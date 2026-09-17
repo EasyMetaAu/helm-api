@@ -3097,6 +3097,86 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("falls back when DeepSeek Responses requires missing reasoning_text history", async () => {
+    // Same thinking-mode rejection as the Chat `reasoning_content` case, but on
+    // the native Responses wire. A Codex transcript that only has OpenAI's
+    // encrypted blob cannot be decrypted here; the next candidate may still
+    // serve it. Do not surface a terminal 400 and do not fault the breaker.
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(
+        new UpstreamError(
+          "upstream_error",
+          "upstream returned 400",
+          {
+            error: {
+              message: "The `reasoning_text` in the thinking mode must be passed back to the API.",
+              type: "invalid_request_error",
+              param: null,
+              code: "invalid_request_error",
+            },
+          },
+          400,
+        ),
+      ),
+    } as unknown as ProviderClient;
+    const tail = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "from-fallback" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["deepseek-responses", head],
+        ["mock", tail],
+      ]),
+      registry: protocolRegistry({
+        "deepseek-responses/flash": {
+          providerName: "deepseek-responses",
+          providerModel: "deepseek-flash",
+          targetProviderProtocol: "openai_responses",
+        },
+        tail: {
+          providerName: "mock",
+          providerModel: "gpt-fallback",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["deepseek-responses/flash", "tail"]),
+      req({
+        protocol: "openai_responses",
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: false },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final).toEqual({ status: "ok", alias: "tail", providerModel: "gpt-fallback" });
+    expect(head.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(tail.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(out.attempts[0]).toMatchObject({
+      alias: "deepseek-responses/flash",
+      skipped: true,
+      skip_reason: "reasoning_history_incompatible",
+      status: "error",
+      error_class: null,
+    });
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
   it("still falls back and faults the breaker on a non-request upstream 5xx", async () => {
     // Control: a 5xx is a provider-HEALTH failure (not a request-shape rejection),
     // so the chain advances to the next candidate and the breaker records a fault.
@@ -6826,6 +6906,69 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     for await (const chunk of out.stream ?? []) chunks.push(chunk);
     expect(chunks).toEqual([output]);
   });
+
+  it("aborts stalled Responses preamble, counts the breaker and never replays unknown work", async () => {
+    let aborted = false;
+    const head = {
+      nativePassthroughStream: async function* (_body: unknown, opts: { signal: AbortSignal }) {
+        yield 'data: {"type":"response.created"}\n\n';
+        await new Promise<void>((resolve) =>
+          opts.signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+      },
+    } as unknown as ProviderClient;
+    const tail = { nativePassthroughStream: vi.fn() } as unknown as ProviderClient;
+    const cb = breaker();
+    const failure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-test",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-test",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      firstOutputTimeoutMs: 40,
+    });
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+    expect(aborted).toBe(true);
+    expect(out.final.status).toBe("error");
+    expect(failure).toHaveBeenCalledWith("a");
+    expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+  }, 1_000);
 
   it("does not advance the chain after HTTP response.created then EOF", async () => {
     async function* acceptedThenEof(): AsyncGenerator<string> {

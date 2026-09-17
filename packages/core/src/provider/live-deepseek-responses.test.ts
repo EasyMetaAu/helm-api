@@ -31,6 +31,7 @@ function translatingClient() {
     requestContract: {
       dropBuiltInSearchCallItems: true,
       translateUnsupportedCustomTools: true,
+      disableThinkingOnOpaqueReasoningHistory: true,
       acceptsResponsesNativeItems: true,
     },
   });

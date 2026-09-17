@@ -187,6 +187,14 @@ export interface GenericOpenAIResponsesRequestContract {
   // model then answers in the standard function_call protocol, which is translated
   // back on the way out. Opt-in: the public OpenAI contract supports custom tools.
   translateUnsupportedCustomTools?: boolean;
+  // DeepSeek thinking mode 400s unless every reasoning item in a tool-call
+  // transcript carries plaintext `reasoning_text`. Codex-from-OpenAI history
+  // only has an encrypted blob the gateway cannot decrypt; live probe: setting
+  // `reasoning.effort: "none"` succeeds and still returns tool calls, while
+  // `thinking: {type:"disabled"}` does not. Opt-in, and only for that shape —
+  // never invent plaintext, never touch a body that already has readable
+  // reasoning or has no tool history.
+  disableThinkingOnOpaqueReasoningHistory?: boolean;
   // The upstream PARSES the Codex-private input items (custom_tool_call, echoed
   // reasoning) instead of rejecting them, so the executor must keep byte passthrough
   // rather than downgrading to translation. Surfaced on the client as
@@ -654,6 +662,45 @@ function translateCustomToolDeclarations(
     });
   }
   return out;
+}
+
+const TOOL_HISTORY_ITEM_TYPES = new Set([
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "function_call",
+  "function_call_output",
+]);
+
+function reasoningItemHasPlaintext(item: Record<string, unknown>): boolean {
+  if (item.type !== "reasoning" || !Array.isArray(item.content)) return false;
+  return item.content.some(
+    (part) =>
+      isRecord(part) &&
+      part.type === "reasoning_text" &&
+      typeof part.text === "string" &&
+      part.text.length > 0,
+  );
+}
+
+/**
+ * True when the body would 400 on DeepSeek's thinking-mode reasoning echo:
+ * there is tool-call history, there is at least one reasoning item, and at
+ * least one of those items has no plaintext `reasoning_text` (typically an
+ * OpenAI `encrypted_content` blob).
+ */
+function shouldDisableThinkingForOpaqueReasoning(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body.input)) return false;
+  let hasToolHistory = false;
+  let hasReasoning = false;
+  let hasOpaqueReasoning = false;
+  for (const item of body.input) {
+    if (!isRecord(item) || typeof item.type !== "string") continue;
+    if (TOOL_HISTORY_ITEM_TYPES.has(item.type)) hasToolHistory = true;
+    if (item.type !== "reasoning") continue;
+    hasReasoning = true;
+    if (!reasoningItemHasPlaintext(item)) hasOpaqueReasoning = true;
+  }
+  return hasToolHistory && hasReasoning && hasOpaqueReasoning;
 }
 
 /**
@@ -3500,6 +3547,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.rejectObjectInput !== true &&
       contract?.dropBuiltInSearchCallItems !== true &&
       contract?.translateUnsupportedCustomTools !== true &&
+      contract?.disableThinkingOnOpaqueReasoningHistory !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
@@ -3578,6 +3626,7 @@ export function createGenericOpenAIResponsesClient(
     }
     let customToolsTranslated = false;
     let customToolsHoisted = false;
+    let opaqueReasoningThinkingDisabled = false;
     if (contract.translateUnsupportedCustomTools === true) {
       const declared = collectDeclaredTools(next);
       const translated = unsupportedCustomToolNames(declared);
@@ -3593,6 +3642,16 @@ export function createGenericOpenAIResponsesClient(
         customToolsTranslated = true;
         customToolsHoisted =
           declared.length > (Array.isArray(source.tools) ? source.tools.length : 0);
+      }
+    }
+    if (
+      contract.disableThinkingOnOpaqueReasoningHistory === true &&
+      shouldDisableThinkingForOpaqueReasoning(next)
+    ) {
+      const current = isRecord(next.reasoning) ? next.reasoning : {};
+      if (current.effort !== "none") {
+        next.reasoning = { ...current, effort: "none" };
+        opaqueReasoningThinkingDisabled = true;
       }
     }
     const instructionShims: string[] = [];
@@ -3614,6 +3673,9 @@ export function createGenericOpenAIResponsesClient(
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
+      ...(opaqueReasoningThinkingDisabled
+        ? ["generic_responses_opaque_reasoning_thinking_disabled"]
+        : []),
       ...instructionShims,
     ]);
     return carrier;
