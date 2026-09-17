@@ -194,11 +194,13 @@ describe("shipped config rules drive routing", () => {
     expect(result.decision.lane.selected_lane).toBe("premium");
     expect(chain.slice(0, 6)).toEqual([
       "openai-codex/gpt-5.6-sol",
+      // The static same-protocol rung sits between the subscription model and the
+      // generic chain, so a subscription outage degrades without a lossy translate.
+      "deepseek-responses/deepseek-flash",
       "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "anthropic/claude-opus-5",
       "anthropic/claude-opus-4-7",
-      "anthropic/claude-opus-4-6",
     ]);
     expect(new Set(chain).size).toBe(chain.length);
   });

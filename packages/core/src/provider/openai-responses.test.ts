@@ -6100,6 +6100,312 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     expect(seenBody.input).toEqual(input);
   });
 
+  // DeepSeek's /v1/responses accepts `type: "custom"` tools ONLY when the tool is
+  // named `apply_patch`; anything else 400s with "Unsupported custom tool: 'x'.
+  // Only 'apply_patch' is supported." (verified live). A Codex code-mode client
+  // drives everything through a custom tool literally named `exec`, so without a
+  // translation the tool cannot be declared at all — and a transcript full of
+  // custom_tool_call items with NO matching tool declared makes the model give up
+  // on the protocol and emit its private DSML markers as plain output_text
+  // (reproduced 5/5 by replaying a real 480-item transcript). Translating the
+  // unsupported custom tools to equivalent single-string function tools keeps the
+  // declaration and the history consistent, and the model then answers in the
+  // standard function_call protocol (verified live 3/3, no DSML).
+  describe("unsupported custom tool translation (DeepSeek)", () => {
+    const EXEC_CUSTOM = { type: "custom", name: "exec", description: "Run JS." };
+
+    function translatingClient(onBody: (body: Record<string, unknown>) => Response) {
+      return createGenericOpenAIResponsesClient({
+        config: { baseUrl: "https://deepseek.test/v1", apiKey: "sk-test" },
+        requestContract: { translateUnsupportedCustomTools: true },
+        fetch: (async (_url: string, init?: RequestInit) =>
+          onBody(
+            JSON.parse(String(init?.body)) as Record<string, unknown>,
+          )) as unknown as typeof fetch,
+      });
+    }
+
+    it("rewrites an unsupported custom tool into a single-string function tool", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM, { type: "custom", name: "apply_patch", description: "patch" }],
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      });
+
+      expect(seen.tools).toEqual([
+        {
+          type: "function",
+          name: "exec",
+          description: "Run JS.",
+          parameters: {
+            type: "object",
+            properties: { input: { type: "string" } },
+            required: ["input"],
+            additionalProperties: false,
+          },
+        },
+        // apply_patch is the one custom tool DeepSeek accepts — left alone.
+        { type: "custom", name: "apply_patch", description: "patch" },
+      ]);
+    });
+
+    it("rewrites the echoed custom_tool_call history to match the translated tools", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        input: [
+          { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input: "ls" },
+          { type: "custom_tool_call_output", call_id: "call_1", output: "a.txt" },
+          // A call for a tool that was NOT translated must stay verbatim.
+          {
+            type: "custom_tool_call",
+            id: "ctc_2",
+            call_id: "call_2",
+            name: "apply_patch",
+            input: "p",
+          },
+        ],
+      });
+
+      expect(seen.input).toEqual([
+        {
+          type: "function_call",
+          id: "ctc_1",
+          call_id: "call_1",
+          name: "exec",
+          arguments: JSON.stringify({ input: "ls" }),
+        },
+        { type: "function_call_output", call_id: "call_1", output: "a.txt" },
+        {
+          type: "custom_tool_call",
+          id: "ctc_2",
+          call_id: "call_2",
+          name: "apply_patch",
+          input: "p",
+        },
+      ]);
+    });
+
+    it("translates the unary function_call response back to a custom_tool_call", async () => {
+      const client = translatingClient(() =>
+        jsonResponse({
+          id: "r",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: "fc_1",
+              call_id: "call_1",
+              name: "exec",
+              arguments: JSON.stringify({ input: 'text(await tools.exec_command({cmd:"ls"}))' }),
+            },
+          ],
+        }),
+      );
+
+      const res = (await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      })) as { output: Record<string, unknown>[] };
+
+      expect(res.output).toEqual([
+        {
+          type: "custom_tool_call",
+          id: "fc_1",
+          call_id: "call_1",
+          name: "exec",
+          input: 'text(await tools.exec_command({cmd:"ls"}))',
+        },
+      ]);
+    });
+
+    it("leaves an untranslated tool's function_call response alone", async () => {
+      const call = {
+        type: "function_call",
+        id: "fc_2",
+        call_id: "call_2",
+        name: "sleep",
+        arguments: '{"ms":10}',
+      };
+      const client = translatingClient(() =>
+        jsonResponse({ id: "r", object: "response", status: "completed", output: [call] }),
+      );
+
+      const res = (await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM, { type: "function", name: "sleep", parameters: {} }],
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      })) as { output: Record<string, unknown>[] };
+
+      expect(res.output).toEqual([call]);
+    });
+
+    it("translates the streamed function_call frames back to custom_tool_call frames", async () => {
+      const args = JSON.stringify({ input: 'text(await tools.exec_command({cmd:"ls -la"}))' });
+      const client = translatingClient(() =>
+        sseResponse([
+          { type: "response.created", response: { id: "r" } },
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_1",
+              call_id: "call_1",
+              name: "exec",
+              arguments: "",
+              status: "in_progress",
+            },
+          },
+          // The arguments arrive as raw byte slices of the JSON envelope; a slice
+          // can split an escape sequence, so they are buffered until `.done`.
+          ...[...args].map((ch) => ({
+            type: "response.function_call_arguments.delta",
+            item_id: "fc_1",
+            output_index: 0,
+            delta: ch,
+          })),
+          {
+            type: "response.function_call_arguments.done",
+            item_id: "fc_1",
+            output_index: 0,
+            arguments: args,
+          },
+          {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_1",
+              call_id: "call_1",
+              name: "exec",
+              arguments: args,
+              status: "completed",
+            },
+          },
+          { type: "response.completed", response: { id: "r", status: "completed" } },
+        ]),
+      );
+
+      const frames: string[] = [];
+      const stream = client.nativePassthroughStream?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        stream: true,
+      });
+      if (stream === undefined) throw new Error("stream_unavailable");
+      for await (const frame of stream) frames.push(frame);
+
+      const events = frames
+        .join("")
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+
+      const inner = 'text(await tools.exec_command({cmd:"ls -la"}))';
+      expect(events.map((e) => e.type)).toEqual([
+        "response.created",
+        "response.output_item.added",
+        "response.custom_tool_call_input.delta",
+        "response.custom_tool_call_input.done",
+        "response.output_item.done",
+        "response.completed",
+      ]);
+      expect(events[1]?.item).toEqual({
+        type: "custom_tool_call",
+        id: "fc_1",
+        call_id: "call_1",
+        name: "exec",
+        input: "",
+        status: "in_progress",
+      });
+      // ponytail: the per-character deltas are buffered and emitted once, so the
+      // client sees one input delta instead of 45. Incremental re-emission needs a
+      // streaming JSON-string decoder; add it if a tool's input is slow enough that
+      // the client must render it as it arrives.
+      expect(events[2]).toEqual({
+        type: "response.custom_tool_call_input.delta",
+        item_id: "fc_1",
+        output_index: 0,
+        delta: inner,
+      });
+      expect(events[3]).toEqual({
+        type: "response.custom_tool_call_input.done",
+        item_id: "fc_1",
+        output_index: 0,
+        input: inner,
+      });
+      expect(events[4]?.item).toEqual({
+        type: "custom_tool_call",
+        id: "fc_1",
+        call_id: "call_1",
+        name: "exec",
+        input: inner,
+        status: "completed",
+      });
+    });
+
+    it("skips a custom tool whose translated name would collide with a function tool", async () => {
+      // DeepSeek rejects duplicate tool names ("Tool names must be unique."), so
+      // rewriting `custom exec` next to an existing `function exec` would swap the
+      // upstream's real complaint ("Unsupported custom tool: 'exec'.") for a
+      // confusing one about uniqueness. Neither request can succeed — leave the body
+      // alone so the operator sees the error that names the actual problem.
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const tools = [
+        EXEC_CUSTOM,
+        { type: "function", name: "exec", description: "different exec", parameters: {} },
+      ];
+      const input = [
+        { type: "custom_tool_call", id: "c", call_id: "c", name: "exec", input: "ls" },
+      ];
+      await client.nativePassthrough?.({ model: "deepseek-flash", tools, input });
+
+      expect(seen.tools).toEqual(tools);
+      expect(seen.input).toEqual(input);
+    });
+
+    it("leaves everything untouched when the contract is not opted in", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = createGenericOpenAIResponsesClient({
+        config: { baseUrl: "https://generic.test/v1", apiKey: "sk-test" },
+        fetch: (async (_url: string, init?: RequestInit) => {
+          seen = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+        }) as unknown as typeof fetch,
+      });
+
+      const tools = [EXEC_CUSTOM];
+      const input = [
+        { type: "custom_tool_call", id: "c", call_id: "c", name: "exec", input: "ls" },
+      ];
+      await client.nativePassthrough?.({ model: "grok", tools, input });
+
+      expect(seen.tools).toEqual(tools);
+      expect(seen.input).toEqual(input);
+    });
+  });
+
   it("preserves requested include fields while requiring encrypted reasoning content", async () => {
     let seenBody: Record<string, unknown> = {};
     const client = createGenericOpenAIResponsesClient({

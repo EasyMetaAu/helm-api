@@ -176,6 +176,17 @@ export interface GenericOpenAIResponsesRequestContract {
   // (Codex) replays them, so drop those items before the POST. Opt-in: the public
   // OpenAI contract keeps them.
   dropBuiltInSearchCallItems?: boolean;
+  // DeepSeek accepts a `type: "custom"` tool ONLY when it is named `apply_patch`;
+  // any other name 400s ("Unsupported custom tool: 'exec'. Only 'apply_patch' is
+  // supported."). A Codex code-mode client drives everything through a custom tool
+  // named `exec`, and a transcript full of custom_tool_call items with no matching
+  // tool declared makes the model abandon the protocol and print its private DSML
+  // markers as output_text — a 200 that silently did nothing. Rewriting the
+  // unsupported custom tools into equivalent single-string function tools (and the
+  // echoed history with them) keeps declaration and transcript consistent; the
+  // model then answers in the standard function_call protocol, which is translated
+  // back on the way out. Opt-in: the public OpenAI contract supports custom tools.
+  translateUnsupportedCustomTools?: boolean;
   // The upstream PARSES the Codex-private input items (custom_tool_call, echoed
   // reasoning) instead of rejecting them, so the executor must keep byte passthrough
   // rather than downgrading to translation. Surfaced on the client as
@@ -544,6 +555,215 @@ export type CodexResponsesNativeBodyFix =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// The single `type: "custom"` tool name DeepSeek's Responses endpoint accepts.
+const DEEPSEEK_SUPPORTED_CUSTOM_TOOL = "apply_patch";
+// The property a translated custom tool carries its freeform input in.
+const TRANSLATED_CUSTOM_TOOL_INPUT_KEY = "input";
+
+/**
+ * Names of the custom tools that must be rewritten as function tools, i.e. every
+ * declared custom tool the upstream would reject. An empty set means no rewrite.
+ *
+ * A name already taken by a function tool is EXCLUDED: DeepSeek rejects duplicate
+ * tool names ("Tool names must be unique."), so rewriting it would replace the
+ * upstream's accurate complaint ("Unsupported custom tool: 'exec'.") with a
+ * misleading one. Neither request can succeed, so the honest error wins.
+ */
+function unsupportedCustomToolNames(tools: unknown): Set<string> {
+  const names = new Set<string>();
+  if (!Array.isArray(tools)) return names;
+  const functionToolNames = new Set<string>();
+  for (const tool of tools) {
+    if (!isRecord(tool) || tool.type === "custom") continue;
+    if (typeof tool.name === "string") functionToolNames.add(tool.name);
+  }
+  for (const tool of tools) {
+    if (!isRecord(tool) || tool.type !== "custom") continue;
+    const name = tool.name;
+    if (typeof name !== "string") continue;
+    if (name === DEEPSEEK_SUPPORTED_CUSTOM_TOOL || functionToolNames.has(name)) continue;
+    names.add(name);
+  }
+  return names;
+}
+
+/** Rewrites the unsupported custom tools into single-string function tools. */
+function translateCustomToolDeclarations(tools: unknown, translated: Set<string>): unknown {
+  if (!Array.isArray(tools)) return tools;
+  return tools.map((tool) => {
+    if (!isRecord(tool) || tool.type !== "custom") return tool;
+    if (typeof tool.name !== "string" || !translated.has(tool.name)) return tool;
+    const { type: _type, format: _format, ...rest } = tool;
+    return {
+      ...rest,
+      type: "function",
+      parameters: {
+        type: "object",
+        properties: { [TRANSLATED_CUSTOM_TOOL_INPUT_KEY]: { type: "string" } },
+        required: [TRANSLATED_CUSTOM_TOOL_INPUT_KEY],
+        additionalProperties: false,
+      },
+    };
+  });
+}
+
+/**
+ * Rewrites the echoed transcript so the replayed calls match the translated tool
+ * declarations. A `custom_tool_call_output` carries no tool name, so it is keyed
+ * off the call it answers.
+ */
+function translateCustomToolCallHistory(input: unknown, translated: Set<string>): unknown {
+  if (!Array.isArray(input)) return input;
+  const translatedCallIds = new Set<string>();
+  return input.map((item) => {
+    if (!isRecord(item)) return item;
+    if (item.type === "custom_tool_call") {
+      if (typeof item.name !== "string" || !translated.has(item.name)) return item;
+      const { input: callInput, ...rest } = item;
+      if (typeof item.call_id === "string") translatedCallIds.add(item.call_id);
+      return {
+        ...rest,
+        type: "function_call",
+        arguments: JSON.stringify({
+          [TRANSLATED_CUSTOM_TOOL_INPUT_KEY]: typeof callInput === "string" ? callInput : "",
+        }),
+      };
+    }
+    if (item.type === "custom_tool_call_output") {
+      if (typeof item.call_id !== "string" || !translatedCallIds.has(item.call_id)) return item;
+      const { output, ...rest } = item;
+      return {
+        ...rest,
+        type: "function_call_output",
+        output: typeof output === "string" ? output : JSON.stringify(output),
+      };
+    }
+    return item;
+  });
+}
+
+/** Unwraps a translated tool's `{"input": "..."}` envelope back to the raw string. */
+function customToolInputFromArguments(args: unknown): string {
+  if (typeof args !== "string") return "";
+  try {
+    const parsed: unknown = JSON.parse(args);
+    if (isRecord(parsed)) {
+      const inner = parsed[TRANSLATED_CUSTOM_TOOL_INPUT_KEY];
+      if (typeof inner === "string") return inner;
+    }
+  } catch {
+    // Fall through: a malformed envelope is surfaced verbatim rather than dropped.
+  }
+  return args;
+}
+
+/** Turns a translated tool's `function_call` output item back into a custom one. */
+function untranslateFunctionCallItem(item: unknown, translated: Set<string>): unknown {
+  if (!isRecord(item) || item.type !== "function_call") return item;
+  if (typeof item.name !== "string" || !translated.has(item.name)) return item;
+  const { arguments: args, ...rest } = item;
+  return {
+    ...rest,
+    type: "custom_tool_call",
+    input: customToolInputFromArguments(args),
+  };
+}
+
+/** Applies {@link untranslateFunctionCallItem} across a unary response body. */
+function untranslateCustomToolResponse(
+  body: Record<string, unknown>,
+  translated: Set<string>,
+): Record<string, unknown> {
+  if (translated.size === 0 || !Array.isArray(body.output)) return body;
+  const output = body.output.map((item) => untranslateFunctionCallItem(item, translated));
+  return { ...body, output };
+}
+
+/**
+ * Rewrites the upstream's `function_call` SSE frames back into the client's
+ * `custom_tool_call` protocol, for the tools that were translated on the way in.
+ *
+ * ponytail: the argument deltas are buffered and re-emitted once at `.done`
+ * instead of being forwarded incrementally. A delta is a raw byte slice of the
+ * `{"input": "..."}` envelope and may split a JSON escape sequence, so streaming
+ * the inner string through would need an incremental JSON-string decoder. The
+ * ceiling is UX-only: the client renders the tool input when the call completes
+ * rather than as it types. Add the decoder if a translated tool's input is slow
+ * enough that the wait is felt.
+ */
+async function* untranslateCustomToolSSE(
+  frames: AsyncGenerator<string>,
+  translated: Set<string>,
+): AsyncGenerator<string> {
+  // item_id -> output_index, for the in-flight calls that need translating.
+  const pending = new Map<string, number>();
+  // Chunks are byte slices and need not end on a frame boundary; hold the tail.
+  let carry = "";
+
+  function encode(event: Record<string, unknown>): string {
+    return `data: ${JSON.stringify(event)}\n\n`;
+  }
+
+  function translateFrame(rawFrame: string, frameBody: string): string {
+    const event = parseResponsesSSEFrame(frameBody);
+    if (!event) return rawFrame;
+    const type = event.type;
+    if (type === "response.output_item.added" || type === "response.output_item.done") {
+      const item = event.item;
+      const translatedItem = untranslateFunctionCallItem(item, translated);
+      if (translatedItem === item) return rawFrame;
+      if (isRecord(item) && typeof item.id === "string") {
+        if (type === "response.output_item.added") {
+          pending.set(item.id, typeof event.output_index === "number" ? event.output_index : 0);
+        } else {
+          pending.delete(item.id);
+        }
+      }
+      return encode({ ...event, item: translatedItem });
+    }
+    const itemId = typeof event.item_id === "string" ? event.item_id : "";
+    if (!pending.has(itemId)) return rawFrame;
+    if (type === "response.function_call_arguments.delta") {
+      // Swallowed; the whole input is emitted once the envelope is complete.
+      return "";
+    }
+    if (type === "response.function_call_arguments.done") {
+      const input = customToolInputFromArguments(event.arguments);
+      const outputIndex = pending.get(itemId) ?? 0;
+      return (
+        encode({
+          type: "response.custom_tool_call_input.delta",
+          item_id: itemId,
+          output_index: outputIndex,
+          delta: input,
+        }) +
+        encode({
+          type: "response.custom_tool_call_input.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          input,
+        })
+      );
+    }
+    return rawFrame;
+  }
+
+  for await (const chunk of frames) {
+    carry += chunk;
+    let out = "";
+    while (true) {
+      const boundary = nextSSEFrameBoundary(carry);
+      if (!boundary) break;
+      const end = boundary.index + boundary.length;
+      out += translateFrame(carry.slice(0, end), carry.slice(0, boundary.index));
+      carry = carry.slice(end);
+    }
+    if (out !== "") yield out;
+  }
+  // A stream that ends without a trailing blank line still has to be relayed.
+  if (carry !== "") yield translateFrame(carry, carry);
 }
 
 type CodexImageOptimizationState = {
@@ -3199,6 +3419,17 @@ export function createGenericOpenAIResponsesClient(
     };
   }
 
+  /**
+   * The custom tool names this request will have translated, read from the body
+   * BEFORE the contract rewrites it — the response side needs the original names
+   * to translate the upstream's function calls back.
+   */
+  function translatedCustomToolNames(body: NativePassthroughInput): Set<string> {
+    if (requestContract?.translateUnsupportedCustomTools !== true) return new Set<string>();
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    return unsupportedCustomToolNames(isRecord(source) ? source.tools : undefined);
+  }
+
   function applyResponsesRequestContract(body: NativePassthroughInput): NativePassthroughInput {
     const contract = requestContract;
     if (
@@ -3209,6 +3440,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.rejectPreviousResponseId !== true &&
       contract?.rejectObjectInput !== true &&
       contract?.dropBuiltInSearchCallItems !== true &&
+      contract?.translateUnsupportedCustomTools !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
@@ -3285,6 +3517,15 @@ export function createGenericOpenAIResponsesClient(
         searchCallItemsDropped = true;
       }
     }
+    let customToolsTranslated = false;
+    if (contract.translateUnsupportedCustomTools === true) {
+      const translated = unsupportedCustomToolNames(next.tools);
+      if (translated.size > 0) {
+        next.tools = translateCustomToolDeclarations(next.tools, translated);
+        next.input = translateCustomToolCallHistory(next.input, translated);
+        customToolsTranslated = true;
+      }
+    }
     const instructionShims: string[] = [];
     if (
       contract.ensureInstructions === true &&
@@ -3302,6 +3543,7 @@ export function createGenericOpenAIResponsesClient(
       ...(streamToolCallsAdded ? ["generic_responses_stream_tool_calls_default"] : []),
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
+      ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
       ...instructionShims,
     ]);
     return carrier;
@@ -3533,6 +3775,7 @@ export function createGenericOpenAIResponsesClient(
     },
 
     async nativePassthrough(body, opts) {
+      const translated = translatedCustomToolNames(body);
       const res = await requestJson("responses", {
         method: "POST",
         body,
@@ -3544,12 +3787,16 @@ export function createGenericOpenAIResponsesClient(
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
-        return await aggregateNativeResponsesStream(res, timeoutMs);
+        return untranslateCustomToolResponse(
+          await aggregateNativeResponsesStream(res, timeoutMs),
+          translated,
+        );
       }
-      return await readUnaryJson(res);
+      return untranslateCustomToolResponse(await readUnaryJson(res), translated);
     },
 
     async *nativePassthroughStream(body, opts) {
+      const translated = translatedCustomToolNames(body);
       const res = await requestJson("responses", {
         method: "POST",
         body,
@@ -3560,7 +3807,12 @@ export function createGenericOpenAIResponsesClient(
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* readResponsesSSERaw(res, timeoutMs);
+      const frames = readResponsesSSERaw(res, timeoutMs);
+      if (translated.size === 0) {
+        yield* frames;
+        return;
+      }
+      yield* untranslateCustomToolSSE(frames, translated);
     },
 
     async responsesRetrieve(responseId, opts) {

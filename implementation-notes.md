@@ -7,7 +7,28 @@
 
 ---
 
-## 2026-09-17 · 撤回 DeepSeek 的 lane 兜底：它不说 Codex 的工具协议（Config / 路由，docs/04，原则 3/5）
+## 2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具（Provider / 协议互译，docs/05，原则 3/8）
+
+- **推翻当天早些时候的结论**（见下一条）。那条笔记把 DSML 泄漏判成"模型不会用 Codex 的工具协议"并撤了 lane rung。**判断错了**，因为只测了单轮，没重放真实长历史。
+- **取证方法**：从本机 Codex rollout 日志（`~/.codex/sessions/.../rollout-*.jsonl`）取出泄漏那一轮之前的 **480 条** `response_item`，原样重放到 live endpoint。**5/5 稳定复现**，触发条件干净：
+  | 条件 | 结果 |
+  |---|---|
+  | 长历史（含 `custom_tool_call`）+ 声明了任意工具 | 干净的 `function_call`，0/6 泄漏 |
+  | 长历史（含 `custom_tool_call`）+ 无工具 / `tools:[]` | **DSML 泄漏，5/5** |
+  | 短历史 + 无工具 | 正常 |
+  | `deepseek-v4-pro` 同条件 | 同样泄漏（非 flash 独有） |
+- **真根因**：DeepSeek 的 Responses 只接受名为 `apply_patch` 的 `custom` 工具，其余一律硬 400（`Unsupported custom tool: 'exec'. Only 'apply_patch' is supported.`）。而 Codex 的 code-mode 会话主力工具正是一个叫 `exec` 的 custom 工具（那次会话 143 次调用，input 是 JS 代码）。于是工具无法声明，历史里却还留着 143 条 `custom_tool_call` —— **模型看见"过去一直在用 exec"、当前菜单上却没有**，就不再走协议，改用训练时的 DSML 标记把调用写成文本。这是**声明与历史不一致**导致的退化，不是协议不兼容。反证很有力：只要**声明了任何工具**（哪怕是不相干的 `sleep`），泄漏就消失。
+- **修复**：新增请求契约 `translateUnsupportedCustomTools`（`deepseek-responses` 打开）。上行把不被支持的 custom 工具改写成等价的单 string 参数 function 工具，历史里的 `custom_tool_call` / `custom_tool_call_output` 一并改写成 `function_call` / `function_call_output`；下行把模型的 `function_call` 翻回 `custom_tool_call`。live 实测在原本泄漏的那条 transcript 上 **3/3 干净**。
+- **流式取了个上限明确的捷径**（`ponytail:` 注释已标）：`function_call_arguments.delta` 是 `{"input":"..."}` 这个 JSON 的**字节切片**，一个切片可能劈开转义序列，要逐字符转发就得写增量 JSON 字符串解码器（50+ 行易错代码）。改为**缓冲到 `.done` 再一次性吐出** `custom_tool_call_input.delta` + `.done`（约 10 行，转义交给 `JSON.parse`）。代价纯 UX：客户端在调用完成时整块看到工具入参，而不是逐字滚动。升级路径写在注释里。
+- **lane rung 已恢复**（6 条 GPT lane），并重写 `lanes.yaml` 注释块记录这次误判与真根因。
+- **顺带修好两条一直是坏的 live 断言**：`live-deepseek-responses.test.ts` 里两处 `rejects.toThrow(/reasoning_text/)` 之类**从来不可能通过**——`UpstreamError.message` 是通用的 `upstream returned 400`，上游原文在 `providerRaw`。已加 `upstreamMessage()` 辅助函数从 `providerRaw` 读，三条断言统一改正。（在 main 上验证过它们同样红，不是本次引入。）
+- **教训修订**：上一条写的"协议兼容是必要非充分条件"仍然成立，但**排查方法**才是真教训 —— 判定一个模型"不支持某协议"之前，必须用**真实 transcript 重放**，而不是构造单轮探针。单轮探针在这件事上两头都骗了我：它显示 `function_call` 干净（所以 rung 当初敢上），也永远复现不出泄漏（所以根因判错）。
+- **事后对照官方 Codex 集成文档**（<https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/>，Lukin 指出）。文档独立印证了实测结论，并补上一块推不出来的信息：它给 Codex 下发的 `models.json` 里两个模型都声明 `apply_patch_tool_type: "freeform"` —— 即 DeepSeek **明确只为 `apply_patch` 这一个 freeform custom 工具做了适配**，`experimental_supported_tools: []`。这解释了 400 里那句"Only 'apply_patch' is supported"为何是设计而非遗漏，也确认我们**不翻译 `apply_patch`** 是对的（已补 live 用例钉住它的 freeform 往返：返回 `custom_tool_call`，input 是 `*** Begin Patch` 补丁文本而非 JSON）。
+- **据文档补测的边界，全部宽容**：`reasoning.effort` 虽只声明 low/high/max，实测 minimal/medium/xhigh 也照收并原样回显（与 helm 的 clamp 策略相容，无需特判）；`text.verbosity` 三档全收；`parallel_tool_calls: true` 正常。**唯一真会 400 的是 `reasoning.summary: "none"`** —— 文档把它写成默认值，但请求侧只接受 auto/concise/detailed，照着文档默认值回传就是确定性 400。已补 live 用例记录。
+- **`tool_choice` 指定具体工具在思考模式下一律 400**（`Thinking mode does not support this tool_choice`），custom 与 function 两种形态都一样。这与本次翻译无关（翻译前后都 400），但值得知道：Codex 若 pin 某个工具，这条 rung 必然失败并走链上下一个。
+- **修掉一个翻译引入的 gap**：客户端同时声明 `custom exec` 和 `function exec` 时，翻译会撞上 `Tool names must be unique.`，把上游准确的 `Unsupported custom tool: 'exec'.` 换成一句误导性错误（两种情况都失败，但后者看不出真问题）。已改为**名称已被 function 工具占用时跳过翻译**，让诚实的错误浮出。
+
+## 2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底：它不说 Codex 的工具协议~~（结论已被上一条推翻）（Config / 路由，docs/04，原则 3/5）
 
 - **现象**：Codex 会话里出现了直接打印给用户的 `<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="exec">`（注意是**全角** `｜`，DeepSeek 私有的 DSML 标记）。命令根本没执行，只是被当成聊天文本渲染。
 - **定位**：查 Codex rollout 日志，该段落的 `role` 是 `assistant`、`type` 是 `output_text`——不是 tool call。再查 helm 遥测，那一轮（13:38:28）请求 `gpt-6-astra`，GPT-6 过载后 fallback 落到 `deepseek-responses/deepseek-flash`。同一分钟内有 5 条请求落到该 rung（含从 `claude-opus-4-8` 转来的）。
@@ -90,12 +111,9 @@
 - 边界：客户端**未携带**该 id 时完全不改写（保留 raw body，不凭空生成）；turn-metadata 非合法 JSON 时原样透传。上游 `prompt_cache_key` 取自 `session_id` 而非 installation id，故本改动不影响 prompt 缓存亲和性。
 - 上游官方只把该 id 放在 body（`compatibility_headers()` 不发它，真 header 仅用于 remote-control WebSocket 配对），但生产抓包显示实际流量 header 里确实带了，因此三处都覆盖。
 
-## 2026-09-10 · 失败请求保留最终尝试的订阅账号（Telemetry / Admin，docs/07，原则 5/7）
-
-- `serving_account` 在成功时仍表示实际服务账号；全部执行失败时改为记录最后一次真正发起上游请求的订阅账号，便于定位账号级故障。若候选在选账号前被熔断/能力门禁跳过，仍保持 `null`，不伪造分配结果。
-- 若订阅账号失败后又尝试了其他 provider，旧账号不会被误标为最终尝试；未新增 schema、迁移或正文记录。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-10 · 失败请求保留最终尝试的订阅账号**：`serving_account` 成功时仍是实际服务账号；全链路失败时改记最后一次真正发起上游请求的订阅账号，便于定位账号级故障。候选在选账号前就被熔断/能力门禁跳过则保持 `null`，不伪造分配结果；订阅账号失败后又试了其他 provider 时旧账号不会被误标。未新增 schema、迁移或正文记录。
 
 - **2026-09-06 · 对齐 Codex Lite 身份与流式控制事件**：Lite 完整请求与增量续接保留带前缀的输入项 ID（旧 `store:false` 清理会删掉它们，两条生产失败分别丢了 157/239 个）；`response.metadata` / `codex.rate_limits` / `keepalive` 等控制事件不再提前提交执行尝试，使其后的过载仍能走有界恢复。真实输出、工具调用、加密 reasoning、结果不明断连的禁止重放边界不变。
 

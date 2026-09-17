@@ -23,6 +23,34 @@ function client(dropSearchItems: boolean) {
   });
 }
 
+function translatingClient() {
+  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+  if (!apiKey) throw new Error("missing_DEEPSEEK_API_KEY");
+  return createGenericOpenAIResponsesClient({
+    config: { baseUrl: "https://api.deepseek.com/v1", apiKey },
+    requestContract: {
+      dropBuiltInSearchCallItems: true,
+      translateUnsupportedCustomTools: true,
+      acceptsResponsesNativeItems: true,
+    },
+  });
+}
+
+/**
+ * The upstream's own error message. `UpstreamError.message` is the generic
+ * "upstream returned 400" — the provider's text lives in `providerRaw`, so a test
+ * that wants to prove WHICH rejection fired has to read it from there.
+ */
+async function upstreamMessage(call: () => Promise<unknown> | undefined): Promise<string> {
+  try {
+    await call();
+  } catch (error) {
+    const raw: unknown = (error as { providerRaw?: unknown }).providerRaw;
+    return JSON.stringify(raw ?? (error as Error).message);
+  }
+  throw new Error("expected the call to reject");
+}
+
 const CODEX_BODY = {
   model: "deepseek-flash",
   instructions: "You are Codex.",
@@ -76,9 +104,9 @@ describe.skipIf(!liveEnabled)("live DeepSeek Responses passthrough", () => {
       input: CODEX_BODY.input.filter((item) => item.type !== "reasoning"),
     };
 
-    await expect(client(true).nativePassthrough?.(withoutReasoning)).rejects.toThrow(
-      /reasoning_text/i,
-    );
+    await expect(
+      upstreamMessage(() => client(true).nativePassthrough?.(withoutReasoning)),
+    ).resolves.toMatch(/reasoning_text/i);
   });
 
   test("drops an echoed built-in search call that would otherwise 400", async () => {
@@ -93,8 +121,127 @@ describe.skipIf(!liveEnabled)("live DeepSeek Responses passthrough", () => {
 
     // … and without it, the live endpoint really does reject the request.
     await expect(
-      client(false).nativePassthrough?.(structuredClone(withSearchCall)),
-    ).rejects.toThrow(/deserialize|queries|action/i);
+      upstreamMessage(() => client(false).nativePassthrough?.(structuredClone(withSearchCall))),
+    ).resolves.toMatch(/deserialize|queries|action/i);
+  });
+
+  // DeepSeek's own Codex guide declares `apply_patch_tool_type: "freeform"` for both
+  // models, i.e. Codex is expected to send apply_patch as a freeform CUSTOM tool.
+  // That is exactly the tool our translation deliberately leaves alone, so pin the
+  // round trip: translating it would have broken the one custom tool that works.
+  // https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/
+  test("keeps apply_patch as a freeform custom tool round trip", async () => {
+    const res = (await translatingClient().nativePassthrough?.({
+      model: "deepseek-flash",
+      instructions: "You are Codex. Use `apply_patch` for local file edits.",
+      store: false,
+      tools: [
+        { type: "custom", name: "apply_patch", description: "Use `apply_patch` to edit files." },
+      ],
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "在 /tmp/demo.txt 里把 foo 改成 bar，用 apply_patch。文件内容就是一行 foo。",
+            },
+          ],
+        },
+      ],
+    })) as { output: Record<string, unknown>[] };
+
+    const call = res.output.find((item) => item.type === "custom_tool_call");
+    expect(call?.name).toBe("apply_patch");
+    // The freeform input is a patch envelope, NOT a JSON arguments object.
+    expect(String(call?.input)).toContain("*** Begin Patch");
+  });
+
+  // `reasoning.summary` is the one knob DeepSeek rejects outright: the documented
+  // default is "none", but that literal is not an accepted request value (only
+  // auto/concise/detailed are). Worth pinning — a client that echoes the documented
+  // default back would get a deterministic 400.
+  test("400s on reasoning.summary:none despite it being the documented default", async () => {
+    await expect(
+      upstreamMessage(() =>
+        client(true).nativePassthrough?.({
+          model: "deepseek-flash",
+          input: "say ok",
+          store: false,
+          reasoning: { effort: "high", summary: "none" },
+        }),
+      ),
+    ).resolves.toMatch(/unknown variant `none`/i);
+  });
+
+  // The DSML-leak regression. A `custom` tool not named `apply_patch` is a hard 400
+  // here, so a Codex code-mode transcript (custom tool `exec`) can only be served by
+  // translating the declaration AND the replayed calls; left inconsistent, the model
+  // abandons the tool protocol and prints its private DSML markers as output_text.
+  const CODE_MODE_EXEC_TOOL = {
+    type: "custom",
+    name: "exec",
+    description: "Run JavaScript. Call tools like `await tools.exec_command({cmd, workdir})`.",
+  };
+  const CODE_MODE_BODY = {
+    model: "deepseek-flash",
+    instructions: "You are Codex, based on GPT-5.",
+    store: false,
+    tools: [CODE_MODE_EXEC_TOOL],
+    input: [
+      {
+        type: "custom_tool_call",
+        id: "ctc_1",
+        call_id: "call_1",
+        name: "exec",
+        input: 'const r = await tools.exec_command({cmd:"pwd"}); text(r.output);\n',
+      },
+      { type: "custom_tool_call_output", call_id: "call_1", output: "/tmp" },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Now list the files with ls -la." }],
+      },
+    ],
+  };
+
+  test("rejects an untranslated code-mode custom tool (the reason translation exists)", async () => {
+    await expect(
+      upstreamMessage(() => client(true).nativePassthrough?.(CODE_MODE_BODY)),
+    ).resolves.toMatch(/Unsupported custom tool/i);
+  });
+
+  test("answers a code-mode transcript in the custom_tool_call protocol, no DSML leak", async () => {
+    const res = (await translatingClient().nativePassthrough?.(
+      structuredClone(CODE_MODE_BODY),
+    )) as { status: string; output: Record<string, unknown>[] };
+
+    expect(res.status).toBe("completed");
+    // The tool call must come back as a custom_tool_call item …
+    const call = res.output.find((item) => item.type === "custom_tool_call");
+    expect(call).toBeDefined();
+    expect(call?.name).toBe("exec");
+    expect(typeof call?.input).toBe("string");
+    // … and NOT as DeepSeek's private markers rendered into assistant text.
+    const text = JSON.stringify(res.output);
+    expect(text).not.toContain("DSML");
+    expect(text).not.toContain("｜");
+  });
+
+  test("streams a code-mode transcript as custom_tool_call frames", async () => {
+    const frames: string[] = [];
+    const stream = translatingClient().nativePassthroughStream?.({
+      ...structuredClone(CODE_MODE_BODY),
+      stream: true,
+    });
+    if (stream === undefined) throw new Error("stream_unavailable");
+    for await (const frame of stream) frames.push(frame);
+
+    const joined = frames.join("");
+    expect(joined).toContain("response.custom_tool_call_input.done");
+    expect(joined).not.toContain("response.function_call_arguments");
+    expect(joined).not.toContain("DSML");
   });
 
   test("streams native SSE frames verbatim", async () => {
