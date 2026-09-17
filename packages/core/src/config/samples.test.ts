@@ -158,23 +158,26 @@ describe("checked-in config samples", () => {
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
     expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes["gpt-5.6"]?.fallback).toEqual(["gpt-5.6-sol"]);
-    // NO `deepseek-responses` rung in ANY lane (reverted 2026-09-17). It was added as
-    // a same-protocol static fallback, but production showed DeepSeek does not speak
-    // the Codex TOOL protocol: instead of `function_call` items it emits its own DSML
-    // markers as plain `output_text`, so Codex renders the tool call as chat text and
-    // silently executes NOTHING. A 200 that looks like work but did none is worse than
-    // a 502 the client would retry — these lanes serve tool-heavy Codex traffic, so the
-    // rung is removed. The provider itself is kept for explicit custom-model use.
+    // The `deepseek-responses` rung is the only STATIC same-protocol fallback these
+    // Codex-serving lanes have. It was pulled on 2026-09-17 after production leaked
+    // raw DSML markers, then restored the same day once the real cause was isolated:
+    // DeepSeek rejects any `custom` tool not named `apply_patch`, so a Codex code-mode
+    // tool (`exec`) could not be declared while its calls were still replayed in the
+    // transcript — and a model shown calls to an undeclared tool abandons the protocol
+    // and types the call out in its own notation. The fix is the provider's
+    // `translateUnsupportedCustomTools` contract, not removing the rung.
+    const deepseek = "deepseek-responses/deepseek-flash";
     expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual(["premium"]);
+    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual([deepseek, "premium"]);
     expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["balanced"]);
+    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual([deepseek, "balanced"]);
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
+    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual([deepseek, "economy"]);
     expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
-    expect(lanes["gpt-6-astra"]?.fallback).toEqual(["premium"]);
-    // Defense in depth: no lane anywhere may reintroduce the rung by accident.
-    expect(JSON.stringify(lanes)).not.toContain("deepseek-responses/");
+    expect(lanes["gpt-6-astra"]?.fallback).toEqual([deepseek, "premium"]);
+    // Always `deepseek-flash`: `deepseek-v4-pro` has no image input, so a vision
+    // request skips the rung entirely and the fallback silently does nothing.
+    expect(JSON.stringify(lanes)).not.toContain("deepseek-responses/deepseek-v4-pro");
     expect(lanes["gpt-image"]).toMatchObject({
       primary: "openai-codex/gpt-image-2",
       fallback: [],
@@ -192,9 +195,13 @@ describe("checked-in config samples", () => {
     // entries deliberately survive for historical cost reprice (see load.test.ts).
     expect(lanes).not.toHaveProperty("gpt-5.5");
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", "premium"]);
+    expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", deepseek, "premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["openai-codex/gpt-5.4-mini", "economy"]);
+    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual([
+      "openai-codex/gpt-5.4-mini",
+      deepseek,
+      "economy",
+    ]);
   });
 
   it("ships Codex GPT-5.6 fallback capabilities matching the Codex model catalog", () => {

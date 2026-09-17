@@ -76,6 +76,7 @@ gpt-6-astra:
   purpose: Official GPT-6 Astra (paid OpenAI), degrades to premium
   primary: openai-codex/gpt-6-astra
   fallback:
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
@@ -208,28 +209,53 @@ claude-haiku:
     require_json: false
     require_vision: false
 
-# NO `deepseek-responses/*` RUNG — added 2026-09-17, REVERTED the same day. Do not
-# re-add it here without solving the tool protocol first.
+# DEEPSEEK RESPONSES RUNG (2026-09-17). Every GPT-family lane carries
+# `deepseek-responses/*` directly, AFTER any sibling subscription slug but BEFORE the
+# generic lane. Reason: these lanes serve Codex traffic, and a Codex-origin body
+# (custom_tool_call + echoed reasoning) does NOT degrade well through the generic
+# chain — `grok` is same-protocol but gets downgraded to translation, and the Claude
+# rungs are cross-protocol and often skipped outright. `deepseek-responses` speaks
+# openai_responses natively, so the verbatim body is forwarded byte-for-byte; it is
+# the only STATIC (non-subscription) same-protocol rung in the config.
 #
-# The idea was sound on paper: these lanes serve Codex traffic, `deepseek-responses`
-# speaks openai_responses natively, and it was the only STATIC (non-subscription)
-# same-protocol rung available, so a subscription outage could degrade without the
-# lossy translation that `grok` (downgraded to translate) and the Claude rungs
-# (cross-protocol, often skipped) force on a Codex-origin body.
+# ALWAYS `deepseek-flash`, never `deepseek-v4-pro` — flash is strictly better as a
+# fallback, not merely cheaper (official pricing page, checked 2026-09-17):
+#   • image input: flash YES, v4-pro NO. A vision request skipped the v4-pro rung
+#     with `no_vision_support` in production, so the fallback silently did nothing.
+#   • price: ~3.4x cheaper in and out (idle 1/4 vs 4.5/13.5 CNY per MTok).
+#   • concurrency: 2500 vs 500.
+#   • identical 1M context / 384K max output, tools + thinking on both.
+# There is no tier where v4-pro wins, so no lane uses it.
 #
-# It broke in production within the hour. DeepSeek accepts the Codex tool DEFINITIONS
-# but does not answer in the Codex tool PROTOCOL: instead of `function_call` output
-# items it emitted its own DSML markers as plain `output_text` —
+# THIS RUNG WAS REVERTED ONCE (2026-09-17) AND RESTORED THE SAME DAY. Production
+# Codex sessions rendered raw DeepSeek DSML markers as chat text —
 #   <｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="exec">…
-# — so Codex rendered the tool call as chat text and executed NOTHING, while the
-# request came back 200 / status completed. A response that looks like work but did
-# none is strictly worse than the 502 the client would have retried, and it fails
-# SILENTLY: only a human noticing the raw markers catches it.
+# — a 200 / status completed that had executed NOTHING. The first diagnosis blamed
+# the model ("does not speak the Codex tool protocol") and pulled the rung. That was
+# wrong. Replaying the real 480-item transcript against the live endpoint isolated
+# the actual trigger:
 #
-# The `deepseek-responses` provider, capabilities and pricing entries are kept: an
-# explicit `allow_custom_model` request can still pin the alias (useful for plain
-# chat, where there is no tool protocol to get wrong), and served history must stay
-# repriceable. It is only the automatic lane fallback that is withdrawn.
+#   DeepSeek accepts `type: "custom"` tools ONLY when named `apply_patch`; any other
+#   name is a hard 400 ("Unsupported custom tool: 'exec'."). A Codex code-mode client
+#   drives everything through a custom tool named `exec`, so the tool could not be
+#   declared — while the transcript still replayed 143 `custom_tool_call` items. Shown
+#   a history of calls to a tool that is not on the menu, the model stops using the
+#   protocol and types the call out in its own DSML notation instead.
+#
+# Reproduced 5/5 with tools absent, 0/6 with any tool declared — it is a
+# declaration/transcript INCONSISTENCY, not a protocol incompatibility. The fix is
+# the `translateUnsupportedCustomTools` request contract (see server.ts): the
+# unsupported custom tools and their echoed calls are rewritten as single-string
+# function tools on the way up, and the model's `function_call` answer is translated
+# back to `custom_tool_call` on the way down. Verified live 3/3 clean on the exact
+# transcript that used to leak.
+#
+# The lesson that still stands: same protocol (`openai_responses`) only guarantees
+# the REQUEST parses, never that the RESPONSE follows the same tool semantics. Any
+# new rung under a tool-driven client must be proven with a real tool ROUND TRIP on
+# a real transcript — a single-turn text probe would have missed this in both
+# directions (it showed a clean `function_call`, which is why the rung shipped, and
+# it would never have shown the leak, which is why the diagnosis went wrong).
 # GPT-5.6 family. The unsuffixed `gpt-5.6` alias routes to Sol upstream; Helm keeps
 # an explicit lane so pinned clients get a GPT-5.6-led chain before generic premium.
 "gpt-5.6":
@@ -246,6 +272,7 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 Sol tier — flagship reasoning/coding
   primary: openai-codex/gpt-5.6-sol
   fallback:
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
@@ -256,6 +283,7 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 Terra tier — balanced intelligence/cost
   primary: openai-codex/gpt-5.6-terra
   fallback:
+    - deepseek-responses/deepseek-flash
     - balanced
   constraints:
     require_tools: false
@@ -266,6 +294,7 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 Luna tier — efficient/high-volume
   primary: openai-codex/gpt-5.6-luna
   fallback:
+    - deepseek-responses/deepseek-flash
     - economy
   constraints:
     require_tools: false
@@ -287,6 +316,7 @@ claude-haiku:
   primary: openai-codex/gpt-5.6-terra
   fallback:
     - openai-codex/gpt-5.4
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
@@ -302,6 +332,7 @@ claude-haiku:
   primary: openai-codex/gpt-5.6-luna
   fallback:
     - openai-codex/gpt-5.4-mini
+    - deepseek-responses/deepseek-flash
     - economy
   constraints:
     require_tools: false
