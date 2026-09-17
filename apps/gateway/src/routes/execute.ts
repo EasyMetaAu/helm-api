@@ -152,6 +152,8 @@ export interface ExecuteAdapterDeps {
    *  don't wire OAuth protocols → passthrough is `protocol_mismatch`-disabled). */
   oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
   breaker: CircuitBreaker;
+  /** Test seam for the fixed 15s first-real-output deadline. */
+  firstOutputTimeoutMs?: number;
   /** modelKey -> capabilities; missing entry => capability filter is skipped. */
   catalog: Map<string, CatalogEntry>;
   now: () => number;
@@ -1358,7 +1360,10 @@ function isReasoningHistoryRejection(err: unknown): boolean {
   const text = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""} ${rawErrorText(
     err.providerRaw,
   )}`.toLowerCase();
-  return text.includes("reasoning_content") && text.includes("thinking mode");
+  return (
+    (text.includes("reasoning_content") || text.includes("reasoning_text")) &&
+    text.includes("thinking mode")
+  );
 }
 
 // Coerce an already-scrubbed upstream error body into the schema's record|null
@@ -2001,11 +2006,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             const stream = await withAttemptDeadline(
               req.attempt_timeout_ms,
               signal,
-              (attemptSignal) =>
-                peekStream(
+              (attemptSignal) => {
+                const preOutputAbort = new AbortController();
+                return peekStream(
                   () => {
                     const raw = passthroughStream(passthroughBody, {
-                      signal: attemptSignal,
+                      signal: AbortSignal.any([attemptSignal, preOutputAbort.signal]),
                       overloadRetry,
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
@@ -2017,13 +2023,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                         (toolCallXmlRecoveryEnabled?.() ?? true),
                     });
                     return passthroughClassifier
-                      ? guardPreOutputFailure(raw, passthroughClassifier)
+                      ? guardPreOutputFailure(raw, passthroughClassifier, {
+                          firstOutputTimeoutMs: deps.firstOutputTimeoutMs ?? 15_000,
+                          onTimeout: () => preOutputAbort.abort(),
+                        })
                       : raw;
                   },
                   attemptSignal,
                   alias,
                   log,
-                ),
+                );
+              },
             );
             settleBreaker("success");
             // Streamed usage is not known at peek time → cost null, backfilled later.
@@ -2331,7 +2341,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             err instanceof UpstreamError &&
             isCodexResponsesPostSendFailureCode(upstreamErrorCode(err.providerRaw));
           if (beforeSendRecovery || postSendFailure) {
-            settleBreaker("abort");
+            // A stalled first-output deadline is an upstream health fault even
+            // though its unknown execution outcome prohibits replay.
+            settleBreaker(
+              err instanceof UpstreamError && err.errorClass === "timeout" ? "failure" : "abort",
+            );
             const detail = errorDetailOf(err);
             attempts.push({
               alias,
@@ -2420,9 +2434,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           }
 
           // DeepSeek-style thinking mode is candidate-specific: when a fallback target
-          // requires OpenAI `reasoning_content` history that the source protocol cannot
-          // supply, another candidate may still serve the request. Do not surface this
-          // as a terminal client 400 and do not fault provider health.
+          // requires OpenAI `reasoning_content` / `reasoning_text` history that the
+          // source protocol cannot supply, another candidate may still serve the
+          // request. Do not surface this as a terminal client 400 and do not fault
+          // provider health.
           if (isReasoningHistoryRejection(err)) {
             capabilityPruned = true;
             attempts.push({

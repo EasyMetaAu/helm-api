@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-09-17 · DeepSeek 缺明文 reasoning 时关掉思考，不伪造思考内容（Provider / 协议互译，docs/05，原则 3/8）
+
+- **现象**：Codex 从 OpenAI 落到 `deepseek-responses/deepseek-flash` 后 400：`The reasoning_text in the thinking mode must be passed back to the API.` Lane rung 不动。
+- **实测（真打 api.deepseek.com，用抓下来的上行体）**：历史里只有 OpenAI 的 `encrypted_content`，网关解不开。设 `reasoning.effort: "none"` 后成功返回工具调用、无 DSML；`thinking: {type:"disabled"}` 无效。
+- **修复**：`deepseek-responses` 增加 opt-in 契约 `disableThinkingOnOpaqueReasoningHistory`。仅当同时满足「有工具历史 + 有 reasoning item + 至少一条没有明文 `reasoning_text`」时，把顶层 `reasoning.effort` 写成 `"none"`，其余字段原样保留。不发明明文，不改没有工具历史的请求，已有明文的也不动。
+- **兜底**：执行层识别 `reasoning_text` + `thinking mode` 的 400，与既有 `reasoning_content` 一样记 `reasoning_history_incompatible`、不熔断、继续下一条候选。契约修掉了主路径；这条是漏网时的安全网。
+
+## 2026-09-17 · 首字节超时：卡住的 Responses 前导算熔断，禁止重放不明结果（Provider execution，docs/04/05，原则 5/8）
+
+- **现象**：过载上游 HTTP 200 开流，只吐 `response.created` + keepalive，几分钟才在流内报 `server_is_overloaded`。生产一条候选烧掉 103s / 104s 请求；熔断要等尝试结束才记账，5 次跳闸前用户已经等了好几分钟。池内过载退避本就有界（1s、3s），连通性测试用 no-op breaker 是刻意的。
+- **修复**：`guardPreOutputFailure` 增加 `firstOutputTimeoutMs`（执行层默认 15s）。只卡**第一帧真实输出**；提交后拆除，慢生成的尾巴不切。到期抛 `errorClass: "timeout"`，Responses 带 `response_create_outcome_unknown`（请求可能已在上游执行，禁止重放到下一条候选），同时 `onTimeout` abort 上游。
+- **熔断**：post-send 不明结果原先 `recordAbort`。首字节超时是健康故障，即使不能重放也要 `recordFailure`，这样卡住的 Codex 别名会在几次后跳闸。
+- **不改 rung**。测试缝 `firstOutputTimeoutMs` 只给单测把 15s 收到 40ms。
+
 ## 2026-09-17 · Lite 回放加密 reasoning 时清空明文 content（Provider / 协议互译，docs/05，原则 3/8）
 
 - trace `4b84107d-1431-4cbc-afd7-4809dea790b5` 的上游 400 为 `input[5].content` 最大长度 0、实际长度 1。原请求带非空 `instructions`，Lite 插入 `additional_tools` 和 developer instructions 两项后，原始 `input[3]` 的 reasoning 变为 `input[5]`；此前将其判为 commentary 是索引误判，已撤回相关改动。
@@ -105,34 +119,12 @@
 - 顶层字段 optional，旧记录 round-trip 不变，**无需迁移**。
 - **后续修正（同日，Lukin 指出）**：Admin 详情页原本把它放进「请求」面板（`buildRequestMeta`），位置错了——记的既然是**上游回显值**，它就是响应侧事实（上游接受了该 id 的证明），应当在「响应」面板。已挪到 `response_meta`。客户端**发送**的那个值本就在抓取的请求正文里可查，不需要在请求元数据里重复。存储字段 `DecisionRecord.safety_identifier` 不动，仅改展示分组；两侧都用通用 `JsonViewer` 渲染，无硬编码标签与 i18n 键需要同步。注意 `response_meta` 在 `status==='error'` 时为 `null`，但该值只在 served 路径写入，不会因此丢失。
 
-## 2026-09-17 · 记录真正发送上游的 Codex installation id（Provider / Routing / Admin，docs/05/07/11，原则 7）
-
-- **动机**：#856 把 installation id 重绑为每账号独立值后，真正上到上游的那个值没有任何留存，只有 `body_shims_applied` 里一个"改写过"的布尔标记。账号被风控时无法回答"这次用的是哪个 id"，也无法验证重绑生效。
-- **粒度**：按 attempt 记在各自的 mutation ledger（fallback 链跨账号，id 各不相同，这是唯一不丢信息的粒度），另把服务成功那次的值提升到顶层 `DecisionRecord.codex_installation_id` 供详情页「请求」面板直接展示；全链路失败时退回最后一次记录到 id 的 attempt。
-- **`source` 三态**：`rebound`（我们改写过，此时才额外留客户端原值）/ `client`（客户端自带且已等于账号绑定值）/ `absent`（请求没带 id）。此前这三种情况在遥测里无法区分。
-- **未新增传播通道**：`prepareRequest` 已有 `Object.assign(input.mutations, prepared.carrier.mutations)` 把 provider 内部 ledger 写回调用方 carrier，`execute.ts` 抓的正是同一引用。原计划的回调机制经验证属多余，已撤销。`execute.test.ts` 新增用例专门守这条链路。
-- 三个字段均为不透明标识符，不含正文或密钥；全部 optional，旧记录 round-trip 不变，**无需迁移**。
-- **顺带修正**：v0.29.15（#861）误把发布条目拼进了文件头部的格式说明行，导致模板被覆盖，本次恢复。
-
-## 2026-09-17 · 修复 provider 字段兼容 400（docs/04/05，原则 3/8）
-
-- Codex legacy `store:false` input 删除已由生产证实被拒绝的 `status`；`phase` 没有拒绝证据，保留其历史语义。Lite input 身份、加密 reasoning、tool call 关联均不改动。
-- Claude Sonnet 5 在转换与 native 发送边界移除已弃用的 `temperature`；strict thinking 可能重新注入 `temperature=1`，因此序列化前再次应用同一模型规则。其他模型维持原行为。
-- 不扩大通用 400 fallback，也不重放已提交输出；已知字段在首次发送前修正，后续临时 provider 故障继续走既有 fallback。仅 Sonnet 5 有生产拒绝证据，本次不推测扩大到其他 Claude 模型。
-
-## 2026-09-17 · 无消息上游失败暴露原始事件（Provider / Admin，docs/05/07/11，原则 3/8）
-
-- **真实触发**：生产两个 ChatGPT Pro 账号（`gongjin843677@` / `smithmark3673@`）全模型失败，连通性面板只显示 `codex responses stream error` 一句，**无法判断是封号、风控还是配额**。同时刻另两个账号正常，排除了通道与网络因素。
-- **根因**：`responseEventError` 的兜底分支——上游 `response.failed` 事件里 `message` 与 `error.message` 都缺失时，直接返回那句固定文案，**原始事件既不进日志也不传前端**，诊断信息在此处彻底丢失。
-- 现在兜底消息保留原句作稳定前缀，追加 `code=<code>` 与事件 JSON（`summarizeUpstreamEvent`，截断 400 字符防刷屏）；完整事件仍在 `UpstreamError.providerRaw`。有 message 的上游错误路径**完全不变**。
-- 连通性测试 SSE 的 error 事件新增 `upstreamStatus` + `providerRaw` 两个**可选**字段，仅 `UpstreamError` 携带；其他错误事件形状不变，前端旧行为兼容。管理面板加可展开的「上游详情」块（7 语言均已补译，CI 的 locale 对齐门禁会卡）。
-- **坑**：测试里用 `async function*` 写"只抛不产出"的 iterator 会被 biome `useYield` 拒绝；改为直接实现 `Symbol.asyncIterator` + `next: () => Promise.reject(...)`，语义上也更贴近"首次拉取即失败"的真实场景。
-- 截断上限 400 字符是拍板值，无配置项——理由同原则 2：会撒谎的旋钮比没有旋钮更糟，完整内容本就在 `providerRaw` 里。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-09-17 · 记录真正发送上游的 Codex installation id**：按 attempt 记 mutation ledger，成功值提升到 `DecisionRecord.codex_installation_id`；`source` 三态 rebound/client/absent。未新增传播通道。
+- **2026-09-17 · 修复 provider 字段兼容 400**：legacy `store:false` 删已证实被拒的 `status`；Sonnet 5 发送前再剥 `temperature`。不扩大通用 400 fallback。
+- **2026-09-17 · 无消息上游失败暴露原始事件**：`response.failed` 缺 message 时连通性面板只剩固定文案。兜底消息追加 `code=` 与截断事件 JSON；完整事件仍在 `providerRaw`。测试用 `Symbol.asyncIterator` 避开 biome `useYield`。
 - **2026-09-16 · 下线 gpt-5.5：断路由但保留价目**：与 Codex Spark 先例（条目删干净）有意偏离——box 上 `served_model='gpt-5.5'` 有 349,050 条 / $28,828.83，`historical-cost-reprice.ts` 查不到价目就 skip，删价目等于永久放弃重算能力。故只移除 lane / alias / provider 条目 / curated list，`pricing.yaml` + `capabilities.yaml` 保留并加退休注释。坑：`validateModelAliasTargets` 启动 fail-closed，alias 必须与 lane 同步删（删后由 `"gpt-5*": premium` 接住，优雅降级非 400）；**manual 模式的 `enabledModels` allowlist 绕过了退休过滤**，已在 `selectAccountModels` chokepoint 补上（测试抓到的，非预判）。`codex-models.json` 由 sync 生成不手改，过滤在 `parseModels`。顺带修正 docs/04 的 lane 计数。
-
 - **2026-09-16 · Codex installation id 按账号重绑**：上游 `installation_id` 是 `$CODEX_HOME/installation_id` 里的纯随机 UUID v4（标识安装而非账号），同机多账号此前共用一个指纹出网。改为每账号确定性派生（`sha256(encKey ‖ "codex-installation:<provider>:<account>")` 前 16 字节整成 UUID v4 形状，永不轮换、免回写 DB）。**三处**必须一起重绑：header `x-codex-installation-id`、`client_metadata` 同名 key、`x-codex-turn-metadata` JSON 内的 `installation_id`——只改 header 则 body 仍泄漏真值。客户端未携带时完全不改写；turn-metadata 非法 JSON 原样透传；`prompt_cache_key` 取自 `session_id`，缓存亲和性不受影响。
 
 - **2026-09-10 · 失败请求保留最终尝试的订阅账号**：`serving_account` 成功时仍是实际服务账号；全链路失败时改记最后一次真正发起上游请求的订阅账号，便于定位账号级故障。候选在选账号前就被熔断/能力门禁跳过则保持 `null`，不伪造分配结果；订阅账号失败后又试了其他 provider 时旧账号不会被误标。未新增 schema、迁移或正文记录。

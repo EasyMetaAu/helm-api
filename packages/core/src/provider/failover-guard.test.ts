@@ -416,6 +416,85 @@ describe("guardPreOutputFailure — openai_chat", () => {
   });
 });
 
+// A stalled preamble is the expensive shape of an overloaded upstream: it answers
+// HTTP 200, emits `response.created` (+ keepalives), and then produces nothing for
+// minutes before finally failing in-band. Production measured a SINGLE candidate
+// burning 103s of a 104s request that way, so the breaker only learned of the fault
+// once per ~2 minutes — five of those to trip it. Capping the time-to-first-OUTPUT
+// turns the stall into a pre-output timeout (~7x sooner). Chat/Anthropic still
+// fall back; Responses is unknown-outcome and must not replay.
+describe("guardPreOutputFailure — first-output deadline", () => {
+  const created = `data: ${JSON.stringify({ type: "response.created", response: { id: "r" } })}\n\n`;
+  const keepalive = `data: ${JSON.stringify({ type: "keepalive" })}\n\n`;
+  const output = `data: ${JSON.stringify({
+    type: "response.output_text.delta",
+    delta: "hi",
+  })}\n\n`;
+
+  /** A source that emits `chunks`, then never settles until aborted. */
+  async function* stalling(chunks: string[]): AsyncGenerator<string> {
+    for (const c of chunks) yield c;
+    await new Promise<never>(() => {});
+  }
+
+  it("fails a stream that emits only preamble past the deadline", async () => {
+    const started = Date.now();
+    await expect(
+      collect(
+        guardPreOutputFailure(stalling([created, keepalive]), responses, {
+          firstOutputTimeoutMs: 40,
+        }),
+      ),
+    ).rejects.toThrow(/first output/i);
+    // The deadline fired rather than the test timing out.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("classifies the deadline as a retryable upstream fault, not an invalid request", async () => {
+    await expect(
+      collect(guardPreOutputFailure(stalling([created]), responses, { firstOutputTimeoutMs: 40 })),
+    ).rejects.toMatchObject({ errorClass: "timeout" });
+  });
+
+  it("does not fire once real output has been committed", async () => {
+    // After commit the stream is the client's; a slow tail must never be cut here
+    // (long generations legitimately pause between deltas).
+    const chunks: string[] = [];
+    const gen = guardPreOutputFailure(stalling([created, output]), responses, {
+      firstOutputTimeoutMs: 40,
+    });
+    const iterator = gen[Symbol.asyncIterator]();
+    chunks.push((await iterator.next()).value as string);
+    chunks.push((await iterator.next()).value as string);
+    // Give the (now disarmed) deadline more than its window to misfire.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await iterator.return?.(undefined);
+    expect(chunks.join("")).toContain("response.output_text.delta");
+  });
+
+  it("prefers an explicit upstream error frame over the deadline", async () => {
+    const failed = `data: ${JSON.stringify({
+      type: "error",
+      error: { code: "server_is_overloaded", message: "busy" },
+    })}\n\n`;
+    await expect(
+      collect(
+        guardPreOutputFailure(stalling([created, failed]), responses, {
+          firstOutputTimeoutMs: 40,
+        }),
+      ),
+    ).rejects.toMatchObject({ providerRaw: { error: { code: "server_is_overloaded" } } });
+  });
+
+  it("is disabled when no deadline is configured", async () => {
+    // Default (no options) must preserve today's behavior exactly.
+    const frames = [created, output];
+    await expect(collect(guardPreOutputFailure(fromChunks(frames), responses))).resolves.toEqual(
+      frames,
+    );
+  });
+});
+
 describe("preOutputClassifierFor", () => {
   it("returns null for gemini (no guard → unchanged commit-on-first behavior)", () => {
     expect(preOutputClassifierFor("gemini")).toBeNull();

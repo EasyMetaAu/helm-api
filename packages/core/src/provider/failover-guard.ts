@@ -321,9 +321,27 @@ export function preOutputClassifierFor(protocol: Protocol): PreOutputClassifier 
  * module header for the contract. Byte-for-byte on the commit path; ZERO parsing once
  * committed.
  */
+export interface PreOutputGuardOptions {
+  /**
+   * Cap (ms) on the time from stream start to the FIRST real output frame. An
+   * overloaded upstream answers 200, emits `response.created` + keepalives, then
+   * stalls for minutes before failing in-band — production measured one candidate
+   * burning 103s of a 104s request. Past the deadline the attempt is a pre-output
+   * timeout so the breaker counts it without waiting out the stall. Chat/Anthropic
+   * keep ordinary fallback; Responses is `response_create_outcome_unknown` and
+   * MUST NOT replay (the POST may already be running tools). Only the PREAMBLE is
+   * bounded: once real output commits, the deadline is disarmed and a slow tail
+   * streams untouched. Omitted or <= 0 disables it (unchanged behavior).
+   */
+  firstOutputTimeoutMs?: number;
+  /** Abort the upstream pull when the deadline expires. */
+  onTimeout?: () => void;
+}
+
 export async function* guardPreOutputFailure(
   source: AsyncIterable<string>,
   classifier: PreOutputClassifier,
+  options: PreOutputGuardOptions = {},
 ): AsyncGenerator<string> {
   const buffered: string[] = [];
   let bufferedBytes = 0;
@@ -339,8 +357,56 @@ export async function* guardPreOutputFailure(
       : null;
   };
 
+  // Time-to-first-output deadline. Raced against each pull rather than driven off a
+  // timer callback, so it cannot fire after the generator is done, and it is cleared
+  // the moment real output commits.
+  const firstOutputTimeoutMs = options.firstOutputTimeoutMs ?? 0;
+  const deadlineArmed = firstOutputTimeoutMs > 0;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadlineReached = deadlineArmed
+    ? new Promise<"deadline">((resolve) => {
+        deadlineTimer = setTimeout(() => resolve("deadline"), firstOutputTimeoutMs);
+        // Never hold the process open for this timer alone.
+        deadlineTimer.unref?.();
+      })
+    : null;
+  const clearDeadline = (): void => {
+    if (deadlineTimer !== undefined) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
+  };
+
+  const iterator = source[Symbol.asyncIterator]();
+  const nextChunk = async (): Promise<IteratorResult<string>> => {
+    if (!deadlineReached || committed) return await iterator.next();
+    const pull = iterator.next();
+    const settled = await Promise.race([pull, deadlineReached]);
+    if (settled === "deadline") {
+      void pull.catch(() => {});
+      options.onTimeout?.();
+      const error = new UpstreamError(
+        "timeout",
+        `upstream produced no first output within ${firstOutputTimeoutMs}ms`,
+      );
+      // A sent Responses request may still execute tools. No explicit rejection
+      // means no safe replay, even when the downstream has seen no output.
+      if (classifier === responsesClassifier) {
+        throw new UpstreamError("timeout", error.message, {
+          error: { code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE, message: error.message },
+          http: { lifecycle_phase: "after_response_created_before_output" },
+        });
+      }
+      throw error;
+    }
+    return settled;
+  };
+
   try {
-    for await (const chunk of source) {
+    for (;;) {
+      const step = await nextChunk();
+      if (step.done === true) break;
+      const chunk = step.value;
       if (committed) {
         yield chunk;
         continue;
@@ -366,6 +432,9 @@ export async function* guardPreOutputFailure(
           }
           if (cls === "output") {
             committed = true;
+            // Real output: the preamble deadline has done its job and must never
+            // interrupt the client's stream.
+            clearDeadline();
             for (const b of buffered) yield b;
             buffered.length = 0;
             bufferedBytes = 0;
@@ -376,6 +445,9 @@ export async function* guardPreOutputFailure(
       }
     }
   } catch (error) {
+    // The deadline abandons a still-running source; close it so the underlying
+    // response body is released instead of leaking until GC.
+    if (!committed) void iterator.return?.().catch(() => {});
     const tailError = unterminatedError();
     if (tailError) throw tailError;
     if (error instanceof UpstreamError) throw error;
@@ -383,6 +455,8 @@ export async function* guardPreOutputFailure(
       throw responsesOutcomeUnknown(error);
     }
     throw error;
+  } finally {
+    clearDeadline();
   }
 
   // Source ended having emitted only preamble (no output, no error): an abnormal

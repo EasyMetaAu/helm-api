@@ -6213,7 +6213,10 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     function translatingClient(onBody: (body: Record<string, unknown>) => Response) {
       return createGenericOpenAIResponsesClient({
         config: { baseUrl: "https://deepseek.test/v1", apiKey: "sk-test" },
-        requestContract: { translateUnsupportedCustomTools: true },
+        requestContract: {
+          translateUnsupportedCustomTools: true,
+          disableThinkingOnOpaqueReasoningHistory: true,
+        },
         fetch: (async (_url: string, init?: RequestInit) =>
           onBody(
             JSON.parse(String(init?.body)) as Record<string, unknown>,
@@ -6595,6 +6598,104 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       await client.nativePassthrough?.({ model: "deepseek-flash", tools, input });
 
       expect(seen.tools).toEqual(tools);
+      expect(seen.input).toEqual(input);
+    });
+
+    it("disables thinking when tool history only has opaque foreign reasoning", async () => {
+      // DeepSeek requires plaintext `reasoning_text` for thinking-mode tool history.
+      // Codex-from-OpenAI items carry only `encrypted_content` the gateway cannot
+      // decrypt; live probe: `reasoning.effort: "none"` succeeds, `thinking:
+      // disabled` does not. Drop the effort only for that shape — never invent
+      // plaintext, never rewrite a body that already has readable reasoning.
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const input = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [],
+          encrypted_content: "foreign-provider-blob",
+        },
+        { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input: "ls" },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
+      ];
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        reasoning: { effort: "high", summary: "detailed" },
+        input,
+      });
+
+      expect(seen.reasoning).toEqual({ effort: "none", summary: "detailed" });
+      expect(seen.input).toEqual([
+        input[0],
+        input[1],
+        {
+          type: "function_call",
+          id: "ctc_1",
+          call_id: "call_1",
+          name: "exec",
+          arguments: JSON.stringify({ input: "ls" }),
+        },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ]);
+    });
+
+    it("keeps requested thinking when a reasoning item already has plaintext", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        reasoning: { effort: "high", summary: "detailed" },
+        input: [
+          {
+            type: "reasoning",
+            id: "rs_1",
+            summary: [],
+            encrypted_content: "foreign-provider-blob",
+            content: [{ type: "reasoning_text", text: "patch then answer" }],
+          },
+          { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input: "ls" },
+        ],
+      });
+
+      expect(seen.reasoning).toEqual({ effort: "high", summary: "detailed" });
+    });
+
+    it("does not invent plaintext or rewrite a body with no tool history", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const input = [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [],
+          encrypted_content: "foreign-provider-blob",
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      ];
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        reasoning: { effort: "high" },
+        input,
+      });
+
+      expect(seen.reasoning).toEqual({ effort: "high" });
       expect(seen.input).toEqual(input);
     });
 
