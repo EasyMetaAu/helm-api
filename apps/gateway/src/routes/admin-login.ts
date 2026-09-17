@@ -75,7 +75,8 @@ function loginPage(
 ): Response {
   const nonce = randomBytes(18).toString("base64");
   c.header("Cache-Control", "no-store");
-  c.header("Referrer-Policy", "no-referrer");
+  // Preserve the form's Origin on HTTP hosts where Fetch Metadata is unavailable.
+  c.header("Referrer-Policy", "same-origin");
   c.header("X-Content-Type-Options", "nosniff");
   c.header(
     "Content-Security-Policy",
