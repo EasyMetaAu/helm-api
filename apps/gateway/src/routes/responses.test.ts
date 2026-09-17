@@ -3984,3 +3984,188 @@ describe("registry.put with providerProtocol='gemini' (lines 756, 758, 680)", ()
     );
   });
 });
+
+// `safety_identifier` is a REQUEST parameter the upstream echoes back on the
+// response object. Recording the ECHOED value (not the one we believe we sent)
+// is what proves the upstream actually accepted it — a mismatch would mean it
+// was rewritten or dropped. Only recorded when the upstream actually echoes it.
+describe("safety_identifier — records the value echoed by the upstream response", () => {
+  it("stamps the echoed identifier from a streamed response.completed frame", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.completed",
+        data: JSON.stringify({
+          type: "response.completed",
+          response: { id: "resp_1", status: "completed", safety_identifier: "lukin-test-001" },
+        }),
+      };
+    }
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    const decision = (insert.mock.calls[0]?.[0] as { decision: Record<string, unknown> }).decision;
+    expect(decision.safety_identifier).toBe("lukin-test-001");
+  });
+
+  // "Absent" must stay absent — an empty string would look like a real identity.
+  it("omits the field when the upstream echoes none", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.completed",
+        data: JSON.stringify({
+          type: "response.completed",
+          response: { id: "resp_1", status: "completed" },
+        }),
+      };
+    }
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    const decision = (insert.mock.calls[0]?.[0] as { decision: Record<string, unknown> }).decision;
+    expect(decision.safety_identifier).toBeUndefined();
+  });
+
+  // response.completed is more authoritative than the response.created preamble.
+  it("prefers the terminal frame's identifier over the preamble's", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.created",
+        data: JSON.stringify({
+          type: "response.created",
+          response: { id: "resp_1", status: "in_progress", safety_identifier: "early" },
+        }),
+      };
+      yield {
+        event: "response.completed",
+        data: JSON.stringify({
+          type: "response.completed",
+          response: { id: "resp_1", status: "completed", safety_identifier: "final" },
+        }),
+      };
+    }
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    const decision = (insert.mock.calls[0]?.[0] as { decision: Record<string, unknown> }).decision;
+    expect(decision.safety_identifier).toBe("final");
+  });
+
+  // Principle 8: the scrape must not perturb the byte relay.
+  it("forwards the native passthrough bytes unchanged while scraping", async () => {
+    const frame = `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: { id: "resp_1", status: "completed", safety_identifier: "lukin-test-001" },
+    })}\n\n`;
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.completed",
+        data: JSON.stringify({
+          type: "response.completed",
+          response: { id: "resp_1", status: "completed", safety_identifier: "lukin-test-001" },
+        }),
+        raw: frame,
+      };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    expect(await res.text()).toBe(frame);
+  });
+});
+
+describe("safety_identifier — non-stream response", () => {
+  it("stamps the echoed identifier from a non-stream response body", async () => {
+    const { record, insert } = makeRecord();
+    // Native passthrough returns the upstream body VERBATIM (no transformResponseOut),
+    // which is exactly how a real Codex/Responses echo reaches this point.
+    const { deps } = makeDeps({
+      record,
+      nativePassthrough: true,
+      collect: async () => ({
+        id: "resp_1",
+        object: "response",
+        status: "completed",
+        model: "gpt-5.6",
+        safety_identifier: "lukin-test-001",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(200);
+
+    const decision = (insert.mock.calls[0]?.[0] as { decision: Record<string, unknown> }).decision;
+    expect(decision.safety_identifier).toBe("lukin-test-001");
+  });
+
+  it("omits the field when a non-stream response echoes none", async () => {
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({ record });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(200);
+
+    const decision = (insert.mock.calls[0]?.[0] as { decision: Record<string, unknown> }).decision;
+    expect(decision.safety_identifier).toBeUndefined();
+  });
+});

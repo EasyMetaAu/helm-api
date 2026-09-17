@@ -265,6 +265,8 @@ interface RawDecisionRecord {
   request_content_mode?: 'none' | 'payload' | 'session';
   // Codex installation id sent upstream by the attempt that served this request.
   codex_installation_id?: string;
+  // safety_identifier echoed back by the upstream response (absent when not echoed).
+  safety_identifier?: string;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
@@ -626,6 +628,8 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
     // Codex-only: the installation id actually sent upstream. Opaque identifier, not
     // key material. Absent for every other provider, so the panel stays clean.
     ...(raw.codex_installation_id ? { codex_installation_id: raw.codex_installation_id } : {}),
+    // Echoed by the upstream on its response — absent unless it actually came back.
+    ...(raw.safety_identifier ? { safety_identifier: raw.safety_identifier } : {}),
   };
 }
 

@@ -533,18 +533,38 @@ export function settleResponsesStreamOutcome(args: {
   return outcome;
 }
 
+// The upstream echo, read off a non-stream response body. Same rule as the stream
+// scrape: a non-empty string only, so "absent" never degrades into an empty label.
+function echoedSafetyIdentifier(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return null;
+  const record = body as Record<string, unknown>;
+  const nested = record.response;
+  const source =
+    typeof nested === "object" && nested !== null ? (nested as Record<string, unknown>) : record;
+  const value = source.safety_identifier;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function responseSnapshotFromStreamFrame(
   eventName: string,
   data: string,
-): { responseId: string | null; status: string | null } {
+): { responseId: string | null; status: string | null; safetyIdentifier: string | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
   } catch {
-    return { responseId: null, status: streamStatusFromEventName(eventName) };
+    return {
+      responseId: null,
+      status: streamStatusFromEventName(eventName),
+      safetyIdentifier: null,
+    };
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { responseId: null, status: streamStatusFromEventName(eventName) };
+    return {
+      responseId: null,
+      status: streamStatusFromEventName(eventName),
+      safetyIdentifier: null,
+    };
   }
   const record = parsed as Record<string, unknown>;
   const response = record.response;
@@ -560,7 +580,10 @@ function responseSnapshotFromStreamFrame(
     typeof responseRecord.status === "string" && responseRecord.status.length > 0
       ? responseRecord.status
       : streamStatusFromEventName(eventName);
-  return { responseId, status };
+  // The upstream echoes the request's `safety_identifier` back on the response
+  // object. Read it off the SAME already-parsed record as id/status so scraping it
+  // costs no extra parse and never touches the forwarded bytes (principle 8).
+  return { responseId, status, safetyIdentifier: echoedSafetyIdentifier(responseRecord) };
 }
 
 function isUsableRegistryRecord(record: ResponsesRegistryRecord): boolean {
@@ -1422,6 +1445,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let lastWrite: string | null = null;
         let streamResponseId: string | null = null;
         let streamStatus: string | null = null;
+        // Last non-null wins: `response.completed` is more authoritative than the
+        // `response.created` preamble that may carry an earlier value.
+        let streamSafetyIdentifier: string | null = null;
         let cancellationReason: RequestCancellationReason | null = null;
         let caughtErrorReason: string | null = null;
         let finalErrorDetail: AttemptErrorDetail | null = null;
@@ -1480,6 +1506,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
             if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
             if (snapshot.status !== null) streamStatus = snapshot.status;
+            if (snapshot.safetyIdentifier !== null)
+              streamSafetyIdentifier = snapshot.safetyIdentifier;
             finalErrorDetail ??= responsesFrameErrorDetail(frame.event, frame.data);
             if (captureSessionResponse && terminalEvent && !captureBodies) {
               if (sessionTerminalCapture?.limited()) {
@@ -1590,6 +1618,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           try {
             if (captureRecord && result !== null) {
               stampServingAccount(result.decision, result.servingAccount ?? null);
+              // Only when the upstream actually echoed one — absent must stay absent
+              // rather than becoming an empty string that looks like a real identity.
+              if (streamSafetyIdentifier !== null) {
+                result.decision.safety_identifier = streamSafetyIdentifier;
+              }
               if (captured?.limited()) {
                 c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
               }
@@ -1698,6 +1731,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (captureRecord) {
       stampServingAccount(result.decision, result.servingAccount ?? null);
+      const echoed = echoedSafetyIdentifier(body);
+      if (echoed !== null) result.decision.safety_identifier = echoed;
       await recordServed(
         captureRecord,
         {
