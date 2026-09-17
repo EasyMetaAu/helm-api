@@ -286,6 +286,16 @@ deepseek/deepseek-v4-flash:
   inputPerMTokUsd: 0.14
   outputPerMTokUsd: 0.28
   cacheReadPerMTokUsd: 0.0028
+# DeepSeek's native Responses endpoint: same account, same rate card as the Chat
+# aliases above — only the wire differs. deepseek-flash is the v4-flash tier.
+deepseek-responses/deepseek-v4-pro:
+  inputPerMTokUsd: 0.435
+  outputPerMTokUsd: 0.87
+  cacheReadPerMTokUsd: 0.003625
+deepseek-responses/deepseek-flash:
+  inputPerMTokUsd: 0.14
+  outputPerMTokUsd: 0.28
+  cacheReadPerMTokUsd: 0.0028
 # OpenRouter-hosted DeepSeek mirrors use official DeepSeek API-equivalent rates.
 # When the relay returns usage.cost, that real upstream-billed value still wins.
 openrouter/deepseek-v4-pro:

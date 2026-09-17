@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-09-17 · 接入 DeepSeek 原生 Responses 透传（Provider / 协议互译，docs/02/05，原则 3/8）
+
+- **动机**：DeepSeek 上线了自己的 `/v1/responses`（<https://api-docs.deepseek.com/zh-cn/guides/responses_api>）。此前 `deepseek` provider 只是 `type: openai`（`openai_chat` 线路），Codex 请求打过去必须经 `Responses→IR→Chat` 翻译；而 DeepSeek 恰恰**要求把 reasoning 项原样回传**，翻译必然丢掉它们。新增 `deepseek-responses` provider（同 host、同 `DEEPSEEK_API_KEY`，`type: deepseek-responses` → `openai_responses`）后，Codex 走字节透传。
+- **实测（2026-09-17，真打 api.deepseek.com）**：逐条验证而非照抄文档。verbatim Codex body（instructions/tools/store/include/`custom_tool_call`/reasoning 回传）**200**；不支持的字段（`previous_response_id`/`metadata`/`service_tier`/`stream_options`/`context_management`）**静默忽略**；未知 item 类型（`mcp_call`/`local_shell_call`/`totally_unknown_item`）**200**。两个真会 400 的点：①tool-call 历史缺 reasoning → `The reasoning_text in the thinking mode must be passed back to the API.`（只带 `encrypted_content` 无明文 `content[]` 同样 400）；②回显的 `web_search_call`/`file_search_call` 被严格反序列化 → `missing field queries/action`（带不带 `action` 都 400）。
+- **不新增 profile 枚举**（关键权衡）：`execute.ts` 的 `needsCodexResponsesShim` 判定是 `nativeProtocolProfile !== "generic_openai_responses"` 取反，新枚举会让 DeepSeek 误吃 Codex shim（砍掉它明确支持的 `temperature`/`max_output_tokens`）。因此沿用 `generic_openai_responses`，另加一个**能力位** `ProviderClient.supportsResponsesNativeItems`，只在两个降级判定点（透传闸门 `targetIsGenericResponsesProfile` 与 `candidateGuardSkipReason`）放行。默认 absent ⇒ xAI/Grok 的降级行为**完全不变**。
+- **xAI 的降级对 DeepSeek 有害**：Grok 那套"带 Codex items 就降级去翻译"在这里会稳定产出 400（翻译丢 reasoning），所以 DeepSeek 必须反向选择 —— 字节透传是唯一可行路径，不是优化。
+- **两个语义拆成两个 flag**：`dropBuiltInSearchCallItems`（wire 怪癖，剥 `web_search_call`/`file_search_call`）与 `acceptsResponsesNativeItems`（能力声明）分开，避免把"要剥搜索项"和"能吃 Codex items"耦成一个开关。
+- **`serialize-client.ts` 同步转发新字段**：该文件只逐个复制方法，数据字段不列进去就会被悄悄丢掉（此前 `nativeProtocolProfile` 就这样导致多账号池判定失效）。
+- **capabilities**：`jsonOutput: schema` 已实测（Responses 的 `text.format` 支持 `json_schema`，与 Chat 端 `response_format` 不同，故与 `deepseek/*` 的 `object` 有别）。vision 只给 `deepseek-flash` 开：`deepseek-v4-pro` 传图不报错，但官方文档只列 flash 真正处理图片，**按 fail-closed 标 false**，避免 vision 请求被静默忽略图片。
+- **live 测试**：`packages/core/src/provider/live-deepseek-responses.test.ts` 默认 skip（`HELM_LIVE_DEEPSEEK=1` 开启），把上述四条真上游断言固化下来，CI 不会打真上游。
+- **已进 lane（Lukin 拍板）**：6 条 GPT family lane（`gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4` / `gpt-5.4-mini`）各加一条 `deepseek-responses/*` rung，排在同族订阅 slug 之后、通用 lane 之前；pro 配高质量档，flash 配廉价档。理由同上：这些 lane 承载 Codex 流量，而通用链里的 grok（同协议但会被降级翻译）与 claude（跨协议常被 skip）对带 Codex items 的请求往往不可用，`deepseek-responses` 是配置中**唯一的静态同协议 rung**。
+- **连带效果（已确认并接受）**：`premium`/`balanced`/`economy` 的 primary 本身就是 `gpt-5.6-sol`/`terra`/`luna` 这三条 lane，所以 DeepSeek 自动出现在**每条通用 lane 的第二位**——订阅一挂，全部流量（不止 Codex）先落 DeepSeek，claude/grok 顺延。Lukin 明确接受：延迟与成本更优，且同协议兜底最可靠。`rules-routing.test.ts` 的 premium 链断言已同步。
+- **e2e 未受影响**：routing/protocol/smoke 共 37 例全过。e2e 用 `HELM_PROVIDER_BASE_URL` 把所有 provider 指向同一 mock，其入站是 openai_chat，`deepseek-responses` 因协议不匹配被跳过，故"无订阅时实际执行模型"的断言仍落在 `openrouter/deepseek-*` 上。
+
 ## 2026-09-17 · 记录上游回显的 safety_identifier（Responses 路由 / Admin，docs/05/07/11，原则 7/8）
 
 - **动机**：`safety_identifier` 一直在转发给上游、也被 `pool.ts` 当账号亲和键用，却从不落库（线上 50 条 0 命中）。无法回答"上游到底认了哪个终端用户标识"。
@@ -14,6 +28,7 @@
 - **零新增解析**：流式中继的 `responseSnapshotFromStreamFrame` 本就逐帧 `JSON.parse` 取 `response` 对象拿 id/status，`safety_identifier` 在同一对象上，多读一字段即可。字节中继不受影响（原则 8），`raw` 路径原样写出，并有专门用例锁住转发字节。
 - 非流式共用 `echoedSafetyIdentifier`，避免两处读法漂移。两条路径都只在值存在时写入：缺失保持 absent，**不退化成空字符串**（空串像一个真实身份，比没有更糟）。流式取最后一个非空值，`response.completed` 比 `response.created` 前导帧权威。
 - 顶层字段 optional，旧记录 round-trip 不变，**无需迁移**。
+- **后续修正（同日，Lukin 指出）**：Admin 详情页原本把它放进「请求」面板（`buildRequestMeta`），位置错了——记的既然是**上游回显值**，它就是响应侧事实（上游接受了该 id 的证明），应当在「响应」面板。已挪到 `response_meta`。客户端**发送**的那个值本就在抓取的请求正文里可查，不需要在请求元数据里重复。存储字段 `DecisionRecord.safety_identifier` 不动，仅改展示分组；两侧都用通用 `JsonViewer` 渲染，无硬编码标签与 i18n 键需要同步。注意 `response_meta` 在 `status==='error'` 时为 `null`，但该值只在 served 路径写入，不会因此丢失。
 
 ## 2026-09-17 · 记录真正发送上游的 Codex installation id（Provider / Routing / Admin，docs/05/07/11，原则 7）
 
@@ -67,22 +82,6 @@
 - `response.metadata`、`codex.response.metadata`、`codex.rate_limits`、`responsesapi.websocket_timing` 和 `keepalive` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。v0.29.10 部署后重放第二条原请求时，生产流明确出现 `keepalive` 后跟过载，补齐了先前缺失的线上事件证据。
 - 两条生产失败请求确实分别丢失 157/239 个 ID；控制事件导致错误直接下传已由本地网关与账号池回归用例复现，但生产未保留这些失败的完整 SSE，因此不能把两项差异直接认定为全部线上故障的唯一原因。补丁尚未部署，真实会话恢复仍须单独验证。
 
-## 2026-09-06 · Remote 配置同步后的目录与 e2e 一致性（Config sync，docs/04/05，原则 2/3/6）
-
-- Remote 的通用 lane 以 `gpt-5.6-*` 子 lane 为主候选，并移除了官方 DeepSeek 直连候选；e2e 断言同步为实际的 lane 名与 OpenRouter fallback，未改运行时代码。
-- `providers.yaml` 暴露 bare alias `gpt-image-2`，但 capability override 仍使用旧的 `zenmux/gpt-image-2` key，导致图片端点误报 404；将 capability key 对齐为 `gpt-image-2`。GPT-6 Astra lane 与四个兼容别名保持原样。
-- Remote 默认开启 eval；e2e 的关闭场景改为显式 header，慢 eval 按实际边界断言 `eval_timeout`。测试专用 MCP OAuth 签名 key 只存在于 hermetic launcher，不影响生产配置。
-
-## 2026-09-06 · 记录 Responses 流内上游错误事件（docs/07，原则 8）
-
-- Decision error detail now records `upstream_event` (`error` or `response.failed`) for in-band SSE failures. HTTP status remains nullable because the upstream may return the error after opening an HTTP 200 stream.
-- This is additive and preserves the raw provider payload; it makes Codex overload failures distinguishable from Helm-generated admission errors in Admin telemetry.
-
-## 2026-09-06 · 将 Remote 运行时配置同步回仓库（Config sync，docs/04/11，原则 2/3/6）
-
-- Remote `/opt/helm-api/config` 没有 Git checkout；本次从服务器读取 11 个正式 YAML，排除 `.bak*` 备份，并原样写入仓库配置。
-- 保留 Remote 的 GPT-6 语义：`gpt-6-astra` lane 主候选为 `openai-codex/gpt-6-astra`，四个 GPT-6 兼容别名均指向 `gpt-6-astra` lane。Remote 还包含已运行的 classifier、Memory、策略和图片配置，因此同步范围不是只改 GPT-6 三行。
-
 ## 2026-09-06 · Responses 空准备事件保留安全恢复窗口（Provider execution / Responses，docs/04/05，原则 3/5/8）
 
 - 空 message/reasoning item、空文本/思考摘要 part 和空 delta 继续缓冲；只有真实内容才提交流，使随后明确的过载错误可以进入既有 OAuth sibling retry 与模型 fallback。正常响应仍逐字节回放原始事件。
@@ -93,6 +92,9 @@
 
 ## 历史条目摘要（最新要点）
 
+- **2026-09-06 · Remote 配置同步后的目录与 e2e 一致性**：通用 lane 改以 `gpt-5.6-*` 子 lane 为主候选并移除官方 DeepSeek 直连候选，e2e 断言随之对齐；修正 `gpt-image-2` 的 capability key（原为旧的 `zenmux/gpt-image-2`，导致图片端点误报 404）。未改运行时代码。
+- **2026-09-06 · 记录 Responses 流内上游错误事件**：error detail 增记 `upstream_event`（`error` / `response.failed`）；HTTP status 保持可空（上游可能先开 200 流再报错）。纯增量、保留原始 provider payload，使 Codex 过载失败可与 Helm 自身准入错误区分。
+- **2026-09-06 · 将 Remote 运行时配置同步回仓库**：Remote `/opt/helm-api/config` 无 Git checkout，本次读取 11 个正式 YAML（排除 `.bak*`）原样写回；保留 Remote 的 GPT-6 语义（`gpt-6-astra` lane 主候选 `openai-codex/gpt-6-astra`，四个兼容别名指向该 lane）。
 - **2026-09-06 · Codex 原生模型列表保留手动自定义 ID**：`GET /v1/models` 对尚未出现在上游目录的手动 ID，借该账号最低 priority 模型的兼容元数据生成条目（改写 slug/display_name）；只为列表展示与协议兼容兜底，不宣称真实能力，自动模式仍只输出上游发现项。
 - **2026-09-06 · 订阅账号手动模型允许自定义 ID**：Manual 模式以运维保存的 `enabledModels` 为权威，Codex 自定义 ID 即使未出现在账号目录也保留（只表示“允许尝试”，不伪造 entitlement）；Automatic 仍只跟随上游发现。注意其后 2026-09-16 已为该路径补上退休模型过滤。
 - **2026-09-05 · GPT-6 Astra 官方 API 目录与价格**：官方 API capability/pricing 与 reasoning 参数兼容已加入 override，订阅 lane 保留；定价和限制按对应提交回溯。

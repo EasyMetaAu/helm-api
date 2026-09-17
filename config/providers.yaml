@@ -71,6 +71,28 @@ providers:
       # `deepseek-v4-flash` (a real DeepSeek id), priced for eval_usd via the bare
       # `deepseek-v4-flash` key in pricing.yaml.
 
+  # DeepSeek's NATIVE Responses endpoint (https://api-docs.deepseek.com/guides/
+  # responses_api). Same host + same credential as the `deepseek` provider above,
+  # but a different WIRE: it speaks openai_responses, so a Codex request reaches it
+  # via byte-faithful native passthrough instead of the lossy Responses->IR->Chat
+  # translation. That distinction is load-bearing, not cosmetic — DeepSeek REJECTS a
+  # tool-call history whose reasoning items were dropped ("The `reasoning_text` in
+  # the thinking mode must be passed back to the API.", HTTP 400), which is exactly
+  # what translating away from Responses does. Everything it does not support it
+  # ignores silently, so no compat shim is configured here; the one wire quirk (it
+  # deserializes echoed-back web_search_call / file_search_call strictly and 400s on
+  # them) is handled by the `deepseek-responses` client profile in code.
+  # Upstream ids: only `deepseek-flash` + `deepseek-v4-pro` serve this endpoint.
+  - name: deepseek-responses
+    type: deepseek-responses
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    models:
+      - alias: deepseek-responses/deepseek-v4-pro
+        provider_model: deepseek-v4-pro
+      - alias: deepseek-responses/deepseek-flash
+        provider_model: deepseek-flash
+
   # SECONDARY provider — ZenMux aggregator. A genuinely DIFFERENT upstream with
   # its own credential, proving a fallback chain can CROSS providers. Carries the
   # vision-capable model used by the `vision` task lane plus a json-INCAPABLE

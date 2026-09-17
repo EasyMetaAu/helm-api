@@ -50,6 +50,9 @@ function inferTargetProviderProtocol(type: string): z.infer<typeof TargetProvide
   if (type === "openai-responses") return "openai_responses";
   if (type === "openai-responses-generic" || type === "openai_responses_generic")
     return "openai_responses";
+  // DeepSeek's own Responses endpoint: OpenAI-shaped, but it needs its own client
+  // profile (it REQUIRES reasoning echo-back and rejects built-in search items).
+  if (type === "deepseek-responses") return "openai_responses";
   if (type === "anthropic") return "anthropic_messages";
   if (type === "gemini") return "gemini";
   return "openai_chat";

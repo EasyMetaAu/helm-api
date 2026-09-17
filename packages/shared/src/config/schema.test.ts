@@ -71,6 +71,7 @@ describe("ProviderConfigSchema targetProviderProtocol", () => {
 
   it.each([
     ["openai-responses", "openai_responses"],
+    ["deepseek-responses", "openai_responses"],
     ["anthropic", "anthropic_messages"],
     ["gemini", "gemini"],
   ] as const)("infers targetProviderProtocol for type %s", (type, targetProviderProtocol) => {

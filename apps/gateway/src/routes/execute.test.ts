@@ -1217,6 +1217,67 @@ describe("createExecute — gateway execution adapter", () => {
     );
   });
 
+  it("byte-forwards a Codex body to DeepSeek Responses instead of translating it", async () => {
+    // DeepSeek is the OPPOSITE of xAI here (verified live against api.deepseek.com):
+    // it ACCEPTS custom_tool_call / reasoning echo-back, and it REQUIRES the reasoning
+    // items to be replayed ("The `reasoning_text` in the thinking mode must be passed
+    // back to the API." -> 400). The translate path drops them, so the xAI-style
+    // downgrade would guarantee a 400. Byte passthrough is the only working path.
+    const client = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-translate", usage: {} }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue({ id: "deepseek-native", usage: {} }),
+      nativeProtocolProfile: "generic_openai_responses",
+      supportsResponsesNativeItems: true,
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: new Map([["deepseek-responses", client]]),
+      registry: protocolRegistry({
+        "deepseek-responses/flash": {
+          providerName: "deepseek-responses",
+          providerModel: "deepseek-flash",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const responsesInput = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "patch it" }] },
+      {
+        type: "reasoning",
+        id: "rs_1",
+        summary: [],
+        content: [{ type: "reasoning_text", text: "x" }],
+      },
+      { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+    ];
+    const out = await execute(
+      plan(["deepseek-responses/flash"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { responses_input_items: responsesInput },
+        native_request: {
+          protocol: "openai_responses",
+          body: { model: "gpt-5.6-sol", input: responsesInput },
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+
+    expect(client.nativePassthrough).toHaveBeenCalled();
+    expect(client.chatCompletion).not.toHaveBeenCalled();
+    expect(out.attempts[0]?.skipped).not.toBe(true);
+    expect(out.attempts[0]?.passthrough_used).toBe(true);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBeNull();
+  });
+
   it("strips Anthropic context_management before a GENERIC Responses (xAI) upstream (box grok 422)", async () => {
     // context_management is an Anthropic-native context-editing control. It is forwarded to
     // openai_responses targets for the Codex-OFFICIAL endpoint (which understands it), but a

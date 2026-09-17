@@ -268,6 +268,27 @@ deepseek/deepseek-v4-flash:
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 16384
+# DeepSeek's native Responses endpoint (provider `deepseek-responses`). Same models
+# on a different wire, so capabilities mirror the entries above — except jsonOutput:
+# the Responses `text.format` is fully supported (json_schema included), unlike the
+# Chat endpoint's response_format. Verified live 2026-09-17.
+deepseek-responses/deepseek-v4-pro:
+  supportsTools: true
+  jsonOutput: schema
+  # An input_image does not 400 here, but the API docs list deepseek-flash as the
+  # only model that actually PROCESSES one. Stay fail-closed: a vision request must
+  # not route to a model that would silently ignore the image.
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 384000
+deepseek-responses/deepseek-flash:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 16384
 # OpenRouter-hosted DeepSeek mirrors (lanes fallback f0d0cc6; data from
 # https://openrouter.ai/api/v1/models, 2026-06-04 — tools + structured_outputs
 # supported, text-only input). structured_outputs ⇒ jsonOutput: schema, so a strict
