@@ -468,7 +468,7 @@ describe("guardPreOutputFailure — first-output deadline", () => {
     chunks.push((await iterator.next()).value as string);
     // Give the (now disarmed) deadline more than its window to misfire.
     await new Promise((resolve) => setTimeout(resolve, 120));
-    await iterator.return?.();
+    await iterator.return?.(undefined);
     expect(chunks.join("")).toContain("response.output_text.delta");
   });
 
