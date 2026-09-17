@@ -21,6 +21,7 @@ import {
   appendMutationList,
   cloneCarrierWithBody,
   isNativePassthroughCarrier,
+  type NativePassthroughCarrier,
   type NativePassthroughInput,
 } from "@helm/shared";
 import sharp from "sharp";
@@ -1241,12 +1242,58 @@ function rewriteCodexTurnMetadata(raw: unknown, installationId: string): string 
   return JSON.stringify({ ...parsed, installation_id: installationId });
 }
 
+// Record WHICH installation id actually went upstream, on the carrier's own ledger.
+// `body_shims_applied` only says a rebind happened; the VALUE is what answers "which
+// id did this request use?" once the request is long gone. `source` separates the three
+// cases an operator otherwise cannot tell apart: we rebound it, the client's own id
+// rode as-is, or nothing carried an id at all.
+function recordCodexInstallationId(
+  carrier: NativePassthroughCarrier,
+  sent: string | undefined,
+  client: string | undefined,
+): void {
+  const source = sent === undefined ? "absent" : sent === client ? "client" : "rebound";
+  carrier.mutations.codex_installation_id_source = source;
+  if (sent !== undefined) carrier.mutations.codex_installation_id = sent;
+  if (source === "rebound" && client !== undefined) {
+    carrier.mutations.codex_installation_id_client = client;
+  }
+}
+
+// The id the CLIENT supplied, from either place it rides. Read before any rewrite so
+// the original value is still observable.
+function clientInstallationId(carrier: NativePassthroughCarrier): string | undefined {
+  for (const [name, value] of Object.entries(carrier.headers)) {
+    if (name.toLowerCase() !== CODEX_INSTALLATION_ID_HEADER) continue;
+    const first = Array.isArray(value) ? value[0] : value;
+    if (typeof first === "string" && first.length > 0) return first;
+  }
+  const metadata = carrier.body.client_metadata;
+  if (isRecord(metadata)) {
+    for (const [name, value] of Object.entries(metadata)) {
+      if (name.toLowerCase() !== CODEX_INSTALLATION_ID_HEADER) continue;
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  return undefined;
+}
+
 function withCodexInstallationId(
   input: NativePassthroughInput,
   installationId: string | undefined,
 ): NativePassthroughInput {
-  if (installationId === undefined || installationId.length === 0) return input;
   if (!isNativePassthroughCarrier(input)) return input;
+  const clientId = clientInstallationId(input);
+  // No per-account id bound, or nothing to rebind: the request rides unchanged, but
+  // whatever it carries (or does not) is still recorded on the ledger.
+  if (installationId === undefined || installationId.length === 0) {
+    recordCodexInstallationId(input, clientId, clientId);
+    return input;
+  }
+  if (clientId === undefined) {
+    recordCodexInstallationId(input, undefined, undefined);
+    return input;
+  }
 
   let headersChanged = false;
   const headers: Record<string, string | string[]> = {};
@@ -1293,7 +1340,11 @@ function withCodexInstallationId(
     }
   }
 
-  if (!headersChanged && nextMetadata === undefined) return input;
+  if (!headersChanged && nextMetadata === undefined) {
+    // Already equal to the bound id — nothing rewritten, but this IS the id going out.
+    recordCodexInstallationId(input, clientId, clientId);
+    return input;
+  }
   const carrier =
     nextMetadata === undefined
       ? { ...input, headers }
@@ -1302,6 +1353,7 @@ function withCodexInstallationId(
           headers,
         };
   appendMutationList(carrier.mutations, "body_shims_applied", ["codex_installation_id_rebound"]);
+  recordCodexInstallationId(carrier, installationId, clientId);
   return carrier;
 }
 

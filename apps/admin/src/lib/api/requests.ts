@@ -263,6 +263,8 @@ interface RawDecisionRecord {
   reasoning_effort?: string | null;
   request_body_bytes?: number | null;
   request_content_mode?: 'none' | 'payload' | 'session';
+  // Codex installation id sent upstream by the attempt that served this request.
+  codex_installation_id?: string;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
@@ -621,6 +623,9 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
     reasoning_effort: raw.reasoning_effort ?? null,
     policy_reason: raw.policy?.reason ?? null,
     ...(raw.request_content_mode ? { request_content_mode: raw.request_content_mode } : {}),
+    // Codex-only: the installation id actually sent upstream. Opaque identifier, not
+    // key material. Absent for every other provider, so the panel stays clean.
+    ...(raw.codex_installation_id ? { codex_installation_id: raw.codex_installation_id } : {}),
   };
 }
 

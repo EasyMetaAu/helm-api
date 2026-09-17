@@ -1143,6 +1143,23 @@ export async function routeRequest(
   // not swaps and never counted.
   const servedAttempts = outcome.attempts.filter((a) => !a.skipped).length;
 
+  // Lift the SERVING attempt's Codex installation id to the top level for the request
+  // detail header. Prefer the attempt that actually landed; fall back to the last
+  // attempt that recorded one so a fully failed request still names the id it used.
+  // Per-attempt ledgers remain the complete record — this is a convenience view.
+  const installationIdOf = (a: (typeof outcome.attempts)[number]): string | undefined =>
+    a.request_mutations?.codex_installation_id ?? a.passthrough_mutations?.codex_installation_id;
+  const servedInstallationId =
+    outcome.attempts
+      .filter((a) => !a.skipped && a.status === "ok")
+      .map(installationIdOf)
+      .at(-1) ??
+    outcome.attempts
+      .filter((a) => !a.skipped)
+      .map(installationIdOf)
+      .filter(Boolean)
+      .at(-1);
+
   const decision: DecisionRecord = {
     request_id: req.request_id,
     trace_id: correlationTraceId(req),
@@ -1155,6 +1172,7 @@ export async function routeRequest(
     policy,
     lane: { selected_lane: execPlan.selected_lane, candidate_chain: execPlan.candidate_chain },
     provider_attempts: outcome.attempts,
+    ...(servedInstallationId !== undefined ? { codex_installation_id: servedInstallationId } : {}),
     final: finalRecord,
     latency_total_ms: outcome.attempts.reduce((acc, a) => acc + a.latency_ms, 0),
     fallback_count: Math.max(0, servedAttempts - 1),

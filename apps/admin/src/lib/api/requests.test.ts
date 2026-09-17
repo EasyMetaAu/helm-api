@@ -132,6 +132,22 @@ describe('toDetail', () => {
       request_content_mode: 'session',
     });
   });
+
+  // The id that actually went upstream is the one an operator needs when an account
+  // is flagged — surface it alongside the other body-free routing metadata.
+  it('surfaces the Codex installation id that was sent upstream', () => {
+    const detail = toDetail({
+      ...rawRecord(),
+      codex_installation_id: 'a3f2b8d3-20b1-4f33-b89f-2be3005b7170',
+    });
+    expect(detail.request_meta).toMatchObject({
+      codex_installation_id: 'a3f2b8d3-20b1-4f33-b89f-2be3005b7170',
+    });
+  });
+
+  it('omits the installation id for non-Codex requests', () => {
+    expect(toDetail(rawRecord()).request_meta).not.toHaveProperty('codex_installation_id');
+  });
 });
 
 describe('toListItem', () => {

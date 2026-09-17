@@ -6508,6 +6508,63 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
   });
 
+  // The Codex client writes the installation id it actually sent onto the carrier's
+  // ledger from INSIDE the provider call. Attempt telemetry is snapshotted around that
+  // call, so this guards the one thing that makes the id durable: a provider-side write
+  // must still reach the recorded attempt.
+  it("carries a provider-written installation id into the attempt telemetry", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+      nativePassthroughStream: vi.fn((carrier: { mutations: Record<string, unknown> }) => {
+        carrier.mutations.codex_installation_id = "bbbbbbbb-2222-4222-8222-222222222222";
+        carrier.mutations.codex_installation_id_source = "rebound";
+        return gen(SSE);
+      }),
+    } as unknown as ProviderClient & {
+      nativePassthroughStream: ReturnType<typeof vi.fn>;
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a"]),
+      anthropicStreamReq({
+        native_request: {
+          protocol: "anthropic_messages" as const,
+          body: { ...NATIVE_STREAM },
+          raw_body: JSON.stringify(NATIVE_STREAM),
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+    // Drain so the attempt settles exactly as a served request would.
+    for await (const _ of out.stream as AsyncIterable<string>) {
+      // drain
+    }
+
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject({
+      codex_installation_id: "bbbbbbbb-2222-4222-8222-222222222222",
+      codex_installation_id_source: "rebound",
+    });
+  });
+
   it("flag OFF + stream → chatCompletionStream(stripInternal) translate path, passthrough_used:false, nativePassthrough absent", async () => {
     const provider = {
       chatCompletion: vi.fn(),
