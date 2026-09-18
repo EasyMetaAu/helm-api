@@ -13,7 +13,7 @@ import {
   CodexResponsesBeforeSendError,
   createCodexResponsesClient,
 } from "../openai-responses.js";
-import { TokenRefreshError } from "../token-manager.js";
+import { OAuthCredentialDisconnectedError, TokenRefreshError } from "../token-manager.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
 beforeEach(() => {
@@ -2781,6 +2781,20 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(selected).toEqual(["bad", "good", "good"]);
   });
 
+  it("does not persist an old disconnected manager's failure against a new login", async () => {
+    const served: string[] = [];
+    const failures: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("old", 10, served, new OAuthCredentialDisconnectedError()),
+        faultMember("good", 50, served, null),
+      ],
+      onAccountCredentialFailure: (account) => failures.push(account),
+    });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    expect(failures).toEqual([]);
+  });
+
   it("lets a provider exclude inference 403 from permanent credential failures", async () => {
     const served: string[] = [];
     const selected: string[] = [];
@@ -2890,6 +2904,60 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     ).rejects.toThrow(/bad gateway/);
     expect(chunks).toEqual(["data: a\n\n"]); // committed to a after its first chunk
     expect(served).toEqual(["a"]); // never fell over to b — the bytes were already out
+  });
+
+  it.each([
+    "chat",
+    "native",
+  ])("disables a credential rejected after output on the %s stream without replaying it", async (protocol) => {
+    const served: string[] = [];
+    const failures: string[] = [];
+    const bad = faultMember("bad", 10, served, AUTH_401, { failMidStream: true });
+    bad.client.nativePassthroughStream = () => bad.client.chatCompletionStream(REQ);
+    const pool = createOAuthPoolClient({
+      members: [bad, faultMember("good", 50, served, null)],
+      onAccountCredentialFailure: (account) => failures.push(account),
+    });
+    const chunks: string[] = [];
+    await expect(
+      (async () => {
+        const stream =
+          protocol === "chat"
+            ? pool.chatCompletionStream(REQ)
+            : pool.nativePassthroughStream?.({ model: "m", stream: true });
+        for await (const chunk of stream ?? []) chunks.push(chunk);
+      })(),
+    ).rejects.toBe(AUTH_401);
+    expect(chunks).toEqual(["data: bad\n\n"]);
+    expect(served).toEqual(["bad"]);
+    expect(failures).toEqual(["bad"]);
+    // Resetting a quota cooldown cannot re-enable rejected credentials.
+    pool.setUsageLimit("bad", null);
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    expect(served).toEqual(["bad", "good"]);
+    expect(failures).toEqual(["bad"]);
+  });
+
+  it.each([
+    AUTH_403,
+    FIVE_XX,
+    new DOMException("disconnected", "AbortError"),
+  ])("does not disable credentials for a non-authentication mid-stream failure: %s", async (fault) => {
+    const bad = faultMember("a", 10, [], fault, { failMidStream: true });
+    const failures: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [bad],
+      onAccountCredentialFailure: (account) => failures.push(account),
+    });
+    await expect(
+      (async () => {
+        for await (const _ of pool.chatCompletionStream(REQ)) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toBe(fault);
+    expect(bad.schedulable).toBe(true);
+    expect(failures).toEqual([]);
   });
 
   it("retries native passthrough streaming across accounts (the Codex case)", async () => {

@@ -13,6 +13,7 @@ import {
   createTokenManager,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   decryptSecret,
+  disconnectOAuthCredential,
   discoverOAuthModels,
   encryptSecret,
   expandOpenAICodexModelAliases,
@@ -322,6 +323,7 @@ export interface OAuthAdminDeps {
     account: string,
     reason: string,
   ) => Promise<void> | void;
+  onDisconnected?: (providerId: string, account: string) => void;
   codexCatalog?: CodexModelCatalog;
   codexClientVersion?: string;
   codexUserAgent?: string;
@@ -1033,7 +1035,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     },
 
     async logout({ providerId, account }) {
-      await deps.store.delete(providerId, account);
+      await disconnectOAuthCredential(deps.store, providerId, account);
+      deps.onDisconnected?.(providerId, account);
       // Invalidate immediately after the credential delete succeeds. A later
       // settings cleanup failure must not leave quota attached to a logged-out
       // identity or a future same-name reconnect.

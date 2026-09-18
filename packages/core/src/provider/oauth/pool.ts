@@ -39,7 +39,7 @@ import {
   CodexResponsesBeforeSendError,
 } from "../openai-responses.js";
 import { numericRetryAfterMs, waitForOverloadRetry } from "../retry.js";
-import { TokenRefreshError } from "../token-manager.js";
+import { OAuthCredentialDisconnectedError, TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
 const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
@@ -102,6 +102,7 @@ function isCredentialAccountFailure(
   err: unknown,
   upstreamCredentialFailureStatuses: ReadonlySet<number>,
 ): boolean {
+  if (err instanceof OAuthCredentialDisconnectedError) return true;
   if (err instanceof TokenRefreshError) {
     return err.permanentCredentialFailure;
   }
@@ -186,6 +187,7 @@ export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk"
 // a successful account test clears every soft cooldown for that account.
 export interface OAuthPoolClient extends ProviderClient {
   hasAvailableModel(model: string): boolean;
+  disableAccount(account: string): void;
   setUsageLimit(account: string, untilMs: number | null): void;
   // Restore only the persisted account-wide park after a hot rebuild. Unlike the
   // explicit reset path above, this must preserve transient/model-scoped cooldowns.
@@ -1047,8 +1049,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   function parkCredentialFailedAccount(entry: PoolEntry, err: unknown): void {
-    entry.member.schedulable = false;
-    forgetStickyAccount(entry.member.account, true);
+    disableAccount(entry.member.account);
+    // Logout is already durable. An old request must not disable a later login
+    // under the same account label by persisting a stale authentication failure.
+    if (err instanceof OAuthCredentialDisconnectedError) return;
     if (credentialFailureReported.has(entry.member.account)) return;
     credentialFailureReported.add(entry.member.account);
     try {
@@ -1056,6 +1060,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     } catch {
       /* fail-open: persistence hooks must not break in-pool failover */
     }
+  }
+
+  function disableAccount(account: string): void {
+    const entry = entries.find((entry) => entry.member.account === account);
+    if (entry) entry.member.schedulable = false;
+    forgetStickyAccount(account, true);
   }
 
   function coolRetryableAccount(entry: PoolEntry): void {
@@ -1290,6 +1300,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           trackResponseAffinity(chunk.value);
           yield chunk.value;
         }
+      } catch (err) {
+        // Output is committed: never replay, but rejected credentials must also
+        // stop serving future requests. A client abort is not an account fault.
+        if (
+          !signal?.aborted &&
+          isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)
+        ) {
+          parkCredentialFailedAccount(entry, err);
+        }
+        throw err;
       } finally {
         await iterator.return?.().catch(() => {});
       }
@@ -1298,6 +1318,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   return {
     ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
+    disableAccount,
     hasAvailableModel(model: string): boolean {
       const nowMs = now();
       return entries.some(

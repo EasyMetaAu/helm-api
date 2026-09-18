@@ -2181,6 +2181,10 @@ export async function buildServer(
         config: store.config,
         log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
         onCredentialFailure: rebuildAfterOAuthCredentialFailure,
+        onDisconnected: (providerId, account) => {
+          oauthPoolClients.get(providerId)?.disableAccount(account);
+          oauthPoolReuseCache.delete(providerId);
+        },
         codexCatalog: codexModelCatalog,
         codexClientVersion,
         codexUserAgent,

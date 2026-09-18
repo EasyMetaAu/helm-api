@@ -718,6 +718,7 @@ export {
 export {
   type ConfidentialOAuth,
   createTokenManager,
+  disconnectOAuthCredential,
   executionTokenExpirySkewMs,
   oauthRefreshQueueDepth,
   type PresetOAuth,

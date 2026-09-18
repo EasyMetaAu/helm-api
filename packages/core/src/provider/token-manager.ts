@@ -41,7 +41,41 @@ import { isFetchTransportError } from "./retry.js";
 // unrelated stores in a test never collide. Inside the gate each instance RE-READS
 // the store, so a sibling's just-rotated token is adopted rather than re-refreshed.
 const presetRefreshGates = new WeakMap<OAuthTokenStore, Map<string, Promise<unknown>>>();
+// Cached managers keep their own lease. Disconnect revokes every old manager,
+// while a subsequent login can create a fresh lease for the same account label.
+const presetCredentialLeases = new WeakMap<OAuthTokenStore, Map<string, { revoked: boolean }>>();
 let presetRefreshOutstanding = 0;
+
+function credentialLease(store: OAuthTokenStore, key: string): { revoked: boolean } {
+  let leases = presetCredentialLeases.get(store);
+  if (!leases) {
+    leases = new Map();
+    presetCredentialLeases.set(store, leases);
+  }
+  let lease = leases.get(key);
+  if (!lease) {
+    lease = { revoked: false };
+    leases.set(key, lease);
+  }
+  return lease;
+}
+
+export async function disconnectOAuthCredential(
+  store: OAuthTokenStore,
+  providerId: string,
+  account: string,
+): Promise<void> {
+  const key = `${providerId} ${account}`;
+  // Use the refresh gate so a refresh already in flight cannot recreate the row
+  // after logout returns. A failed delete leaves the existing credential usable.
+  await runExclusive(store, key, async () => {
+    await store.delete(providerId, account);
+    const leases = presetCredentialLeases.get(store);
+    const lease = leases?.get(key);
+    if (lease) lease.revoked = true;
+    leases?.delete(key);
+  });
+}
 
 export function oauthRefreshQueueDepth(): number {
   return presetRefreshOutstanding;
@@ -161,6 +195,15 @@ export class TokenRefreshError extends Error {
   }
 }
 
+export class OAuthCredentialDisconnectedError extends TokenRefreshError {
+  constructor() {
+    // This manager is revoked, not the durable credential of a later same-name
+    // login. Admin probes must not persist it as an upstream authentication failure.
+    super("OAuth account was disconnected; reconnect the account");
+    this.name = "OAuthCredentialDisconnectedError";
+  }
+}
+
 const DEFAULT_EXPIRY_SKEW_MS = 60_000;
 const TOKEN_REFRESH_HEADROOM_MS = 5 * 60_000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 30_000;
@@ -238,6 +281,18 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   if (isPreset) {
     if (!deps.tokenStore || !deps.encKey || !deps.oauthProvider) {
       throw new Error("preset OAuth token manager requires tokenStore + encKey + oauthProvider");
+    }
+  }
+  const lease = isPreset
+    ? credentialLease(deps.tokenStore as OAuthTokenStore, `${oauth.providerId} ${oauth.account}`)
+    : undefined;
+  function assertConnected(): void {
+    if (lease?.revoked) {
+      accessToken = null;
+      refreshToken = undefined;
+      expiresAt = 0;
+      presetExtra = {};
+      throw new OAuthCredentialDisconnectedError();
     }
   }
 
@@ -492,6 +547,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     const p = oauth as PresetOAuth;
     const store = deps.tokenStore as OAuthTokenStore;
     await runExclusive(store, `${p.providerId} ${p.account}`, async () => {
+      assertConnected();
       // A sibling may have rotated the credential while we waited for the gate —
       // re-read before deciding so we adopt its token instead of replaying ours.
       await loadFromStore();
@@ -509,7 +565,9 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
 
   return {
     async getAuthHeader(signal?: AbortSignal): Promise<string> {
+      assertConnected();
       await ensureFresh(signal);
+      assertConnected();
       return `Bearer ${accessToken}`;
     },
     currentSecrets(): string[] {
