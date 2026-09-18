@@ -2582,9 +2582,8 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
   ])("strips DeepSeek ciphertext before Codex Lite replay (stream=%s)", async (stream) => {
     const openaiCipher = `gAAAAA${"B".repeat(80)}`;
     const deepseekCipher = "d8b79690-1120-4bab-b9cb-f053d8ced08a-0";
-    const plaintext = [
-      { type: "reasoning_text", text: "Let me check the current state of the repository..." },
-    ];
+    const plaintextText = "Let me check the current state of the repository...";
+    const plaintext = [{ type: "reasoning_text", text: plaintextText }];
     const body = {
       model: "gpt-6-astra",
       store: false,
@@ -2651,11 +2650,68 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
       },
       {
         type: "reasoning",
-        summary: [],
-        content: plaintext,
+        summary: [{ type: "summary_text", text: plaintextText }],
+        content: [],
       },
       body.input[3],
       body.input[4],
+    ]);
+    expect(body).toEqual(snapshot);
+  });
+
+  it("folds leftover DeepSeek reasoning_text into summary for Lite (ffc6d4d6)", async () => {
+    // After 0.29.25 stripped d8b7…8a-0, input[483].content still had
+    // reasoning_text. Lite 400: array_above_max_length (max 0, got 1).
+    const plaintext = "Let me check the current state of the repository and the running test.";
+    const body = {
+      model: "gpt-6-astra",
+      store: false,
+      stream: true,
+      reasoning: { effort: "high", summary: "detailed", context: "all_turns" },
+      input: [
+        { type: "additional_tools", role: "developer", tools: [] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+        {
+          type: "reasoning",
+          summary: [],
+          content: [{ type: "reasoning_text", text: plaintext }],
+        },
+        { type: "custom_tool_call", call_id: "call_ds", name: "exec", input: "{}" },
+      ],
+    };
+    const snapshot = structuredClone(body);
+    let sent: Record<string, unknown> | undefined;
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        resolveModelInfo: () => codexModelInfo({ use_responses_lite: true }),
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseResponse([
+          { type: "response.completed", response: { status: "completed", usage: {} } },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.({
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: JSON.stringify(body),
+      headers: {},
+      mutations: {},
+    }) ?? []) {
+      /* drain */
+    }
+    expect(sent?.input).toEqual([
+      body.input[0],
+      body.input[1],
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: plaintext }],
+        content: [],
+      },
+      body.input[3],
     ]);
     expect(body).toEqual(snapshot);
   });
@@ -5411,7 +5467,16 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       expect.objectContaining({
         type: "response.create",
         previous_response_id: "resp-1",
-        input: [encryptedContent ? { ...reasoning, content: [] } : reasoning, output],
+        input: [
+          encryptedContent.startsWith("gAAAAA")
+            ? { ...reasoning, content: [] }
+            : {
+                ...reasoning,
+                summary: [{ type: "summary_text", text: "Continue." }],
+                content: [],
+              },
+          output,
+        ],
       }),
     ]);
   });
@@ -7776,15 +7841,42 @@ describe("sanitizeCodexResponsesNativeBody", () => {
       original.input[0],
       {
         type: "reasoning",
-        summary: [],
-        content: [
-          { type: "reasoning_text", text: "Let me check the current state of the repository..." },
+        summary: [
+          {
+            type: "summary_text",
+            text: "Let me check the current state of the repository...",
+          },
         ],
+        content: [],
       },
       original.input[2],
       original.input[3],
     ]);
     expect(original).toEqual(snapshot);
+  });
+
+  it("keeps an existing summary when folding leftover DeepSeek reasoning_text", () => {
+    const { body } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-6-astra",
+      store: false,
+      reasoning: { context: "all_turns" },
+      input: [
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Existing summary" }],
+          encrypted_content: "d8b79690-1120-4bab-b9cb-f053d8ced08a-0",
+          content: [{ type: "reasoning_text", text: "Private DeepSeek thought." }],
+        },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Existing summary" }],
+        content: [],
+      },
+    ]);
   });
 
   it("drops a foreign-only reasoning item that has no plaintext left", () => {

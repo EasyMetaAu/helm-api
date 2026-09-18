@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-18 · Lite 把 DeepSeek 明文折进 summary，content 必须空（Provider / 协议互译，docs/05，原则 3/8）
+
+- **现象**：v0.29.25 剥掉 `d8b7…8a-0` 后，同会话 `ffc6d4d6` 仍 400：`Invalid 'input[483].content': array too long. Expected … 0, but got … 1`（`array_above_max_length`）。mutation 已有 `foreign_encrypted_content_stripped`，失败项仍带着 DeepSeek 的 `reasoning_text`。Lite 不允许 reasoning `content` 非空；OpenAI 自己的项 `content` 是 `null`，明文只在 `summary`（`summary_text`）。
+- **修复**：剥外源密文后，把 leftover `reasoning_text` 折进空的 `summary`，再把 `content` 清成 `[]`。已有 `summary` 不覆盖。Lite canonicalizer 对无 `gAAAAA` 的 reasoning 走同一折法；OpenAI blob 仍只清 content、不动 summary。不发明明文，不改 rung。
+
 ## 2026-09-18 · Codex 回放前剥掉外源 encrypted_content（Provider / 协议互译，docs/05，原则 3/8）
 
 - **现象**：DeepSeek 成功后再打 `openai-codex/gpt-6-astra`，上游 400 `invalid_encrypted_content`。生产 `a8b37bb9`：历史 107 条 reasoning 里 106 条是 OpenAI 的 `gAAAAA…`，恰好 1 条是 DeepSeek 的 `d8b79690-…-0`，并带明文 `reasoning_text`。OpenAI 解不开别家密文。
@@ -99,16 +104,9 @@
 - **教训**：同协议（openai_responses）只保证**请求能被解析**，不保证**响应遵循同一套工具语义**。给工具型客户端选兜底，协议兼容是必要条件而非充分条件，得实测工具往返而不只是单轮文本。此前我把"live 测试验证了 custom_tool_call 被接受"当成了"工具链路可用"，这一步跳得太快。
 - 配置注释里留了完整原委与那段 DSML 原文，防止将来有人只看到"同协议兜底"的好处又加回去。
 
-## 2026-09-17 · 过载预算耗尽不再中断候选链（Provider execution，docs/04，原则 5）
-
-- **现象**：v0.29.18 上线 DeepSeek 兜底后，线上 15 条过载请求里 10 条 `fallback_count: 0` —— 12 个候选只试了第一个，后面连 skip 记录都没有，直接 `all_providers_failed`。堆栈指向 `execute.ts` 的候选循环在首次失败后就退出。
-- **根因**：`if (overloadRetry.exhausted) break;`（#840，2026-09-06 引入）。它 `break` 的是**整个候选链循环**。原意合理——不要在换模型后重启过载退避、把等待时间累加成几十秒——但实现把"不要再等"写成了"不要再试"。
-- **两件事本就该分开**：预算约束的是**单个请求累计 sleep 多久**，而候选推进是另一个问题。下一个候选往往是完全不同的上游（本例是静态 DeepSeek），头部 Codex 过载对它毫无预测力，跳过它没有任何依据。
-- **等待上界没有被削弱**（关键核查）：删 `break` 后重新确认了两道真正的防线 ——（1）`overloadRetryDelayMs` 只按共享的 `budget.attempt` 计算，backoff 表仅 2 项，第 3 次起恒为 null，而 `attempt` 是**跨候选累加**的，所以后来的候选继承的是已花光的预算，无法重启退避表；（2）`pool.ts` 的 `if (budget.exhausted) throw err;` 在池内直接抛出。两者都与链推进无关。
-- **意外发现**：`waitForOverloadRetry` 根本不读 `exhausted` 标志，只看 `attempt`。所以 `{attempt:0, exhausted:true}` 仍会 sleep —— 该标志只是给调用方读的**结果**，不是输入开关。我最初按标志写的测试因此断言失败，改为按 `attempt` 断言才是真实契约。
-- **测试**：`execute.test.ts` 原有那条 `it.each([false,true])` 正是钉住 bug 行为的（`exhausted` 时断言 `attempts` 只有 1 条），改为两种情况都必须推进到第二个候选；另在 `retry.test.ts` 补两条，把"耗尽后不再 sleep / 后来的候选不能重启退避表"这个 #840 的真实本意钉在它该在的那一层。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-17 · 过载预算耗尽不再中断候选链**：`overloadRetry.exhausted` 曾 `break` 整个候选链。等待上界仍由跨候选 `attempt` 与池内 `budget.exhausted` 守住。
 
 - **2026-09-17 · 接入 DeepSeek 原生 Responses 透传**：新增 `deepseek-responses` 字节透传；不新增 profile 枚举，用 `acceptsResponsesNativeItems`。两个真 400：缺明文 reasoning、回显 search call。lane 当天加过又撤，后由工具翻译条目恢复。
 
