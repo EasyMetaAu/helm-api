@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-18 · DeepSeek 回放前补上缺的 function_call_output.call_id（Provider / 协议互译，docs/05，原则 3/8）
+
+- **现象**：`28bacfd4` 先打 `gpt-5.6-sol` 上游 `server_error`，落到 `deepseek-flash` 后 400：`missing field call_id`。历史第 31 项是 Codex desktop 心跳 `function_call_output`（`name: automation_update`, `namespace: codex_app`），有 `id` 无 `call_id`。OpenAI 收；DeepSeek 反序列化更严。
+- **修复**：`deepseek-responses` 增加 opt-in `fillMissingFunctionCallOutputCallId`。缺 `call_id` 时用非空 `id` 补上，已有 `call_id` 不动。不发明新 id，不改 rung。第一条候选的 OpenAI 5xx 是上游故障，不是这次 shape 问题。
+
 ## 2026-09-18 · Lite 把 DeepSeek 明文折进 summary，content 必须空（Provider / 协议互译，docs/05，原则 3/8）
 
 - **现象**：v0.29.25 剥掉 `d8b7…8a-0` 后，同会话 `ffc6d4d6` 仍 400：`Invalid 'input[483].content': array too long. Expected … 0, but got … 1`（`array_above_max_length`）。mutation 已有 `foreign_encrypted_content_stripped`，失败项仍带着 DeepSeek 的 `reasoning_text`。Lite 不允许 reasoning `content` 非空；OpenAI 自己的项 `content` 是 `null`，明文只在 `summary`（`summary_text`）。
@@ -94,17 +99,9 @@
 - **`tool_choice` 指定具体工具在思考模式下一律 400**（`Thinking mode does not support this tool_choice`），custom 与 function 两种形态都一样。这与本次翻译无关（翻译前后都 400），但值得知道：Codex 若 pin 某个工具，这条 rung 必然失败并走链上下一个。
 - **修掉一个翻译引入的 gap**：客户端同时声明 `custom exec` 和 `function exec` 时，翻译会撞上 `Tool names must be unique.`，把上游准确的 `Unsupported custom tool: 'exec'.` 换成一句误导性错误（两种情况都失败，但后者看不出真问题）。已改为**名称已被 function 工具占用时跳过翻译**，让诚实的错误浮出。
 
-## 2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底：它不说 Codex 的工具协议~~（结论已被上一条推翻）（Config / 路由，docs/04，原则 3/5）
-
-- **现象**：Codex 会话里出现了直接打印给用户的 `<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="exec">`（注意是**全角** `｜`，DeepSeek 私有的 DSML 标记）。命令根本没执行，只是被当成聊天文本渲染。
-- **定位**：查 Codex rollout 日志，该段落的 `role` 是 `assistant`、`type` 是 `output_text`——不是 tool call。再查 helm 遥测，那一轮（13:38:28）请求 `gpt-6-astra`，GPT-6 过载后 fallback 落到 `deepseek-responses/deepseek-flash`。同一分钟内有 5 条请求落到该 rung（含从 `claude-opus-4-8` 转来的）。
-- **根因不在 helm**：透传是对的，是**模型不会用 Codex 的工具协议**。DeepSeek 接受 Codex 的 tools 定义，却不按 `function_call` item 返回，而退化成自己训练时的文本标记。（此前实测过裸 `function_call` 是正常的，所以这是 Codex 特定工具形状下的退化，不是完全不支持。）
-- **为什么必须撤**：这是**静默失败**——上游返回 200、status completed、内容看着像在干活，实际什么都没做。比起客户端会重试的 502，一个"假装干完了"的 200 严重得多，而且只有人眼看到原始标记才会发现。承载重度工具调用的 Codex 流量不能挂这种兜底。
-- **撤的范围**：只撤 6 条 GPT lane 的自动 rung，回到 v0.29.17 的链路。`deepseek-responses` provider 与 capabilities/pricing **全部保留**——显式 `allow_custom_model` 仍可指定（纯对话场景没有工具协议可搞错），且历史必须保持可重新计价。
-- **教训**：同协议（openai_responses）只保证**请求能被解析**，不保证**响应遵循同一套工具语义**。给工具型客户端选兜底，协议兼容是必要条件而非充分条件，得实测工具往返而不只是单轮文本。此前我把"live 测试验证了 custom_tool_call 被接受"当成了"工具链路可用"，这一步跳得太快。
-- 配置注释里留了完整原委与那段 DSML 原文，防止将来有人只看到"同协议兜底"的好处又加回去。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底~~**：曾因 DSML 泄漏（全角 `｜` 文本标记）撤回 6 条 GPT rung；同日工具翻译条目恢复。完整原文见 git history。
 
 - **2026-09-17 · 过载预算耗尽不再中断候选链**：`overloadRetry.exhausted` 曾 `break` 整个候选链。等待上界仍由跨候选 `attempt` 与池内 `budget.exhausted` 守住。
 
