@@ -1803,6 +1803,7 @@ function createProviderClient(
       requestContract: {
         dropBuiltInSearchCallItems: true,
         translateUnsupportedCustomTools: true,
+        fillMissingFunctionCallOutputCallId: true,
         disableThinkingOnOpaqueReasoningHistory: true,
         acceptsResponsesNativeItems: true,
       },

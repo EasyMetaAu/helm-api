@@ -6364,6 +6364,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         config: { baseUrl: "https://deepseek.test/v1", apiKey: "sk-test" },
         requestContract: {
           translateUnsupportedCustomTools: true,
+          fillMissingFunctionCallOutputCallId: true,
           disableThinkingOnOpaqueReasoningHistory: true,
         },
         fetch: (async (_url: string, init?: RequestInit) =>
@@ -6705,6 +6706,84 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         "calc",
         "exec",
       ]);
+    });
+
+    it("fills missing function_call_output.call_id from item id (28bacfd4)", async () => {
+      // Production: Codex desktop heartbeat `automation_update` has id/name/
+      // namespace but no call_id. OpenAI accepted it; DeepSeek 400s
+      // "missing field `call_id` at line 1 column 449140".
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+      const heartbeat = {
+        type: "function_call_output",
+        id: "fco_01a0b1d1-a055-77e3-b786-12916f9e896c",
+        name: "automation_update",
+        namespace: "codex_app",
+        output: "<heartbeat/>",
+      };
+      const paired = {
+        type: "function_call",
+        id: "fc_list",
+        name: "list_agents",
+        namespace: "collaboration",
+        arguments: "{}",
+        call_id: "call_wKG27WmThPMdlGO7kUAfzmLm",
+      };
+      const pairedOut = {
+        type: "function_call_output",
+        id: "fco_list",
+        call_id: "call_wKG27WmThPMdlGO7kUAfzmLm",
+        output: '{"agents":[]}',
+      };
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        input: [
+          { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input: "ls" },
+          { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
+          heartbeat,
+          paired,
+          pairedOut,
+        ],
+      });
+
+      expect(seen.input).toEqual([
+        {
+          type: "function_call",
+          id: "ctc_1",
+          call_id: "call_1",
+          name: "exec",
+          arguments: JSON.stringify({ input: "ls" }),
+        },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+        { ...heartbeat, call_id: heartbeat.id },
+        paired,
+        pairedOut,
+      ]);
+    });
+
+    it("fills missing call_id even when no custom tools are translated", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+      const heartbeat = {
+        type: "function_call_output",
+        id: "fco_heartbeat",
+        name: "automation_update",
+        namespace: "codex_app",
+        output: "<heartbeat/>",
+      };
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        input: [heartbeat],
+      });
+      expect(seen.input).toEqual([{ ...heartbeat, call_id: "fco_heartbeat" }]);
     });
 
     it("leaves a body with no additional_tools and no custom tools untouched", async () => {

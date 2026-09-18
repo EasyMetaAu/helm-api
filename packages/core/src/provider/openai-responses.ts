@@ -176,6 +176,11 @@ export interface GenericOpenAIResponsesRequestContract {
   // (Codex) replays them, so drop those items before the POST. Opt-in: the public
   // OpenAI contract keeps them.
   dropBuiltInSearchCallItems?: boolean;
+  // Codex desktop injects a heartbeat `function_call_output` (`automation_update`
+  // / `codex_app`) that has `id`/`name`/`namespace` but no `call_id`. OpenAI
+  // accepts it; DeepSeek deserializes strictly and 400s "missing field `call_id`".
+  // Copy a non-empty `id` into `call_id` when the latter is absent. Opt-in.
+  fillMissingFunctionCallOutputCallId?: boolean;
   // DeepSeek accepts a `type: "custom"` tool ONLY when it is named `apply_patch`;
   // any other name 400s ("Unsupported custom tool: 'exec'. Only 'apply_patch' is
   // supported."). A Codex code-mode client drives everything through a custom tool
@@ -740,6 +745,28 @@ function translateCustomToolCallHistory(input: unknown, translated: Set<string>)
     }
     return item;
   });
+}
+
+function fillMissingFunctionCallOutputCallIds(input: unknown): {
+  input: unknown;
+  filled: boolean;
+} {
+  if (!Array.isArray(input)) return { input, filled: false };
+  let filled = false;
+  const next = input.map((item) => {
+    if (
+      !isRecord(item) ||
+      item.type !== "function_call_output" ||
+      (typeof item.call_id === "string" && item.call_id.length > 0) ||
+      typeof item.id !== "string" ||
+      item.id.length === 0
+    ) {
+      return item;
+    }
+    filled = true;
+    return { ...item, call_id: item.id };
+  });
+  return { input: filled ? next : input, filled };
 }
 
 /** Unwraps a translated tool's `{"input": "..."}` envelope back to the raw string. */
@@ -3634,6 +3661,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.rejectObjectInput !== true &&
       contract?.dropBuiltInSearchCallItems !== true &&
       contract?.translateUnsupportedCustomTools !== true &&
+      contract?.fillMissingFunctionCallOutputCallId !== true &&
       contract?.disableThinkingOnOpaqueReasoningHistory !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
@@ -3713,6 +3741,7 @@ export function createGenericOpenAIResponsesClient(
     }
     let customToolsTranslated = false;
     let customToolsHoisted = false;
+    let functionCallOutputCallIdFilled = false;
     let opaqueReasoningThinkingDisabled = false;
     if (contract.translateUnsupportedCustomTools === true) {
       const declared = collectDeclaredTools(next);
@@ -3729,6 +3758,13 @@ export function createGenericOpenAIResponsesClient(
         customToolsTranslated = true;
         customToolsHoisted =
           declared.length > (Array.isArray(source.tools) ? source.tools.length : 0);
+      }
+    }
+    if (contract.fillMissingFunctionCallOutputCallId === true) {
+      const filled = fillMissingFunctionCallOutputCallIds(next.input);
+      if (filled.filled) {
+        next.input = filled.input;
+        functionCallOutputCallIdFilled = true;
       }
     }
     if (
@@ -3760,6 +3796,9 @@ export function createGenericOpenAIResponsesClient(
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
+      ...(functionCallOutputCallIdFilled
+        ? ["generic_responses_function_call_output_call_id_filled"]
+        : []),
       ...(opaqueReasoningThinkingDisabled
         ? ["generic_responses_opaque_reasoning_thinking_disabled"]
         : []),
