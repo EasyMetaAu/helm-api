@@ -610,6 +610,7 @@ export {
   resolveOpenAICodexModelAlias,
   resolveXaiGrokClientVersion,
   type SerializeClientDeps,
+  STICKY_ACCOUNT_WAIT_MAX_MS,
   selectCodexActiveLimitWindows,
   type UsagePeriodsResult,
   windowMinutesForKey,

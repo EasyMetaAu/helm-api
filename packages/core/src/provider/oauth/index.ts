@@ -94,6 +94,7 @@ export {
   type OAuthPoolMember,
   type OAuthRateLimitParkContext,
   type OAuthSelectionStrategy,
+  STICKY_ACCOUNT_WAIT_MAX_MS,
   XAI_TTS_CAPABILITY,
 } from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";

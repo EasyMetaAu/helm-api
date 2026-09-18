@@ -2380,7 +2380,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       streamIR: async function* () {
         throw new PipelineError("lane_unavailable", "response.create was not sent", "trace-1", {
           error: { code: "response_create_not_sent" },
-          recovery: { retry_after_ms: 6_000 },
+          recovery: { retry_after_ms: 6_000, reason: "oauth_affinity_unavailable" },
         });
       },
     });
@@ -2396,7 +2396,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       {
         type: "error",
         code: "response_create_not_sent",
-        recovery: { retry_after_ms: 6_000 },
+        recovery: { retry_after_ms: 6_000, reason: "oauth_affinity_unavailable" },
       },
     );
   });

@@ -731,7 +731,7 @@ describe("createOAuthPoolClient — account selection", () => {
     });
 
     await pool.chatCompletion(REQ);
-    pool.setUsageLimit("a", 50_000);
+    pool.setUsageLimit("a", 1_000 + 10 * 60_000);
 
     await expect(
       pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" }),
@@ -1951,7 +1951,7 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     for await (const _chunk of first ?? []) {
       // Drain the stream so response metadata can establish account affinity.
     }
-    pool.setUsageLimit("a", 50_000);
+    pool.setUsageLimit("a", 1_000 + 10 * 60_000);
 
     let caught: unknown;
     try {
@@ -1969,7 +1969,143 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
       /x-codex-turn-state.*original account.*unavailable/i,
     );
     expect((caught as CodexResponsesBeforeSendError).providerRaw).toMatchObject({
-      recovery: { retry_after_ms: 49_000 },
+      error: { type: "server_error", code: "response_create_not_sent" },
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        reason: "oauth_affinity_unavailable",
+        retry_after_ms: 10 * 60_000,
+      },
+    });
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("waits a short sticky-account park then retries the original Codex account", async () => {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    let nowMs = 1_000;
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream(_body, opts) {
+          calls.push(account);
+          opts?.onResponseMeta?.(new Headers({ "x-codex-turn-state": "strict-turn-state" }));
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => nowMs,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+
+    const first = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+      headers: { "session-id": "session-stable" },
+      mutations: {},
+    });
+    for await (const _chunk of first ?? []) {
+      // Drain so the turn-state binds to account a.
+    }
+    pool.setUsageLimit("a", 28_000);
+
+    const continuation = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
+      headers: { "x-codex-turn-state": "strict-turn-state" },
+      mutations: {},
+    });
+    const chunks: string[] = [];
+    for await (const chunk of continuation ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(sleeps).toEqual([27_000]);
+    expect(calls).toEqual(["a", "a"]);
+    expect(chunks.join("")).toContain("resp-a");
+  });
+
+  it("fails a long sticky-account park immediately with the original Codex error", async () => {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream(_body, opts) {
+          calls.push(account);
+          opts?.onResponseMeta?.(new Headers({ "x-codex-turn-state": "strict-turn-state" }));
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    const first = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+      headers: { "session-id": "session-stable" },
+      mutations: {},
+    });
+    for await (const _chunk of first ?? []) {
+      // Drain so the turn-state binds to account a.
+    }
+    pool.setUsageLimit("a", 1_000 + 5 * 60_000);
+
+    let caught: unknown;
+    try {
+      const continuation = pool.nativePassthroughStream?.({
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
+        headers: { "x-codex-turn-state": "strict-turn-state" },
+        mutations: {},
+      });
+      for await (const _chunk of continuation ?? []) {
+        // Should throw before any sibling chunk.
+      }
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(sleeps).toEqual([]);
+    expect(caught).toBeInstanceOf(CodexResponsesBeforeSendError);
+    expect((caught as CodexResponsesBeforeSendError).message).toMatch(
+      /x-codex-turn-state.*original account.*unavailable/i,
+    );
+    expect((caught as CodexResponsesBeforeSendError).providerRaw).toMatchObject({
+      error: { type: "server_error", code: "response_create_not_sent" },
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        reason: "oauth_affinity_unavailable",
+        retry_after_ms: 5 * 60_000,
+      },
     });
     expect(calls).toEqual(["a"]);
   });

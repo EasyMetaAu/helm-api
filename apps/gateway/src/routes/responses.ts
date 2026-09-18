@@ -630,10 +630,12 @@ function codexResponsesRecovery(providerRaw: unknown): Record<string, unknown> |
   }
   const retryAfterMs = (recovery as { retry_after_ms?: unknown }).retry_after_ms;
   if (!Number.isSafeInteger(retryAfterMs) || (retryAfterMs as number) <= 0) return undefined;
+  const reason = (recovery as { reason?: unknown }).reason;
   return {
     safe_to_replay: true,
     lifecycle_phase: "before_send",
     retry_after_ms: retryAfterMs,
+    ...(typeof reason === "string" && reason.length > 0 ? { reason } : {}),
   };
 }
 
