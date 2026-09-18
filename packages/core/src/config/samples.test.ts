@@ -236,6 +236,34 @@ describe("checked-in config samples", () => {
     expect(lanes["grok-imagine-image-quality"]?.fallback).toEqual([]);
   });
 
+  it("routes bare Grok ids onto grok lanes without swallowing Imagine/video", () => {
+    // Production bbcd8800: allow_custom_model key sent grok-4.6 and 400ed
+    // unknown model or lane — the grok lane exists, but no alias glob caught
+    // versioned chat ids. Catch-all grok* must not steal Imagine/video lanes.
+    const cfg = loadConfig({ configDir, env: {} });
+    const aliases = cfg.model_aliases;
+    if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    expect(resolveModelAlias("grok-4.6", aliases)).toBe("grok");
+    expect(resolveModelAlias("grok-4.5", aliases)).toBe("grok");
+    expect(resolveModelAlias("grok-composer-2.5-fast", aliases)).toBe("grok");
+    expect(resolveModelAlias("grok-imagine-image-quality", aliases)).toBe(
+      "grok-imagine-image-quality",
+    );
+    expect(resolveModelAlias("grok-imagine-image", aliases)).toBe("grok-imagine-image-quality");
+    expect(resolveModelAlias("grok-imagine-video", aliases)).toBe("grok-imagine-video");
+    // Stable 1.5 is grok-build's current wire id for both image_to_video and
+    // reference_to_video. It must NOT fall through grok-imagine-video* onto the
+    // prompt-only / extension lane. Helm already rewrites this id onto the
+    // 1.5-preview capability pool on the video path; the alias map must match.
+    expect(resolveModelAlias("grok-imagine-video-1.5", aliases)).toBe(
+      "grok-imagine-video-1.5-preview",
+    );
+    expect(resolveModelAlias("grok-imagine-video-1.5-preview", aliases)).toBe(
+      "grok-imagine-video-1.5-preview",
+    );
+    expect(validateModelAliasTargets(aliases, Object.keys(cfg.lanes ?? {}))).toEqual([]);
+  });
+
   it("routes bare Gemini ids onto the gemini vendor-family lanes (pro vs flash vs catch-all)", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;
