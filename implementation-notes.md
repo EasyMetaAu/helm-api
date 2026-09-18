@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-18 · 补 grok 兼容别名：版本化 chat id 进 grok lane，Imagine/video 不抢（Config / 路由，docs/04，原则 6）
+
+- **现象**：`bbcd8800` 自定义模型 key 发 `grok-4.6`，400 `unknown model or lane "grok-4.6"`。`grok` lane 已有（primary `xai/grok-4.6`），但 `model-aliases.yaml` 没有 grok glob，版本化 id 既不是 lane 名也不是 provider alias。
+- **修复**：`grok-imagine-image*` → `grok-imagine-image-quality`；`grok-imagine-video-1.5*` → `grok-imagine-video-1.5-preview`（grok-build 当前 wire id，兼容 preview 后缀）；`grok-imagine-video*` → 纯文本/续写 lane；最后 `grok*` → `grok`。最长字面量优先。不把 1.5-preview 并进无版本 `grok-imagine-video`（那是另一份合同）。不钉 chat 版本，不改 rung。
+
 ## 2026-09-18 · DeepSeek 回放前补上缺的 function_call_output.call_id（Provider / 协议互译，docs/05，原则 3/8）
 
 - **现象**：`28bacfd4` 先打 `gpt-5.6-sol` 上游 `server_error`，落到 `deepseek-flash` 后 400：`missing field call_id`。历史第 31 项是 Codex desktop 心跳 `function_call_output`（`name: automation_update`, `namespace: codex_app`），有 `id` 无 `call_id`。OpenAI 收；DeepSeek 反序列化更严。
@@ -78,29 +83,9 @@
 - **上游校验每个 hoist 上去的 schema**：`parameters: {}` 直接 400（`schema must be a JSON Schema of 'type: "object"'`）；省略 `parameters` 或给合法空对象都可以。这条是写 live 夹具时踩出来的，真实 Codex 工具带的是合法 schema。
 - **我的验证方法第二次骗了我**：上一轮我"端到端验证通过"用的是自己构造的顶层 `tools` body —— 形状不对，所以测出来是绿的。**教训升级为硬规则：涉及客户端 body 形状的修复，夹具必须从 `request_payloads` 抓真实上行体，不能手写。** 本次 live 用例 `CODE_MODE_ADDITIONAL_TOOLS_BODY` 就是按抓下来的结构写的（含 lark `format`）。
 
-## 2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具（Provider / 协议互译，docs/05，原则 3/8）
-
-- **推翻当天早些时候的结论**（见下一条）。那条笔记把 DSML 泄漏判成"模型不会用 Codex 的工具协议"并撤了 lane rung。**判断错了**，因为只测了单轮，没重放真实长历史。
-- **取证方法**：从本机 Codex rollout 日志（`~/.codex/sessions/.../rollout-*.jsonl`）取出泄漏那一轮之前的 **480 条** `response_item`，原样重放到 live endpoint。**5/5 稳定复现**，触发条件干净：
-  | 条件 | 结果 |
-  |---|---|
-  | 长历史（含 `custom_tool_call`）+ 声明了任意工具 | 干净的 `function_call`，0/6 泄漏 |
-  | 长历史（含 `custom_tool_call`）+ 无工具 / `tools:[]` | **DSML 泄漏，5/5** |
-  | 短历史 + 无工具 | 正常 |
-  | `deepseek-v4-pro` 同条件 | 同样泄漏（非 flash 独有） |
-- **真根因**：DeepSeek 的 Responses 只接受名为 `apply_patch` 的 `custom` 工具，其余一律硬 400（`Unsupported custom tool: 'exec'. Only 'apply_patch' is supported.`）。而 Codex 的 code-mode 会话主力工具正是一个叫 `exec` 的 custom 工具（那次会话 143 次调用，input 是 JS 代码）。于是工具无法声明，历史里却还留着 143 条 `custom_tool_call` —— **模型看见"过去一直在用 exec"、当前菜单上却没有**，就不再走协议，改用训练时的 DSML 标记把调用写成文本。这是**声明与历史不一致**导致的退化，不是协议不兼容。反证很有力：只要**声明了任何工具**（哪怕是不相干的 `sleep`），泄漏就消失。
-- **修复**：新增请求契约 `translateUnsupportedCustomTools`（`deepseek-responses` 打开）。上行把不被支持的 custom 工具改写成等价的单 string 参数 function 工具，历史里的 `custom_tool_call` / `custom_tool_call_output` 一并改写成 `function_call` / `function_call_output`；下行把模型的 `function_call` 翻回 `custom_tool_call`。live 实测在原本泄漏的那条 transcript 上 **3/3 干净**。
-- **流式取了个上限明确的捷径**（`ponytail:` 注释已标）：`function_call_arguments.delta` 是 `{"input":"..."}` 这个 JSON 的**字节切片**，一个切片可能劈开转义序列，要逐字符转发就得写增量 JSON 字符串解码器（50+ 行易错代码）。改为**缓冲到 `.done` 再一次性吐出** `custom_tool_call_input.delta` + `.done`（约 10 行，转义交给 `JSON.parse`）。代价纯 UX：客户端在调用完成时整块看到工具入参，而不是逐字滚动。升级路径写在注释里。
-- **lane rung 已恢复**（6 条 GPT lane），并重写 `lanes.yaml` 注释块记录这次误判与真根因。
-- **顺带修好两条一直是坏的 live 断言**：`live-deepseek-responses.test.ts` 里两处 `rejects.toThrow(/reasoning_text/)` 之类**从来不可能通过**——`UpstreamError.message` 是通用的 `upstream returned 400`，上游原文在 `providerRaw`。已加 `upstreamMessage()` 辅助函数从 `providerRaw` 读，三条断言统一改正。（在 main 上验证过它们同样红，不是本次引入。）
-- **教训修订**：上一条写的"协议兼容是必要非充分条件"仍然成立，但**排查方法**才是真教训 —— 判定一个模型"不支持某协议"之前，必须用**真实 transcript 重放**，而不是构造单轮探针。单轮探针在这件事上两头都骗了我：它显示 `function_call` 干净（所以 rung 当初敢上），也永远复现不出泄漏（所以根因判错）。
-- **事后对照官方 Codex 集成文档**（<https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/>，Lukin 指出）。文档独立印证了实测结论，并补上一块推不出来的信息：它给 Codex 下发的 `models.json` 里两个模型都声明 `apply_patch_tool_type: "freeform"` —— 即 DeepSeek **明确只为 `apply_patch` 这一个 freeform custom 工具做了适配**，`experimental_supported_tools: []`。这解释了 400 里那句"Only 'apply_patch' is supported"为何是设计而非遗漏，也确认我们**不翻译 `apply_patch`** 是对的（已补 live 用例钉住它的 freeform 往返：返回 `custom_tool_call`，input 是 `*** Begin Patch` 补丁文本而非 JSON）。
-- **据文档补测的边界，全部宽容**：`reasoning.effort` 虽只声明 low/high/max，实测 minimal/medium/xhigh 也照收并原样回显（与 helm 的 clamp 策略相容，无需特判）；`text.verbosity` 三档全收；`parallel_tool_calls: true` 正常。**唯一真会 400 的是 `reasoning.summary: "none"`** —— 文档把它写成默认值，但请求侧只接受 auto/concise/detailed，照着文档默认值回传就是确定性 400。已补 live 用例记录。
-- **`tool_choice` 指定具体工具在思考模式下一律 400**（`Thinking mode does not support this tool_choice`），custom 与 function 两种形态都一样。这与本次翻译无关（翻译前后都 400），但值得知道：Codex 若 pin 某个工具，这条 rung 必然失败并走链上下一个。
-- **修掉一个翻译引入的 gap**：客户端同时声明 `custom exec` 和 `function exec` 时，翻译会撞上 `Tool names must be unique.`，把上游准确的 `Unsupported custom tool: 'exec'.` 换成一句误导性错误（两种情况都失败，但后者看不出真问题）。已改为**名称已被 function 工具占用时跳过翻译**，让诚实的错误浮出。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具**：DeepSeek 只接受 `apply_patch` custom；Codex `exec` 未声明却在历史里回放就会 DSML 泄漏。`translateUnsupportedCustomTools` 改写成 function。完整原文见 git history。
 - **2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底~~**：曾因 DSML 泄漏（全角 `｜` 文本标记）撤回 6 条 GPT rung；同日工具翻译条目恢复。完整原文见 git history。
 
 - **2026-09-17 · 过载预算耗尽不再中断候选链**：`overloadRetry.exhausted` 曾 `break` 整个候选链。等待上界仍由跨候选 `attempt` 与池内 `budget.exhausted` 守住。

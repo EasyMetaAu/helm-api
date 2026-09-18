@@ -88,3 +88,22 @@
 "gemini-*flash*": gemini-flash
 "gemini-*pro*": gemini-pro
 "gemini-*": balanced
+
+# ── xAI / Grok (Grok CLI, SuperGrok, …) ─────────────────────────────────────
+# Bare Grok ids → lanes (config/lanes.yaml). Chat versions (`grok-4.6`,
+# `grok-composer-2.5-fast`, a future grok-5) all land on the stable `grok`
+# lane — that lane's primary is the one place to bump when Grok changes
+# version, so aliases never pin a version.
+#
+# Imagine/video stay on dedicated media lanes. Do NOT merge
+# `grok-imagine-video-1.5-preview` into `grok-imagine-video`: the latter is
+# prompt-only / extension; 1.5 is first-frame + reference_images. grok-build
+# now sends one wire id (`grok-imagine-video-1.5`) for both video tools; Helm
+# already rewrites that onto the 1.5-preview capability pool on the video
+# path, so the alias map must do the same. Longest-literal-wins:
+# `grok-imagine-video-1.5*` (21) beats `grok-imagine-video*` (19) beats
+# `grok*` (4). Exact lane names still win before this map.
+"grok-imagine-image*": grok-imagine-image-quality
+"grok-imagine-video-1.5*": grok-imagine-video-1.5-preview
+"grok-imagine-video*": grok-imagine-video
+"grok*": grok

@@ -75,6 +75,22 @@ describe("resolveModelAlias", () => {
     // Full flash (no "lite") is not captured by the flash-lite glob.
     expect(resolveModelAlias("gemini-3.5-flash", map)).toBe("gemini-flash");
   });
+
+  it("keeps Grok Imagine 1.5 off the prompt-only video lane and chat catch-all", () => {
+    const map = {
+      "grok-imagine-image*": "grok-imagine-image-quality",
+      "grok-imagine-video-1.5*": "grok-imagine-video-1.5-preview",
+      "grok-imagine-video*": "grok-imagine-video",
+      "grok*": "grok",
+    };
+    expect(resolveModelAlias("grok-4.6", map)).toBe("grok");
+    expect(resolveModelAlias("grok-imagine-video", map)).toBe("grok-imagine-video");
+    expect(resolveModelAlias("grok-imagine-video-1.5", map)).toBe("grok-imagine-video-1.5-preview");
+    expect(resolveModelAlias("grok-imagine-video-1.5-preview", map)).toBe(
+      "grok-imagine-video-1.5-preview",
+    );
+    expect(resolveModelAlias("grok-imagine-image", map)).toBe("grok-imagine-image-quality");
+  });
 });
 
 describe("validateModelAliasTargets", () => {
