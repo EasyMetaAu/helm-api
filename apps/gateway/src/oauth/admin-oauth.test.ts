@@ -1,9 +1,12 @@
 import {
   type ConfigStore,
+  createOAuthPoolClient,
   createSqliteDb,
+  createTokenManager,
   decryptSecret,
   encryptSecret,
   GROK_OAUTH_MEDIA_MODELS,
+  type OAuthCredentials,
   type ProxyConfig,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
@@ -399,6 +402,129 @@ describe("createOAuthAdmin", () => {
     const row = await store.get("github-copilot", "default");
     expect(decryptSecret(row?.refreshEnc ?? "", KEY)).toBe("gho_x");
     expect(decryptSecret(row?.accessEnc ?? "", KEY)).toContain("proxy-ep=");
+  });
+
+  it.each([
+    false,
+    true,
+  ])("logout revokes cached tokens even if settings cleanup fails: %s", async (cleanupFails) => {
+    const { tokens, config } = makeStores();
+    const record = {
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("cached-access", KEY),
+      refreshEnc: encryptSecret("cached-refresh", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    };
+    await tokens.upsert(record);
+    const refresh = vi.fn(async () => ({
+      access: "rotated",
+      refresh: "rotated",
+      expires: Date.now() + 3_600_000,
+    }));
+    const makeManager = () =>
+      createTokenManager({
+        oauth: { kind: "preset", providerId: "anthropic", account: "default" },
+        tokenStore: tokens,
+        encKey: KEY,
+        oauthProvider: {
+          id: "anthropic",
+          name: "test",
+          login: vi.fn(),
+          refreshToken: refresh,
+          getApiKey: (c) => c.access,
+        },
+      });
+    const manager = makeManager();
+    expect(await manager.getAuthHeader()).toBe("Bearer cached-access");
+    const call = vi.fn(async () => {
+      await manager.getAuthHeader();
+      return {};
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          account: "default",
+          priority: 0,
+          schedulable: true,
+          allowSpendRemainingCredits: true,
+          client: {
+            chatCompletion: call,
+            async *chatCompletionStream() {
+              yield "unused";
+            },
+          },
+        },
+      ],
+    });
+    const onDisconnected = vi.fn((_providerId: string, account: string) =>
+      pool.disableAccount(account),
+    );
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config, onDisconnected });
+    if (cleanupFails)
+      vi.spyOn(config, "get").mockRejectedValueOnce(new Error("settings unavailable"));
+    const logout = admin.logout({ providerId: "anthropic", account: "default" });
+    if (cleanupFails) await expect(logout).rejects.toThrow();
+    else await logout;
+    expect(await tokens.get("anthropic", "default")).toBeNull();
+    expect(onDisconnected).toHaveBeenCalledWith("anthropic", "default");
+    // The old pool is safe even when a subsequent rebuild cannot replace it.
+    expect(pool.hasAvailableModel("m")).toBe(false);
+    await expect(pool.chatCompletion({ model: "m", messages: [] })).rejects.toThrow();
+    expect(call).not.toHaveBeenCalled();
+    await expect(manager.getAuthHeader()).rejects.toThrow(/disconnect/i);
+    // A same-name login gets a new manager; the old one must stay revoked.
+    await tokens.upsert({ ...record, accessEnc: encryptSecret("new-login", KEY) });
+    await expect(makeManager().getAuthHeader()).resolves.toBe("Bearer new-login");
+    await expect(manager.getAuthHeader()).rejects.toThrow(/disconnect/i);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("logout cannot be undone by an in-flight credential refresh", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("old-access", KEY),
+      refreshEnc: encryptSecret("old-refresh", KEY),
+      expiresAt: 0,
+      meta: null,
+      updatedAt: 1,
+    });
+    let started!: () => void;
+    const refreshing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish!: (credentials: OAuthCredentials) => void;
+    const response = new Promise<OAuthCredentials>((resolve) => {
+      finish = resolve;
+    });
+    const manager = createTokenManager({
+      oauth: { kind: "preset", providerId: "anthropic", account: "default" },
+      tokenStore: tokens,
+      encKey: KEY,
+      oauthProvider: {
+        id: "anthropic",
+        name: "test",
+        login: vi.fn(),
+        getApiKey: (c) => c.access,
+        refreshToken: async () => {
+          started();
+          return response;
+        },
+      },
+    });
+    const header = manager.getAuthHeader();
+    await refreshing;
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    const logout = admin.logout({ providerId: "anthropic", account: "default" });
+    finish({ access: "late-access", refresh: "late-refresh", expires: Date.now() + 3_600_000 });
+    await Promise.allSettled([header, logout]);
+    await expect(logout).resolves.toBeUndefined();
+    expect(await tokens.get("anthropic", "default")).toBeNull();
+    await expect(manager.getAuthHeader()).rejects.toThrow(/disconnect/i);
   });
 
   it("logout deletes the stored credential and clears that account's settings", async () => {

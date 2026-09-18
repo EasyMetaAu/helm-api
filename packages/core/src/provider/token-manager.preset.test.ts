@@ -6,6 +6,7 @@ import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
 import {
   createTokenManager,
+  disconnectOAuthCredential,
   executionTokenExpirySkewMs,
   oauthRefreshQueueDepth,
   type PresetOAuth,
@@ -112,6 +113,25 @@ function rotatingSeed(expiresAt: number): OAuthTokenRecord {
 }
 
 describe("createTokenManager (preset kind)", () => {
+  it("preserves a cached credential when logout cannot delete the stored row", async () => {
+    const store = memStore(seedRecord({ expiresAt: 9_999_999_999_999 }));
+    const provider = stubProvider();
+    const manager = createTokenManager({
+      oauth: PRESET,
+      tokenStore: store,
+      encKey: KEY,
+      oauthProvider: provider,
+      now: () => 0,
+    });
+    expect(await manager.getAuthHeader()).toBe("Bearer at-stored");
+    vi.spyOn(store, "delete").mockRejectedValueOnce(new Error("store unavailable"));
+    await expect(
+      disconnectOAuthCredential(store, PRESET.providerId, PRESET.account),
+    ).rejects.toThrow("store unavailable");
+    expect(await manager.getAuthHeader()).toBe("Bearer at-stored");
+    expect(provider.calls).toBe(0);
+  });
+
   it("throws at construction when preset deps are missing", () => {
     expect(() => createTokenManager({ oauth: PRESET })).toThrow(/requires tokenStore/);
   });
