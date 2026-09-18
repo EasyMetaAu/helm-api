@@ -6354,9 +6354,8 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
     const openaiCipher = `gAAAAA${"A".repeat(80)}`;
     const deepseekCipher = "d8b79690-1120-4bab-b9cb-f053d8ced08a-0";
-    const plaintext = [
-      { type: "reasoning_text", text: "Let me check the current state of the repository..." },
-    ];
+    const plaintextText = "Let me check the current state of the repository...";
+    const plaintext = [{ type: "reasoning_text", text: plaintextText }];
     const carrier = {
       protocol: "openai_responses" as const,
       body: {
@@ -6393,7 +6392,11 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
     expect(forwarded.body.input).toEqual([
       carrier.body.input[0],
-      { type: "reasoning", summary: [], content: plaintext },
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: plaintextText }],
+        content: [],
+      },
       carrier.body.input[2],
     ]);
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([

@@ -1001,9 +1001,44 @@ function isForeignEncryptedContent(value: unknown): value is string {
   );
 }
 
+function isOpenAIEncryptedContent(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith(OPENAI_ENCRYPTED_CONTENT_PREFIX);
+}
+
+function reasoningTextParts(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  const texts: string[] = [];
+  for (const part of content) {
+    if (
+      isRecord(part) &&
+      part.type === "reasoning_text" &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+    ) {
+      texts.push(part.text);
+    }
+  }
+  return texts;
+}
+
+/**
+ * Lite rejects non-empty `content` on reasoning items (`array_above_max_length`).
+ * Move leftover DeepSeek `reasoning_text` into `summary` (`summary_text`) and
+ * clear `content`. Never copy OpenAI-private thoughts off a `gAAAAA` blob.
+ */
+function foldReasoningTextIntoLiteSummary(item: Record<string, unknown>): Record<string, unknown> {
+  const texts = reasoningTextParts(item.content);
+  const next = { ...item };
+  if (texts.length > 0 && !hasNonEmptyArray(next.summary)) {
+    next.summary = texts.map((text) => ({ type: "summary_text", text }));
+  }
+  if (hasNonEmptyArray(next.content)) next.content = [];
+  return next;
+}
+
 /**
  * OpenAI cannot decrypt another provider's `encrypted_content` (DeepSeek
- * echoes a UUID-like blob). Keep plaintext `reasoning_text` / summary.
+ * echoes a UUID-like blob). Keep plaintext as Lite-legal `summary`.
  */
 function stripForeignEncryptedReasoningItems(input: unknown): {
   input: unknown;
@@ -1024,7 +1059,8 @@ function stripForeignEncryptedReasoningItems(input: unknown): {
     stripped = true;
     const cleaned = { ...item };
     delete cleaned.encrypted_content;
-    if (hasUsefulReasoningPayload(cleaned)) next.push(cleaned);
+    const folded = foldReasoningTextIntoLiteSummary(cleaned);
+    if (hasUsefulReasoningPayload(folded)) next.push(folded);
   }
   return { input: stripped ? next : input, stripped };
 }
@@ -1790,17 +1826,18 @@ function canonicalizeCodexNativeInput(
   }
 
   if (useResponsesLite) {
-    // Lite rejects plaintext reasoning replay. Keep its encrypted state and item
-    // identity; without encrypted state, leave the item intact rather than lose it.
-    originalInput = originalInput.map((item) =>
-      isRecord(item) &&
-      item.type === "reasoning" &&
-      typeof item.encrypted_content === "string" &&
-      item.encrypted_content.length > 0 &&
-      hasNonEmptyArray(item.content)
-        ? { ...item, content: [] }
-        : item,
-    );
+    // Lite rejects non-empty reasoning `content` (max length 0). OpenAI items
+    // keep their `gAAAAA` blob and drop content; leftover DeepSeek plaintext
+    // is folded into `summary` so mixed history is not deleted.
+    originalInput = originalInput.map((item) => {
+      if (!isRecord(item) || item.type !== "reasoning" || !hasNonEmptyArray(item.content)) {
+        return item;
+      }
+      if (isOpenAIEncryptedContent(item.encrypted_content)) {
+        return { ...item, content: [] };
+      }
+      return foldReasoningTextIntoLiteSummary(item);
+    });
     const isIncrementalContinuation =
       typeof body.previous_response_id === "string" && body.previous_response_id.length > 0;
     if (isIncrementalContinuation) {
