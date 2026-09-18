@@ -181,6 +181,10 @@ export interface GenericOpenAIResponsesRequestContract {
   // accepts it; DeepSeek deserializes strictly and 400s "missing field `call_id`".
   // Copy a non-empty `id` into `call_id` when the latter is absent. Opt-in.
   fillMissingFunctionCallOutputCallId?: boolean;
+  // Codex also injects that heartbeat with no matching `function_call`. Filling
+  // `call_id` from `id` then 400s "No tool call found for tool output with
+  // call_id fco_…". Drop unpaired `function_call_output` items. Opt-in.
+  dropUnpairedFunctionCallOutputs?: boolean;
   // DeepSeek accepts a `type: "custom"` tool ONLY when it is named `apply_patch`;
   // any other name 400s ("Unsupported custom tool: 'exec'. Only 'apply_patch' is
   // supported."). A Codex code-mode client drives everything through a custom tool
@@ -767,6 +771,32 @@ function fillMissingFunctionCallOutputCallIds(input: unknown): {
     return { ...item, call_id: item.id };
   });
   return { input: filled ? next : input, filled };
+}
+
+function dropUnpairedFunctionCallOutputs(input: unknown): {
+  input: unknown;
+  dropped: boolean;
+} {
+  if (!Array.isArray(input)) return { input, dropped: false };
+  const knownCallIds = new Set<string>();
+  for (const item of input) {
+    if (
+      isRecord(item) &&
+      (item.type === "function_call" || item.type === "custom_tool_call") &&
+      typeof item.call_id === "string" &&
+      item.call_id.length > 0
+    ) {
+      knownCallIds.add(item.call_id);
+    }
+  }
+  let dropped = false;
+  const next = input.filter((item) => {
+    if (!isRecord(item) || item.type !== "function_call_output") return true;
+    if (typeof item.call_id === "string" && knownCallIds.has(item.call_id)) return true;
+    dropped = true;
+    return false;
+  });
+  return { input: dropped ? next : input, dropped };
 }
 
 /** Unwraps a translated tool's `{"input": "..."}` envelope back to the raw string. */
@@ -3662,6 +3692,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.dropBuiltInSearchCallItems !== true &&
       contract?.translateUnsupportedCustomTools !== true &&
       contract?.fillMissingFunctionCallOutputCallId !== true &&
+      contract?.dropUnpairedFunctionCallOutputs !== true &&
       contract?.disableThinkingOnOpaqueReasoningHistory !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
@@ -3742,6 +3773,7 @@ export function createGenericOpenAIResponsesClient(
     let customToolsTranslated = false;
     let customToolsHoisted = false;
     let functionCallOutputCallIdFilled = false;
+    let unpairedFunctionCallOutputsDropped = false;
     let opaqueReasoningThinkingDisabled = false;
     if (contract.translateUnsupportedCustomTools === true) {
       const declared = collectDeclaredTools(next);
@@ -3765,6 +3797,13 @@ export function createGenericOpenAIResponsesClient(
       if (filled.filled) {
         next.input = filled.input;
         functionCallOutputCallIdFilled = true;
+      }
+    }
+    if (contract.dropUnpairedFunctionCallOutputs === true) {
+      const pruned = dropUnpairedFunctionCallOutputs(next.input);
+      if (pruned.dropped) {
+        next.input = pruned.input;
+        unpairedFunctionCallOutputsDropped = true;
       }
     }
     if (
@@ -3798,6 +3837,9 @@ export function createGenericOpenAIResponsesClient(
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
       ...(functionCallOutputCallIdFilled
         ? ["generic_responses_function_call_output_call_id_filled"]
+        : []),
+      ...(unpairedFunctionCallOutputsDropped
+        ? ["generic_responses_unpaired_function_call_outputs_dropped"]
         : []),
       ...(opaqueReasoningThinkingDisabled
         ? ["generic_responses_opaque_reasoning_thinking_disabled"]
