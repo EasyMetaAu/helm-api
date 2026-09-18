@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-18 · DeepSeek 丢掉无配对的 function_call_output（Provider / 协议互译，docs/05，原则 3/8）
+
+- **现象**：`776fa8e7` 先打 `gpt-5.6-sol` 上游过载，落到 `deepseek-flash` 后 400：`No tool call found for tool output with call_id fco_01a0a7f2-…`。历史第 7 项是 Codex `automation_update` / `codex_app` 的 `function_call_output`，有 `id` 无 `call_id`，也没有对应的 `function_call`。v0.29.27 用 `id` 填 `call_id` 后，DeepSeek 仍要配对的 call。
+- **修复**：`deepseek-responses` 增加 opt-in `dropUnpairedFunctionCallOutputs`，在填 `call_id` 之后丢掉没有 sibling `function_call`/`custom_tool_call` 的 output。配对的工具结果不动。不发明 call，不改 rung。第一条候选的 Codex 过载仍是上游故障。
+
 ## 2026-09-18 · 断开 OAuth 账号撤销缓存凭证并阻止刷新写回（Auth / Provider，docs/06、04、05）
 
 - **已复现**：后台断开只删 Store 行，旧 token manager 仍能返回缓存 access token；并发刷新完成后会重新 upsert 该行。pool 重建失败时旧成员也仍可选择。另有流式已输出后出现确定性鉴权失败却未禁用账号的缺口。
@@ -61,37 +66,10 @@
 - 在 Codex 共用的发送前 canonicalizer 中，仅对 Lite 的 `type:reasoning` 且带非空 `encrypted_content` 的项将非空 `content` 清为 `[]`，保留密文、summary、ID、commentary 与工具关联。无密文时保留原项，避免无依据删除唯一的推理上下文；legacy 和 generic Responses 不受此规则影响。
 - 使用生产请求的脱敏结构验证完整发送体及索引，覆盖 HTTP 流式/非流式、WebSocket 增量续接和无密文边界。本地验证不代表生产已部署或上游已验收。
 
-## 2026-09-17 · 候选链只有一个候选时说明原因（Admin / 请求详情，docs/07，原则 5）
-
-- **不是 bug，是缺解释**。Lukin 报"通道候选链只有一个模型，展开有问题"。查 box 记录 `5a0e80ed`：`policy.reason` 是 `stateful Responses continuation`，`candidate_chain` 恒为 `["openai-codex/gpt-5.6-terra"]`。`route-request.ts` 的 stateful 分支（最高优先级）**故意**只给一个候选——对话状态存在上游那个 `resp_...` 里，换 provider 兜底只会 400 + 丢上下文；`pool.ts` 里 `if (statefulContinuation …) throw lastErr` 连同池内换账号都不做，同理。近 24h box 上这类 2137 次（成功 2040 / 失败 97），全部单候选。
-- **真问题在 UI**：卡片副标题写"按顺序尝试各通道；首个模型调用成功的通道会处理请求"，读起来像本该有多个；唯一的解释 `policy.reason` 被埋在下面 `request_meta` 的 JSON 里要展开才看得见。
-- **最小改法**：`policy_reason` 从 `request_meta` 提成 `RequestDetail` 的正式字段（后端零改动，值一直都在记录里），`DecisionChain.svelte` 在**候选数 === 1** 时才渲染一行说明。三种钉死场景（stateful 续接 / explicit model / image 模型）各有文案，未知 reason 原样显示不留空白，`title` 挂原始串备查。多候选不显示——那行会是噪音。
-- **没跑 `pnpm i18n:sync`**：它会重排整个 locale 文件并把隔壁 session 的未提交 WIP 卷进 diff（实测 63 行噪音）。7 个 locale 按字典序手工插入 3 条，每个文件只 +3 行。`extraction-anchors.svelte` 必须同步登记——`$t(变量)` 的 key 不挂锚点会被 `i18n:sync` 剪掉（这是已知坑）。
-- **本机坑（与本改动无关）**：`better-sqlite3` 原生模块是 Node 24 编译的，本机已升 Node 26，e2e webServer 起不来（`NODE_MODULE_VERSION 137 vs 147`）。`pnpm rebuild` 无效（无输出不重编），要 `npx prebuild-install -r node` 才拉到对应版本。
-
-## 2026-09-17 · DSML 泄漏修复补完：工具声明在 `additional_tools` 里，v0.29.21 的修复是 no-op（Provider / 协议互译，docs/05，原则 3/8）
-
-- **v0.29.21 上线后仍然泄漏**（Lukin 在 21:32 复现，box 21:28:29 启动，新代码确实在跑）。遥测证实那轮 `gpt-6-astra` 过载后落到 `deepseek-flash`，而 attempt 的 `mutations` 是**空的** —— 翻译一次都没触发。
-- **漏掉的地方**：翻译只扫请求**顶层 `tools`**。抓下真实上行体（box request `0e2ad9d9`）才看见，Codex code-mode 客户端**根本不在那里声明工具**：
-  ```
-  tools: null                              ← 顶层是空的
-  input: [
-    { type: "additional_tools", role: "developer", tools: [
-        { type: "namespace", name: "functions", tools: [ {type:"custom", name:"exec", format:{lark…}}, … ] },
-        { type: "namespace", name: "clock",     tools: [ … ] },   // 共 4 个 namespace / 13 个工具
-    ]},
-    …36 条 custom_tool_call + 36 条 output
-  ]
-  ```
-  DeepSeek 把 `additional_tools` 当未知 item **静默忽略**，所以它看到的是"36 条对未声明工具的调用"——正是触发 DSML 退化的那个状态。
-- **只翻译 `additional_tools` 内部不够**（实测 3/3 仍泄漏）：既然上游压根不读这个 item，改写它等于没改。**必须把工具提升到顶层 `tools`**。实测 hoist 后 3/3 干净。
-- **hoist 所有工具，不只翻译的那个**：只提 `exec` 会让它的 namespace 同伴（`wait`/`sleep`/`send_message`…）继续不可见，而历史里也replay 了对它们的调用。保留原 `additional_tools` item 不删（上游忽略它，没理由动客户端数据）。
-- **去重时机有讲究**：flatten 阶段**不能**按名去重，否则 `custom exec` + `function exec` 的冲突会被提前抹掉，导致本该跳过的翻译又跑起来；去重挪到改写阶段（上游拒绝重名）。
-- **上游校验每个 hoist 上去的 schema**：`parameters: {}` 直接 400（`schema must be a JSON Schema of 'type: "object"'`）；省略 `parameters` 或给合法空对象都可以。这条是写 live 夹具时踩出来的，真实 Codex 工具带的是合法 schema。
-- **我的验证方法第二次骗了我**：上一轮我"端到端验证通过"用的是自己构造的顶层 `tools` body —— 形状不对，所以测出来是绿的。**教训升级为硬规则：涉及客户端 body 形状的修复，夹具必须从 `request_payloads` 抓真实上行体，不能手写。** 本次 live 用例 `CODE_MODE_ADDITIONAL_TOOLS_BODY` 就是按抓下来的结构写的（含 lark `format`）。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-09-17 · 候选链只有一个候选时说明原因**：stateful Responses 续接故意单候选；UI 在候选数 === 1 时把 `policy_reason` 提成说明行。完整原文见 git history。
+- **2026-09-17 · DSML 泄漏修复补完：工具声明在 additional_tools 里**：v0.29.21 只扫顶层 `tools`（Codex code-mode 实际在 `input[].additional_tools`）。必须 hoist 到顶层 `tools`；只改写内部不够。去重放到改写阶段。完整原文见 git history。
 - **2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具**：DeepSeek 只接受 `apply_patch` custom；Codex `exec` 未声明却在历史里回放就会 DSML 泄漏。`translateUnsupportedCustomTools` 改写成 function。完整原文见 git history。
 - **2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底~~**：曾因 DSML 泄漏（全角 `｜` 文本标记）撤回 6 条 GPT rung；同日工具翻译条目恢复。完整原文见 git history。
 

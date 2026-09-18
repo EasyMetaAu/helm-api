@@ -6365,6 +6365,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         requestContract: {
           translateUnsupportedCustomTools: true,
           fillMissingFunctionCallOutputCallId: true,
+          dropUnpairedFunctionCallOutputs: true,
           disableThinkingOnOpaqueReasoningHistory: true,
         },
         fetch: (async (_url: string, init?: RequestInit) =>
@@ -6708,35 +6709,37 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       ]);
     });
 
-    it("fills missing function_call_output.call_id from item id (28bacfd4)", async () => {
-      // Production: Codex desktop heartbeat `automation_update` has id/name/
-      // namespace but no call_id. OpenAI accepted it; DeepSeek 400s
-      // "missing field `call_id` at line 1 column 449140".
+    it("drops unpaired Codex automation_update output (776fa8e7)", async () => {
+      // Production: gpt-5.6-sol overloaded, then deepseek-flash 400ed
+      // "No tool call found for tool output with call_id fco_…". Codex injects
+      // function_call_output (name/namespace, no call_id, no matching
+      // function_call). Filling call_id from id still 400s — DeepSeek requires
+      // a sibling function_call. Drop the unpaired output; keep paired tools.
       let seen: Record<string, unknown> = {};
       const client = translatingClient((body) => {
         seen = body;
         return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
       });
-      const heartbeat = {
+      const unpaired = {
         type: "function_call_output",
-        id: "fco_01a0b1d1-a055-77e3-b786-12916f9e896c",
+        id: "fco_01a0a7f2-5e94-7dd2-9849-5221074b3e7b",
         name: "automation_update",
         namespace: "codex_app",
-        output: "<heartbeat/>",
+        output: "Automation: SkillStore weekly growth\n",
       };
       const paired = {
         type: "function_call",
         id: "fc_list",
-        name: "list_agents",
-        namespace: "collaboration",
+        name: "js",
+        namespace: "mcp__cua_repl",
         arguments: "{}",
-        call_id: "call_wKG27WmThPMdlGO7kUAfzmLm",
+        call_id: "call_L1r7FZ3PBurcd6I0jnvRPT4v",
       };
       const pairedOut = {
         type: "function_call_output",
         id: "fco_list",
-        call_id: "call_wKG27WmThPMdlGO7kUAfzmLm",
-        output: '{"agents":[]}',
+        call_id: "call_L1r7FZ3PBurcd6I0jnvRPT4v",
+        output: "ok",
       };
 
       await client.nativePassthrough?.({
@@ -6745,7 +6748,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         input: [
           { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input: "ls" },
           { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
-          heartbeat,
+          unpaired,
           paired,
           pairedOut,
         ],
@@ -6760,13 +6763,12 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
           arguments: JSON.stringify({ input: "ls" }),
         },
         { type: "function_call_output", call_id: "call_1", output: "ok" },
-        { ...heartbeat, call_id: heartbeat.id },
         paired,
         pairedOut,
       ]);
     });
 
-    it("fills missing call_id even when no custom tools are translated", async () => {
+    it("drops a lone unpaired function_call_output when no custom tools are translated", async () => {
       let seen: Record<string, unknown> = {};
       const client = translatingClient((body) => {
         seen = body;
@@ -6781,9 +6783,42 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       };
       await client.nativePassthrough?.({
         model: "deepseek-flash",
-        input: [heartbeat],
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          heartbeat,
+        ],
       });
-      expect(seen.input).toEqual([{ ...heartbeat, call_id: "fco_heartbeat" }]);
+      expect(seen.input).toEqual([
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      ]);
+    });
+
+    it("fills missing call_id then keeps the output when a sibling call matches", async () => {
+      // Fill still matters: DeepSeek 400s "missing field call_id" even when a
+      // sibling function_call exists. Fill from id first; drop only if still unpaired.
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+      const call = {
+        type: "function_call",
+        id: "fc_list",
+        name: "list_agents",
+        arguments: "{}",
+        call_id: "fco_01a0b1d1-a055-77e3-b786-12916f9e896c",
+      };
+      const output = {
+        type: "function_call_output",
+        id: "fco_01a0b1d1-a055-77e3-b786-12916f9e896c",
+        name: "list_agents",
+        output: '{"agents":[]}',
+      };
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        input: [call, output],
+      });
+      expect(seen.input).toEqual([call, { ...output, call_id: output.id }]);
     });
 
     it("leaves a body with no additional_tools and no custom tools untouched", async () => {

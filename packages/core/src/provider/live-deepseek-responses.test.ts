@@ -32,6 +32,7 @@ function translatingClient() {
       dropBuiltInSearchCallItems: true,
       translateUnsupportedCustomTools: true,
       fillMissingFunctionCallOutputCallId: true,
+      dropUnpairedFunctionCallOutputs: true,
       disableThinkingOnOpaqueReasoningHistory: true,
       acceptsResponsesNativeItems: true,
     },

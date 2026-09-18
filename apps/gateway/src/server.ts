@@ -1789,14 +1789,17 @@ function createProviderClient(
     };
   }
   // DeepSeek's own /v1/responses. Same generic wire profile (so the executor's
-  // Codex-shim guard keeps its hands off), plus the three behaviours DeepSeek needs:
+  // Codex-shim guard keeps its hands off), plus the behaviours DeepSeek needs:
   // built-in search call items must be dropped, because it deserializes them
   // strictly and 400s on the ones Codex replays from an earlier provider's turn;
   // a custom tool not named `apply_patch` must be translated to a function tool,
   // because DeepSeek rejects it outright and a transcript of calls to an undeclared
-  // tool makes the model leak its private DSML markers as output_text; and thinking
-  // must be disabled when tool history only has opaque foreign reasoning, because
-  // thinking mode 400s without plaintext `reasoning_text` the gateway cannot invent.
+  // tool makes the model leak its private DSML markers as output_text; missing
+  // function_call_output.call_id is filled from id, then unpaired outputs (Codex
+  // desktop heartbeat) are dropped because DeepSeek requires a sibling call;
+  // thinking must be disabled when tool history only has opaque foreign reasoning,
+  // because thinking mode 400s without plaintext `reasoning_text` the gateway
+  // cannot invent.
   if (p.type === "deepseek-responses") {
     return createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
@@ -1804,6 +1807,7 @@ function createProviderClient(
         dropBuiltInSearchCallItems: true,
         translateUnsupportedCustomTools: true,
         fillMissingFunctionCallOutputCallId: true,
+        dropUnpairedFunctionCallOutputs: true,
         disableThinkingOnOpaqueReasoningHistory: true,
         acceptsResponsesNativeItems: true,
       },
