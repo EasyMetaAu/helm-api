@@ -1225,7 +1225,41 @@ describe("Responses websocket bridge", () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(40);
   });
 
-  it("caps a trusted recovery delay before closing once", async () => {
+  it("forwards a long sticky-account cooldown as the original Codex error", async () => {
+    const baseUrl = await startBridge(
+      async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","code":"response_create_not_sent","message":"oauth pool: x-codex-turn-state original account is unavailable","recovery":{"safe_to_replay":true,"lifecycle_phase":"before_send","reason":"oauth_affinity_unavailable","retry_after_ms":28000}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF,
+            },
+          },
+        ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "response_create_not_sent",
+      message: "oauth pool: x-codex-turn-state original account is unavailable",
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        reason: "oauth_affinity_unavailable",
+        retry_after_ms: 28_000,
+      },
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("does not rewrite a long trusted cooldown into a 1012 disconnect", async () => {
     const baseUrl = await startBridge(
       async () =>
         new Response(
@@ -1247,24 +1281,23 @@ describe("Responses websocket bridge", () => {
       },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    let closeCode: number | undefined;
-    socket.once("close", (code) => {
-      closeCode = code;
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
     });
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-    try {
-      socket.send(JSON.stringify({ type: "response.create", model: "gpt-5.6-sol", input: [] }));
-      await vi.waitFor(() => expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 10_000));
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(closeCode).toBeUndefined();
 
-      await vi.advanceTimersByTimeAsync(1);
-      await vi.waitFor(() => expect(closeCode).toBe(1012));
-    } finally {
-      timeoutSpy.mockRestore();
-      vi.useRealTimers();
-    }
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "response_create_not_sent",
+      message: "retry original account",
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        retry_after_ms: 50_000,
+      },
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("turns a non-OK nested recovery marker into a retryable disconnect", async () => {

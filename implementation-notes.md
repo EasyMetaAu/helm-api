@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-18 · Codex 短冷却等原账号，长冷却原样回错误（Provider / OAuth 池，docs/04，原则 3/5）
+
+- **现象**：`90aa083d` 带 `x-codex-turn-state`，原账号短暂停用约 28s。Helm 立刻抛 `response_create_not_sent`，WebSocket 桥还可能把它改成 1012。Codex 不读 `recovery.retry_after_ms`，12s 连打 6 次。
+- **修复**：≤60s 的 sticky 冷却在原请求上等到点，再打原来的 Codex 账号；不换号、不换 DeepSeek。超过 60s 立刻失败，错误码/文案/`recovery`（含 `reason` 与 `retry_after_ms`）原样给客户端。长冷却不再改成 1012。客户端断连仍不算 provider 故障。
+- **不改**：lane rung；不把错误改成假的 `rate_limit_exceeded`。
+
 ## 2026-09-18 · DeepSeek 丢掉无配对的 function_call_output（Provider / 协议互译，docs/05，原则 3/8）
 
 - **现象**：`776fa8e7` 先打 `gpt-5.6-sol` 上游过载，落到 `deepseek-flash` 后 400：`No tool call found for tool output with call_id fco_01a0a7f2-…`。历史第 7 项是 Codex `automation_update` / `codex_app` 的 `function_call_output`，有 `id` 无 `call_id`，也没有对应的 `function_call`。v0.29.27 用 `id` 填 `call_id` 后，DeepSeek 仍要配对的 call。
@@ -60,14 +66,9 @@
 - **熔断**：post-send 不明结果原先 `recordAbort`。首字节超时是健康故障，即使不能重放也要 `recordFailure`，这样卡住的 Codex 别名会在几次后跳闸。
 - **不改 rung**。测试缝 `firstOutputTimeoutMs` 只给单测把 15s 收到 40ms。
 
-## 2026-09-17 · Lite 回放加密 reasoning 时清空明文 content（Provider / 协议互译，docs/05，原则 3/8）
-
-- trace `4b84107d-1431-4cbc-afd7-4809dea790b5` 的上游 400 为 `input[5].content` 最大长度 0、实际长度 1。原请求带非空 `instructions`，Lite 插入 `additional_tools` 和 developer instructions 两项后，原始 `input[3]` 的 reasoning 变为 `input[5]`；此前将其判为 commentary 是索引误判，已撤回相关改动。
-- 在 Codex 共用的发送前 canonicalizer 中，仅对 Lite 的 `type:reasoning` 且带非空 `encrypted_content` 的项将非空 `content` 清为 `[]`，保留密文、summary、ID、commentary 与工具关联。无密文时保留原项，避免无依据删除唯一的推理上下文；legacy 和 generic Responses 不受此规则影响。
-- 使用生产请求的脱敏结构验证完整发送体及索引，覆盖 HTTP 流式/非流式、WebSocket 增量续接和无密文边界。本地验证不代表生产已部署或上游已验收。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-09-17 · Lite 回放加密 reasoning 时清空明文 content**：Lite 对带密文的 reasoning 把 content 清为 `[]`。完整原文见 git history。
 - **2026-09-17 · 候选链只有一个候选时说明原因**：stateful Responses 续接故意单候选；UI 在候选数 === 1 时把 `policy_reason` 提成说明行。完整原文见 git history。
 - **2026-09-17 · DSML 泄漏修复补完：工具声明在 additional_tools 里**：v0.29.21 只扫顶层 `tools`（Codex code-mode 实际在 `input[].additional_tools`）。必须 hoist 到顶层 `tools`；只改写内部不够。去重放到改写阶段。完整原文见 git history。
 - **2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具**：DeepSeek 只接受 `apply_patch` custom；Codex `exec` 未声明却在历史里回放就会 DSML 泄漏。`translateUnsupportedCustomTools` 改写成 function。完整原文见 git history。

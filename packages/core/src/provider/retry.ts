@@ -152,7 +152,7 @@ export interface ConnectionRetryOptions {
 const DEFAULT_RETRIES = 2;
 const DEFAULT_BACKOFF_MS = [200, 500] as const;
 
-function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleepMs(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve) => {
     if (signal?.aborted) {
@@ -211,7 +211,7 @@ export async function waitForOverloadRetry(
     // Observability is fail-open.
   }
   if (delay === null) return false;
-  await (opts.sleep ?? defaultSleep)(delay, opts.signal);
+  await (opts.sleep ?? sleepMs)(delay, opts.signal);
   opts.signal?.throwIfAborted();
   return true;
 }
@@ -281,7 +281,7 @@ export async function withConnectionRetry<T>(
 ): Promise<T> {
   const retries = opts.retries ?? DEFAULT_RETRIES;
   const backoff = opts.backoffMs ?? DEFAULT_BACKOFF_MS;
-  const sleep = opts.sleep ?? defaultSleep;
+  const sleep = opts.sleep ?? sleepMs;
   const shouldRetry = opts.shouldRetry ?? isTransientConnectionError;
 
   let attempt = 0;

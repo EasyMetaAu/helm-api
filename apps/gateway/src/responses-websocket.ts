@@ -336,18 +336,39 @@ function recoverableDisconnectCode(value: unknown): string | null {
   return null;
 }
 
-function recoveryDelayMs(value: unknown): number {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return 0;
+function recoveryRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const recovery = (value as { recovery?: unknown }).recovery;
-  if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) return 0;
-  const record = recovery as Record<string, unknown>;
+  if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) return null;
+  return recovery as Record<string, unknown>;
+}
+
+function recoveryRetryAfterMs(value: unknown): number {
+  const record = recoveryRecord(value);
+  if (record === null) return 0;
   const delay = record.retry_after_ms;
-  return record.safe_to_replay === true &&
-    record.lifecycle_phase === "before_send" &&
-    Number.isSafeInteger(delay) &&
-    (delay as number) > 0
-    ? Math.min(delay as number, MAX_RECOVERY_DELAY_MS)
-    : 0;
+  if (
+    record.safe_to_replay !== true ||
+    record.lifecycle_phase !== "before_send" ||
+    !Number.isSafeInteger(delay) ||
+    (delay as number) <= 0
+  ) {
+    return 0;
+  }
+  return delay as number;
+}
+
+function recoveryDelayMs(value: unknown): number {
+  const delay = recoveryRetryAfterMs(value);
+  // The OAuth pool already waited for a short sticky-account park. Remaining
+  // long cooldowns must reach Codex unchanged; converting them into a 1012
+  // disconnect would hide response_create_not_sent and recovery.reason.
+  if (delay > MAX_RECOVERY_DELAY_MS) return 0;
+  return delay;
+}
+
+function shouldCloseForFullHistoryRecovery(value: unknown): boolean {
+  return recoveryRetryAfterMs(value) <= MAX_RECOVERY_DELAY_MS;
 }
 
 function waitForRecoveryDelay(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -432,7 +453,11 @@ async function forwardResponse(
     response.headers.get(CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER) === sessionProof;
   if (!response.ok) {
     const envelope = await responseErrorEnvelope(response);
-    if (trustedRecovery && recoverableDisconnectCode(envelope) !== null) {
+    if (
+      trustedRecovery &&
+      recoverableDisconnectCode(envelope) !== null &&
+      shouldCloseForFullHistoryRecovery(envelope)
+    ) {
       await closeForFullHistoryRecovery(socket, envelope, signal);
       return true;
     }
@@ -454,7 +479,11 @@ async function forwardResponse(
     try {
       const parsed = JSON.parse(payload) as { type?: unknown };
       type = parsed.type;
-      if (trustedRecovery && recoverableDisconnectCode(parsed) !== null) {
+      if (
+        trustedRecovery &&
+        recoverableDisconnectCode(parsed) !== null &&
+        shouldCloseForFullHistoryRecovery(parsed)
+      ) {
         void body.cancel().catch(() => {});
         await closeForFullHistoryRecovery(socket, parsed, signal);
         return true;

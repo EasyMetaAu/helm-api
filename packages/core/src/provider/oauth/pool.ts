@@ -38,11 +38,15 @@ import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   CodexResponsesBeforeSendError,
 } from "../openai-responses.js";
-import { numericRetryAfterMs, waitForOverloadRetry } from "../retry.js";
+import { numericRetryAfterMs, sleepMs, waitForOverloadRetry } from "../retry.js";
 import { OAuthCredentialDisconnectedError, TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
 const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
+// Short account parks (generic 429 / in-memory cooldown) can be absorbed on the
+// original sticky account. A longer park must fail immediately with the original
+// CodexResponsesBeforeSendError so the client still sees response_create_not_sent.
+export const STICKY_ACCOUNT_WAIT_MAX_MS = 60_000;
 
 // Hidden scheduling capability for xAI TTS. It is never exposed as a public
 // model alias; the gateway grants it only while the account's media entitlement
@@ -261,6 +265,8 @@ export interface OAuthPoolDeps {
   // legacy commit-on-first-raw-chunk (gemini has no separate preamble, so it stays null).
   nativeStreamPreambleClassifier?: PreOutputClassifier | null; // nativePassthroughStream
   chatStreamPreambleClassifier?: PreOutputClassifier | null; // chatCompletionStream (translated)
+  // Injected for tests; default sleeps real time and resolves early on abort.
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 // Internal mutable scheduling record (the member + its rotating cursor).
@@ -283,6 +289,7 @@ export const DEFAULT_MAX_STICKY_SESSIONS = 5_000;
 
 export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
+  const sleep = deps.sleep ?? sleepMs;
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
   const maxStickySessions = Math.max(
     1,
@@ -889,6 +896,33 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     };
   }
 
+  function stickyUnavailableError(
+    source: string,
+    retryAfterMs: number,
+  ): CodexResponsesBeforeSendError {
+    return new CodexResponsesBeforeSendError(
+      `oauth pool: ${source} original account is unavailable`,
+      {
+        reason: "oauth_affinity_unavailable",
+        ...(retryAfterMs > 0 ? { retry_after_ms: retryAfterMs } : {}),
+      },
+    );
+  }
+
+  function stickyAccountWaitMs(err: unknown): number | null {
+    if (!(err instanceof CodexResponsesBeforeSendError)) return null;
+    const raw = err.providerRaw;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const recovery = (raw as { recovery?: unknown }).recovery;
+    if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) return null;
+    const record = recovery as { reason?: unknown; retry_after_ms?: unknown };
+    if (record.reason !== "oauth_affinity_unavailable") return null;
+    const retryAfterMs = record.retry_after_ms;
+    if (!Number.isSafeInteger(retryAfterMs) || (retryAfterMs as number) <= 0) return null;
+    if ((retryAfterMs as number) > STICKY_ACCOUNT_WAIT_MAX_MS) return null;
+    return retryAfterMs as number;
+  }
+
   function affinityKeySource(stickyKey: string | null): string | null {
     if (stickyKey === null) return null;
     const separator = stickyKey.indexOf(":");
@@ -1010,13 +1044,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const modelLimit =
         knownStickyAccount === null ? null : modelLimitUntilMs(knownStickyAccount, model, nowMs);
       const limitUntilMs = Math.max(accountLimit ?? 0, modelLimit ?? 0);
-      throw new CodexResponsesBeforeSendError(
-        `oauth pool: ${source} original account is unavailable`,
-        {
-          reason: "oauth_affinity_unavailable",
-          ...(limitUntilMs > nowMs ? { retry_after_ms: limitUntilMs - nowMs } : {}),
-        },
-      );
+      throw stickyUnavailableError(source, limitUntilMs > nowMs ? limitUntilMs - nowMs : 0);
     }
     const { entry: best, reason } = chooseByStrategy(
       capacityTier.candidates,
@@ -1143,15 +1171,24 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     credentialFailureStatuses = upstreamCredentialFailureStatuses,
     retryForbiddenWithoutParking = false,
     overloadRetry?: ProviderCallOptions["overloadRetry"],
+    signal?: AbortSignal,
   ): Promise<R> {
     const tried = new Set<string>();
     const statefulContinuation = isStrictAccountSticky(stickyKey);
     let lastErr: unknown;
+    let waitedForStickyAccount = false;
     for (;;) {
       let entry: PoolEntry;
       try {
         entry = select(stickyKey, tried, { avoidBusy, model });
       } catch (selErr) {
+        const waitMs = !waitedForStickyAccount ? stickyAccountWaitMs(selErr) : null;
+        if (waitMs !== null) {
+          waitedForStickyAccount = true;
+          await sleep(waitMs, signal);
+          signal?.throwIfAborted();
+          continue;
+        }
         throw lastErr ?? selErr;
       }
       tried.add(entry.member.account);
@@ -1372,6 +1409,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         undefined,
         false,
         opts?.overloadRetry,
+        opts?.signal,
       );
     },
     chatCompletionStream(
@@ -1383,17 +1421,39 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const stickyKey = stickyKeyFromChat(req);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(req);
+      const model = modelFromChat(req);
       opts = { ...opts, overloadRetry: opts?.overloadRetry ?? { attempt: 0 } };
-      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromChat(req) });
-      return streamWithRetry(
-        first,
-        stickyKey,
-        modelFromChat(req),
-        avoidBusy,
-        opts,
-        (client, entry) => client.chatCompletionStream(req, callOptionsForEntry(opts, entry)),
-        deps.chatStreamPreambleClassifier,
-      );
+      const open = (client: ProviderClient, entry: PoolEntry) =>
+        client.chatCompletionStream(req, callOptionsForEntry(opts, entry));
+      try {
+        const first = select(stickyKey, undefined, { avoidBusy, model });
+        return streamWithRetry(
+          first,
+          stickyKey,
+          model,
+          avoidBusy,
+          opts,
+          open,
+          deps.chatStreamPreambleClassifier,
+        );
+      } catch (err) {
+        const waitMs = stickyAccountWaitMs(err);
+        if (waitMs === null) throw err;
+        return (async function* waitThenStream() {
+          await sleep(waitMs, opts?.signal);
+          opts?.signal?.throwIfAborted();
+          const first = select(stickyKey, undefined, { avoidBusy, model });
+          yield* streamWithRetry(
+            first,
+            stickyKey,
+            model,
+            avoidBusy,
+            opts,
+            open,
+            deps.chatStreamPreambleClassifier,
+          );
+        })();
+      }
     },
     // Native protocol passthrough (issue #217, Phase 1): forward it like the other
     // methods so the executor's feature-detect (`provider.nativePassthrough`) sees a
@@ -1428,6 +1488,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         undefined,
         false,
         opts?.overloadRetry,
+        opts?.signal,
       );
     },
     // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
@@ -1442,27 +1503,49 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const stickyKey = stickyKeyFromNative(body);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
-      // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
-      // synchronous throw if the picked member can't passthrough-stream), exactly as before.
+      const model = modelFromNative(body);
       opts = { ...opts, overloadRetry: opts?.overloadRetry ?? { attempt: 0 } };
-      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromNative(body) });
-      if (!first.member.client.nativePassthroughStream) {
-        throw new Error("oauth pool member does not support native passthrough streaming");
-      }
-      return streamWithRetry(
-        first,
-        stickyKey,
-        modelFromNative(body),
-        avoidBusy,
-        opts,
-        (client, entry) => {
-          if (!client.nativePassthroughStream) {
+      const open = (client: ProviderClient, entry: PoolEntry) => {
+        if (!client.nativePassthroughStream) {
+          throw new Error("oauth pool member does not support native passthrough streaming");
+        }
+        return client.nativePassthroughStream(body, callOptionsForEntry(opts, entry));
+      };
+      try {
+        const first = select(stickyKey, undefined, { avoidBusy, model });
+        if (!first.member.client.nativePassthroughStream) {
+          throw new Error("oauth pool member does not support native passthrough streaming");
+        }
+        return streamWithRetry(
+          first,
+          stickyKey,
+          model,
+          avoidBusy,
+          opts,
+          open,
+          deps.nativeStreamPreambleClassifier,
+        );
+      } catch (err) {
+        const waitMs = stickyAccountWaitMs(err);
+        if (waitMs === null) throw err;
+        return (async function* waitThenStream() {
+          await sleep(waitMs, opts?.signal);
+          opts?.signal?.throwIfAborted();
+          const first = select(stickyKey, undefined, { avoidBusy, model });
+          if (!first.member.client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");
           }
-          return client.nativePassthroughStream(body, callOptionsForEntry(opts, entry));
-        },
-        deps.nativeStreamPreambleClassifier,
-      );
+          yield* streamWithRetry(
+            first,
+            stickyKey,
+            model,
+            avoidBusy,
+            opts,
+            open,
+            deps.nativeStreamPreambleClassifier,
+          );
+        })();
+      }
     },
     ...(entries.length > 0 &&
     entries.every((entry) => typeof entry.member.client.realtimeCall === "function")
