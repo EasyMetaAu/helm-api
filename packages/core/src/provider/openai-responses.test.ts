@@ -6448,6 +6448,105 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       ]);
     });
 
+    it.each([false, true])("preserves tool-result image parts (stream=%s)", async (stream) => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        const response = { id: "r", object: "response", status: "completed", output: [] };
+        return stream
+          ? sseResponse([{ type: "response.completed", response }])
+          : jsonResponse(response);
+      });
+      const output = [
+        { type: "input_text", text: "Screenshot follows" },
+        { type: "input_image", image_url: "https://example.com/image.png", detail: "high" },
+        { type: "input_image", file_id: "file-api-test" },
+        { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+      ];
+      const body = {
+        model: "deepseek-flash",
+        input: [
+          { type: "additional_tools", tools: [{ type: "namespace", tools: [EXEC_CUSTOM] }] },
+          { type: "custom_tool_call", call_id: "c1", name: "exec", input: "screenshot()" },
+          { type: "custom_tool_call_output", call_id: "c1", output },
+        ],
+      };
+      let captured = "";
+      const opts = {
+        captureUpstream: (wire: string) => {
+          captured = wire;
+        },
+      };
+      if (stream) {
+        const frames = client.nativePassthroughStream?.(body, opts);
+        if (!frames) throw new Error("stream_unavailable");
+        for await (const _frame of frames) {
+          /* drain */
+        }
+      } else {
+        await client.nativePassthrough?.(body, opts);
+      }
+      expect((seen.input as unknown[])[2]).toEqual({
+        type: "function_call_output",
+        call_id: "c1",
+        output,
+      });
+      expect(JSON.parse(captured)).toEqual(seen);
+      expect(body.input[2]).toEqual({ type: "custom_tool_call_output", call_id: "c1", output });
+    });
+
+    it("compresses DeepSeek tool images while keeping the caller's originals", async () => {
+      const source = await sharp({
+        create: { width: 4096, height: 64, channels: 3, background: "red" },
+      })
+        .png()
+        .toBuffer();
+      const image = {
+        type: "input_image",
+        image_url: `data:image/png;base64,${source.toString("base64")}`,
+        detail: "high",
+      };
+      const body = {
+        model: "deepseek-flash",
+        tools: [EXEC_CUSTOM],
+        input: [
+          { type: "custom_tool_call", call_id: "c1", name: "exec", input: "screenshot()" },
+          {
+            type: "custom_tool_call_output",
+            call_id: "c1",
+            output: [{ type: "input_text", text: "Screenshot" }, image],
+          },
+        ],
+      };
+      let seen: Record<string, unknown> = {};
+      const onBody = (wire: Record<string, unknown>) => {
+        seen = wire;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      };
+      await translatingClient(onBody).nativePassthrough?.(body);
+      const parts =
+        (seen.input as Array<{ output: Array<Record<string, unknown>> }>)[1]?.output ?? [];
+      expect(parts[0]).toEqual({ type: "input_text", text: "Screenshot" });
+      expect(parts[1]?.image_url).toMatch(/^data:image\/webp;base64,/);
+      const compressed = Buffer.from(String(parts[1]?.image_url).split(",")[1] ?? "", "base64");
+      expect(compressed.byteLength).toBeLessThan(source.byteLength);
+      expect(await sharp(compressed).metadata()).toMatchObject({
+        width: 2048,
+        height: 32,
+        format: "webp",
+      });
+      expect(parts[1]?.detail).toBe("high");
+      expect(body.input[1]?.output?.[1]).toBe(image);
+      expect(image.image_url).toBe(`data:image/png;base64,${source.toString("base64")}`);
+
+      const generic = createGenericOpenAIResponsesClient({
+        config: { baseUrl: "https://generic.test/v1", apiKey: "sk-test" },
+        fetch: (async (_url, init) => onBody(JSON.parse(String(init?.body)))) as typeof fetch,
+      });
+      await generic.nativePassthrough?.(body);
+      expect(seen).toEqual(body);
+    });
+
     it("translates the unary function_call response back to a custom_tool_call", async () => {
       const client = translatingClient(() =>
         jsonResponse({

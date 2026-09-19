@@ -744,7 +744,10 @@ function translateCustomToolCallHistory(input: unknown, translated: Set<string>)
       return {
         ...rest,
         type: "function_call_output",
-        output: typeof output === "string" ? output : JSON.stringify(output),
+        // Responses accepts content-part arrays; stringifying them turns image
+        // Base64 into millions of text tokens instead of vision input.
+        output:
+          typeof output === "string" || Array.isArray(output) ? output : JSON.stringify(output),
       };
     }
     return item;
@@ -3680,7 +3683,10 @@ export function createGenericOpenAIResponsesClient(
     return unsupportedCustomToolNames(collectDeclaredTools(source));
   }
 
-  function applyResponsesRequestContract(body: NativePassthroughInput): NativePassthroughInput {
+  async function applyResponsesRequestContract(
+    body: NativePassthroughInput,
+    signal?: AbortSignal,
+  ): Promise<NativePassthroughInput> {
     const contract = requestContract;
     if (
       contract?.forceSse !== true &&
@@ -3816,6 +3822,12 @@ export function createGenericOpenAIResponsesClient(
         opaqueReasoningThinkingDisabled = true;
       }
     }
+    let optimizedImages = 0;
+    if (contract.translateUnsupportedCustomTools === true) {
+      const optimized = await optimizeCodexInlineImages(next.input, { signal });
+      next.input = optimized.value;
+      optimizedImages = optimized.optimizedImages;
+    }
     const instructionShims: string[] = [];
     if (
       contract.ensureInstructions === true &&
@@ -3834,6 +3846,7 @@ export function createGenericOpenAIResponsesClient(
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
+      ...(optimizedImages > 0 ? ["generic_responses_inline_images_optimized"] : []),
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
       ...(functionCallOutputCallIdFilled
         ? ["generic_responses_function_call_output_call_id_filled"]
@@ -3950,7 +3963,7 @@ export function createGenericOpenAIResponsesClient(
     init.overloadRetry ??= { attempt: 0 };
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
-        ? applyResponsesRequestContract(init.body)
+        ? await applyResponsesRequestContract(init.body, init.signal)
         : init.body;
     const finalBody =
       requestBody === undefined
