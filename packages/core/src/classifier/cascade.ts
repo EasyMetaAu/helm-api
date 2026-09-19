@@ -55,6 +55,7 @@ export interface ClassificationResult {
   // cascade escalated. null when Layer 1 was disabled and did not run.
   rules_confidence: number | null;
   decided_by: DecidedBy; // observable; never conflated with provider fallback
+  eval_model?: string;
   eval_used: boolean; // did this request actually invoke/hit Layer-2 eval
   eval_cache_hit: boolean; // eval cache hit (always false when eval unused)
   // Layer-2 eval self-cost (USD). Non-null ONLY when a fresh eval call ran and the
@@ -136,6 +137,7 @@ export async function classify(
   const e = await runEvalCached(input);
   if (e.decided) {
     return {
+      ...(e.model ? { eval_model: e.model } : {}),
       lane: resolveLane(e.output.complexity, e.output.task_type, input),
       complexity: e.output.complexity,
       task_type: e.output.task_type,
@@ -154,6 +156,8 @@ export async function classify(
   // ── Layer 3: eval failed open (timeout / provider_error / dirty output) → balanced. ─
   // Eval DID run here, so carry its measured latency through the fallback.
   return balancedFallback(r, `eval_${e.reason}`, {
+    ...(e.model ? { eval_model: e.model } : {}),
+    eval_usd: e.cost_usd ?? null,
     eval_used: true,
     eval_cache_hit: e.cache_hit,
     eval_latency_ms: e.latency_ms,
@@ -166,7 +170,13 @@ export async function classify(
 function balancedFallback(
   r: RulesResult | null,
   fallbackReason: string,
-  evalState: { eval_used: boolean; eval_cache_hit: boolean; eval_latency_ms: number | null },
+  evalState: {
+    eval_model?: string;
+    eval_usd?: number | null;
+    eval_used: boolean;
+    eval_cache_hit: boolean;
+    eval_latency_ms: number | null;
+  },
 ): ClassificationResult {
   return {
     lane: BALANCED,
@@ -175,11 +185,12 @@ function balancedFallback(
     confidence: r?.confidence ?? 0,
     rules_confidence: r?.confidence ?? null,
     decided_by: "fallback",
+    ...(evalState.eval_model ? { eval_model: evalState.eval_model } : {}),
     eval_used: evalState.eval_used,
     eval_cache_hit: evalState.eval_cache_hit,
     // No successful eval verdict to attribute a self-cost to (eval was off, or it
     // ran and failed open). Treat as unmeasured.
-    eval_usd: null,
+    eval_usd: evalState.eval_usd ?? null,
     // null on eval_disabled (no eval ran); the measured latency when eval ran-then-failed.
     eval_latency_ms: evalState.eval_latency_ms,
     fallback_reason: fallbackReason,

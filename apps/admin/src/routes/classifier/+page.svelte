@@ -1,21 +1,72 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { EvalCandidateSchema, type EvalCandidate } from '@helm/shared';
   import { saveClassifier, type ClassifierConfig } from '$lib/api/classifier.js';
   import DimensionTable from '$lib/components/DimensionTable.svelte';
   import { formatDurationMs } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests). The
-  // page runs NO classification logic (Principle 1): it only flips eval on/off, edits
-  // the confidence threshold within [0,1], and renders the read-only rule
-  // dimensions / eval details. It writes back via the API client only.
+  // page runs NO classification logic: it edits evaluation order and thresholds
+  // and renders the read-only rule dimensions / shared eval limits. It writes back via the API client only.
   let { data }: { data: { classifier: ClassifierConfig } } = $props();
 
-  const cfg = untrack(() => data.classifier);
+  let cfg = $state(untrack(() => data.classifier));
 
-  // The two editable knobs.
+  // Editable settings.
   let evalEnabled = $state(untrack(() => cfg.eval.enabled));
   let thresholdText = $state(untrack(() => String(cfg.rules.confidence_threshold)));
+
+  function candidates(config: ClassifierConfig): EvalCandidate[] {
+    return structuredClone(
+      config.eval.chain ?? [
+        {
+          type: 'chat',
+          model: config.eval.model,
+          timeout_ms: config.eval.outer_timeout_ms ?? 8000,
+          min_confidence: 0,
+        },
+      ],
+    );
+  }
+  let chain = $state<EvalCandidate[]>(untrack(() => candidates(data.classifier)));
+  let chainDirty = $state(false);
+  const chainValid = $derived(
+    chain.length > 0 &&
+      chain.length <= 4 &&
+      chain.every((c) => EvalCandidateSchema.safeParse(c).success) &&
+      new Set(chain.map((c) => `${c.type}:${c.model.trim()}`)).size === chain.length,
+  );
+
+  function addCandidate(type: EvalCandidate['type']) {
+    const candidate: EvalCandidate =
+      type === 'jev'
+        ? { type, model: 'typesafe/jev-1.13', timeout_ms: 1000, min_confidence: 0.6 }
+        : { type, model: 'economy', timeout_ms: 5000, min_confidence: 0 };
+    chain = type === 'jev' ? [candidate, ...chain] : [...chain, candidate];
+    chainDirty = true;
+    saved = false;
+  }
+  function move(index: number, offset: number) {
+    const next = [...chain];
+    [next[index], next[index + offset]] = [next[index + offset], next[index]];
+    chain = next;
+    chainDirty = true;
+    saved = false;
+  }
+  function setType(index: number, type: EvalCandidate['type']) {
+    chain[index] =
+      type === 'jev'
+        ? { type, model: 'typesafe/jev-1.13', timeout_ms: 1000, min_confidence: 0.6 }
+        : {
+            type,
+            model: cfg.eval.model,
+            timeout_ms: cfg.eval.outer_timeout_ms ?? 8000,
+            min_confidence: 0,
+          };
+    chainDirty = true;
+    saved = false;
+  }
 
   let error = $state<string | null>(null);
   let saving = $state(false);
@@ -36,16 +87,20 @@
   );
 
   async function handleSave(): Promise<void> {
-    if (!thresholdValid) return; // hard guard: never write an out-of-range value
+    if (!thresholdValid || !chainValid) return; // hard guard: never write an out-of-range value
     error = null;
     saved = false;
     saving = true;
     try {
       const result = await saveClassifier({
         eval_enabled: evalEnabled,
+        ...(chainDirty ? { eval_chain: chain.map((c) => ({ ...c, model: c.model.trim() })) } : {}),
         confidence_threshold: thresholdValue,
       });
       // Reflect the persisted view.
+      cfg = result;
+      chain = candidates(result);
+      chainDirty = false;
       evalEnabled = result.eval.enabled;
       thresholdText = String(result.rules.confidence_threshold);
       saved = true;
@@ -88,7 +143,7 @@
     <div class="flex flex-col gap-1">
       <h2 class="section-header">{$t('Classifier settings')}</h2>
       <p class="section-desc">
-        {$t('These two settings are saved to the gateway when you click Save.')}
+        {$t('Settings take effect after saving; no restart is needed.')}
       </p>
     </div>
 
@@ -99,7 +154,7 @@
     </label>
     <p class="field-help">
       {$t(
-        'Layer-2 runs a small model when Layer-1 is uncertain or disabled. It is off by default; failures use the terminal fallback lane.',
+        'Layer-2 tries classifiers in order when Layer-1 is uncertain or disabled. Only when every candidate fails does the request use the system default lane.',
       )}
     </p>
     <p class="field-help" data-testid="eval-cache-runtime-status">
@@ -135,6 +190,145 @@
       {/if}
     </label>
 
+    <fieldset class="flex min-w-0 flex-col gap-3 border-t border-slate-200 pt-4" disabled={saving}>
+      <legend class="field-label">{$t('Classifier order')}</legend>
+      <p class="field-help">
+        {$t(
+          'The first valid, confident result wins. Errors, timeouts and low confidence try the next classifier.',
+        )}
+      </p>
+      <p class="field-help">
+        {$t('Total evaluation budget: {duration}. Later candidates share the remaining time.', {
+          duration: formatDurationMs(cfg.eval.outer_timeout_ms ?? 8000),
+        })}
+      </p>
+      {#each chain as candidate, index}
+        <div
+          class="flex min-w-0 flex-col gap-3 rounded-control border border-slate-200 p-3"
+          data-testid="classifier-candidate"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="field-label"
+              >{index + 1}. {index === 0
+                ? $t('Preferred classifier')
+                : $t('Fallback classifier')}</span
+            >
+            <div class="flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="btn-secondary"
+                disabled={index === 0}
+                aria-label={$t('Move classifier {index} up', { index: index + 1 })}
+                onclick={() => move(index, -1)}>{$t('Move up')}</button
+              >
+              <button
+                type="button"
+                class="btn-secondary"
+                disabled={index === chain.length - 1}
+                aria-label={$t('Move classifier {index} down', { index: index + 1 })}
+                onclick={() => move(index, 1)}>{$t('Move down')}</button
+              >
+              <button
+                type="button"
+                class="btn-secondary"
+                disabled={chain.length === 1}
+                aria-label={$t('Remove classifier {index}', { index: index + 1 })}
+                onclick={() => {
+                  chain = chain.filter((_, i) => i !== index);
+                  chainDirty = true;
+                  saved = false;
+                }}>{$t('Remove')}</button
+              >
+            </div>
+          </div>
+          <div class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="field-label">{$t('Classifier type')}</span>
+              <select
+                class="input w-full"
+                aria-label={$t('Classifier type {index}', { index: index + 1 })}
+                value={candidate.type}
+                onchange={(e) => setType(index, e.currentTarget.value as EvalCandidate['type'])}
+              >
+                <option value="jev">Jev · OpenRouter</option>
+                <option value="chat">{$t('Chat model / lane')}</option>
+              </select>
+            </label>
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="field-label">{$t('Model / lane')}</span>
+              <input
+                class="input w-full"
+                aria-label={$t('Classifier model {index}', { index: index + 1 })}
+                bind:value={candidate.model}
+                oninput={() => {
+                  chainDirty = true;
+                  saved = false;
+                }}
+              />
+            </label>
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="field-label">{$t('Candidate timeout (ms)')}</span>
+              <input
+                type="number"
+                class="input w-full"
+                min="1"
+                max="60000"
+                step="1"
+                aria-label={$t('Classifier timeout {index}', { index: index + 1 })}
+                bind:value={candidate.timeout_ms}
+                oninput={() => {
+                  chainDirty = true;
+                  saved = false;
+                }}
+              />
+            </label>
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="field-label">{$t('Minimum confidence')}</span>
+              <input
+                type="number"
+                class="input w-full"
+                min="0"
+                max="1"
+                step="0.01"
+                aria-label={$t('Classifier minimum confidence {index}', { index: index + 1 })}
+                bind:value={candidate.min_confidence}
+                oninput={() => {
+                  chainDirty = true;
+                  saved = false;
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      {/each}
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={chain.length >= 4 || chain.some((c) => c.type === 'jev')}
+          onclick={() => addCandidate('jev')}>{$t('Add Jev')}</button
+        >
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={chain.length >= 4}
+          onclick={() => addCandidate('chat')}>{$t('Add chat classifier')}</button
+        >
+      </div>
+      <p class="field-help">
+        {$t(
+          'Jev uses the configured OpenRouter credential. Test confidence thresholds on your own Chinese and English requests.',
+        )}
+      </p>
+      {#if !chainValid}
+        <p class="text-sm text-red-600" role="alert">
+          {$t(
+            'Use unique classifiers, valid model IDs, positive timeouts up to 60000 ms, and confidence values from 0 to 1.',
+          )}
+        </p>
+      {/if}
+    </fieldset>
+
     <div class="card-actions">
       {#if saved}
         <span class="badge-ok" role="status">{$t('Saved')}</span>
@@ -142,7 +336,7 @@
       <button
         type="button"
         onclick={handleSave}
-        disabled={!thresholdValid || saving}
+        disabled={!thresholdValid || !chainValid || saving}
         class="btn-primary"
       >
         {saving ? $t('Saving…') : $t('Save')}
@@ -201,13 +395,15 @@
     <div class="flex flex-col gap-1">
       <h2 class="section-header">{$t('Eval details')}</h2>
       <p class="section-desc">
-        {$t('The Layer-2 model and its limits. Read-only — configured in')}
+        {$t('Shared evaluation limits. Candidate order is configured above; other limits are in')}
         <code>classifier.yaml</code>.
       </p>
     </div>
     <dl data-testid="eval-details" class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
       <dt class="text-ink-muted">{$t('Model')}</dt>
-      <dd class="font-mono text-ink-strong">{cfg.eval.model}</dd>
+      <dd class="break-all font-mono text-ink-strong">
+        {cfg.eval.chain?.map((c) => c.model).join(' → ') ?? cfg.eval.model}
+      </dd>
       <dt class="text-ink-muted">{$t('Temperature')}</dt>
       <dd class="tabular-nums text-ink-strong">{cfg.eval.temperature}</dd>
       <dt class="text-ink-muted">{$t('Max tokens')}</dt>
@@ -215,7 +411,7 @@
       <dt class="text-ink-muted">{$t('Timeout')}</dt>
       <dd class="tabular-nums text-ink-strong">{formatDurationMs(cfg.eval.timeout_ms)}</dd>
       <dt class="text-ink-muted">{$t('On failure')}</dt>
-      <dd class="text-ink-strong">{cfg.eval.on_failure}</dd>
+      <dd class="text-ink-strong">{$t('System default lane')}</dd>
       <dt class="text-ink-muted">{$t('Cache')}</dt>
       <dd class="text-ink-strong">
         {cfg.eval.cache.enabled ? $t('on') : $t('off')} · ttl {formatDurationMs(

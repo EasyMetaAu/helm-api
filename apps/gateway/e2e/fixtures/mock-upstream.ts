@@ -259,6 +259,7 @@ export function createMockUpstream() {
   // BEFORE any slow-path delay, so a timed-out call still counts (the spec
   // asserts a fail-open is re-called, not cached).
   let evalCallCount = 0;
+  let jevCallCount = 0;
   // OAuth token mints (e2e.oauth). Incremented on every token endpoint POST so the
   // spec can prove a refresh happened (a 401-retry mints a second token).
   let oauthTokenCount = 0;
@@ -278,7 +279,34 @@ export function createMockUpstream() {
   app.get(EVAL_CALL_COUNT_PATH, (c) => c.json({ count: evalCallCount }));
   app.post(EVAL_RESET_PATH, (c) => {
     evalCallCount = 0;
+    jevCallCount = 0;
     return c.json({ ok: true });
+  });
+
+  app.get("/__jev_count", (c) => c.json({ count: jevCallCount }));
+  app.post("/alpha/decisions", async (c) => {
+    jevCallCount += 1;
+    const body = await c.req.json();
+    const text = String(body.state?.last_user_message ?? "");
+    if (text.includes("__JEV_ERROR__")) return c.json({ error: "unavailable" }, 503);
+    if (text.includes("__JEV_SLOW__")) await new Promise((resolve) => setTimeout(resolve, 250));
+    return c.json({
+      model: "typesafe/jev-1.13-20260917",
+      answers: {
+        task_type: {
+          type: "choice",
+          choice:
+            text.includes("__JEV_BAD__") || text.includes("__EVAL_ALL_BAD__") ? "invalid" : "chat",
+          confidence: 0.9,
+        },
+        complexity: {
+          type: "choice",
+          choice: "reasoning",
+          confidence: text.includes("__JEV_LOW__") ? 0.1 : 0.9,
+        },
+      },
+      usage: { input_tokens: 474, output_tokens: 85, cost: 0.000019908 },
+    });
   });
 
   // OAuth token endpoint (e2e.oauth): mint a fresh access token each call. The
@@ -382,6 +410,8 @@ export function createMockUpstream() {
     //    slow sentinel makes it exceed the eval timeout.
     if (promptText.includes(EVAL_PROMPT_MARKER)) {
       evalCallCount += 1; // count BEFORE any delay so timed-out calls still count
+      if (promptText.includes("__EVAL_ALL_BAD__"))
+        return c.json({ choices: [{ message: { content: "{}" } }] });
       if (promptText.includes(EVAL_SLOW_SENTINEL)) {
         await sleep(EVAL_SLOW_DELAY_MS);
       }

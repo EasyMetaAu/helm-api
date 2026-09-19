@@ -1,5 +1,5 @@
 import { ClassifierConfigSchema, type InternalRequest } from "@helm/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildClassifyAdapter, type ProviderForEval } from "./classify.js";
 
 // classify.hotapply — pins the admin.classifier-hotapply contract: the classify
@@ -56,6 +56,63 @@ function makeEvalProvider(
 }
 
 describe("classify adapter — admin classifier hot-apply", () => {
+  it("hot-applies candidate order, caches the actual winner, and falls back to the runtime lane", async () => {
+    const cfg = baseClassifier();
+    cfg.rules.enabled = false;
+    cfg.eval.enabled = true;
+    cfg.eval.chain = [
+      { type: "jev", model: "typesafe/jev-1.13", timeout_ms: 100, min_confidence: 0.6 },
+      { type: "chat", model: "economy", timeout_ms: 200, min_confidence: 0 },
+    ];
+    const { provider, calls } = makeEvalProvider(() => ({
+      complexity: "complex",
+      task_type: "coding",
+      confidence: 0.9,
+    }));
+    const invokeDecisions = vi.fn(async () => ({
+      text: JSON.stringify({ complexity: "simple", task_type: "chat", confidence: 0.9 }),
+      model: "typesafe/jev-1.13-20260917",
+      cost_usd: 0.00002,
+    }));
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider,
+      invokeDecisions,
+      now: Date.now,
+      log: () => {},
+      defaultLane: () => "premium",
+    });
+    expect(await classify(req("same input"))).toMatchObject({
+      eval_model: "typesafe/jev-1.13-20260917",
+      eval_cache_hit: false,
+    });
+    expect(await classify(req("same input"))).toMatchObject({
+      eval_model: "typesafe/jev-1.13-20260917",
+      eval_cache_hit: true,
+    });
+    expect(calls.n).toBe(0);
+    cfg.eval.chain.reverse();
+    expect(await classify(req("same input"))).toMatchObject({
+      eval_model: "economy",
+      eval_cache_hit: false,
+    });
+    expect(calls.n).toBe(1);
+    cfg.eval.chain.reverse();
+    invokeDecisions.mockRejectedValue(new Error("offline"));
+    expect(await classify(req("other input"))).toMatchObject({
+      eval_model: "economy",
+      decided_by: "eval",
+    });
+    provider.chatCompletion = async () => {
+      throw new Error("offline");
+    };
+    expect(await classify(req("all offline"))).toMatchObject({
+      decided_by: "fallback",
+      fallback_reason: "eval_provider_error",
+    });
+  });
+
   it("skips Layer 1 immediately when rules.enabled is turned off", async () => {
     const cfg = baseClassifier();
     cfg.rules.enabled = false;

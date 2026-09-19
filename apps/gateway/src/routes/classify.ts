@@ -144,6 +144,11 @@ export interface ClassifyAdapterDeps {
   /** Provider used to invoke the internal eval small-model (same upstream, eval
    *  alias). Only its non-stream `chatCompletion` is used. */
   provider: ProviderForEval;
+  invokeDecisions?: (
+    input: ClassifierInput,
+    model: string,
+    signal: AbortSignal,
+  ) => Promise<EvalModelResponse>;
   now: () => number;
   /** Structured log sink (safe fields only). */
   log: (level: string, msg: string, fields: Record<string, unknown>) => void;
@@ -256,7 +261,8 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       // it and relies on the outer guard, byte-identical to before.
       { signal, attemptTimeoutMs },
     );
-    // Extract the assistant text from an OpenAI-shaped completion (defensive).
+    // Extract the assistant text and actual evaluator model from an OpenAI-shaped completion (defensive).
+    const responseModel = (res as { model?: unknown }).model;
     const choices = (res as { choices?: unknown }).choices;
     let text = "";
     if (Array.isArray(choices) && choices[0]) {
@@ -269,8 +275,12 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
     // `usage.cost` / top-level `cost_usd`); otherwise convert the eval call's OWN
     // token usage × the catalog pricing for the eval model. Missing both → null
     // (unknown, not a measured 0), no crash.
-    const costUsd = resolveCostUsd(catalog?.get(modelReq.model)?.pricing, res);
-    return { text, cost_usd: costUsd };
+    const servedModel =
+      typeof responseModel === "string" && responseModel.length > 0 ? responseModel : undefined;
+    const pricing =
+      catalog?.get(servedModel ?? modelReq.model)?.pricing ?? catalog?.get(modelReq.model)?.pricing;
+    const costUsd = resolveCostUsd(pricing, res);
+    return { text, cost_usd: costUsd, ...(servedModel ? { model: servedModel } : {}) };
   };
 
   return async (req: InternalRequest, overrides?: ClassifyOverrides): Promise<Classification> => {
@@ -320,6 +330,7 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
         runEvalCached(cacheInput, {
           config: evalCfg,
           invokeModel,
+          invokeDecisions: deps.invokeDecisions,
           buildPrompt: () => buildEvalPrompt(req),
           now,
           log: (e) =>
@@ -356,7 +367,7 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       // lives ONLY here (the cascade is model-agnostic), so stamp it whenever eval
       // actually ran — covering both a decided eval and one that ran then failed open
       // (result.eval_used is true in both). null when eval never ran.
-      eval_model: result.eval_used ? evalCfg.model : null,
+      eval_model: result.eval_used ? (result.eval_model ?? evalCfg.model) : null,
       eval_latency_ms: result.eval_latency_ms,
       fallback_reason: result.fallback_reason ?? null,
       constraints: {

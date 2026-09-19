@@ -26,6 +26,20 @@ export const EvalCacheConfigSchema = z.object({
   max_entries: z.number().int().positive().default(5000),
 });
 
+// Optional ordered chain; absence preserves the legacy single chat evaluator.
+export const EvalCandidateSchema = z
+  .strictObject({
+    type: z.enum(["chat", "jev"]),
+    model: z.string().trim().min(1).max(200),
+    timeout_ms: z.number().int().positive().max(60_000),
+    min_confidence: z.number().min(0).max(1),
+  })
+  .refine((c) => c.type !== "jev" || /^~?typesafe\/jev-[a-zA-Z0-9.-]+$/.test(c.model), {
+    message: "Jev candidates require an OpenRouter typesafe/jev-* model ID",
+    path: ["model"],
+  });
+export type EvalCandidate = z.infer<typeof EvalCandidateSchema>;
+
 export const EvalConfigSchema = z
   .object({
     // OFF by default — non-negotiable. No .default(true); explicit false.
@@ -33,6 +47,15 @@ export const EvalConfigSchema = z
     // Internal small-model alias, e.g. deepseek/deepseek-v4-flash. Required: a
     // missing model fails closed (an enabled eval with no model is a lie).
     model: z.string().min(1),
+    chain: z
+      .array(EvalCandidateSchema)
+      .min(1)
+      .max(4)
+      .refine(
+        (chain) => new Set(chain.map((c) => `${c.type}:${c.model}`)).size === chain.length,
+        "Classifier candidates must be unique",
+      )
+      .optional(),
     // Determinism: locked to 0 (principle 4). A non-zero value fails closed.
     temperature: z.literal(0).default(0),
     // Capped at 1024 to bound per-call cost at scale (research-notes probe gap).

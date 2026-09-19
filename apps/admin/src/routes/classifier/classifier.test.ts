@@ -151,13 +151,40 @@ describe('classifier page', () => {
     renderPage(config());
     const details = screen.getByTestId('eval-details');
     expect(within_text(details, 'deepseek/deepseek-v4-flash')).toBe(true);
-    expect(within_text(details, 'balanced')).toBe(true);
+    expect(within_text(details, 'System default lane')).toBe(true);
     expect(within_text(details, '6.9s')).toBe(true);
     expect(within_text(details, 'ttl 1.5min')).toBe(true);
     // temperature is locked to 0 and surfaced.
     expect(within_text(details, '0')).toBe(true);
     // No editable controls in the read-only eval detail block.
     expect(details.querySelectorAll('input, select, textarea')).toHaveLength(0);
+  });
+
+  it('adds Jev first, reorders it behind chat, and saves both candidates', async () => {
+    renderPage(config());
+    await fireEvent.click(screen.getByRole('button', { name: 'Add Jev' }));
+    expect(screen.getByLabelText('Classifier model 1')).toHaveValue('typesafe/jev-1.13');
+    expect(screen.getByLabelText('Classifier model 2')).toHaveValue('deepseek/deepseek-v4-flash');
+    await fireEvent.click(screen.getByRole('button', { name: 'Move classifier 1 down' }));
+    expect(screen.getByLabelText('Classifier model 2')).toHaveValue('typesafe/jev-1.13');
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+    await waitFor(() =>
+      expect(saveClassifier).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eval_chain: [
+            expect.objectContaining({ type: 'chat' }),
+            expect.objectContaining({ type: 'jev' }),
+          ],
+        }),
+      ),
+    );
+  });
+
+  it('blocks saving empty model IDs and duplicate candidates', async () => {
+    renderPage(config());
+    await fireEvent.input(screen.getByLabelText('Classifier model 1'), { target: { value: '' } });
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
+    expect(saveClassifier).not.toHaveBeenCalled();
   });
 
   it('on save failure shows an error and keeps the original values (no dirty write)', async () => {

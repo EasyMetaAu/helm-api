@@ -1,9 +1,11 @@
+import type { EvalCandidate } from '@helm/shared';
+
 // Admin classifier API client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and runs
 // NO classification (CLAUDE.md Principle 1). The server round-trips the FULL classifier
 // config (ClassifierConfigSchema, the single source of truth); this client
-// projects that into a small read-only UI view and, on save, merges the two
-// editable knobs (eval on/off, rules.confidence_threshold) back onto the current
+// projects that into a small read-only UI view and, on save, merges the editable
+// settings (eval on/off, ordered candidates, rules.confidence_threshold) back onto the current
 // server config and PUTs the whole object — so untouched data (dimensions,
 // boundaries, eval details) is never dropped. See docs/03 + docs/11.
 
@@ -24,7 +26,9 @@ export interface ClassifierConfig {
   };
   eval: {
     enabled: boolean; // editable: turn eval on/off
-    model: string; // read-only
+    model: string; // legacy single evaluator
+    chain?: EvalCandidate[]; // ordered fallback candidates
+    outer_timeout_ms?: number;
     temperature: number; // read-only (locked 0)
     max_tokens: number; // read-only
     timeout_ms: number; // read-only
@@ -80,6 +84,8 @@ function project(server: Record<string, unknown>): ClassifierConfig {
     eval: {
       enabled: evalCfg.enabled === true,
       model: typeof evalCfg.model === 'string' ? evalCfg.model : '',
+      chain: evalCfg.chain as EvalCandidate[] | undefined,
+      outer_timeout_ms: num(evalCfg.outer_timeout_ms, 8000),
       temperature: num(evalCfg.temperature, 0),
       max_tokens: num(evalCfg.max_tokens, 256),
       timeout_ms: num(evalCfg.timeout_ms, 250),
@@ -99,10 +105,11 @@ export async function getClassifier(): Promise<ClassifierConfig> {
 // PUT /admin/api/classifier <- the FULL config. The server schema is the source
 // of truth and validates the whole object (out-of-range threshold -> 400, config
 // unchanged: fail-closed, Principle 2). We re-read the current config, apply only the
-// two editable knobs, and write the merged object back so no server-only field is
+// editable settings, and write the merged object back so no server-only field is
 // lost. Returns the projected, persisted view.
 export async function saveClassifier(patch: {
   eval_enabled?: boolean;
+  eval_chain?: EvalCandidate[];
   confidence_threshold?: number;
 }): Promise<ClassifierConfig> {
   const getRes = await fetch(BASE, { headers: { accept: 'application/json' } });
@@ -118,6 +125,8 @@ export async function saveClassifier(patch: {
   if (patch.eval_enabled !== undefined) {
     next.eval.enabled = patch.eval_enabled;
   }
+
+  if (patch.eval_chain !== undefined) next.eval.chain = patch.eval_chain;
 
   const putRes = await fetch(BASE, {
     method: 'PUT',

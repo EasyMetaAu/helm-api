@@ -57,6 +57,7 @@ export interface EvalModelRequest {
 export interface EvalModelResponse {
   text: string;
   cost_usd?: number | null;
+  model?: string;
 }
 
 /** Reason an eval call did not yield a decision — all fail-open to balanced
@@ -66,11 +67,13 @@ export type EvalFailReason =
   | "provider_error"
   | "circuit_open"
   | "not_json"
-  | "schema_invalid";
+  | "schema_invalid"
+  | "low_confidence";
 
-export type EvalDecision =
+export type EvalDecision = { model?: string } & (
   | { decided: true; output: EvalOutput; latency_ms: number; cost_usd: number | null }
-  | { decided: false; reason: EvalFailReason; latency_ms: number };
+  | { decided: false; reason: EvalFailReason; latency_ms: number; cost_usd?: number | null }
+);
 
 /** Structured telemetry event — safe fields ONLY (principle 7). Never extend
  *  this with prompt / message / raw-output content. */
@@ -95,6 +98,12 @@ export interface EvalClientDeps<TInput> {
     signal: AbortSignal,
     attemptTimeoutMs: number,
   ) => Promise<EvalModelResponse>;
+  /** Typed Decisions transport. Injected separately from the chat execution path. */
+  invokeDecisions?: (
+    input: TInput,
+    model: string,
+    signal: AbortSignal,
+  ) => Promise<EvalModelResponse>;
   /** Pure prompt builder; runEval never inspects TInput itself. */
   buildPrompt: (input: TInput) => EvalModelRequest["messages"];
   /** Injected clock for deterministic latency / timeout assertions. */
@@ -107,18 +116,13 @@ export interface EvalClientDeps<TInput> {
 // with a legitimate model response.
 const TIMEOUT = Symbol("eval_timeout");
 
-function timeoutAfter(ms: number): Promise<typeof TIMEOUT> {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(TIMEOUT), ms);
-  });
-}
-
 /**
  * Run a Layer-2 eval. Returns a decision or a fail-open signal; NEVER throws.
  */
-export async function runEval<TInput>(
+async function runSingleEval<TInput>(
   input: TInput,
   deps: EvalClientDeps<TInput>,
+  minConfidence = 0,
 ): Promise<EvalDecision> {
   const { config, invokeModel, buildPrompt, now, log } = deps;
   const start = now();
@@ -126,7 +130,7 @@ export async function runEval<TInput>(
 
   const finish = (decision: EvalDecision): EvalDecision => {
     log({
-      model: config.model,
+      model: decision.model ?? config.model,
       latency_ms: decision.latency_ms,
       decided: decision.decided,
       reason: decision.decided ? null : decision.reason,
@@ -149,6 +153,7 @@ export async function runEval<TInput>(
   };
 
   let raced: EvalModelResponse | typeof TIMEOUT;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     // The loopback call races the TOTAL outer budget. config.timeout_ms is NOT an
     // inner race here — it is forwarded to invokeModel as the PER-CANDIDATE deadline
@@ -158,7 +163,9 @@ export async function runEval<TInput>(
     // the total budget we abort and fail open (balanced), never hanging the hot path.
     raced = await Promise.race([
       invokeModel(request, controller.signal, config.timeout_ms),
-      timeoutAfter(config.outer_timeout_ms),
+      new Promise<typeof TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT), config.outer_timeout_ms);
+      }),
     ]);
   } catch (err) {
     // The upstream call rejected. Abort (defensive) and classify the failure.
@@ -169,6 +176,8 @@ export async function runEval<TInput>(
     // AbortError and any other provider error are fail-open; abort is not a
     // counted fault (handled at the execution layer, not here).
     return finish({ decided: false, reason: "provider_error", latency_ms: elapsed() });
+  } finally {
+    clearTimeout(timer);
   }
 
   if (raced === TIMEOUT) {
@@ -177,16 +186,74 @@ export async function runEval<TInput>(
     return finish({ decided: false, reason: "timeout", latency_ms: elapsed() });
   }
 
+  const cost =
+    typeof raced.cost_usd === "number" && Number.isFinite(raced.cost_usd) && raced.cost_usd >= 0
+      ? raced.cost_usd
+      : null;
   const parsed = parseEvalOutput(raced.text);
   if (!parsed.ok) {
-    return finish({ decided: false, reason: parsed.reason, latency_ms: elapsed() });
+    return finish({ decided: false, reason: parsed.reason, latency_ms: elapsed(), cost_usd: cost });
+  }
+  if (parsed.value.confidence < minConfidence) {
+    return finish({
+      decided: false,
+      reason: "low_confidence",
+      latency_ms: elapsed(),
+      cost_usd: cost,
+    });
   }
   return finish({
+    ...(raced.model ? { model: raced.model } : {}),
     decided: true,
     output: parsed.value,
     latency_ms: elapsed(),
     // Layer-2 self-cost from the model response when the provider reported it;
     // null otherwise (unknown, not a measured 0). Kept separate from completion.
-    cost_usd: typeof raced.cost_usd === "number" ? raced.cost_usd : null,
+    cost_usd: cost,
   });
+}
+
+/** Each classifier gets a bounded turn; the whole chain shares the outer budget. */
+export async function runEval<TInput>(
+  input: TInput,
+  deps: EvalClientDeps<TInput>,
+): Promise<EvalDecision> {
+  if (!deps.config.chain) return runSingleEval(input, deps);
+  const start = deps.now();
+  let cost = 0;
+  let unknownCost = false;
+  let last: EvalDecision = { decided: false, reason: "timeout", latency_ms: 0 };
+  for (const candidate of deps.config.chain) {
+    const remaining = deps.config.outer_timeout_ms - Math.max(0, deps.now() - start);
+    if (remaining <= 0) break;
+    const result = await runSingleEval(
+      input,
+      {
+        ...deps,
+        config: {
+          ...deps.config,
+          model: candidate.model,
+          outer_timeout_ms: Math.min(candidate.timeout_ms, remaining),
+        },
+        invokeModel:
+          candidate.type === "chat"
+            ? deps.invokeModel
+            : async (_req, signal) => {
+                if (!deps.invokeDecisions) throw new Error("Decisions provider unavailable");
+                return deps.invokeDecisions(input, candidate.model, signal);
+              },
+      },
+      candidate.min_confidence,
+    );
+    if (result.cost_usd == null) unknownCost = true;
+    else cost += result.cost_usd;
+    last = {
+      ...result,
+      model: result.model ?? candidate.model,
+      latency_ms: Math.max(0, deps.now() - start),
+      cost_usd: unknownCost ? null : cost,
+    };
+    if (last.decided) return last;
+  }
+  return last;
 }

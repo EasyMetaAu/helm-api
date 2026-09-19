@@ -164,6 +164,27 @@ entirely, including momentum reads and writes. With eval enabled the request goe
 straight to Layer 2; with both layers disabled it uses the terminal fallback and
 records `rules_and_eval_disabled`.
 
+## Ordered Layer-2 classifiers
+
+The optional `eval.chain` list controls Layer 2 when more than one evaluator is configured. Candidates run in order and share `eval.outer_timeout_ms`; each candidate has its own `timeout_ms` and `min_confidence`. A Jev candidate uses OpenRouter's Decisions endpoint and a chat candidate uses Helm's existing non-streaming JSON evaluator. A provider error, timeout, invalid answer, or below-threshold confidence advances to the next candidate. Only when all candidates fail does classification fall open to the runtime default lane.
+
+The admin Classifier page writes this list without changing provider credentials. The legacy `eval.model` path remains valid when `eval.chain` is absent.
+
+```yaml
+# Optional fields inside classifier.eval; keep the existing model and other limits.
+chain:
+  - type: jev
+    model: typesafe/jev-1.13
+    timeout_ms: 1000
+    min_confidence: 0.6
+  - type: chat
+    model: economy
+    timeout_ms: 5000
+    min_confidence: 0
+```
+
+Jev reads the configured `openrouter` provider's environment credential. It sends the same five-field canonical input used for cache keys and two typed Choice questions. The lower task/complexity confidence must meet the candidate threshold; 0.6 is a starting value, not a calibrated accuracy claim. Requests over a conservative 32,000-byte input ceiling fall through to the next candidate. Chat-only generation parameters (`temperature`, `max_tokens`, `extra_body`) do not enter the Decisions request. Successful results retain their actual evaluator model in the cache. Costs across attempts are summed only when every attempt's cost is known; otherwise total eval cost remains unknown.
+
 ## Layer 2: small-model eval
 
 When Layer 1 is uncertain—or deliberately disabled—and `eval.enabled` is true, a
