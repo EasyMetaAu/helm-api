@@ -197,8 +197,10 @@ export interface GenericOpenAIResponsesRequestContract {
   // back on the way out. Opt-in: the public OpenAI contract supports custom tools.
   translateUnsupportedCustomTools?: boolean;
   // DeepSeek thinking mode 400s unless every reasoning item in a tool-call
-  // transcript carries plaintext `reasoning_text`. Codex-from-OpenAI history
-  // only has an encrypted blob the gateway cannot decrypt; live probe: setting
+  // transcript carries plaintext `reasoning_text`. History with no reasoning
+  // items (including translated Chat tool history) needs the same downgrade.
+  // Codex-from-OpenAI history only has an encrypted blob the gateway cannot
+  // decrypt; live probe: setting
   // `reasoning.effort: "none"` succeeds and still returns tool calls, while
   // `thinking: {type:"disabled"}` does not. Opt-in, and only for that shape —
   // never invent plaintext, never touch a body that already has readable
@@ -697,9 +699,8 @@ function reasoningItemHasPlaintext(item: Record<string, unknown>): boolean {
 
 /**
  * True when the body would 400 on DeepSeek's thinking-mode reasoning echo:
- * there is tool-call history, there is at least one reasoning item, and at
- * least one of those items has no plaintext `reasoning_text` (typically an
- * OpenAI `encrypted_content` blob).
+ * there is tool-call history but reasoning items are absent or at least one
+ * has no plaintext `reasoning_text` (typically an OpenAI encrypted blob).
  */
 function shouldDisableThinkingForOpaqueReasoning(body: Record<string, unknown>): boolean {
   if (!Array.isArray(body.input)) return false;
@@ -713,7 +714,7 @@ function shouldDisableThinkingForOpaqueReasoning(body: Record<string, unknown>):
     hasReasoning = true;
     if (!reasoningItemHasPlaintext(item)) hasOpaqueReasoning = true;
   }
-  return hasToolHistory && hasReasoning && hasOpaqueReasoning;
+  return hasToolHistory && (!hasReasoning || hasOpaqueReasoning);
 }
 
 /**
