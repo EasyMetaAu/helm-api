@@ -2,6 +2,8 @@ import type { EvalOutput } from "@helm/shared";
 import { buildEvalCacheKey, type ClassifierInput } from "./cache-key.js";
 import { type EvalClientDeps, type EvalDecision, runEval } from "./client.js";
 
+type CachedEvalOutput = EvalOutput & { eval_model?: string };
+
 // eval.cache — an in-process TTL + LRU container plus the `runEvalCached`
 // wrapper. eval is a costly, latency-bearing network call; repeating it for the
 // same (or essentially the same) request is waste. We key by the content-hash
@@ -17,14 +19,14 @@ import { type EvalClientDeps, type EvalDecision, runEval } from "./client.js";
 
 export interface EvalCache {
   /** Hit (and fresh) → the cached output; expired or absent → undefined. */
-  get(key: string, nowMs: number): EvalOutput | undefined;
+  get(key: string, nowMs: number): CachedEvalOutput | undefined;
   /** Insert with expireAt = nowMs + ttl; evicts the LRU entry past capacity. */
-  set(key: string, value: EvalOutput, nowMs: number): void;
+  set(key: string, value: CachedEvalOutput, nowMs: number): void;
   readonly size: number;
 }
 
 interface Entry {
-  value: EvalOutput;
+  value: CachedEvalOutput;
   expireAt: number;
 }
 
@@ -102,12 +104,24 @@ export async function runEvalCached(
   if (cached !== undefined) {
     // Cache hit → no new model call, so NO incremental eval self-cost (cost_usd
     // null, not a stale figure: the cost was already counted when first run).
-    return { decided: true, output: cached, latency_ms: 0, cost_usd: null, cache_hit: true };
+    const { eval_model, ...output } = cached;
+    return {
+      decided: true,
+      output,
+      ...(eval_model ? { model: eval_model } : {}),
+      latency_ms: 0,
+      cost_usd: null,
+      cache_hit: true,
+    };
   }
 
   const decision = await runEvalImpl(input, clientDeps);
   if (decision.decided) {
-    cache.set(key, decision.output, nowMs);
+    cache.set(
+      key,
+      { ...decision.output, ...(decision.model ? { eval_model: decision.model } : {}) },
+      nowMs,
+    );
   }
   return { ...decision, cache_hit: false };
 }

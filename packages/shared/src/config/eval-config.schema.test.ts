@@ -143,3 +143,27 @@ describe("EvalConfigSchema", () => {
     expectTypeOf<EvalConfig>().toEqualTypeOf<z.infer<typeof EvalConfigSchema>>();
   });
 });
+
+describe("ordered eval chain", () => {
+  const chain = [
+    { type: "jev", model: "typesafe/jev-1.13", timeout_ms: 1000, min_confidence: 0.6 },
+    { type: "chat", model: "economy", timeout_ms: 5000, min_confidence: 0 },
+  ];
+  it("round trips the chain and preserves legacy configs", () => {
+    expect(EvalConfigSchema.parse({ ...fullEval(), chain }).chain).toEqual(chain);
+    expect(EvalConfigSchema.parse(fullEval()).chain).toBeUndefined();
+  });
+  it.each(
+    [
+      [],
+      [{ ...chain[0], type: "unknown" }],
+      [{ ...chain[0], model: "economy" }],
+      [{ ...chain[0], timeout_ms: 0 }],
+      [{ ...chain[0], min_confidence: 1.1 }],
+      [{ ...chain[1], api_key: "never store keys here" }],
+      [chain[0], chain[0]],
+    ].map((chain) => ({ chain })),
+  )("rejects invalid or duplicate candidates", ({ chain }) => {
+    expect(EvalConfigSchema.safeParse({ ...fullEval(), chain }).success).toBe(false);
+  });
+});

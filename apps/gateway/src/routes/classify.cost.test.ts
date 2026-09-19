@@ -103,6 +103,42 @@ describe("classify adapter — eval self-cost from usage × catalog pricing", ()
     expect(cls.eval_usd).toBeCloseTo(0.00012, 12);
   });
 
+  it("attributes chat fallback to its served model and uses that model's pricing", async () => {
+    const cfg = classifierCfg();
+    cfg.eval.chain = [{ type: "chat", model: "economy", timeout_ms: 300, min_confidence: 0 }];
+    const base = evalProviderWithUsage(400, 100);
+    const logs: unknown[] = [];
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider: {
+        chatCompletion: async (...args) => ({
+          ...((await base.chatCompletion(...args)) as object),
+          model: "served-model",
+        }),
+      },
+      now: Date.now,
+      log: (_level, _message, fields) => {
+        logs.push(fields);
+      },
+      catalog: new Map([
+        [
+          "served-model",
+          priced("served-model", {
+            inputPerMTokUsd: 0.15,
+            outputPerMTokUsd: 0.6,
+            cacheReadPerMTokUsd: null,
+            cacheWritePerMTokUsd: null,
+          }),
+        ],
+      ]),
+    });
+    const result = await classify(req("write a compiler"));
+    expect(result.eval_model).toBe("served-model");
+    expect(result.eval_usd).toBeCloseTo(0.00012, 12);
+    expect(logs).toContainEqual(expect.objectContaining({ model: "served-model" }));
+  });
+
   it("records eval_usd = null (no crash) when the eval model has no pricing entry", async () => {
     const classify = buildClassifyAdapter({
       getClassifierConfig: classifierCfg,

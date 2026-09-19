@@ -24,6 +24,7 @@ import {
   createDistributedKeyedSemaphore,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
+  createJevInvoker,
   createKeyedSemaphore,
   createKeyedSerialGate,
   createMemoryMomentumStore,
@@ -3330,6 +3331,7 @@ export async function buildServer(
           isLane: (m) => Object.hasOwn(lanes, m),
         })
       : null;
+  const decisionsProvider = config.providers.find((p) => p.name === "openrouter");
   const classify = buildClassifyAdapter({
     getClassifierConfig: () => classifierConfig,
     lanes,
@@ -3339,6 +3341,11 @@ export async function buildServer(
     // When routing internal LLM calls through the gateway, the eval model goes via the
     // self-HTTP client (visible in /admin/requests); else straight to the primary provider.
     provider: selfHttpClient ?? provider,
+    invokeDecisions: createJevInvoker({
+      apiKey: () =>
+        decisionsProvider?.api_key_env ? process.env[decisionsProvider.api_key_env] : undefined,
+      baseUrl: baseUrlOverride ?? decisionsProvider?.base_url,
+    }),
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
     momentum: { store: momentumStore },

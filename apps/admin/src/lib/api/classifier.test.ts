@@ -113,6 +113,25 @@ describe('classifier api client', () => {
     expect(body.rules.dimensions.code_density.weight).toBe(0.3);
   });
 
+  it('saves ordered candidates without dropping legacy model or other config', async () => {
+    const chain = [
+      { type: 'jev' as const, model: 'typesafe/jev-1.13', timeout_ms: 1000, min_confidence: 0.6 },
+      { type: 'chat' as const, model: 'economy', timeout_ms: 5000, min_confidence: 0 },
+    ];
+    const fetchMock = fetch as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(Response.json(serverConfig()))
+      .mockImplementation((_url: string, init: RequestInit) =>
+        Promise.resolve(new Response(init.body as string)),
+      );
+    const saved = await saveClassifier({ eval_chain: chain });
+    expect(saved.eval.chain).toEqual(chain);
+    const body = JSON.parse(String(fetchMock.mock.calls[1]?.[1].body));
+    expect(body.eval.model).toBe('deepseek/deepseek-v4-flash');
+    expect(body.eval.chain).toEqual(chain);
+    expect(body.rules.dimensions.code_density.weight).toBe(0.3);
+  });
+
   it('saveClassifier rejects when the PUT returns a non-2xx (fail-closed)', async () => {
     const fetchMock = fetch as ReturnType<typeof vi.fn>;
     fetchMock

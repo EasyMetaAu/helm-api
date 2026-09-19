@@ -57,6 +57,8 @@ export {
 export {
   type EvalCacheConfig,
   EvalCacheConfigSchema,
+  type EvalCandidate,
+  EvalCandidateSchema,
   type EvalConfig,
   EvalConfigSchema,
 } from "./config/eval-config.schema.js";
