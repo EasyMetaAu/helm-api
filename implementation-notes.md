@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-19 · DeepSeek 工具图片保留结构并压缩（Provider / 协议互译，docs/05，原则 8）
+
+- **根因与修复**：Codex `exec` 的工具结果包含 `input_image` 数组，旧的 custom → function 转换把整个数组 JSON 字符串化，使图片 Base64 被当成文本计入上下文。保留字符串或内容数组；其他旧式对象仍按原逻辑序列化。[DeepSeek 官方 Responses 文档](https://api-docs.deepseek.com/guides/responses_api)明确支持工具结果中的图片数组。
+- **压缩与边界**：DeepSeek 合同发送前复用现有图片优化器：最长边 2048、WebP quality 82，仅采用比原图更小的结果；不改调用方原始图片，不下载外部 URL。沿用内存准入、取消信号、单图 1600 万像素、每请求 12 张/累计 3200 万像素上限；超限、资源不足或解码失败保留原图。压缩是有界尽力优化，结构修复始终生效。其他 provider 不启用此处理。
+- **验证范围**：流式/非流式回归先红后绿，覆盖图片结构、压缩、原数据保留和普通 Responses 客户端隔离；未将本地验证当成生产部署或真实上游验收。
+
 ## 2026-09-19 · 分类器支持 Jev → 聊天模型的有序回退（Classifier，docs/03）
 
 - **配置与兼容**：新增可选 `eval.chain`，逐项配置类型、模型/通道、超时和最低置信度；未配置时保留旧 `eval.model` 行为。分类器页面可添加、排序、删除候选，保存后热更新并清空旧配置缓存，不默认替生产启用 Jev。
@@ -53,19 +59,13 @@
 - **修复**：Codex 发送前（`sanitizeCodexResponsesNativeBody` + Lite canonicalizer）删掉**不以 `gAAAAA` 开头**的 `encrypted_content`，保留明文 `content` / `summary`。没有明文的外源 reasoning item 整条丢掉。OpenAI 自己的 blob 不动。不发明明文，不改 rung。
 - **为何只认 `gAAAAA`**：那是 OpenAI Fernet 密文的稳定前缀；DeepSeek 回的是 UUID 形。Lite 旧规则是「有密文就清空明文」——对这条 DeepSeek 项会把唯一可读的思考清掉、把外源密文留下，正好把 400 钉死，所以剥密文必须在那条规则之前。
 
-## 2026-09-18 · 取消 Responses 首帧 15s 超时（Provider execution，docs/04/05，原则 5/8）
-
-- **现象**：v0.29.23 上线后，真实 Codex 请求在 `response.created` 之后、第一帧真实输出之前被切掉。Admin 显示「错误 15s 通道不可用」，`response_create_outcome_unknown` / `after_response_created_before_output`。15s 对思考或工具准备过短。
-- **修复**：执行层不再默认 `firstOutputTimeoutMs: 15_000`。生产路径不设这个上限；测试缝仍可显式传入（单测用 40ms）。`guardPreOutputFailure` 本身的 deadline 能力保留，省略或 ≤0 即关闭，与原先契约一致。
-- **保留**：in-band 前导错误仍会 fallback；Responses 的 `response.created` 后不明结果仍禁止重放。不改 rung。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-17 · DeepSeek 缺明文 reasoning 时关掉思考，不伪造思考内容（Provider / 协议互译，docs/05，原则 3/8）**：外源 reasoning 缺明文时关闭 DeepSeek 思考，不伪造内容；完整记录见 git history。
+- **2026-09-18 · 取消 Responses 首帧 15s 超时（Provider execution，docs/04/05，原则 5/8）**：生产执行层不再默认限制首个真实输出为 15s；in-band 错误 fallback 与结果不明禁止重放保留，完整记录见 git history。
 
 ## 更早历史总览
 
-2026-09-17 的首字节超时、Lite reasoning、候选链解释、DSML 工具兼容、DeepSeek Responses、观测字段等记录已压缩，完整原文可从本次变更之前的 Git 历史回溯。
+2026-09-17 的外源 reasoning 缺明文时关闭 DeepSeek 思考、首字节超时、Lite reasoning、候选链解释、DSML 工具兼容、DeepSeek Responses、观测字段等记录已压缩，完整原文可从本次变更之前的 Git 历史回溯。
 
 2026-09-06：Codex 模型发现使用上游 client_version 和可选 base_instructions；订阅模型自动/手动列表统一依据官方目录与数据库权威，完整记录见 Git history。
 
