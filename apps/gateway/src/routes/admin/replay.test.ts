@@ -591,7 +591,16 @@ describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
       stream: null,
       error: null,
     });
-    const body = { model: "gpt-5.5", input: "say hi", max_output_tokens: 16 };
+    const body = {
+      model: "gpt-5.5",
+      max_output_tokens: 16,
+      input: [
+        { role: "user", content: "say hi" },
+        { type: "reasoning", encrypted_content: "gAAAAAopaque", summary: [] },
+        { type: "custom_tool_call", call_id: "c1", name: "exec", input: "test" },
+        { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+      ],
+    };
     const out = await runReplay(
       {
         replay: wiring(route, rec),
@@ -602,6 +611,11 @@ describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
     );
     expect(out).toEqual({ ok: true, traceId: "new_trace" });
     expect(rec.routeCalls[0]?.req.protocol).toBe("openai_responses");
+    expect(rec.routeCalls[0]?.req.native_request).toMatchObject({
+      protocol: "openai_responses",
+      body,
+      headers: {},
+    });
     // Native Responses envelope (`object: "response"`), NOT the raw OpenAI body.
     const resp = JSON.parse(rec.payloads[0]?.responseJson ?? "{}");
     expect(resp.object).toBe("response");

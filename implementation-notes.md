@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-20 · DeepSeek 缺失思考历史降级与管理端原生重放（Provider / Admin，docs/05）
+
+- **已确认的缺口**：工具历史完全没有 reasoning item 时，旧保护未关闭 DeepSeek 思考；管理端 Retry 丢失原生 Responses carrier，经 IR 往返会丢掉 reasoning/custom tool 历史，已实测触发 reasoning_text 400。
+- **修复**：复用原有请求合同，将「有工具历史但无 reasoning」纳入 `reasoning.effort: none`；有明文的完整 reasoning 历史继续保留原设置，不编造思考。Responses Retry 复用 live route 的 carrier helper，保留原始 body，headers 为空，不转发管理端鉴权。
+- **验证与限制**：三项回归先红后绿，相关两文件共 284 测试通过，core/gateway 类型检查通过；真实 DeepSeek 接受无 reasoning 工具历史配合 effort none。原失败 `a374e50b` 的原生请求当前经公开网关重放成功（`b5b2de1c`，单 token 上限），因此本次补齐两个已证实缺口，不把它们断言为该历史失败的根因。
+
 ## 2026-09-19 · DeepSeek 工具图片保留结构并压缩（Provider / 协议互译，docs/05，原则 8）
 
 - **根因与修复**：Codex `exec` 的工具结果包含 `input_image` 数组，旧的 custom → function 转换把整个数组 JSON 字符串化，使图片 Base64 被当成文本计入上下文。保留字符串或内容数组；其他旧式对象仍按原逻辑序列化。[DeepSeek 官方 Responses 文档](https://api-docs.deepseek.com/guides/responses_api)明确支持工具结果中的图片数组。
@@ -53,17 +59,13 @@
 - **现象**：v0.29.25 剥掉 `d8b7…8a-0` 后，同会话 `ffc6d4d6` 仍 400：`Invalid 'input[483].content': array too long. Expected … 0, but got … 1`（`array_above_max_length`）。mutation 已有 `foreign_encrypted_content_stripped`，失败项仍带着 DeepSeek 的 `reasoning_text`。Lite 不允许 reasoning `content` 非空；OpenAI 自己的项 `content` 是 `null`，明文只在 `summary`（`summary_text`）。
 - **修复**：剥外源密文后，把 leftover `reasoning_text` 折进空的 `summary`，再把 `content` 清成 `[]`。已有 `summary` 不覆盖。Lite canonicalizer 对无 `gAAAAA` 的 reasoning 走同一折法；OpenAI blob 仍只清 content、不动 summary。不发明明文，不改 rung。
 
-## 2026-09-18 · Codex 回放前剥掉外源 encrypted_content（Provider / 协议互译，docs/05，原则 3/8）
-
-- **现象**：DeepSeek 成功后再打 `openai-codex/gpt-6-astra`，上游 400 `invalid_encrypted_content`。生产 `a8b37bb9`：历史 107 条 reasoning 里 106 条是 OpenAI 的 `gAAAAA…`，恰好 1 条是 DeepSeek 的 `d8b79690-…-0`，并带明文 `reasoning_text`。OpenAI 解不开别家密文。
-- **修复**：Codex 发送前（`sanitizeCodexResponsesNativeBody` + Lite canonicalizer）删掉**不以 `gAAAAA` 开头**的 `encrypted_content`，保留明文 `content` / `summary`。没有明文的外源 reasoning item 整条丢掉。OpenAI 自己的 blob 不动。不发明明文，不改 rung。
-- **为何只认 `gAAAAA`**：那是 OpenAI Fernet 密文的稳定前缀；DeepSeek 回的是 UUID 形。Lite 旧规则是「有密文就清空明文」——对这条 DeepSeek 项会把唯一可读的思考清掉、把外源密文留下，正好把 400 钉死，所以剥密文必须在那条规则之前。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · 取消 Responses 首帧 15s 超时（Provider execution，docs/04/05，原则 5/8）**：生产执行层不再默认限制首个真实输出为 15s；in-band 错误 fallback 与结果不明禁止重放保留，完整记录见 git history。
+- **2026-09-18 · Codex 回放前剥掉外源 encrypted_content（Provider / 协议互译，docs/05，原则 3/8）**：Codex/Lite 发送前删除非 `gAAAAA` 外源密文，保留可读 content/summary；无明文的外源 reasoning 整项丢弃，完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 取消 Responses 默认首帧 15s 超时，保留 in-band 错误 fallback 与结果不明禁止重放；完整记录见 Git history。
 
 2026-09-17 的外源 reasoning 缺明文时关闭 DeepSeek 思考、首字节超时、Lite reasoning、候选链解释、DSML 工具兼容、DeepSeek Responses、观测字段等记录已压缩，完整原文可从本次变更之前的 Git 历史回溯。
 

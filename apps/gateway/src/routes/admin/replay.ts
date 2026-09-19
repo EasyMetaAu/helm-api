@@ -20,6 +20,7 @@ import { downgradeClientFastModeIfDisallowed } from "../fast-mode.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "../internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "../messages.js";
 import { createMessagesPipeline, PipelineError } from "../messages-pipeline.js";
+import { nativeCarrierFromParsedBody } from "../native-carrier.js";
 import {
   backfillCompletionCost,
   type PayloadCaptureDeps,
@@ -347,6 +348,17 @@ async function replayViaPipeline(
   // Stamp the server-generated id in both fields. Replay has no separate client
   // correlation id; no memory headers → scope defaults OFF (isolated re-run).
   ir.metadata = { ...(ir.metadata ?? {}), request_id: requestId, trace_id: requestId };
+  // Match /v1/responses: retain native tool/reasoning history instead of forcing
+  // a lossy Responses -> IR -> Responses round trip during an admin retry.
+  if (protocol === "openai_responses") {
+    const native = nativeCarrierFromParsedBody({
+      protocol,
+      native: args.body,
+      rawBody: JSON.stringify(args.body),
+      headers: {},
+    });
+    if (native) ir.metadata.native_request = native;
+  }
   // Gemini's model + stream-ness ride the URL, not the body, so the captured body
   // carries neither: recover the model from the original decision (else "auto" =
   // re-classify) and replay NON-stream (a debug re-run wants the full response).

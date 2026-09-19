@@ -7008,6 +7008,48 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       ]);
     });
 
+    it.each([
+      false,
+      true,
+    ])("disables thinking for tool history with no reasoning (chat=%s)", async (chat) => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+      if (chat) {
+        await client.chatCompletion({
+          model: "deepseek-flash",
+          reasoning_effort: "high",
+          messages: [
+            { role: "user", content: "Continue" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                { id: "c1", type: "function", function: { name: "exec", arguments: "{}" } },
+              ],
+            },
+            { role: "tool", tool_call_id: "c1", content: "ok" },
+          ],
+        });
+      } else {
+        await client.nativePassthrough?.({
+          model: "deepseek-flash",
+          reasoning: { effort: "high" },
+          tools: [EXEC_CUSTOM],
+          input: [
+            { type: "custom_tool_call", call_id: "c1", name: "exec", input: "test" },
+            { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+          ],
+        });
+      }
+      expect(seen.reasoning).toMatchObject({ effort: "none" });
+      expect(
+        (seen.input as Array<{ type: string }>).some((item) => item.type === "reasoning"),
+      ).toBe(false);
+    });
+
     it("keeps requested thinking when a reasoning item already has plaintext", async () => {
       let seen: Record<string, unknown> = {};
       const client = translatingClient((body) => {
