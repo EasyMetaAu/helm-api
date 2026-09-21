@@ -7,12 +7,11 @@
 
 ---
 
-## 2026-09-21 · 外部 Jev Decisions 与强制无正文审计（Provider / Auth / Telemetry，docs/05、06、07）
+## 2026-09-21 · HTTP 降级后禁止发送增量 continuation（Provider / WebSocket，docs/05）
 
-- **接口**：新增 `POST /v1/decisions`，复用 Jev transport 与服务端 OpenRouter 凭证；接受 noul／choice／score，严格校验完整分布、实际模型和有限用量。业务模板留在调用方，无聊天回退或自动重试。契约与示例见 `docs/integrations/jev-decisions.zh-CN.md`。
-- **权限与计费**：要求 allow_custom_model；有模型封禁规则时必须日期固定版本。缺失用量／费用为 null；token／金额硬额度 key 拒绝。请求次数在现有 SQLite／Postgres budget 表原子预留，失败或结果不明仍计尝试；其他入口保留既有事后结算语义，无迁移。
-- **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
-- **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
+- **证据**：`223a933e-f396-4556-98d9-18523b0aa3c6` 与前一成功请求绑定同一 Codex 账号，HTTP 上游却拒绝 `previous_response_id`。旧分支让 HTTP fallback 会话绕过 WebSocket continuation guard，现有测试还错误假设 HTTP 能接受该参数。
+- **修复**：HTTP fallback 中的增量 continuation 在发送前走已有 `response_create_not_sent` 恢复协议。可信 WebSocket 桥发送 1012，客户端重连补全历史；完整历史仍可 HTTP fallback。原账号绑定、结果不明时禁止重放、鉴权与恢复证明校验保持原样。
+- **边界**：不能拿旧账号的 response ID 盲轮转；自动恢复依赖客户端重连并重发完整历史。没有保存完整历史时不伪造上下文。无需配置或数据库迁移。
 
 ## 2026-09-21 · Codex 工具历史恢复声明中的 namespace（Provider / 协议互译，docs/05）
 
@@ -64,11 +63,11 @@
 
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · DeepSeek 回放前补上缺失 call_id（Provider / 协议互译，docs/05）**：仅在 function_call_output 缺少 call_id 时使用非空 id，已有值保留；完整记录见 git history。
+- **2026-09-18 · DeepSeek 回放补缺失 call_id（Provider / 协议互译，docs/05）**：function_call_output 缺 call_id 时以非空 id 补上，已有 call_id 不改，不伪造 id；完整记录见 git history。
 
 ## 更早历史总览
 
-2026-09-18 Lite 将 DeepSeek reasoning 明文折入空 summary，保留已有 summary 和 OpenAI 密文；完整记录见 git history。
+2026-09-18 Lite 将 DeepSeek 外源 reasoning 明文折入空 summary 并清空 content，已有 summary 和 OpenAI 密文不改；完整记录见 git history。
 
 2026-09-18 Codex 回放前剥掉非 `gAAAAA` 外源 encrypted_content，保留可读正文，空项丢弃；完整记录见 git history。
 

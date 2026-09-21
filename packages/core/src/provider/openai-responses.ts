@@ -3425,9 +3425,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         hasPreviousResponseId &&
         (!cfg.responsesWebSocketConnector ||
           !sessionId ||
-          (!usingHttpFallback &&
-            (!websocketSessions.has(sessionId) ||
-              responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)))
+          usingHttpFallback ||
+          !websocketSessions.has(sessionId) ||
+          responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
       ) {
         throw new CodexResponsesBeforeSendError(
           "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
