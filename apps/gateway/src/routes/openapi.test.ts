@@ -33,6 +33,7 @@ describe("OpenAPI docs", () => {
       "/v1/videos/{requestId}",
       "/v1/tts/voices",
       "/v1/tts",
+      "/v1/decisions",
       "/v1/realtime/calls",
       "/v1/live",
       "/v1beta/interactions",

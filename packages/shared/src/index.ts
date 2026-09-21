@@ -178,6 +178,15 @@ export {
 } from "./decision/schema.js";
 // Admin dashboard token-accounting aggregate query model.
 export { type StatsQuery, StatsQuerySchema } from "./decision/stats-query.js";
+export {
+  DecisionsEnvelopeSchema,
+  type DecisionsRequest,
+  DecisionsRequestSchema,
+  type DecisionsResponse,
+  DecisionsResponseSchema,
+  JevModelSchema,
+  validateDecisionsResponse,
+} from "./decisions.js";
 // Structured error model + error_class -> HTTP map (docs/07).
 export {
   ERROR_CLASS_HTTP_STATUS,

@@ -42,9 +42,31 @@ export class PgBudgetStore implements BudgetStore {
     amount: number,
     nowMs: number,
   ): Promise<{ remaining: number }> {
+    const result = await this.change(keyId, dim, capacity, windowMs, amount, nowMs, false);
+    return { remaining: result.remaining };
+  }
+
+  async reserveRequest(
+    keyId: string,
+    capacity: number,
+    windowMs: number,
+    nowMs: number,
+  ): Promise<boolean> {
+    return (await this.change(keyId, "req", capacity, windowMs, 1, nowMs, true)).accepted;
+  }
+
+  private async change(
+    keyId: string,
+    dim: BudgetDim,
+    capacity: number,
+    windowMs: number,
+    amount: number,
+    nowMs: number,
+    requireAvailable: boolean,
+  ): Promise<{ remaining: number; accepted: boolean }> {
     const where = and(eq(usageBudgetBuckets.keyId, keyId), eq(usageBudgetBuckets.dim, dim));
 
-    return this.db.transaction(async (tx): Promise<{ remaining: number }> => {
+    return this.db.transaction(async (tx): Promise<{ remaining: number; accepted: boolean }> => {
       // Seed a FULL bucket FIRST (no-op if present) so the FOR UPDATE below always
       // locks an existing row — otherwise two cold concurrent settles would both
       // seed + debit a full bucket (a lost update).
@@ -60,6 +82,8 @@ export class PgBudgetStore implements BudgetStore {
         : { tokens: capacity, lastRefillMs: nowMs };
 
       const refilled = refill(current, capacity, nowMs, windowMs);
+      if (requireAvailable && refilled.tokens < amount)
+        return { remaining: refilled.tokens, accepted: false };
       const tokens = refilled.tokens - amount;
 
       await tx
@@ -70,7 +94,7 @@ export class PgBudgetStore implements BudgetStore {
           set: { tokens: sql`excluded.tokens`, lastRefillMs: sql`excluded.last_refill_ms` },
         });
 
-      return { remaining: tokens };
+      return { remaining: tokens, accepted: true };
     });
   }
 }

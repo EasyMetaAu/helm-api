@@ -100,3 +100,26 @@ describe("readResponseTextWithinBudget", () => {
     expect(admission.reservedBytes).toBe(0);
   });
 });
+
+it("cancels a stalled body and releases admission on abort", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 100,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const controller = new AbortController();
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    }),
+  );
+  const pending = readResponseTextWithinBudget(response, 32_000, admission, controller.signal);
+  const assertion = expect(pending).rejects.toThrow("synthetic abort");
+  controller.abort(new Error("synthetic abort"));
+  await assertion;
+  expect(cancelled).toBe(true);
+  expect(admission.reservedBytes).toBe(0);
+});

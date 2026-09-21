@@ -33,8 +33,15 @@ export async function readResponseTextWithinBudget(
   response: Response,
   maxBytes: number,
   admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+  signal?: AbortSignal,
 ): Promise<string> {
-  return await consumeResponseTextWithinBudget(response, maxBytes, (text) => text, admission);
+  return await consumeResponseTextWithinBudget(
+    response,
+    maxBytes,
+    (text) => text,
+    admission,
+    signal,
+  );
 }
 
 export async function consumeResponseTextWithinBudget<T>(
@@ -42,6 +49,7 @@ export async function consumeResponseTextWithinBudget<T>(
   maxBytes: number,
   consume: (text: string) => T | Promise<T>,
   admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+  signal?: AbortSignal,
 ): Promise<T> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new Error("maxBytes must be a non-negative safe integer");
@@ -65,11 +73,18 @@ export async function consumeResponseTextWithinBudget<T>(
   try {
     const reader = response.body?.getReader();
     if (reader === undefined) return await consume("");
+    const cancel = () => {
+      void reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
     try {
+      signal?.throwIfAborted();
       while (true) {
         const { done, value } = await reader.read();
+        signal?.throwIfAborted();
         if (done) break;
         if (!value) continue;
         totalBytes += value.byteLength;
@@ -84,6 +99,7 @@ export async function consumeResponseTextWithinBudget<T>(
         chunks.push(value);
       }
     } finally {
+      signal?.removeEventListener("abort", cancel);
       reader.releaseLock();
     }
 

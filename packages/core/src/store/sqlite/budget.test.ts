@@ -62,4 +62,17 @@ describe("SqliteBudgetStore", () => {
     expect(r.remaining).toBeCloseTo(40, 5);
     close();
   });
+  it("atomically reserves one request without debiting rejected concurrent calls", async () => {
+    const { store, close } = freshStore();
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => store.reserveRequest("k1", 1, DAY, 0)),
+      );
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect((await store.peek("k1", "req", 1, DAY, 0)).remaining).toBe(0);
+      expect(await store.reserveRequest("k1", 1, DAY, DAY)).toBe(true);
+    } finally {
+      close();
+    }
+  });
 });
