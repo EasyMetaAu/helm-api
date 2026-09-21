@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-21 · Codex 工具历史恢复声明中的 namespace（Provider / 协议互译，docs/05）
+
+- **证据**：生产请求 `6422fb44-043b-4f5e-a07a-ea124cc4e94b` 的原始 `input[492]` 是 `function_call`，`name=mcp__cua_repl::js`，没有 namespace；OpenAI 拒绝 name 中的冒号。相同请求内已声明 `mcp__cua_repl` namespace 下的 `js`，早期调用也使用拆分字段。
+- **处理**：复用 Codex 原生请求 sanitizer，仅把能精确匹配当前工具声明的 `namespace::name` 拆回两个字段。支持顶层 tools 和 Lite additional_tools；保留参数、call_id、输出和 item ID，不原地修改客户端历史。记录 `qualified_function_names_normalized` mutation。
+- **边界**：仅修复 function_call；未声明、namespace 冲突或其他非法名字仍交给原有校验拒绝，不猜测工具身份。generic Responses 透传不改。无需改库；本地验证不代表生产部署。
+
 ## 2026-09-20 · DeepSeek 缺失思考历史降级与管理端原生重放（Provider / Admin，docs/05）
 
 - **已确认的缺口**：工具历史完全没有 reasoning item 时，旧保护未关闭 DeepSeek 思考；管理端 Retry 丢失原生 Responses carrier，经 IR 往返会丢掉 reasoning/custom tool 历史，已实测触发 reasoning_text 400。
@@ -54,16 +60,13 @@
 - **现象**：`28bacfd4` 先打 `gpt-5.6-sol` 上游 `server_error`，落到 `deepseek-flash` 后 400：`missing field call_id`。历史第 31 项是 Codex desktop 心跳 `function_call_output`（`name: automation_update`, `namespace: codex_app`），有 `id` 无 `call_id`。OpenAI 收；DeepSeek 反序列化更严。
 - **修复**：`deepseek-responses` 增加 opt-in `fillMissingFunctionCallOutputCallId`。缺 `call_id` 时用非空 `id` 补上，已有 `call_id` 不动。不发明新 id，不改 rung。第一条候选的 OpenAI 5xx 是上游故障，不是这次 shape 问题。
 
-## 2026-09-18 · Lite 把 DeepSeek 明文折进 summary，content 必须空（Provider / 协议互译，docs/05，原则 3/8）
-
-- **现象**：v0.29.25 剥掉 `d8b7…8a-0` 后，同会话 `ffc6d4d6` 仍 400：`Invalid 'input[483].content': array too long. Expected … 0, but got … 1`（`array_above_max_length`）。mutation 已有 `foreign_encrypted_content_stripped`，失败项仍带着 DeepSeek 的 `reasoning_text`。Lite 不允许 reasoning `content` 非空；OpenAI 自己的项 `content` 是 `null`，明文只在 `summary`（`summary_text`）。
-- **修复**：剥外源密文后，把 leftover `reasoning_text` 折进空的 `summary`，再把 `content` 清成 `[]`。已有 `summary` 不覆盖。Lite canonicalizer 对无 `gAAAAA` 的 reasoning 走同一折法；OpenAI blob 仍只清 content、不动 summary。不发明明文，不改 rung。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · Codex 回放前剥掉外源 encrypted_content（Provider / 协议互译，docs/05，原则 3/8）**：Codex/Lite 发送前删除非 `gAAAAA` 外源密文，保留可读 content/summary；无明文的外源 reasoning 整项丢弃，完整记录见 git history。
+- **2026-09-18 · Lite 把 DeepSeek 明文折进 summary（Provider / 协议互译，docs/05）**：外源 reasoning 明文折入空 summary 并清空 content，保留已有 summary 和 OpenAI 密文；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 Codex 回放前剥掉非 `gAAAAA` 外源 encrypted_content，保留可读正文，空项丢弃；完整记录见 git history。
 
 2026-09-18 取消 Responses 默认首帧 15s 超时，保留 in-band 错误 fallback 与结果不明禁止重放；完整记录见 Git history。
 
