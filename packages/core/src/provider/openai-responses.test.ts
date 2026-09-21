@@ -4118,7 +4118,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps continuations on HTTP after an oversized websocket request falls back", async () => {
+  it("requests full-history recovery before sending a continuation after HTTP fallback", async () => {
     let sends = 0;
     const connection: CodexResponsesWebSocketConnection = {
       responseHeaders: new Headers(),
@@ -4169,22 +4169,32 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     ) ?? []) {
       // Establish the HTTP fallback response.
     }
-    for await (const _ of client.nativePassthroughStream?.(
-      carrier("ingress-oversized-http-session", {
-        model: "gpt-5.6-sol",
-        input: [],
-        stream: true,
-        store: false,
-        previous_response_id: "resp-http-parent",
-      }),
-    ) ?? []) {
-      // Continue the same provider-owned response over HTTP.
-    }
+    const continuation = client
+      .nativePassthroughStream?.(
+        carrier("ingress-oversized-http-session", {
+          model: "gpt-5.6-sol",
+          input: [{ type: "function_call_output", call_id: "call-parent", output: "ok" }],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-http-parent",
+        }),
+      )
+      [Symbol.asyncIterator]();
+    await expect(continuation?.next()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_not_sent" },
+        recovery: {
+          safe_to_replay: true,
+          lifecycle_phase: "before_send",
+          reason: "websocket_session_unavailable",
+        },
+      },
+    });
 
     expect(connect).toHaveBeenCalledTimes(1);
     expect(sends).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(sentBodies[1]?.previous_response_id).toBe("resp-http-parent");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sentBodies[0]?.previous_response_id).toBeUndefined();
   });
 
   it.each([
