@@ -1,4 +1,6 @@
 import {
+  DecisionsEnvelopeSchema,
+  DecisionsRequestSchema,
   GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
@@ -135,6 +137,8 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         VideoGenerationResponse: component(VideoGenerationResponseSchema),
         VideoRetrieveResponse: component(VideoRetrieveResponseSchema),
         TtsSpeechRequest: component(TtsSpeechRequestSchema),
+        DecisionsRequest: component(DecisionsRequestSchema),
+        DecisionsResponse: component(DecisionsEnvelopeSchema),
         UsageStats: {
           type: "object",
           properties: {
@@ -592,6 +596,40 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "400": errorResponse("Invalid image edit request"),
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
+          },
+        },
+      },
+      "/v1/decisions": {
+        post: {
+          tags: ["Inference"],
+          summary: "Ask typed Jev questions",
+          description:
+            "Noul, choice and score with complete distributions and actual model version. Requires allow_custom_model; token/spend budget keys are rejected. Request-count budgets reserve atomically. Helm never retains request or answer bodies on this route, including failures. Maximum body: 32000 bytes. No chat fallback. Missing usage/cost is null.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/DecisionsRequest" } },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Typed answers; unknown usage fields are null",
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/DecisionsResponse" } },
+              },
+            },
+            "400": { description: "Invalid request" },
+            "401": errorResponse("Missing or invalid key"),
+            "403": { description: "Model permission denied" },
+            "413": { description: "Body too large" },
+            "422": {
+              description: "Token/spend hard budgets unsupported; upstream may also reject input",
+            },
+            "429": { description: "Rate, concurrency, request budget or upstream limit" },
+            "502": { description: "Invalid or failed Jev response" },
+            "503": { description: "Credential, admission or upstream unavailable" },
+            "504": { description: "Request timed out" },
           },
         },
       },

@@ -1,5 +1,13 @@
-import { ComplexitySchema, TaskTypeSchema } from "@helm/shared";
+import {
+  ComplexitySchema,
+  type DecisionsRequest,
+  DecisionsRequestSchema,
+  type DecisionsResponse,
+  TaskTypeSchema,
+  validateDecisionsResponse,
+} from "@helm/shared";
 import { z } from "zod";
+import { readResponseTextWithinBudget } from "../../runtime/bounded-response.js";
 import { type ClassifierInput, toCanonicalInput } from "./cache-key.js";
 import type { EvalModelResponse } from "./client.js";
 
@@ -46,20 +54,30 @@ const questions = {
   },
 };
 
-/** Fixed Decisions protocol, separate from chat. Credentials never enter classifier config. */
-export function createJevInvoker(deps: {
+export interface JevTransportDeps {
   apiKey: () => string | undefined;
   baseUrl?: string;
   fetch?: typeof fetch;
-}): (input: ClassifierInput, model: string, signal: AbortSignal) => Promise<EvalModelResponse> {
+}
+
+export class JevError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** One fixed endpoint and credential source for internal eval and public Decisions. */
+function createJevTransport(deps: JevTransportDeps) {
   const endpoint = `${(deps.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/v1\/?$/, "")}/alpha/decisions`;
-  return async (input, model, signal) => {
+  return async (request: unknown, signal: AbortSignal): Promise<unknown> => {
     const key = deps.apiKey();
-    if (!key) throw new Error("Jev credential unavailable");
-    const body = JSON.stringify({ model, state: toCanonicalInput(input), questions });
-    // Conservative byte ceiling keeps text below the 32k state+question token limit.
-    // ponytail: reject oversized state; add token-aware selection if real routing inputs need it.
-    if (Buffer.byteLength(body, "utf8") > 32_000) throw new Error("Jev input too large");
+    if (!key) throw new JevError(503, "Jev credential unavailable");
+    const body = JSON.stringify(request);
+    // ponytail: conservative byte ceiling; add token-aware sizing only if needed.
+    if (Buffer.byteLength(body, "utf8") > 32_000) throw new JevError(413, "Jev input too large");
     const res = await (deps.fetch ?? fetch)(endpoint, {
       method: "POST",
       redirect: "error",
@@ -69,9 +87,42 @@ export function createJevInvoker(deps: {
     });
     if (!res.ok) {
       await res.body?.cancel();
-      throw new Error(`Jev HTTP ${res.status}`);
+      throw new JevError(res.status, `Jev HTTP ${res.status}`);
     }
-    const envelope = ResponseSchema.safeParse(await res.json());
+    try {
+      return JSON.parse(
+        await readResponseTextWithinBudget(res, 256_000, undefined, signal),
+      ) as unknown;
+    } catch {
+      if (signal.aborted) signal.throwIfAborted();
+      throw new JevError(502, "invalid Jev response");
+    }
+  };
+}
+
+export function createJevDecisionsInvoker(
+  deps: JevTransportDeps,
+): (request: DecisionsRequest, signal: AbortSignal) => Promise<DecisionsResponse> {
+  const invoke = createJevTransport(deps);
+  return async (request, signal) => {
+    const input = DecisionsRequestSchema.parse(request);
+    const raw = await invoke(input, signal);
+    try {
+      return validateDecisionsResponse(input, raw);
+    } catch {
+      throw new JevError(502, "invalid Jev response");
+    }
+  };
+}
+
+/** Fixed classifier questions; retains the existing internal eval contract. */
+export function createJevInvoker(
+  deps: JevTransportDeps,
+): (input: ClassifierInput, model: string, signal: AbortSignal) => Promise<EvalModelResponse> {
+  const invoke = createJevTransport(deps);
+  return async (input, model, signal) => {
+    const raw = await invoke({ model, state: toCanonicalInput(input), questions }, signal);
+    const envelope = ResponseSchema.safeParse(raw);
     if (!envelope.success) return { text: "", cost_usd: null };
     const data = envelope.data;
     const answers = AnswersSchema.safeParse(data.answers);

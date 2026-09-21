@@ -89,3 +89,43 @@ describe("Jev Decisions boundary", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
+
+describe("external Decisions transport", () => {
+  it("retains all probabilities and unknown usage without chat fallback", async () => {
+    const { createJevDecisionsInvoker } = await import("./jev.js");
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        model: "typesafe/jev-1.13-20260917",
+        answers: { q: { type: "noul", noul: 0.8 } },
+      }),
+    );
+    const result = await createJevDecisionsInvoker({ apiKey: () => "secret", fetch: fetcher })(
+      {
+        model: "~typesafe/jev-latest",
+        state: "synthetic",
+        questions: { q: { type: "noul", instructions: "Match?" } },
+      },
+      new AbortController().signal,
+    );
+    expect(result.answers.q).toEqual({ type: "noul", noul: 0.8 });
+    expect(result.usage.cost).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it("bounds upstream response and never includes its text in an error", async () => {
+    const { createJevDecisionsInvoker } = await import("./jev.js");
+    const invoke = createJevDecisionsInvoker({
+      apiKey: () => "secret",
+      fetch: async () => new Response("private".repeat(50_000)),
+    });
+    await expect(
+      invoke(
+        {
+          model: "~typesafe/jev-latest",
+          state: "synthetic",
+          questions: { q: { type: "noul", instructions: "Match?" } },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("invalid Jev response");
+  });
+});

@@ -44,9 +44,31 @@ export class SqliteBudgetStore implements BudgetStore {
     amount: number,
     nowMs: number,
   ): Promise<{ remaining: number }> {
+    const result = await this.change(keyId, dim, capacity, windowMs, amount, nowMs, false);
+    return { remaining: result.remaining };
+  }
+
+  async reserveRequest(
+    keyId: string,
+    capacity: number,
+    windowMs: number,
+    nowMs: number,
+  ): Promise<boolean> {
+    return (await this.change(keyId, "req", capacity, windowMs, 1, nowMs, true)).accepted;
+  }
+
+  private async change(
+    keyId: string,
+    dim: BudgetDim,
+    capacity: number,
+    windowMs: number,
+    amount: number,
+    nowMs: number,
+    requireAvailable: boolean,
+  ): Promise<{ remaining: number; accepted: boolean }> {
     const where = and(eq(usageBudgetBuckets.keyId, keyId), eq(usageBudgetBuckets.dim, dim));
 
-    const txn = this.db.$sqlite.transaction((): { remaining: number } => {
+    const txn = this.db.$sqlite.transaction((): { remaining: number; accepted: boolean } => {
       const row = this.db.select().from(usageBudgetBuckets).where(where).get() as
         | { tokens: number; lastRefillMs: number }
         | undefined;
@@ -58,6 +80,8 @@ export class SqliteBudgetStore implements BudgetStore {
       // Refill to now, then subtract the settled amount. NO floor at 0 — a budget
       // is a soft cap, so over-spend pushes the bucket negative until it refills.
       const refilled = refill(current, capacity, nowMs, windowMs);
+      if (requireAvailable && refilled.tokens < amount)
+        return { remaining: refilled.tokens, accepted: false };
       const tokens = refilled.tokens - amount;
 
       this.db
@@ -69,7 +93,7 @@ export class SqliteBudgetStore implements BudgetStore {
         })
         .run();
 
-      return { remaining: tokens };
+      return { remaining: tokens, accepted: true };
     });
 
     return txn();

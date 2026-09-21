@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-21 · 外部 Jev Decisions 与强制无正文审计（Provider / Auth / Telemetry，docs/05、06、07）
+
+- **接口**：新增 `POST /v1/decisions`，复用 Jev transport 与服务端 OpenRouter 凭证；接受 noul／choice／score，严格校验完整分布、实际模型和有限用量。业务模板留在调用方，无聊天回退或自动重试。契约与示例见 `docs/integrations/jev-decisions.zh-CN.md`。
+- **权限与计费**：要求 allow_custom_model；有模型封禁规则时必须日期固定版本。缺失用量／费用为 null；token／金额硬额度 key 拒绝。请求次数在现有 SQLite／Postgres budget 表原子预留，失败或结果不明仍计尝试；其他入口保留既有事后结算语义，无迁移。
+- **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
+- **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
+
 ## 2026-09-21 · Codex 工具历史恢复声明中的 namespace（Provider / 协议互译，docs/05）
 
 - **证据**：生产请求 `6422fb44-043b-4f5e-a07a-ea124cc4e94b` 的原始 `input[492]` 是 `function_call`，`name=mcp__cua_repl::js`，没有 namespace；OpenAI 拒绝 name 中的冒号。相同请求内已声明 `mcp__cua_repl` namespace 下的 `js`，早期调用也使用拆分字段。
@@ -55,16 +62,13 @@
 - **现象**：`bbcd8800` 自定义模型 key 发 `grok-4.6`，400 `unknown model or lane "grok-4.6"`。`grok` lane 已有（primary `xai/grok-4.6`），但 `model-aliases.yaml` 没有 grok glob，版本化 id 既不是 lane 名也不是 provider alias。
 - **修复**：`grok-imagine-image*` → `grok-imagine-image-quality`；`grok-imagine-video-1.5*` → `grok-imagine-video-1.5-preview`（grok-build 当前 wire id，兼容 preview 后缀）；`grok-imagine-video*` → 纯文本/续写 lane；最后 `grok*` → `grok`。最长字面量优先。不把 1.5-preview 并进无版本 `grok-imagine-video`（那是另一份合同）。不钉 chat 版本，不改 rung。
 
-## 2026-09-18 · DeepSeek 回放前补上缺的 function_call_output.call_id（Provider / 协议互译，docs/05，原则 3/8）
-
-- **现象**：`28bacfd4` 先打 `gpt-5.6-sol` 上游 `server_error`，落到 `deepseek-flash` 后 400：`missing field call_id`。历史第 31 项是 Codex desktop 心跳 `function_call_output`（`name: automation_update`, `namespace: codex_app`），有 `id` 无 `call_id`。OpenAI 收；DeepSeek 反序列化更严。
-- **修复**：`deepseek-responses` 增加 opt-in `fillMissingFunctionCallOutputCallId`。缺 `call_id` 时用非空 `id` 补上，已有 `call_id` 不动。不发明新 id，不改 rung。第一条候选的 OpenAI 5xx 是上游故障，不是这次 shape 问题。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · Lite 把 DeepSeek 明文折进 summary（Provider / 协议互译，docs/05）**：外源 reasoning 明文折入空 summary 并清空 content，保留已有 summary 和 OpenAI 密文；完整记录见 git history。
+- **2026-09-18 · DeepSeek 回放前补上缺失 call_id（Provider / 协议互译，docs/05）**：仅在 function_call_output 缺少 call_id 时使用非空 id，已有值保留；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 Lite 将 DeepSeek reasoning 明文折入空 summary，保留已有 summary 和 OpenAI 密文；完整记录见 git history。
 
 2026-09-18 Codex 回放前剥掉非 `gAAAAA` 外源 encrypted_content，保留可读正文，空项丢弃；完整记录见 git history。
 

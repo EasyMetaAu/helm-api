@@ -24,6 +24,7 @@ import {
   createDistributedKeyedSemaphore,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
+  createJevDecisionsInvoker,
   createJevInvoker,
   createKeyedSemaphore,
   createKeyedSerialGate,
@@ -220,6 +221,7 @@ import { mountAdminLogin } from "./routes/admin-login.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
+import { registerDecisionsRoute } from "./routes/decisions.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
 import type { ImageChainTarget, ResolveImageChain } from "./routes/image-chain.js";
@@ -3508,6 +3510,31 @@ export async function buildServer(
   for (const pattern of chatRoutePatterns) {
     app.use(pattern, concurrencyMiddleware(concurrencyGate));
   }
+
+  registerDecisionsRoute(app, {
+    keyStore,
+    rateLimiter,
+    concurrencyGate,
+    budgetGate,
+    reserveRequest: async (keyId, caps, nowMs) => {
+      if (caps.requests === null) return true;
+      if (!store.budget.reserveRequest) throw new Error("request reservation unavailable");
+      return store.budget.reserveRequest(
+        keyId,
+        caps.requests,
+        (caps.windowSeconds ?? budgetConfig.defaultWindowSeconds) * 1000,
+        nowMs,
+      );
+    },
+    timeoutMs: config.runtime.request_timeout_ms,
+    invoke: createJevDecisionsInvoker({
+      apiKey: () =>
+        decisionsProvider?.api_key_env ? process.env[decisionsProvider.api_key_env] : undefined,
+      baseUrl: baseUrlOverride ?? decisionsProvider?.base_url,
+    }),
+    // Intentionally bypass all payload/session capture, including forced error capture.
+    audit: (input) => telemetry.insert({ ...input, decision: redact(input.decision) }),
+  });
 
   // Model discovery (GET /v1/models) is key-aware: it requires the SAME mandatory
   // key auth as the chat surface so the listing reflects the authenticated key's

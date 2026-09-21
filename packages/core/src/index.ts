@@ -101,7 +101,7 @@ export {
   type EvalModelResponse,
   runEval,
 } from "./classifier/eval/client.js";
-export { createJevInvoker } from "./classifier/eval/jev.js";
+export { createJevDecisionsInvoker, createJevInvoker, JevError } from "./classifier/eval/jev.js";
 export { lastUserMessageText } from "./classifier/message-text.js";
 export {
   applyMomentum,
@@ -820,6 +820,10 @@ export {
   type RoutingSignalFeedbackDeps,
   routeRequest,
 } from "./routing/route-request.js";
+export {
+  ResponseBodyTooLargeError,
+  readResponseTextWithinBudget,
+} from "./runtime/bounded-response.js";
 export {
   createRuntimeMemoryCoordinator,
   deriveRuntimeMemoryBudget,

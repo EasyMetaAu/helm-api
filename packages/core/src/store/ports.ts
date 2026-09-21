@@ -134,6 +134,14 @@ export interface BudgetPeekResult {
 // push it NEGATIVE (a budget is a soft cap settled post-served, not a hard
 // reservation — D5-style tolerance). key_id only; never a plaintext key (principle 7).
 export interface BudgetStore {
+  // Atomic hard request reservation against the existing req bucket. Optional for
+  // older adapters; callers requiring hard admission must fail closed when absent.
+  reserveRequest?(
+    keyId: string,
+    capacity: number,
+    windowMs: number,
+    nowMs: number,
+  ): Promise<boolean>;
   // Pre-route sign check: refill (in memory) and read remaining for one
   // (keyId, dim). READ-ONLY — never writes (the refilled state is persisted by the
   // next debit). A cold bucket reads as FULL (capacity).
