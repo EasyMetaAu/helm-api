@@ -3125,6 +3125,60 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     });
   });
 
+  it("keeps rewritten turn metadata ByteString-safe when it contains Unicode", async () => {
+    let seen = new Headers();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        installationId: "11111111-2222-4333-8444-555555555555",
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        const request = new Request("https://chatgpt.com/backend-api/codex/responses", init);
+        seen = request.headers;
+        return sseResponse([
+          {
+            type: "response.completed",
+            response: { status: "completed", usage: {} },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+    const clientInstall = "25ae6219-e425-402f-b26b-b784b7f9ce5b";
+    const turnMetadata = JSON.stringify({
+      installation_id: clientInstall,
+      workspaces: { "D:\\项目\\dd_t-shuxiang": { has_changes: true } },
+    });
+    const body = nativeStreamBody();
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        ...body,
+        client_metadata: {
+          "x-codex-installation-id": clientInstall,
+          "x-codex-turn-metadata": turnMetadata,
+        },
+      },
+      raw_body: JSON.stringify(body),
+      headers: {
+        "x-codex-installation-id": clientInstall,
+        "x-codex-turn-metadata": turnMetadata,
+      },
+      mutations: {},
+    };
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    const metadata = String(seen.get("x-codex-turn-metadata"));
+    expect([...metadata].every((character) => character.charCodeAt(0) <= 255)).toBe(true);
+    expect(JSON.parse(metadata)).toMatchObject({
+      installation_id: "11111111-2222-4333-8444-555555555555",
+      workspaces: { "D:\\项目\\dd_t-shuxiang": { has_changes: true } },
+    });
+  });
+
   // No rebinding happened, but the id still rode upstream — record it, otherwise a
   // request served with the CLIENT's machine-wide id looks identical to one that
   // carried no id at all.

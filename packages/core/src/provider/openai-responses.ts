@@ -1706,7 +1706,20 @@ function rewriteCodexTurnMetadata(raw: unknown, installationId: string): string 
   }
   if (!isRecord(parsed) || typeof parsed.installation_id !== "string") return undefined;
   if (parsed.installation_id === installationId) return undefined;
-  return JSON.stringify({ ...parsed, installation_id: installationId });
+  // HTTP header values are ByteStrings. JSON.stringify emits Unicode literally,
+  // so escape non-Latin-1 code units before forwarding the metadata header.
+  const serialized = JSON.stringify({ ...parsed, installation_id: installationId });
+  let byteString = "";
+  for (const character of serialized) {
+    if (character.charCodeAt(0) <= 0xff) {
+      byteString += character;
+      continue;
+    }
+    for (let index = 0; index < character.length; index += 1) {
+      byteString += `\\u${character.charCodeAt(index).toString(16).padStart(4, "0")}`;
+    }
+  }
+  return byteString;
 }
 
 // Record WHICH installation id actually went upstream, on the carrier's own ledger.
