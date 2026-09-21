@@ -8007,6 +8007,58 @@ describe("hoistResponsesInstructions", () => {
 
 describe("sanitizeCodexResponsesNativeBody", () => {
   it.each([
+    "tools",
+    "additional_tools",
+  ])("restores declared namespaces on qualified function history from %s", (source) => {
+    const tools = [
+      { type: "namespace", name: "mcp__cua_repl", tools: [{ type: "function", name: "js" }] },
+    ];
+    const call = {
+      type: "function_call",
+      id: "fc_stable",
+      call_id: "call_stable",
+      name: "mcp__cua_repl::js",
+      arguments: '{"code":"1 + 1"}',
+    };
+    const output = { type: "function_call_output", call_id: "call_stable", output: "2" };
+    const unchanged = [
+      { ...call, name: "js", namespace: "mcp__cua_repl" },
+      { ...call, namespace: "other" },
+      { ...call, name: "undeclared::js" },
+      { ...call, name: "mcp__cua_repl::missing" },
+      { ...call, name: "mcp__cua_repl::js::nested" },
+      { ...call, name: "mcp__cua_repl.js" },
+      { ...call, type: "custom_tool_call" },
+    ];
+    const original = {
+      ...(source === "tools" ? { tools } : {}),
+      input: [
+        ...(source === "additional_tools" ? [{ type: "additional_tools", tools }] : []),
+        call,
+        output,
+        ...unchanged,
+      ],
+    };
+    const snapshot = structuredClone(original);
+    const result = sanitizeCodexResponsesNativeBody(original);
+    expect(result).toEqual({
+      body: {
+        ...original,
+        input: original.input.map((item) =>
+          item === call ? { ...call, name: "js", namespace: "mcp__cua_repl" } : item,
+        ),
+      },
+      fixes: ["qualified_function_names_normalized"],
+    });
+    expect(original).toEqual(snapshot);
+    expect(sanitizeCodexResponsesNativeBody(result.body)).toEqual({ body: result.body, fixes: [] });
+    expect(sanitizeCodexResponsesNativeBody({ input: [call] })).toEqual({
+      body: { input: [call] },
+      fixes: [],
+    });
+  });
+
+  it.each([
     false,
     true,
   ])("preserves Responses Lite item identity (continuation=%s)", (continuation) => {

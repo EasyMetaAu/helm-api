@@ -571,6 +571,7 @@ export type CodexResponsesNativeBodyFix =
   | "input_item_metadata_stripped"
   | "input_item_references_stripped"
   | "max_output_tokens_removed"
+  | "qualified_function_names_normalized"
   | "temperature_removed";
 
 /** OpenAI/Codex Fernet-style reasoning blobs start with this prefix. */
@@ -1169,6 +1170,53 @@ function sanitizeStoreFalseInputItems(input: unknown): {
   return { input: next, referencesStripped, metadataStripped, emptyReasoningDropped };
 }
 
+// Cross-provider history can encode namespace::name in name. Restore only an
+// explicitly declared function; guessing or replacing punctuation changes tool identity.
+function normalizeQualifiedFunctionNames(body: Record<string, unknown>): unknown[] | undefined {
+  if (!Array.isArray(body.input)) return;
+  const toolLists = [
+    body.tools,
+    ...body.input
+      .filter((item) => isRecord(item) && item.type === "additional_tools")
+      .map((item) => item.tools),
+  ];
+  const declared = new Map<string, { namespace: string; name: string }>();
+  for (const tools of toolLists) {
+    if (!Array.isArray(tools)) continue;
+    for (const group of tools) {
+      if (
+        !isRecord(group) ||
+        group.type !== "namespace" ||
+        typeof group.name !== "string" ||
+        !/^[a-zA-Z0-9_-]+$/.test(group.name) ||
+        !Array.isArray(group.tools)
+      )
+        continue;
+      for (const tool of group.tools) {
+        if (
+          !isRecord(tool) ||
+          tool.type !== "function" ||
+          typeof tool.name !== "string" ||
+          !/^[a-zA-Z0-9_-]+$/.test(tool.name)
+        )
+          continue;
+        declared.set(`${group.name}::${tool.name}`, { namespace: group.name, name: tool.name });
+      }
+    }
+  }
+  let changed = false;
+  const input = body.input.map((item) => {
+    if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string")
+      return item;
+    const target = declared.get(item.name);
+    if (!target || (item.namespace !== undefined && item.namespace !== target.namespace))
+      return item;
+    changed = true;
+    return { ...item, ...target };
+  });
+  return changed ? input : undefined;
+}
+
 // ChatGPT-account Codex Responses is stricter than the public OpenAI Responses API.
 // Legacy requests reject max_output_tokens/temperature and store:false item IDs
 // from prior responses. Responses Lite carries stable prefixed IDs (including its
@@ -1192,6 +1240,11 @@ export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>):
   if ("temperature" in next) {
     delete ensureCopy().temperature;
     fixes.add("temperature_removed");
+  }
+  const normalizedInput = normalizeQualifiedFunctionNames(next);
+  if (normalizedInput) {
+    ensureCopy().input = normalizedInput;
+    fixes.add("qualified_function_names_normalized");
   }
   const foreignReasoning = stripForeignEncryptedReasoningItems(next.input);
   if (foreignReasoning.stripped) {

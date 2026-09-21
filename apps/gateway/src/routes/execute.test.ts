@@ -6322,7 +6322,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     ]);
   });
 
-  it("strips DeepSeek encrypted_content before Codex sees mixed history", async () => {
+  it("repairs mixed-provider reasoning and qualified tools before forwarding to Codex", async () => {
     const responsesBody = {
       id: "resp_mixed",
       object: "response",
@@ -6377,6 +6377,24 @@ describe("createExecute — native protocol passthrough (#217)", () => {
             content: plaintext,
           },
           { type: "custom_tool_call", call_id: "call_1", name: "exec", input: "{}" },
+          {
+            type: "additional_tools",
+            tools: [
+              {
+                type: "namespace",
+                name: "mcp__cua_repl",
+                tools: [{ type: "function", name: "js" }],
+              },
+            ],
+          },
+          {
+            type: "function_call",
+            id: "fc_stable",
+            call_id: "call_2",
+            name: "mcp__cua_repl::js",
+            arguments: "{}",
+          },
+          { type: "function_call_output", call_id: "call_2", output: "ok" },
         ],
       },
       headers: {},
@@ -6398,9 +6416,14 @@ describe("createExecute — native protocol passthrough (#217)", () => {
         content: [],
       },
       carrier.body.input[2],
+      carrier.body.input[3],
+      { ...carrier.body.input[4], name: "js", namespace: "mcp__cua_repl" },
+      carrier.body.input[5],
     ]);
+    expect(carrier.body.input[4]).toMatchObject({ name: "mcp__cua_repl::js" });
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
       "foreign_encrypted_content_stripped",
+      "qualified_function_names_normalized",
     ]);
   });
 
