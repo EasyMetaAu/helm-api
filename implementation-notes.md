@@ -13,6 +13,13 @@
 - **修复**：HTTP fallback 中的增量 continuation 在发送前走已有 `response_create_not_sent` 恢复协议。可信 WebSocket 桥发送 1012，客户端重连补全历史；完整历史仍可 HTTP fallback。原账号绑定、结果不明时禁止重放、鉴权与恢复证明校验保持原样。
 - **边界**：不能拿旧账号的 response ID 盲轮转；自动恢复依赖客户端重连并重发完整历史。没有保存完整历史时不伪造上下文。无需配置或数据库迁移。
 
+## 2026-09-21 · 外部 Jev Decisions 与强制无正文审计（Provider / Auth / Telemetry，docs/05、06、07）
+
+- **接口**：新增 `POST /v1/decisions`，复用 Jev transport 与服务端 OpenRouter 凭证；接受 noul／choice／score，严格校验完整分布、实际模型和有限用量。业务模板留在调用方，无聊天回退或自动重试。契约与示例见 `docs/integrations/jev-decisions.zh-CN.md`。
+- **权限与计费**：要求 allow_custom_model；有模型封禁规则时必须日期固定版本。缺失用量／费用为 null；token／金额硬额度 key 拒绝。请求次数在现有 SQLite／Postgres budget 表原子预留，失败或结果不明仍计尝试；其他入口保留既有事后结算语义，无迁移。
+- **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
+- **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
+
 ## 2026-09-21 · Codex 工具历史恢复声明中的 namespace（Provider / 协议互译，docs/05）
 
 - **证据**：生产请求 `6422fb44-043b-4f5e-a07a-ea124cc4e94b` 的原始 `input[492]` 是 `function_call`，`name=mcp__cua_repl::js`，没有 namespace；OpenAI 拒绝 name 中的冒号。相同请求内已声明 `mcp__cua_repl` namespace 下的 `js`，早期调用也使用拆分字段。
@@ -56,16 +63,13 @@
 - **边界**：锁与缓存失效作用于同一网关进程共享的 Store；不承诺跨进程直接删库的一致性，也不撤回已经发送的上游请求。退出会等待已经开始的刷新完成后再删除；删除提交是退出生效点，重新登录的保证从退出完成后开始。删除失败不撤销现有凭证。普通 403、限流、5xx 与客户端断连不因此永久禁用。
 - **证据范围**：回归测试先红后绿；这些代码缺陷已证实，但不能据此断言它们造成了本次截图中另一个账号的 429 冷却。尚未部署。
 
-## 2026-09-18 · 补 grok 兼容别名：版本化 chat id 进 grok lane，Imagine/video 不抢（Config / 路由，docs/04，原则 6）
-
-- **现象**：`bbcd8800` 自定义模型 key 发 `grok-4.6`，400 `unknown model or lane "grok-4.6"`。`grok` lane 已有（primary `xai/grok-4.6`），但 `model-aliases.yaml` 没有 grok glob，版本化 id 既不是 lane 名也不是 provider alias。
-- **修复**：`grok-imagine-image*` → `grok-imagine-image-quality`；`grok-imagine-video-1.5*` → `grok-imagine-video-1.5-preview`（grok-build 当前 wire id，兼容 preview 后缀）；`grok-imagine-video*` → 纯文本/续写 lane；最后 `grok*` → `grok`。最长字面量优先。不把 1.5-preview 并进无版本 `grok-imagine-video`（那是另一份合同）。不钉 chat 版本，不改 rung。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · DeepSeek 回放补缺失 call_id（Provider / 协议互译，docs/05）**：function_call_output 缺 call_id 时以非空 id 补上，已有 call_id 不改，不伪造 id；完整记录见 git history。
+- **2026-09-18 · grok 兼容别名（Config / 路由，docs/04）**：版本化 chat id 进入 grok lane；最长字面量优先区分 Imagine 图片与视频型号，不固定 chat 版本；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 DeepSeek 回放为缺少 call_id 的 function_call_output 使用非空 id，已有值保留；完整记录见 git history。
 
 2026-09-18 Lite 将 DeepSeek 外源 reasoning 明文折入空 summary 并清空 content，已有 summary 和 OpenAI 密文不改；完整记录见 git history。
 
