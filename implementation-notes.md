@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-09-22 · Helm 上游通道转发（Provider / 协议透传，docs/04、05）
+
+- **决定**：静态 `type: helm` 配合 `target_provider_protocol: openai_responses` 复用 Responses 客户端，明确允许 Codex 原生 items；不应用 DeepSeek 的请求改写。客户端仍使用已有模型别名，内网仅把 lane 转发到远端同名 lane。
+- **媒体边界**：视频 lane 可指向显式 Helm provider，由远端履行 Grok 订阅鉴权；普通静态 OpenAI provider 仍不可调用该入口。本机 API key 鉴权、预算、一次创建与轮询所属 key 校验继续生效。
+- **验证与限制**：原生请求、鉴权替换及 SSE 回归先红后绿；视频创建、轮询隔离与普通 provider 拒绝有定向集成测试。映射采用当前通道快照，远端调整通道内模型无需同步；新增或删除通道需重新同步。远端额度及可用性仍决定最终是否成功。
+
+- **WebSocket 续接修复**：真实两轮验证中，直连远端成功，经过本地 Helm 第二轮因中继降为 HTTP 而丢失上游连接。显式 Helm Responses provider 使用现有有界 WebSocket connector，按可信 ingress session 保持一条远端连接；不透传内部会话证明，不改模型名、不删除 previous_response_id、不重建用户历史。下游关闭时释放连接，复用现有收包超时与内存租约处理。
+- **恢复边界**：原连接缺失或远端明确未发送时保持 response_create_not_sent 恢复语义；发送后连接失败标记结果不明，禁止自动重放。普通 HTTP 与其他 generic Responses provider 保持原路由。需要真实同 socket 两轮 continuation 作为验收，普通 CLI 或 SSE 成功不足以覆盖此问题。
+- **本次验收**：328 项定向测试、core/gateway 类型检查与构建通过；独立审查提出的握手 401/403/429 错误保真已补测试修复。`.12` 的 0.30.7 派生镜像部署后，同 socket 两轮均 response.completed、远端账号一致；Claude/Grok/Codex CLI 工具调用通过，测试 Key 全部删除。正式发布仍需通过完整 CI 与不可变镜像验收。
+
+
 ## 2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）
 
 - **证据**：Grok 4.7 的 PR 全绿；相同合并提交在共享 runner 上三次执行，第一次 100 项通过但 Chromium 下载重试耗尽 job 时间，后两次分别为五秒并发队列和固定等待 1.5 秒的记忆 worker 测试失败，其余 99 项通过。不是稳定复现的 Grok 配置失败。
@@ -56,15 +67,9 @@
 - **Jev 协议**：使用 OpenRouter Decisions 接口和既有 provider 环境凭证；只发送分类缓存使用的五项输入，排除系统提示词、完整历史和账号信息。该接口不支持聊天接口的 temperature/max_tokens，因而不发送这些字段；聊天候选仍保持原有约束。返回分类严格校验，两项 confidence 取较低者。
 - **限制**：Jev 请求体保守限制为 32,000 UTF-8 字节，超限继续备用分类器；0.6 是可调整的起始阈值，未声称已通过中文准确率校准。只缓存通过验收的结果和实际模型；已知费用累加，任何一次计费未知则总费用记为未知，避免少报。
 
-## 2026-09-18 · Codex 短冷却等原账号，长冷却原样回错误（Provider / OAuth 池，docs/04，原则 3/5）
-
-- **现象**：`90aa083d` 带 `x-codex-turn-state`，原账号短暂停用约 28s。Helm 立刻抛 `response_create_not_sent`，WebSocket 桥还可能把它改成 1012。Codex 不读 `recovery.retry_after_ms`，12s 连打 6 次。
-- **修复**：≤60s 的 sticky 冷却在原请求上等到点，再打原来的 Codex 账号；不换号、不换 DeepSeek。超过 60s 立刻失败，错误码/文案/`recovery`（含 `reason` 与 `retry_after_ms`）原样给客户端。长冷却不再改成 1012。客户端断连仍不算 provider 故障。
-- **不改**：lane rung；不把错误改成假的 `rate_limit_exceeded`。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · DeepSeek 未配对工具结果（Provider / 协议互译，docs/05）**：仅在 deepseek-responses 丢弃无 sibling call 的 output，保留已有配对，不发明 call 或改变 rung；完整记录见 git history。
+- **2026-09-18 · Codex 原账号冷却（Provider / OAuth 池，docs/04）**：短冷却在原请求内等待原账号；长冷却原样返回恢复信息，禁止换账号或误触发客户端重连。完整记录见 git history。
 
 ## 更早历史总览
 

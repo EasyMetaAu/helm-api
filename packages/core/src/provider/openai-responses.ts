@@ -133,6 +133,8 @@ export interface CodexResponsesClientDeps {
 }
 
 export interface GenericOpenAIResponsesClientDeps {
+  // Explicit Helm relays preserve the authenticated ingress WebSocket lifetime.
+  responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
   config: ProviderConfig;
   fetch?: typeof globalThis.fetch;
   // Provider-neutral compatibility profile for Responses endpoints that only
@@ -3266,47 +3268,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     responseWebsocketSessions.set(responseId, sessionId);
   }
 
-  async function receiveWebSocketMessage(
-    connection: CodexResponsesWebSocketConnection,
-    signal: AbortSignal | undefined,
-  ): Promise<CodexResponsesWebSocketReceivedMessage | null> {
-    const timeout = withTimeout(timeoutMs, signal);
-    const receive =
-      connection.receiveWithWork?.() ??
-      connection.receive().then((text) =>
-        text === null
-          ? null
-          : {
-              text,
-              release() {},
-            },
-      );
-    try {
-      return await Promise.race([
-        receive,
-        new Promise<never>((_, reject) => {
-          const rejectAbort = () => {
-            if (timeout.isTimeout() && !timeout.isExternalAbort()) {
-              reject(new UpstreamError("timeout", "upstream websocket stream timed out"));
-            } else {
-              reject(signal?.reason ?? new Error("client aborted"));
-            }
-          };
-          if (timeout.signal.aborted) rejectAbort();
-          else timeout.signal.addEventListener("abort", rejectAbort, { once: true });
-        }),
-      ]);
-    } catch (error) {
-      void receive.then(
-        (message) => message?.release(),
-        () => {},
-      );
-      throw error;
-    } finally {
-      timeout.cleanup();
-    }
-  }
-
   return {
     nativeProtocolProfile: "codex_responses",
 
@@ -3507,7 +3468,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             while (true) {
               let received: CodexResponsesWebSocketReceivedMessage | null;
               try {
-                received = await receiveWebSocketMessage(lease.connection, opts?.signal);
+                received = await receiveResponsesWebSocketMessage(
+                  lease.connection,
+                  timeoutMs,
+                  opts?.signal,
+                );
               } catch (error) {
                 if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
                 if (await fallbackOversizedRequestToHttp()) break;
@@ -3693,6 +3658,48 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       return await readUnaryJson(result);
     },
   };
+}
+
+async function receiveResponsesWebSocketMessage(
+  connection: CodexResponsesWebSocketConnection,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<CodexResponsesWebSocketReceivedMessage | null> {
+  const timeout = withTimeout(timeoutMs, signal);
+  const receive =
+    connection.receiveWithWork?.() ??
+    connection.receive().then((text) =>
+      text === null
+        ? null
+        : {
+            text,
+            release() {},
+          },
+    );
+  try {
+    return await Promise.race([
+      receive,
+      new Promise<never>((_, reject) => {
+        const rejectAbort = () => {
+          if (timeout.isTimeout() && !timeout.isExternalAbort()) {
+            reject(new UpstreamError("timeout", "upstream websocket stream timed out"));
+          } else {
+            reject(signal?.reason ?? new Error("client aborted"));
+          }
+        };
+        if (timeout.signal.aborted) rejectAbort();
+        else timeout.signal.addEventListener("abort", rejectAbort, { once: true });
+      }),
+    ]);
+  } catch (error) {
+    void receive.then(
+      (message) => message?.release(),
+      () => {},
+    );
+    throw error;
+  } finally {
+    timeout.cleanup();
+  }
 }
 
 export function createGenericOpenAIResponsesClient(
@@ -4015,6 +4022,125 @@ export function createGenericOpenAIResponsesClient(
     }
   }
 
+  const websocketSessions = new Map<
+    string,
+    { connection: Promise<CodexResponsesWebSocketConnection>; busy: boolean }
+  >();
+
+  async function closeWebSocketSession(sessionId: string): Promise<void> {
+    const state = websocketSessions.get(sessionId);
+    if (!state) return;
+    websocketSessions.delete(sessionId);
+    try {
+      await (await state.connection).close();
+    } catch {
+      // Teardown also handles a failed or cancelled handshake.
+    }
+  }
+
+  async function* relayWebSocket(
+    body: NativePassthroughInput,
+    sessionId: string,
+    opts: ProviderCallOptions | undefined,
+  ): AsyncGenerator<string> {
+    const connector = deps.responsesWebSocketConnector;
+    if (!connector) throw new Error("missing Responses websocket connector");
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    const prepared = prepareNativePassthroughRequest(
+      body,
+      await providerHeaders("text/event-stream", source),
+    );
+    const url = new URL(await endpoint("responses"));
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    let state = websocketSessions.get(sessionId);
+    if (typeof source.previous_response_id === "string" && source.previous_response_id && !state) {
+      throw new CodexResponsesBeforeSendError(
+        "previous_response_id requires its original Helm websocket; send the full conversation input instead",
+      );
+    }
+    if (state?.busy)
+      throw new CodexResponsesBeforeSendError("Helm websocket turn already in progress");
+    if (opts?.signal?.aborted) throw opts.signal.reason;
+    if (!state) {
+      state = {
+        connection: connector({ url: url.href, headers: prepared.headers, signal: opts?.signal }),
+        busy: false,
+      };
+      websocketSessions.set(sessionId, state);
+    }
+    state.busy = true;
+    let sent = false;
+    let terminal = false;
+    try {
+      const connection = await state.connection;
+      if (opts?.signal?.aborted) throw opts.signal.reason;
+      if (websocketSessions.get(sessionId) !== state)
+        throw new CodexResponsesBeforeSendError("Helm websocket was closed before send");
+      const text = JSON.stringify({ ...prepared.body, type: "response.create" });
+      opts?.captureUpstream?.(text);
+      sent = true;
+      await connection.send(text);
+      while (true) {
+        const received = await receiveResponsesWebSocketMessage(
+          connection,
+          timeoutMs,
+          opts?.signal,
+        );
+        if (received === null) throw new Error("Helm websocket closed after send");
+        try {
+          const event: unknown = JSON.parse(received.text);
+          if (!isRecord(event) || typeof event.type !== "string")
+            throw new Error("invalid Helm websocket event");
+          if (event.type === "error") {
+            const error = isRecord(event.error) ? event.error : event;
+            const message =
+              typeof error.message === "string" ? error.message : "Helm websocket upstream error";
+            if (error.code === CODEX_RESPONSES_NOT_SENT_CODE)
+              throw new CodexResponsesBeforeSendError(message);
+            terminal = true;
+          }
+          terminal ||= [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+            "response.cancelled",
+          ].includes(event.type);
+          yield `event: ${event.type}\ndata: ${received.text}\n\n`;
+          if (terminal) return;
+        } finally {
+          received.release();
+        }
+      }
+    } catch (error) {
+      if (opts?.signal?.aborted || isCodexResponsesBeforeSendError(error)) throw error;
+      if (!sent && error instanceof CodexResponsesWebSocketConnectError && error.status !== null) {
+        throw await errorFromResponse(
+          new Response(error.body, { status: error.status, headers: error.headers }),
+        );
+      }
+      if (!sent || error instanceof CodexResponsesWebSocketNotOpenError) {
+        throw new CodexResponsesBeforeSendError("Helm websocket request could not be sent");
+      }
+      // Never replay: the remote may already have executed this response.create.
+      throw new UpstreamError(
+        error instanceof UpstreamError && error.errorClass === "timeout"
+          ? "timeout"
+          : "upstream_error",
+        "Helm websocket failed after response.create was sent",
+        {
+          error: {
+            code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
+            message: "Helm websocket execution outcome is unknown",
+          },
+        },
+        400,
+      );
+    } finally {
+      state.busy = false;
+      if (!terminal) await closeWebSocketSession(sessionId);
+    }
+  }
+
   async function requestJson(
     path: string,
     init: {
@@ -4175,7 +4301,18 @@ export function createGenericOpenAIResponsesClient(
       return untranslateCustomToolResponse(await readUnaryJson(res), translated);
     },
 
+    closeResponsesWebSocketSession: closeWebSocketSession,
+
     async *nativePassthroughStream(body, opts) {
+      const session = isNativePassthroughCarrier(body)
+        ? Object.entries(body.headers).find(
+            ([name]) => name.toLowerCase() === CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+          )?.[1]
+        : undefined;
+      if (deps.responsesWebSocketConnector && typeof session === "string" && session.length > 0) {
+        yield* relayWebSocket(body, session, opts);
+        return;
+      }
       const translated = translatedCustomToolNames(body);
       const res = await requestJson("responses", {
         method: "POST",
