@@ -11,6 +11,7 @@
 
 - **来源与范围**：[官方模型页](https://platform.claude.com/docs/en/models/opus-5-5/overview)、[迁移指南](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)和[价格表](https://platform.claude.com/docs/en/about-claude/pricing)，于 2026-09-23 核对。新增原生 `anthropic/claude-opus-5-5`，1M 上下文、128K 输出；Claude Opus 通道优先 5.5，保留旧模型回退。未证实 ZenMux 上架，因此不新增其别名。
 - **兼容决定**：思考始终开启，沿用 `output_config.effort` 的五档控制；适配器统一移除旧版 enabled/disabled 思考配置及 sampling 字段，保留合法 adaptive/display 和签名历史。此模型不声明手动预算策略，以免通用策略删除合法 adaptive 配置。不会把强制工具请求偷偷改为 auto；上游确定性 400 继续按原契约返回。
+- **上线前实测**：远端旧版客户端标识 2.1.278 被上游以 `claude_code_version_too_old` 拒绝，要求至少 2.1.280；通过现有 `pnpm sync:claude-cli` 更新生成文件。真实 Claude Code 客户端仍需自行升级，不伪造其传入版本。
 - **计价与限制**：标准输入/输出 $4/$20 每百万 token；缓存读/5 分钟写/1 小时写 $0.20/$5/$8，fast 全部翻倍，US 区域系数 1.1。订阅显示的是 API 等价费用。旧 computer_20251124 不兼容、强制工具和 assistant prefill 不支持；原生工具集直接透传。签名历史须保持 append-only，跨模型回退不保证签名兼容；不改客户端历史来伪造兼容。新模型是否可用仍由账号发现/手动名单决定，发布时需核对挂载配置与在线账号。
 
 ## 2026-09-22 · Helm 上游通道转发（Provider / 协议透传，docs/04、05）
