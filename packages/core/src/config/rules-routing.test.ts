@@ -197,7 +197,7 @@ describe("shipped config rules drive routing", () => {
       // The static same-protocol rung sits between the subscription model and the
       // generic chain, so a subscription outage degrades without a lossy translate.
       "deepseek-responses/deepseek-flash",
-      "xai/grok-4.6",
+      "xai/grok-4.7",
       "anthropic/claude-opus-4-8",
       "anthropic/claude-opus-5",
       "anthropic/claude-opus-4-7",

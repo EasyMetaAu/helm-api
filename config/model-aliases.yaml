@@ -90,7 +90,7 @@
 "gemini-*": balanced
 
 # ── xAI / Grok (Grok CLI, SuperGrok, …) ─────────────────────────────────────
-# Bare Grok ids → lanes (config/lanes.yaml). Chat versions (`grok-4.6`,
+# Bare Grok ids → lanes (config/lanes.yaml). Chat versions (`grok-4.7`,
 # `grok-composer-2.5-fast`, a future grok-5) all land on the stable `grok`
 # lane — that lane's primary is the one place to bump when Grok changes
 # version, so aliases never pin a version.
@@ -106,4 +106,6 @@
 "grok-imagine-image*": grok-imagine-image-quality
 "grok-imagine-video-1.5*": grok-imagine-video-1.5-preview
 "grok-imagine-video*": grok-imagine-video
+# Build Fast stays on its separately priced channel.
+"grok-*-build-fast": grok-fast
 "grok*": grok

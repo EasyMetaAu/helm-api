@@ -268,6 +268,63 @@ describe("loadRuntimeCatalog", () => {
     ).toBeCloseTo((6 * 2 + 4 * 0.5 + 5 * 6) / 1_000_000, 12);
   });
 
+  it("loads Grok 4.7 standard and Build Fast capabilities and official price bands", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    for (const [model, input, output, cache, longInput, longOutput, longCache] of [
+      ["xai/grok-4.7", 2, 6, 0.5, 4, 12, 1],
+      ["xai/grok-4.7-build-fast", 4, 12, 1, 6, 18, 1.5],
+    ] as const) {
+      const entry = catalog.get(model);
+      expect(entry?.capabilities).toMatchObject({
+        supportsTools: true,
+        supportsVision: true,
+        supportsStreaming: true,
+        jsonOutput: "none",
+        supportsCachedContent: false,
+        modalities: [],
+        maxContextTokens: 500_000,
+        maxOutputTokens: null,
+        reasoningEffort: {
+          openaiReasoning: { supported: true, levels: ["low", "medium", "high", "xhigh"] },
+        },
+      });
+      expect(entry?.pricing).toMatchObject({
+        inputPerMTokUsd: input,
+        outputPerMTokUsd: output,
+        cacheReadPerMTokUsd: cache,
+      });
+      for (const prompt of [199_999, 200_000, 200_001]) {
+        const [i, o, c] =
+          prompt > 200_000 ? [longInput, longOutput, longCache] : [input, output, cache];
+        expect(
+          resolveCostUsd(entry?.pricing, {
+            usage: {
+              input_tokens: prompt,
+              output_tokens: 10,
+              input_tokens_details: { cached_tokens: 100 },
+            },
+          }),
+        ).toBeCloseTo(((prompt - 100) * i + 100 * c + 10 * o) / 1_000_000, 12);
+      }
+    }
+    const standard = catalog.get("xai/grok-4.7");
+    for (const prompt of [200_000, 200_001]) {
+      const multiplier = prompt > 200_000 ? 2 : 1;
+      expect(
+        resolveCostUsd(standard?.pricing, {
+          service_tier: "priority",
+          usage: {
+            input_tokens: prompt,
+            output_tokens: 10,
+            input_tokens_details: { cached_tokens: 100 },
+          },
+        }),
+      ).toBeCloseTo((((prompt - 100) * 4 + 100 + 10 * 12) * multiplier) / 1_000_000, 12);
+    }
+    // Build Fast has its own price card, not the public API priority multiplier.
+    expect(catalog.get("xai/grok-4.7-build-fast")?.pricing.serviceTiers).toBeUndefined();
+  });
+
   it("loads current official cache and context-tier prices for routed models", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
 

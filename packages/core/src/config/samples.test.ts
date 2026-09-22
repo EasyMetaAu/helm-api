@@ -93,7 +93,8 @@ describe("checked-in config samples", () => {
     expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
     expect(lanes.premium?.primary).toBe("gpt-5.6-sol");
     expect(lanes.premium?.fallback).toEqual(["grok", "claude-opus", "balanced"]);
-    expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.6", fallback: [] });
+    expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.7", fallback: [] });
+    expect(lanes["grok-fast"]).toMatchObject({ primary: "xai/grok-4.7-build-fast", fallback: [] });
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(lanes.json?.constraints.require_json).toBe(true);
@@ -243,6 +244,8 @@ describe("checked-in config samples", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const aliases = cfg.model_aliases;
     if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    expect(resolveModelAlias("grok-4.7", aliases)).toBe("grok");
+    expect(resolveModelAlias("grok-4.7-build-fast", aliases)).toBe("grok-fast");
     expect(resolveModelAlias("grok-4.6", aliases)).toBe("grok");
     expect(resolveModelAlias("grok-4.5", aliases)).toBe("grok");
     expect(resolveModelAlias("grok-composer-2.5-fast", aliases)).toBe("grok");
