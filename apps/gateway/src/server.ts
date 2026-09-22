@@ -1820,12 +1820,23 @@ function createProviderClient(
   if (
     p.type === "openai-responses" ||
     p.type === "openai-responses-generic" ||
-    p.type === "openai_responses_generic"
+    p.type === "openai_responses_generic" ||
+    (p.type === "helm" && p.targetProviderProtocol === "openai_responses")
   ) {
     const isXaiOAuth =
       p.oauth !== undefined && isOAuthPreset(p.oauth) && p.oauth.provider === "xai";
     const responsesClient = createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
+      // A Helm upstream accepts Codex native items and applies its own provider policy.
+      ...(p.type === "helm"
+        ? {
+            requestContract: { acceptsResponsesNativeItems: true },
+            responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
+              proxy,
+              timeoutMs: base.timeoutMs,
+            }),
+          }
+        : {}),
       ...(isXaiOAuth
         ? {
             requestContract: {
@@ -4624,14 +4635,21 @@ export async function buildServer(
     for (const alias of aliases) {
       const slash = alias.indexOf("/");
       const prefix = slash > 0 ? alias.slice(0, slash) : "";
-      // Grok Imagine is deliberately subscription-only. Static API-key or generic
-      // outputVideo providers must not become an implicit second credential path.
-      if (prefix !== "xai" || !isOAuthAliasAvailable(alias)) continue;
+      // Direct Grok access remains subscription-only. An explicit Helm relay
+      // delegates that credential boundary to the upstream gateway.
+      const relay = registry.resolve(alias);
+      const isHelmRelay =
+        relay.ok &&
+        config.providers.some((p) => p.name === relay.value.providerName && p.type === "helm");
+      if (!isHelmRelay && (prefix !== "xai" || !isOAuthAliasAvailable(alias))) continue;
       const providerAlias = alias;
-      const providerName = prefix;
-      const providerModel = model.endsWith("grok-imagine-video-1.5")
-        ? "grok-imagine-video-1.5"
-        : (oauthWireModelMap.get(alias) ?? alias.slice(slash + 1));
+      const providerName = isHelmRelay && relay.ok ? relay.value.providerName : prefix;
+      const providerModel =
+        isHelmRelay && relay.ok
+          ? relay.value.providerModel
+          : model.endsWith("grok-imagine-video-1.5")
+            ? "grok-imagine-video-1.5"
+            : (oauthWireModelMap.get(alias) ?? alias.slice(slash + 1));
       if (catalog.get(providerAlias)?.capabilities.outputVideo !== true) continue;
       const client = providerClients.get(providerName);
       const create = operation === "extension" ? client?.videoExtension : client?.videoGeneration;

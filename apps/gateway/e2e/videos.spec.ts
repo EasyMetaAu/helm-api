@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import {
   SqliteOAuthTokenStore,
 } from "@helm/core";
 import { expect, test } from "@playwright/test";
+import { parse, stringify } from "yaml";
 import {
   VIDEO_CAPTURE_PATH,
   VIDEO_RESET_PATH,
@@ -401,4 +402,45 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
       { requestId: secondId, account: started.starts[1]?.account },
     ]),
   );
+});
+
+test("relays a video lane through an explicit Helm upstream with key-owned polling", async () => {
+  const paths = ["providers.yaml", "capabilities.yaml", "lanes.yaml"];
+  const originals = paths.map((name) => readFileSync(join(configDir, name), "utf8"));
+  const providers = parse(originals[0]);
+  providers.providers.push({
+    name: "helm-video",
+    type: "helm",
+    base_url: MOCK,
+    api_key_env: "HELM_E2E_STATIC_VIDEO_KEY",
+    models: [{ alias: "relay/video", provider_model: "grok-imagine-video" }],
+  });
+  const caps = parse(originals[1]);
+  caps["relay/video"] = caps["static/video"];
+  const lanes = parse(originals[2]);
+  lanes["grok-imagine-video"].primary = "relay/video";
+  lanes["grok-imagine-video"].fallback = [];
+  try {
+    [providers, caps, lanes].forEach((doc, i) => {
+      writeFileSync(join(configDir, paths[i]), stringify(doc));
+    });
+    await boot();
+    const response = await createPromptVideo(KEY_A, "Helm relay only");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect((await videoCapture()).starts).toMatchObject([
+      { account: "static", body: { model: "grok-imagine-video", prompt: "Helm relay only" } },
+    ]);
+    expect((await pollVideo(KEY_B, body.request_id)).status).toBe(404);
+    expect((await pollVideo(KEY_A, body.request_id)).status).toBe(200);
+    providers.providers.at(-1).type = "openai";
+    writeFileSync(join(configDir, "providers.yaml"), stringify(providers));
+    await boot();
+    expect((await createPromptVideo(KEY_A, "generic provider must stay blocked")).status).toBe(503);
+    expect((await videoCapture()).starts).toHaveLength(1);
+  } finally {
+    originals.forEach((text, i) => {
+      writeFileSync(join(configDir, paths[i]), text);
+    });
+  }
 });
