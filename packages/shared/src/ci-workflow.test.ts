@@ -113,7 +113,7 @@ describe("CI workflow", () => {
       const job = jobBlock(raw, name);
       expect(job, `${name} job must exist`).not.toBe("");
       expect(job).toContain("github.event_name == 'pull_request_target'");
-      if (name === "verify" || name === "store") {
+      if (name !== "docker") {
         expect(job).toContain("runs-on: ubuntu-24.04");
         expect(job).not.toContain('["self-hosted","Linux","X64","docker"]');
       } else {
