@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-23 · Claude Opus 5.5（模型目录 / 协议 / 计费，docs/04、05、07）
+
+- **来源与范围**：[官方模型页](https://platform.claude.com/docs/en/models/opus-5-5/overview)、[迁移指南](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)和[价格表](https://platform.claude.com/docs/en/about-claude/pricing)，于 2026-09-23 核对。新增原生 `anthropic/claude-opus-5-5`，1M 上下文、128K 输出；Claude Opus 通道优先 5.5，保留旧模型回退。未证实 ZenMux 上架，因此不新增其别名。
+- **兼容决定**：思考始终开启，沿用 `output_config.effort` 的五档控制；适配器统一移除旧版 enabled/disabled 思考配置及 sampling 字段，保留合法 adaptive/display 和签名历史。此模型不声明手动预算策略，以免通用策略删除合法 adaptive 配置。不会把强制工具请求偷偷改为 auto；上游确定性 400 继续按原契约返回。
+- **上线前实测**：远端旧版客户端标识 2.1.278 被上游以 `claude_code_version_too_old` 拒绝，要求至少 2.1.280；通过现有 `pnpm sync:claude-cli` 更新生成文件。真实 Claude Code 客户端仍需自行升级，不伪造其传入版本。
+- **计价与限制**：标准输入/输出 $4/$20 每百万 token；缓存读/5 分钟写/1 小时写 $0.20/$5/$8，fast 全部翻倍，US 区域系数 1.1。订阅显示的是 API 等价费用。旧 computer_20251124 不兼容、强制工具和 assistant prefill 不支持；原生工具集直接透传。签名历史须保持 append-only，跨模型回退不保证签名兼容；不改客户端历史来伪造兼容。新模型是否可用仍由账号发现/手动名单决定，发布时需核对挂载配置与在线账号。
+
 ## 2026-09-22 · Helm 上游通道转发（Provider / 协议透传，docs/04、05）
 
 - **决定**：静态 `type: helm` 配合 `target_provider_protocol: openai_responses` 复用 Responses 客户端，明确允许 Codex 原生 items；不应用 DeepSeek 的请求改写。客户端仍使用已有模型别名，内网仅把 lane 转发到远端同名 lane。
@@ -60,18 +67,13 @@
 - **压缩与边界**：DeepSeek 合同发送前复用现有图片优化器：最长边 2048、WebP quality 82，仅采用比原图更小的结果；不改调用方原始图片，不下载外部 URL。沿用内存准入、取消信号、单图 1600 万像素、每请求 12 张/累计 3200 万像素上限；超限、资源不足或解码失败保留原图。压缩是有界尽力优化，结构修复始终生效。其他 provider 不启用此处理。
 - **验证范围**：流式/非流式回归先红后绿，覆盖图片结构、压缩、原数据保留和普通 Responses 客户端隔离；未将本地验证当成生产部署或真实上游验收。
 
-## 2026-09-19 · 分类器支持 Jev → 聊天模型的有序回退（Classifier，docs/03）
-
-- **配置与兼容**：新增可选 `eval.chain`，逐项配置类型、模型/通道、超时和最低置信度；未配置时保留旧 `eval.model` 行为。分类器页面可添加、排序、删除候选，保存后热更新并清空旧配置缓存，不默认替生产启用 Jev。
-- **回退与时间预算**：Jev 错误、超时、无效结果或置信度不足，继续下一分类器；单项超时受整条链 `outer_timeout_ms` 的剩余预算约束。全部失败才进入 `runtime.default_lane`，模型执行层的回退仍独立。
-- **Jev 协议**：使用 OpenRouter Decisions 接口和既有 provider 环境凭证；只发送分类缓存使用的五项输入，排除系统提示词、完整历史和账号信息。该接口不支持聊天接口的 temperature/max_tokens，因而不发送这些字段；聊天候选仍保持原有约束。返回分类严格校验，两项 confidence 取较低者。
-- **限制**：Jev 请求体保守限制为 32,000 UTF-8 字节，超限继续备用分类器；0.6 是可调整的起始阈值，未声称已通过中文准确率校准。只缓存通过验收的结果和实际模型；已知费用累加，任何一次计费未知则总费用记为未知，避免少报。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · Codex 原账号冷却（Provider / OAuth 池，docs/04）**：短冷却在原请求内等待原账号；长冷却原样返回恢复信息，禁止换账号或误触发客户端重连。完整记录见 git history。
+- **2026-09-19 · 分类器 Jev 有序回退（Classifier，docs/03）**：可选 eval.chain 复用总超时、严格校验与稳定缓存，失败回退 default_lane；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 Codex 短冷却在原账号等待，长冷却原样返回，禁止换账号和误触发重连；完整记录见 git history。
 
 2026-09-18 OAuth 退出与刷新共锁，撤销缓存凭证并同步禁用 live pool，避免删除后刷新写回；完整记录见 git history。
 

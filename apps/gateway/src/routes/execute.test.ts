@@ -7,6 +7,7 @@ import {
   createGenericOpenAIResponsesClient,
   createOAuthPoolClient,
   createRuntimeMemoryCoordinator,
+  loadRuntimeCatalog,
   runtimeResponseWorkAdmission,
   TokenRefreshError,
   UpstreamError,
@@ -2430,6 +2431,50 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.request_mutations).toMatchObject({
       body_shims_applied: ["reasoning_effort_mapped_for_model"],
     });
+  });
+
+  it("routes Opus 5.5 through real catalog policy without synthesizing a manual budget", async () => {
+    let sent: Record<string, unknown> = {};
+    const provider = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.test", apiKey: "test" },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "msg_opus55",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const alias = "anthropic/claude-opus-5-5";
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        [alias]: {
+          providerName: "anthro",
+          providerModel: "claude-opus-5-5",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(
+      plan([alias]),
+      req({ reasoning_effort: "minimal", max_tokens: 1024 }),
+    );
+    expect(out.final).toEqual({ status: "ok", alias, providerModel: "claude-opus-5-5" });
+    expect(sent.output_config).toEqual({ effort: "low" });
+    expect(sent.max_tokens).toBe(1024);
+    expect(sent).not.toHaveProperty("thinking");
+    expect(sent).not.toHaveProperty("temperature");
   });
 
   it("uses Anthropic Haiku and strips unsupported output_config.effort for that attempt", async () => {

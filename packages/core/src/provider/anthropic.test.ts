@@ -12,6 +12,22 @@ import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.genera
 import { UpstreamError } from "./openai.js";
 
 describe("openaiToAnthropicRequest", () => {
+  it("uses Opus 5.5 effort without manual thinking budgets or sampling parameters", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-5-5",
+      messages: [{ role: "user", content: "Hi" }],
+      reasoning_effort: "high",
+      max_tokens: 1024,
+      temperature: 0.2,
+      top_p: 0.9,
+    });
+    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.max_tokens).toBe(1024);
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("temperature");
+    expect(body).not.toHaveProperty("top_p");
+  });
+
   it("omits deprecated temperature for Claude Sonnet 5", () => {
     const body = openaiToAnthropicRequest({
       model: "claude-sonnet-5",
@@ -1345,6 +1361,97 @@ describe("translateAnthropicSSE", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("Opus 5.5 wire compatibility", () => {
+  it.each([
+    "native",
+    "translated",
+    "count",
+    "native-stream",
+    "translated-stream",
+  ] as const)("normalizes legacy settings and preserves signed tool history on %s requests", async (path) => {
+    let sent: Record<string, unknown> = {};
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer test",
+        claudeCliFingerprintMode: "strict",
+      },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        if (path.endsWith("stream"))
+          return new Response(
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        return jsonResponse({
+          id: "m",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const signed = { type: "thinking", thinking: "", signature: "opaque-signed-history" };
+    const body = {
+      model: "claude-opus-5-5",
+      max_tokens: 1024,
+      temperature: 0.2,
+      top_p: 0.9,
+      top_k: 40,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      output_config: { effort: "medium" },
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: [signed, { type: "text", text: "Hello" }] },
+        { role: "user", content: "continue" },
+      ],
+    };
+    if (path === "native") await client.nativePassthrough?.(body);
+    else if (path === "count") await client.countTokens?.(body);
+    else if (path === "translated") await client.chatCompletion(body);
+    else if (path === "native-stream") {
+      for await (const _ of client.nativePassthroughStream?.({ ...body, stream: true }) ?? []) {
+        /* consume */
+      }
+    } else {
+      for await (const _ of client.chatCompletionStream(body)) {
+        /* consume */
+      }
+    }
+    for (const key of ["temperature", "top_p", "top_k", "thinking"])
+      expect(sent).not.toHaveProperty(key);
+    expect(sent.output_config).toEqual({ effort: "medium" });
+    expect(sent.max_tokens).toBe(1024);
+    if (path === "native" || path === "native-stream" || path === "count") {
+      expect(sent.messages).toEqual(body.messages);
+    }
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it("preserves adaptive display and forced-tool rejection instead of weakening the request", async () => {
+    let sent: Record<string, unknown> = {};
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "test" },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return jsonResponse(
+          { error: { type: "invalid_request_error", message: "forced tools unsupported" } },
+          400,
+        );
+      },
+    });
+    const body = {
+      model: "claude-opus-5-5",
+      thinking: { type: "adaptive", display: "summarized" },
+      tool_choice: { type: "any" },
+      messages: [{ role: "user", content: "hi" }],
+    };
+    await expect(client.nativePassthrough?.(body)).rejects.toBeInstanceOf(UpstreamError);
+    expect(sent.thinking).toEqual(body.thinking);
+    expect(sent.tool_choice).toEqual(body.tool_choice);
   });
 });
 
