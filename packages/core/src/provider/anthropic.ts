@@ -1310,6 +1310,7 @@ export function openaiToAnthropicRequest(
   if (r.thinking && typeof r.thinking === "object") {
     body.thinking = r.thinking;
   } else if (
+    model !== "claude-opus-5-5" &&
     typeof r.reasoning_effort === "string" &&
     reasoningEffortToAnthropicThinking(r.reasoning_effort) !== undefined
   ) {
@@ -1362,7 +1363,7 @@ export function openaiToAnthropicRequest(
   // Claude Code body always owns the cache breakpoint (ephemeral on the agent-prompt block) and
   // top-level `cache_control` is not an Anthropic Messages field. Genuine passthrough for
   // non-emulated targets lives in execute.ts (generic) and protocol/anthropic/request.ts (native).
-  return body;
+  return nativePassthroughBody(normalizeAnthropicModelParameters(body));
 }
 
 function anthropicToolChoice(
@@ -1503,14 +1504,34 @@ function forceAnthropicFastMode(input: NativePassthroughInput): NativePassthroug
   return carrier;
 }
 
-function stripUnsupportedSonnetTemperature(input: NativePassthroughInput): NativePassthroughInput {
+function normalizeAnthropicModelParameters(input: NativePassthroughInput): NativePassthroughInput {
   const body = nativePassthroughBody(input);
-  if (body.model !== "claude-sonnet-5" || !("temperature" in body)) return input;
+  const opus55 = body.model === "claude-opus-5-5";
+  const unsupported = opus55
+    ? ["temperature", "top_p", "top_k"]
+    : body.model === "claude-sonnet-5"
+      ? ["temperature"]
+      : [];
+  // Opus 5.5 always thinks adaptively. Keep valid adaptive display settings and
+  // signed history intact; only remove the legacy request-level modes.
+  if (
+    opus55 &&
+    isRecord(body.thinking) &&
+    (body.thinking.type === "enabled" || body.thinking.type === "disabled")
+  ) {
+    unsupported.push("thinking");
+  }
+  const removed = unsupported.filter((key) => key in body);
+  if (removed.length === 0) return input;
   const next = { ...body };
-  delete next.temperature;
+  for (const key of removed) delete next[key];
   if (!isNativePassthroughCarrier(input)) return next;
   const carrier = cloneCarrierWithBody(input, next);
-  appendMutationList(carrier.mutations, "body_shims_applied", ["temperature_removed_for_model"]);
+  appendMutationList(
+    carrier.mutations,
+    "body_shims_applied",
+    removed.map((key) => `${key}_removed_for_model`),
+  );
   return carrier;
 }
 
@@ -1604,7 +1625,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
   ): Promise<AnthropicRequestResult> {
-    const wireInput = stripUnsupportedSonnetTemperature(
+    const wireInput = normalizeAnthropicModelParameters(
       cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
     );
     const body = nativePassthroughBody(wireInput);
@@ -1641,7 +1662,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     }
     // Strict thinking normalization can re-add temperature; apply the model gate last.
     const finalBody = nativePassthroughBody(
-      stripUnsupportedSonnetTemperature(normalizedBody ?? strictPrepared.body),
+      normalizeAnthropicModelParameters(normalizedBody ?? strictPrepared.body),
     );
     const wireBody = strictClaudeCliFingerprint
       ? serializeAnthropicBody(finalBody, { strictClaudeCliFingerprint: true })

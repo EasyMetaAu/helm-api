@@ -676,6 +676,25 @@ zenmux-anthropic/claude-haiku-4.5:
 # output, $1/M cache hit, $12.50/M 5-min cache write). Load-bearing: Claude Code
 # caches heavily, and without these computeCostUsd bills cached tokens at full
 # input rate (large over-estimate). MUST stay in sync with the capabilities.yaml caps.
+# Official Opus 5.5 pricing, checked 2026-09-23. Cache reads are 0.05x input;
+# fast mode is 2x standard pricing, including cache writes/reads.
+# https://platform.claude.com/docs/en/about-claude/pricing
+anthropic/claude-opus-5-5:
+  inputPerMTokUsd: 4.0
+  outputPerMTokUsd: 20.0
+  cacheReadPerMTokUsd: 0.2
+  cacheWritePerMTokUsd: 5.0
+  cacheWrite1hPerMTokUsd: 8.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
+  serviceTiers:
+    fast:
+      inputPerMTokUsd: 8.0
+      outputPerMTokUsd: 40.0
+      cacheReadPerMTokUsd: 0.4
+      cacheWritePerMTokUsd: 10.0
+      cacheWrite1hPerMTokUsd: 16.0
 # Claude Opus 5: a drop-in upgrade at Opus 4.8's pricing — $5/M input, $25/M output,
 # $0.50/M cache read, $6.25/M 5-min cache write, $10/M 1h cache write, and the same
 # $10/$50 fast-mode tier. Verified 2026-07-25 against the ZenMux catalog

@@ -74,6 +74,7 @@ describe("discoverOAuthModels", () => {
   });
 
   it("returns the curated list for anthropic but no Codex entitlement without a token", async () => {
+    expect(CURATED_OAUTH_MODELS.anthropic).toContain("claude-opus-5-5");
     expect(await discoverOAuthModels("anthropic", undefined)).toEqual(
       CURATED_OAUTH_MODELS.anthropic,
     );

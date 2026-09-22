@@ -97,6 +97,53 @@ describe("loadRuntimeCatalog", () => {
     expect(gpt4o?.capabilities.supportsVision).toBe(true);
   });
 
+  it("loads Opus 5.5 limits, adaptive effort and standard/fast cache pricing", () => {
+    const opus = loadRuntimeCatalog({ configDir: "config" }).get("anthropic/claude-opus-5-5");
+    expect(opus?.capabilities).toMatchObject({
+      supportsTools: true,
+      supportsVision: true,
+      supportsStreaming: true,
+      jsonOutput: "schema",
+      modalities: ["document"],
+      maxContextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      reasoningEffort: {
+        anthropicOutputConfig: {
+          supported: true,
+          levels: ["low", "medium", "high", "xhigh", "max"],
+          map: { minimal: "low" },
+        },
+      },
+    });
+    expect(opus?.pricing).toEqual({
+      inputPerMTokUsd: 4,
+      outputPerMTokUsd: 20,
+      cacheReadPerMTokUsd: 0.2,
+      cacheWritePerMTokUsd: 5,
+      cacheWrite1hPerMTokUsd: 8,
+      inferenceGeoMultipliers: { global: 1, us: 1.1 },
+      serviceTiers: {
+        fast: {
+          inputPerMTokUsd: 8,
+          outputPerMTokUsd: 40,
+          cacheReadPerMTokUsd: 0.4,
+          cacheWritePerMTokUsd: 10,
+          cacheWrite1hPerMTokUsd: 16,
+        },
+      },
+    });
+    expect(
+      resolveCostUsd(opus?.pricing, {
+        usage: {
+          input_tokens: 600,
+          output_tokens: 200,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 100,
+        },
+      }),
+    ).toBeCloseTo((600 * 4 + 200 * 20 + 300 * 0.2 + 100 * 5) / 1_000_000, 12);
+  });
+
   it("loads the native Claude Fable pricing and capabilities from real config", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
     const latest = catalog.get("anthropic/claude-fable-5-1");

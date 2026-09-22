@@ -198,9 +198,9 @@ describe("shipped config rules drive routing", () => {
       // generic chain, so a subscription outage degrades without a lossy translate.
       "deepseek-responses/deepseek-flash",
       "xai/grok-4.7",
-      "anthropic/claude-opus-4-8",
+      "anthropic/claude-opus-5-5",
       "anthropic/claude-opus-5",
-      "anthropic/claude-opus-4-7",
+      "anthropic/claude-opus-4-8",
     ]);
     expect(new Set(chain).size).toBe(chain.length);
   });

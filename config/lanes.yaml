@@ -160,9 +160,10 @@ tool_use:
 # `premium`; Sonnet and Haiku degrade through `balanced` and `economy` respectively.
 claude-opus:
   purpose: Anthropic Claude Opus tier — strongest Claude
-  primary: anthropic/claude-opus-4-8
+  primary: anthropic/claude-opus-5-5
   fallback:
     - anthropic/claude-opus-5
+    - anthropic/claude-opus-4-8
     - anthropic/claude-opus-4-7
     - anthropic/claude-opus-4-6
     - premium
