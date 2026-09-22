@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）
+
+- **证据**：Grok 4.7 的 PR 全绿；相同合并提交在共享 runner 上三次执行，第一次 100 项通过但 Chromium 下载重试耗尽 job 时间，后两次分别为五秒并发队列和固定等待 1.5 秒的记忆 worker 测试失败，其余 99 项通过。不是稳定复现的 Grok 配置失败。
+- **决定**：main E2E 与 PR 一样使用独立 ubuntu-24.04 runner，沿用 verify/store 的隔离做法。保留原有 100 项断言、十分钟 job 上限、真实 PostgreSQL、浏览器安装、只读权限和完整发布门禁，不增加重试或放宽超时。版本仍为尚未发布的 0.30.7。
+
 ## 2026-09-22 · Grok 4.7 与 Build Fast 配置（Config / 路由 / 计费，docs/04、07）
 
 - **来源**：[官方模型页](https://docs.x.ai/developers/models/grok-4.7)、[官方价格页](https://docs.x.ai/developers/pricing)及已认证的 Grok CLI 目录。两个型号均为 500K 上下文，支持 low/medium/high/xhigh；沿用订阅通道的工具、图片和流式能力，未知输出上限保留 null。公共 API 的结构化输出声明不代表订阅代理已验证，JSON 能力继续关闭。
@@ -57,16 +62,13 @@
 - **修复**：≤60s 的 sticky 冷却在原请求上等到点，再打原来的 Codex 账号；不换号、不换 DeepSeek。超过 60s 立刻失败，错误码/文案/`recovery`（含 `reason` 与 `retry_after_ms`）原样给客户端。长冷却不再改成 1012。客户端断连仍不算 provider 故障。
 - **不改**：lane rung；不把错误改成假的 `rate_limit_exceeded`。
 
-## 2026-09-18 · DeepSeek 丢掉无配对的 function_call_output（Provider / 协议互译，docs/05，原则 3/8）
-
-- **现象**：`776fa8e7` 先打 `gpt-5.6-sol` 上游过载，落到 `deepseek-flash` 后 400：`No tool call found for tool output with call_id fco_01a0a7f2-…`。历史第 7 项是 Codex `automation_update` / `codex_app` 的 `function_call_output`，有 `id` 无 `call_id`，也没有对应的 `function_call`。v0.29.27 用 `id` 填 `call_id` 后，DeepSeek 仍要配对的 call。
-- **修复**：`deepseek-responses` 增加 opt-in `dropUnpairedFunctionCallOutputs`，在填 `call_id` 之后丢掉没有 sibling `function_call`/`custom_tool_call` 的 output。配对的工具结果不动。不发明 call，不改 rung。第一条候选的 Codex 过载仍是上游故障。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · OAuth 退出撤销（Auth / Provider，docs/06、04、05）**：删除与刷新共锁，撤销旧 manager 缓存并同步禁用 live pool，防止刷新写回；完整记录见 git history。
+- **2026-09-18 · DeepSeek 未配对工具结果（Provider / 协议互译，docs/05）**：仅在 deepseek-responses 丢弃无 sibling call 的 output，保留已有配对，不发明 call 或改变 rung；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 OAuth 退出与刷新共锁，撤销缓存凭证并同步禁用 live pool，避免删除后刷新写回；完整记录见 git history。
 
 2026-09-18 Grok 版本化 chat 别名进入稳定 lane，Imagine/video 按最长字面量区分；完整记录见 git history。
 

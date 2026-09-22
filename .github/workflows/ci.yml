@@ -108,12 +108,12 @@ jobs:
   # the gateway via tsx against SOURCE + a fully offline deterministic mock
   # upstream (no network, fixed worker interval), so the suite is hermetic. Only
   # admin.spec drives a real browser; the rest use Playwright's HTTP request
-  # context. GitHub-hosted pull-request runners already provide Chromium's system
-  # libraries, so avoid the slow apt step; trusted main pushes retain the
-  # preconfigured self-hosted pool.
+  # context. Keep PR and main on the same disposable runner: shared runners
+  # have exhausted browser-install budgets and timing-sensitive queue/worker tests.
+  # GitHub-hosted runners already provide Chromium's system libraries.
   e2e:
     timeout-minutes: 10
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
