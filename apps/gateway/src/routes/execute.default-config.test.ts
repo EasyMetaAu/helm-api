@@ -248,23 +248,27 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(calls).toEqual(["deepseek/deepseek-v4-pro"]);
   });
 
-  it("admits xAI Grok 4.6 OAuth agent requests with tools", async () => {
+  it.each([
+    "grok-4.6",
+    "grok-4.7",
+    "grok-4.7-build-fast",
+  ])("admits xAI %s OAuth agent requests with tools", async (model) => {
     const { client, calls } = stubProvider();
-    const alias = "xai/grok-4.6";
+    const alias = `xai/${model}`;
     const execute = createExecute({
       defaultProvider: client,
       providers: new Map([["xai", client]]),
       registry: buildRegistry(),
       knownOAuthPrefixes: new Set(["xai"]),
       oauthAliases: () => new Set([alias]),
-      oauthWireModels: () => new Map([[alias, "grok-4.6"]]),
+      oauthWireModels: () => new Map([[alias, model]]),
       xaiOAuthModels: () =>
         new Map([
           [
             alias,
             {
-              id: "grok-4.6",
-              model: "grok-4.6",
+              id: model,
+              model,
               apiBackend: "responses",
               contextWindow: 500_000,
               hidden: false,
@@ -288,7 +292,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
 
     expect(out.attempts[0]?.skipped).toBe(false);
     expect(out.final.status).toBe("ok");
-    expect(calls).toEqual(["grok-4.6"]);
+    expect(calls).toEqual([model]);
   });
 
   it("fails open when the shipped Grok OAuth candidate is not connected", async () => {

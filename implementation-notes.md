@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-22 · Grok 4.7 与 Build Fast 配置（Config / 路由 / 计费，docs/04、07）
+
+- **来源**：[官方模型页](https://docs.x.ai/developers/models/grok-4.7)、[官方价格页](https://docs.x.ai/developers/pricing)及已认证的 Grok CLI 目录。两个型号均为 500K 上下文，支持 low/medium/high/xhigh；沿用订阅通道的工具、图片和流式能力，未知输出上限保留 null。公共 API 的结构化输出声明不代表订阅代理已验证，JSON 能力继续关闭。
+- **价格**：每百万 token 的输入/输出/缓存读取，标准版为 $2/$6/$0.5，超过 200,000 prompt tokens 为 $4/$12/$1；priority 按官方 2 倍计。Build Fast 为 $4/$12/$1，长上下文为 $6/$18/$1.5，不能套用标准版 priority 的长上下文价格。订阅仍按 API 等价估算计入遥测与 key 预算，不是 SuperGrok 订阅账单。
+- **通道与边界**：稳定 grok 主模型从 4.6 切到 4.7，所有引用它的 fallback 链随之升级；新增 grok-fast，并把 grok-*-build-fast 别名导向该通道。旧型号能力与价格保留，媒体通道不变。不添加未公开定价的 Fast priority 档，不为当前订阅代理启用美国区域 API 费率。
+
 ## 2026-09-21 · HTTP 降级后禁止发送增量 continuation（Provider / WebSocket，docs/05）
 
 - **证据**：`223a933e-f396-4556-98d9-18523b0aa3c6` 与前一成功请求绑定同一 Codex 账号，HTTP 上游却拒绝 `previous_response_id`。旧分支让 HTTP fallback 会话绕过 WebSocket continuation guard，现有测试还错误假设 HTTP 能接受该参数。
@@ -56,18 +62,13 @@
 - **现象**：`776fa8e7` 先打 `gpt-5.6-sol` 上游过载，落到 `deepseek-flash` 后 400：`No tool call found for tool output with call_id fco_01a0a7f2-…`。历史第 7 项是 Codex `automation_update` / `codex_app` 的 `function_call_output`，有 `id` 无 `call_id`，也没有对应的 `function_call`。v0.29.27 用 `id` 填 `call_id` 后，DeepSeek 仍要配对的 call。
 - **修复**：`deepseek-responses` 增加 opt-in `dropUnpairedFunctionCallOutputs`，在填 `call_id` 之后丢掉没有 sibling `function_call`/`custom_tool_call` 的 output。配对的工具结果不动。不发明 call，不改 rung。第一条候选的 Codex 过载仍是上游故障。
 
-## 2026-09-18 · 断开 OAuth 账号撤销缓存凭证并阻止刷新写回（Auth / Provider，docs/06、04、05）
-
-- **已复现**：后台断开只删 Store 行，旧 token manager 仍能返回缓存 access token；并发刷新完成后会重新 upsert 该行。pool 重建失败时旧成员也仍可选择。另有流式已输出后出现确定性鉴权失败却未禁用账号的缺口。
-- **修复**：删除与刷新复用同一 store/account 锁，删除成功后撤销旧 manager 的内存凭证使用权；管理端同步禁用 live pool 成员并丢弃复用缓存，不依赖后续重建成功。重新登录创建新 manager，旧 manager 永不复活，其断开错误也不会把新登录标为凭证失效。流式已提交后只禁用确定性失效账号并上抛原错误，禁止重放。
-- **边界**：锁与缓存失效作用于同一网关进程共享的 Store；不承诺跨进程直接删库的一致性，也不撤回已经发送的上游请求。退出会等待已经开始的刷新完成后再删除；删除提交是退出生效点，重新登录的保证从退出完成后开始。删除失败不撤销现有凭证。普通 403、限流、5xx 与客户端断连不因此永久禁用。
-- **证据范围**：回归测试先红后绿；这些代码缺陷已证实，但不能据此断言它们造成了本次截图中另一个账号的 429 冷却。尚未部署。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-18 · grok 兼容别名（Config / 路由，docs/04）**：版本化 chat id 进入 grok lane；最长字面量优先区分 Imagine 图片与视频型号，不固定 chat 版本；完整记录见 git history。
+- **2026-09-18 · OAuth 退出撤销（Auth / Provider，docs/06、04、05）**：删除与刷新共锁，撤销旧 manager 缓存并同步禁用 live pool，防止刷新写回；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-18 Grok 版本化 chat 别名进入稳定 lane，Imagine/video 按最长字面量区分；完整记录见 git history。
 
 2026-09-18 DeepSeek 回放为缺少 call_id 的 function_call_output 使用非空 id，已有值保留；完整记录见 git history。
 

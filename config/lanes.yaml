@@ -370,7 +370,16 @@ gemini-flash:
 
 grok:
   purpose: Stable Grok channel; update only this primary when Grok changes version
-  primary: xai/grok-4.6
+  primary: xai/grok-4.7
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+grok-fast:
+  purpose: Grok Build Fast channel — higher token prices for faster responses
+  primary: xai/grok-4.7-build-fast
   fallback: []
   constraints:
     require_tools: false
