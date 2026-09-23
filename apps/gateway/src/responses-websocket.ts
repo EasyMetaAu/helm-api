@@ -428,7 +428,7 @@ function websocketPayload(event: string | undefined, data: string): string | nul
         record.status !== undefined &&
         record.status_code !== undefined
       ) {
-        const envelope = { ...record, type: "error" };
+        const envelope: Record<string, unknown> = { ...record, type: "error" };
         delete envelope.status_code;
         return JSON.stringify(envelope);
       }
