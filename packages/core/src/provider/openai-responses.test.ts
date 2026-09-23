@@ -7020,6 +7020,24 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       ]);
     });
 
+    it("preserves continuation tool results whose calls are in the previous response", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+      const input = [{ type: "function_call_output", call_id: "call_previous", output: "ok" }];
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        previous_response_id: "previous-response",
+        input,
+      });
+
+      expect(seen.input).toEqual(input);
+      expect(seen.previous_response_id).toBe("previous-response");
+    });
+
     it("fills missing call_id then keeps the output when a sibling call matches", async () => {
       // Fill still matters: DeepSeek 400s "missing field call_id" even when a
       // sibling function_call exists. Fill from id first; drop only if still unpaired.

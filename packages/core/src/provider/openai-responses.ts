@@ -3880,7 +3880,11 @@ export function createGenericOpenAIResponsesClient(
         functionCallOutputCallIdFilled = true;
       }
     }
-    if (contract.dropUnpairedFunctionCallOutputs === true) {
+    // A continuation's matching call lives in the previous response, not this input.
+    if (
+      contract.dropUnpairedFunctionCallOutputs === true &&
+      !(typeof next.previous_response_id === "string" && next.previous_response_id.length > 0)
+    ) {
       const pruned = dropUnpairedFunctionCallOutputs(next.input);
       if (pruned.dropped) {
         next.input = pruned.input;
