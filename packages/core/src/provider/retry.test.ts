@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   isFetchTransportError,
+  isPreConnectError,
   isTransientConnectionError,
   numericRetryAfterMs,
   type OverloadRetryBudget,
@@ -88,6 +89,26 @@ describe("isTransientConnectionError", () => {
     // must still be classified non-transient (name wins).
     const err = Object.assign(new Error("socket hang up"), { name: "AbortError" });
     expect(isTransientConnectionError(err)).toBe(false);
+  });
+});
+
+describe("isPreConnectError", () => {
+  it("allows only errors that prove no TCP connection was established", () => {
+    expect(
+      isPreConnectError(
+        Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("Connect Timeout Error"), {
+            code: "UND_ERR_CONNECT_TIMEOUT",
+          }),
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isPreConnectError(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })),
+    ).toBe(false);
+    expect(isPreConnectError(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(
+      false,
+    );
   });
 });
 
