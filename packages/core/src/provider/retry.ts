@@ -9,9 +9,9 @@
 // chain) for a hiccup that a 200 ms retry would have survived.
 //
 // The classifier is a STRICT allowlist: only raw socket/connection signatures match.
-// An already-classified UpstreamError("timeout") (slow connect — retrying only adds
-// latency; the chain falls back instead) and a client AbortError both fall through
-// to non-transient and are never retried.
+// An already-classified UpstreamError("timeout") and a client AbortError both fall
+// through to non-transient. UND_ERR_CONNECT_TIMEOUT is safe because no TCP
+// connection was established, so the request cannot have reached the upstream.
 
 const TRANSIENT_CODES = new Set([
   "ECONNRESET",
@@ -19,6 +19,7 @@ const TRANSIENT_CODES = new Set([
   "ECANCELED",
   "EPIPE",
   "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_SOCKET",
 ]);
 

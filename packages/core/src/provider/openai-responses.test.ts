@@ -6329,6 +6329,70 @@ describe("createCodexResponsesClient — passthrough methods are defined (pool f
 });
 
 describe("createGenericOpenAIResponsesClient — native passthrough", () => {
+  it.each([
+    ["a network failure", new CodexResponsesWebSocketConnectError("socket hang up")],
+    [
+      "an upgrade rejection",
+      new CodexResponsesWebSocketConnectError("upgrade rejected", {
+        status: 499,
+        body: "upgrade rejected",
+      }),
+    ],
+  ])("falls back to HTTP before send after %s", async (_label, connectError) => {
+    const connect = vi.fn(async () => {
+      throw connectError;
+    });
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://helm.test/v1", apiKey: "sk-test" },
+      responsesWebSocketConnector: connect,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], stream: true, store: false },
+      headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "generic-ws-fallback" },
+      mutations: {},
+    }) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("preserves a websocket handshake 429 instead of replaying it over HTTP", async () => {
+    const fetchMock = vi.fn();
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://helm.test/v1", apiKey: "sk-test" },
+      responsesWebSocketConnector: vi.fn(async () => {
+        throw new CodexResponsesWebSocketConnectError("rate limited", {
+          status: 429,
+          body: JSON.stringify({ error: { message: "quota exhausted" } }),
+        });
+      }),
+      fetch: fetchMock,
+    });
+    const stream = client.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], stream: true, store: false },
+      headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "generic-ws-429" },
+      mutations: {},
+    });
+
+    await expect(stream?.[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      upstreamStatus: 429,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("injects default native instructions when the opt-in contract requires them", async () => {
     let seenBody: Record<string, unknown> = {};
     const client = createGenericOpenAIResponsesClient({
@@ -7669,6 +7733,34 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     expect(seenHeaders.get("chatgpt-account-id")).toBeNull();
     expect(seenBody).toEqual(body);
     expect(out).toEqual({ id: "resp_generic", object: "response", status: "completed" });
+  });
+
+  it("retries a generic Responses connect timeout before any response is received", async () => {
+    const connectTimeout = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("Connect Timeout Error"), {
+        code: "UND_ERR_CONNECT_TIMEOUT",
+      }),
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(connectTimeout)
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "resp_retried", object: "response", status: "completed" }),
+      );
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://api.openai.test/v1",
+        apiKey: "sk-test",
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock,
+    });
+
+    const out = await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toMatchObject({ id: "resp_retried", status: "completed" });
   });
 
   it("chatCompletion maps Responses function_call output items to chat tool_calls", async () => {
