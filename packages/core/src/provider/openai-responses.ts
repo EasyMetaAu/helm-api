@@ -4327,10 +4327,15 @@ export function createGenericOpenAIResponsesClient(
             typeof source.previous_response_id === "string" &&
             source.previous_response_id.length > 0;
           const status = error instanceof UpstreamError ? error.upstreamStatus : null;
+          const providerRaw = error instanceof UpstreamError ? error.providerRaw : null;
+          const providerError = isRecord(providerRaw) ? providerRaw.error : null;
+          const failureCode = isRecord(providerError) ? providerError.code : undefined;
           const websocketDidNotSend =
             (error instanceof CodexResponsesBeforeSendError &&
               error.message === "Helm websocket request could not be sent") ||
-            (status !== null && ![401, 403, 429].includes(status));
+            (status !== null &&
+              ![401, 403, 429].includes(status) &&
+              !isCodexResponsesPostSendFailureCode(failureCode));
           if (hasContinuation || !websocketDidNotSend) throw error;
           // The websocket failed before response.create reached the remote. A full
           // first-turn body is therefore safe to send once through HTTP/SSE.
