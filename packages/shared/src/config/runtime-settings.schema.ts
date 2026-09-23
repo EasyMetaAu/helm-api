@@ -39,6 +39,9 @@ const RuntimeSettingsObjectSchema = z
     // XML. Default ON because the recovery is guarded by the upstream tool-use stop
     // signal, a closed block, and the request's declared-tool whitelist.
     tool_call_xml_recovery: z.boolean().default(true),
+    // Atomic Codex WebSocket output; retries one interrupted inference on the same
+    // account. Opt-in: delays first output and may consume quota twice.
+    codex_buffered_stream_recovery: z.boolean().default(false),
     // Visual context compression renders bulky Anthropic-native context into image
     // blocks before an upstream call. Default OFF because the technique is lossy:
     // dense images are useful for gist/context, not exact byte recall. `observe`

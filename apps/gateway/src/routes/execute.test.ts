@@ -7057,6 +7057,76 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(chunks).toEqual([output]);
   });
 
+  it("passes the live buffered-recovery flag to Codex and records recovery cost uncertainty", async () => {
+    let enabled = false;
+    const seen: boolean[] = [];
+    const logs = vi.fn();
+    const provider: ProviderClient = {
+      nativeProtocolProfile: "codex_responses",
+      async chatCompletion() {
+        throw new Error("unexpected chat translation");
+      },
+      async *chatCompletionStream() {
+        yield* [];
+        throw new Error("unexpected chat translation");
+      },
+      async *nativePassthroughStream(_body, opts) {
+        seen.push(opts?.codexBufferedStreamRecovery === true);
+        if (opts?.codexBufferedStreamRecovery) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          expect(opts.signal?.aborted).toBe(false);
+          opts.onStreamRecovery?.({ attempt: 1, reason: "websocket_transport_closed" });
+        }
+        yield 'data: {"type":"response.completed","response":{"id":"done","status":"completed","usage":{}}}\n\n';
+      },
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex",
+          providerModel: "gpt-test",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      codexBufferedStreamRecoveryEnabled: () => enabled,
+      firstOutputTimeoutMs: 10,
+      log: logs,
+    });
+    for (const flag of [false, true]) {
+      enabled = flag;
+      const out = await execute(
+        plan(["a"]),
+        req({
+          protocol: "openai_responses",
+          stream: true,
+          native_request: createNativePassthroughCarrier({
+            protocol: "openai_responses",
+            body: { model: "auto", input: [], stream: true },
+            headers: {},
+          }),
+        }),
+      );
+      expect(out.final.status).toBe("ok");
+    }
+    expect(seen).toEqual([false, true]);
+    expect(logs).toHaveBeenCalledWith(
+      "info",
+      "provider.stream_recovery",
+      expect.objectContaining({
+        attempt: 1,
+        same_account: true,
+        additional_inference_cost_unknown: true,
+      }),
+    );
+  });
+
   it("aborts stalled Responses preamble, counts the breaker and never replays unknown work", async () => {
     let aborted = false;
     const head = {

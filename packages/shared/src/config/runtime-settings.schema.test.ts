@@ -13,12 +13,23 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed.capture_sessions).toBe(true);
     expect(parsed.native_protocol_passthrough).toBe(true);
     expect(parsed.tool_call_xml_recovery).toBe(true);
+    expect(parsed.codex_buffered_stream_recovery).toBe(false);
     expect(parsed.visual_context_compression).toBe("off");
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
     expect(parsed.rate_limit_default_rpm).toBe(0);
     expect(parsed.rate_limit_default_tpm).toBe(0);
     expect(parsed.log_level).toBe("info");
+  });
+
+  it("accepts buffered recovery only as an explicit boolean", () => {
+    expect(
+      RuntimeSettingsSchema.parse({ codex_buffered_stream_recovery: true })
+        .codex_buffered_stream_recovery,
+    ).toBe(true);
+    expect(
+      RuntimeSettingsSchema.safeParse({ codex_buffered_stream_recovery: "true" }).success,
+    ).toBe(false);
   });
 
   it("parses a full settings object field-by-field", () => {
@@ -39,6 +50,7 @@ describe("RuntimeSettingsSchema", () => {
       capture_sessions: true,
       native_protocol_passthrough: false,
       tool_call_xml_recovery: false,
+      codex_buffered_stream_recovery: false,
       visual_context_compression: "observe",
       payload_retention_days: 7,
       rate_limit_enabled: true,

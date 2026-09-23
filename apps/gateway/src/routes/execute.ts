@@ -173,6 +173,7 @@ export interface ExecuteAdapterDeps {
    * Anthropic attempt and forwarded request-scoped to the provider so operators can
    * disable recovery live without rebuilding clients or restarting the gateway. */
   toolCallXmlRecoveryEnabled?: () => boolean;
+  codexBufferedStreamRecoveryEnabled?: () => boolean;
   /** Runtime feature flag for lossy visual context compression. Default OFF. */
   visualContextCompressionMode?: () => VisualContextCompressionMode;
   /** Test seam / alternate implementation for visual context compression. */
@@ -2003,12 +2004,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             // throw → peekStream records a breaker failure and advances the chain. null
             // classifier (gemini) → unchanged commit-on-first behavior.
             const passthroughClassifier = preOutputClassifierFor(req.protocol);
+            const codexBufferedStreamRecovery =
+              provider.nativeProtocolProfile === "codex_responses" &&
+              (deps.codexBufferedStreamRecoveryEnabled?.() ?? false);
             const stream = await withAttemptDeadline(
               req.attempt_timeout_ms,
               signal,
               (attemptSignal) => {
                 const firstOutputTimeoutMs =
-                  deps.firstOutputTimeoutMs && deps.firstOutputTimeoutMs > 0
+                  !codexBufferedStreamRecovery &&
+                  deps.firstOutputTimeoutMs &&
+                  deps.firstOutputTimeoutMs > 0
                     ? deps.firstOutputTimeoutMs
                     : undefined;
                 const preOutputAbort = firstOutputTimeoutMs ? new AbortController() : null;
@@ -2024,6 +2030,20 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                         : {}),
                       captureUpstream,
                       onResponseMeta,
+                      codexBufferedStreamRecovery,
+                      onStreamRecovery: (event) => {
+                        const mutations = nativePassthroughMutations(passthroughBody);
+                        if (mutations) {
+                          mutations.codex_stream_recovery_attempts = event.attempt;
+                          mutations.codex_stream_recovery_cost_unknown = true;
+                        }
+                        log?.("info", "provider.stream_recovery", {
+                          trace_id: correlationTraceId(req),
+                          ...event,
+                          same_account: true,
+                          additional_inference_cost_unknown: true,
+                        });
+                      },
                       toolCallXmlRecovery:
                         target.targetProviderProtocol === "anthropic_messages" &&
                         (toolCallXmlRecoveryEnabled?.() ?? true),

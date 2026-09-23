@@ -1,9 +1,11 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnector,
   CodexResponsesWebSocketNotOpenError,
+  createCodexResponsesClient,
   createResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -167,6 +169,86 @@ describe("createCodexResponsesWebSocketConnector", () => {
     await connection.close();
     expect(admission.reservedBytes).toBe(0);
     expect(await connection.receive()).toBeNull();
+  });
+
+  it("recovers a real mid-turn disconnect without forwarding failed text or tool calls", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (ws) =>
+        websocketServer.emit("connection", ws, request),
+      );
+    });
+    let attempts = 0;
+    websocketServer.on("connection", (socket) => {
+      socket.on("message", () => {
+        attempts += 1;
+        const id = attempts === 1 ? "discard" : "accepted";
+        socket.send(JSON.stringify({ type: "response.created", response: { id } }));
+        socket.send(JSON.stringify({ type: "response.output_text.delta", delta: id }));
+        socket.send(
+          JSON.stringify({
+            type: "response.output_item.done",
+            output_index: 0,
+            item: { type: "function_call", name: "edit", arguments: "{}", call_id: id },
+          }),
+          () => {
+            if (attempts === 1) socket.terminate();
+            else
+              socket.send(
+                JSON.stringify({
+                  type: "response.completed",
+                  response: { id, status: "completed", usage: {} },
+                }),
+              );
+          },
+        );
+      });
+    });
+    const port = await listen(server);
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 100_000,
+      minChargeBytes: 1,
+      jsonAmplification: 1,
+    });
+    const connector = createCodexResponsesWebSocketConnector({ responseWorkAdmission: admission });
+    const client = createCodexResponsesClient({
+      responseWorkAdmission: admission,
+      config: {
+        baseUrl: `http://127.0.0.1:${port}`,
+        getAuthHeader: async () => "Bearer synthetic",
+        responsesWebSocketConnector: connector,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: async () => {
+        throw new Error("unexpected HTTP fallback");
+      },
+    });
+    const close = () => client.closeResponsesWebSocketSession?.("recovery") ?? Promise.resolve();
+    connections.push({ close });
+    let output = "";
+    for await (const frame of client.nativePassthroughStream?.(
+      {
+        protocol: "openai_responses",
+        headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "recovery" },
+        mutations: {},
+        body: {
+          model: "gpt-test",
+          store: false,
+          stream: true,
+          input: [{ role: "user", content: "test" }],
+          tools: [{ type: "function", name: "edit", parameters: {} }],
+        },
+      },
+      { codexBufferedStreamRecovery: true },
+    ) ?? [])
+      output += frame;
+    expect(attempts).toBe(2);
+    expect(output).not.toContain("discard");
+    expect(output.match(/"call_id":"accepted"/g)).toHaveLength(1);
+    expect(output).toContain("response.completed");
+    await close();
+    expect(admission.reservedBytes).toBe(0);
   });
 
   it("reports a typed error when send is attempted after the socket closes", async () => {
