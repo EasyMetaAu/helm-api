@@ -38,6 +38,14 @@ describe("isTransientConnectionError", () => {
     ["ECANCELED code", Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" })],
     ["ETIMEDOUT code", Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })],
     [
+      "undici connect timeout code",
+      Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("Connect Timeout Error"), {
+          code: "UND_ERR_CONNECT_TIMEOUT",
+        }),
+      }),
+    ],
+    [
       "UND_ERR_SOCKET code",
       Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
     ],
@@ -84,14 +92,14 @@ describe("isTransientConnectionError", () => {
 });
 
 describe("isFetchTransportError", () => {
-  it("classifies an opaque undici fetch failure even when its cause code is not retry-allowlisted", () => {
+  it("classifies an undici connect timeout as a retryable transport failure", () => {
     const err = Object.assign(new TypeError("fetch failed"), {
       cause: Object.assign(new Error("Connect Timeout Error"), {
         code: "UND_ERR_CONNECT_TIMEOUT",
       }),
     });
 
-    expect(isTransientConnectionError(err)).toBe(false);
+    expect(isTransientConnectionError(err)).toBe(true);
     expect(isFetchTransportError(err)).toBe(true);
   });
 

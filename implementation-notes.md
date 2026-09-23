@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-23 · 远端 Helm 建连重试与 WebSocket 降级（Provider / 协议透传，docs/04、05）
+
+- **证据**：内网 Helm 到远端公网入口间歇出现 Undici `UND_ERR_CONNECT_TIMEOUT`，请求未建立 TCP 连接；共享 API key 尚未参与鉴权，不是该故障原因。此错误加入现有严格连接错误白名单，generic Responses 复用已有两次短退避重试。
+- **WebSocket 边界**：首轮 `response.create` 发送前发生网络失败或非鉴权 upgrade 拒绝时，改走同一 Responses HTTP/SSE 请求。401/403/429、增量 `previous_response_id`、发送后结果不明仍原样失败，禁止自动重放。
+- **部署限制**：请求总超时无法改变 Undici 独立的 10 秒 TCP 建连上限；生产内网节点应优先使用稳定的专网路径。代码重试只吸收专网短抖动，不掩盖鉴权、配额或确定性请求错误。
+
 ## 2026-09-23 · Claude Opus 5.5（模型目录 / 协议 / 计费，docs/04、05、07）
 
 - **来源与范围**：[官方模型页](https://platform.claude.com/docs/en/models/opus-5-5/overview)、[迁移指南](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)和[价格表](https://platform.claude.com/docs/en/about-claude/pricing)，于 2026-09-23 核对。新增原生 `anthropic/claude-opus-5-5`，1M 上下文、128K 输出；Claude Opus 通道优先 5.5，保留旧模型回退。未证实 ZenMux 上架，因此不新增其别名。
