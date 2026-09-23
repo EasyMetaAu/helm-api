@@ -82,12 +82,16 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
     this.scheduleKeepAlive();
   }
 
-  private terminate(value: Error | null): void {
+  private terminate(value: Error | null, discardPending = false): void {
+    // Transport closure must not discard frames already received (including completion).
+    // Explicit disposal and capacity rejection still release unread work immediately.
+    if (discardPending) {
+      for (const pending of this.pending.splice(0)) pending.release();
+      this.pendingBytes = 0;
+    }
     if (this.terminal !== undefined) return;
     this.clearKeepAlive();
     this.terminal = value;
-    for (const pending of this.pending.splice(0)) pending.release();
-    this.pendingBytes = 0;
     for (const waiter of this.waiters.splice(0)) {
       if (value instanceof Error) waiter.reject(value);
       else waiter.resolve(value);
@@ -137,7 +141,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   private failCapacity(currentRelease?: () => void): void {
     currentRelease?.();
     const error = this.capacityError();
-    this.terminate(error);
+    this.terminate(error, true);
     this.socket.close(1013, "response capacity exceeded");
   }
 
@@ -218,7 +222,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   }
 
   async close(): Promise<void> {
-    this.clearKeepAlive();
+    this.terminate(null, true);
     if (this.socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
