@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-23 · Codex 整轮暂存与同账号断流恢复（Provider / 流式协议，docs/04、05，原则 8）
+
+- **选择**：用户明确选择延迟首字来换取透明恢复；新增运行时开关 `codex_buffered_stream_recovery`，默认关闭，Remote 按本次授权开启。仅 Codex 原生 WebSocket 的合格请求暂存整轮，收到终止事件后按原序交付；不合成完成、不让失败尝试的文本或客户端工具调用泄漏。
+- **恢复**：`store:false` 且只有客户端执行的 function/custom（含 namespace）工具时，接收阶段真实断线在原账号内部重建连接并最多重放一次。续轮仅使用同会话、同模型、完整的上一轮输入和输出快照，移除 `previous_response_id` 后重发完整历史；保留加密 reasoning，缺失时不猜测。明确 provider 错误、超时、取消、发送回调结果不明、内存溢出、未知事件/远端工具、无完整历史均不自动重放。
+- **限制**：首字要等待整轮（含可能的重试），生成长回答时等待明显增加；上游失败尝试可能已消费额度，其用量不可得，记录 `codex_stream_recovery_cost_unknown` 与 `provider.stream_recovery`，不宣称零重复费用。客户端已断开后无法继续无感交付。buffered 模式不应用首字超时，仍保留总请求/attempt deadline、接收 idle timeout 和取消。
+- **资源**：帧与快照复用共享响应内存租约；所有账号的快照总计最多占同一准入预算的四分之一，每账号最多 128 个会话。会话关闭、替换、淘汰释放快照，容量不足时不缓存/不恢复，不挤掉必要的输入校验。无持久化历史或数据库迁移。
+- **验证**：失败尝试包含文本和工具调用的真实 ws 断线测试、实际 OAuth pool 同账号测试、续轮重建、重试上限、HTTP 降级禁入、解析/容量/超时/取消及 live 设置回归均先红后绿。真实上游另有 `codex.response.metadata` 与 `responsesapi.websocket_timing` 两种非输出事件，明确允许并保留；未知事件仍拒绝重放。发布验收还须完成线上同 socket 续轮和真实上游受控断流验证。
+
 ## 2026-09-23 · WebSocket 断线时保留已接收响应（Provider / 流式协议，docs/05，原则 8）
 
 - **问题**：上游 close/error 回调清空待消费队列，包括已到达的 `response.completed`；慢消费者会把已完成请求误报为 `response_create_outcome_unknown`。真实网络断流与本地丢帧原先共用同一错误，线上历史记录无法区分二者。
@@ -64,29 +72,13 @@
 - **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
 - **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
 
-## 2026-09-21 · Codex 工具历史恢复声明中的 namespace（Provider / 协议互译，docs/05）
-
-- **证据**：生产请求 `6422fb44-043b-4f5e-a07a-ea124cc4e94b` 的原始 `input[492]` 是 `function_call`，`name=mcp__cua_repl::js`，没有 namespace；OpenAI 拒绝 name 中的冒号。相同请求内已声明 `mcp__cua_repl` namespace 下的 `js`，早期调用也使用拆分字段。
-- **处理**：复用 Codex 原生请求 sanitizer，仅把能精确匹配当前工具声明的 `namespace::name` 拆回两个字段。支持顶层 tools 和 Lite additional_tools；保留参数、call_id、输出和 item ID，不原地修改客户端历史。记录 `qualified_function_names_normalized` mutation。
-- **边界**：仅修复 function_call；未声明、namespace 冲突或其他非法名字仍交给原有校验拒绝，不猜测工具身份。generic Responses 透传不改。无需改库；本地验证不代表生产部署。
-
-## 2026-09-20 · DeepSeek 缺失思考历史降级与管理端原生重放（Provider / Admin，docs/05）
-
-- **已确认的缺口**：工具历史完全没有 reasoning item 时，旧保护未关闭 DeepSeek 思考；管理端 Retry 丢失原生 Responses carrier，经 IR 往返会丢掉 reasoning/custom tool 历史，已实测触发 reasoning_text 400。
-- **修复**：复用原有请求合同，将「有工具历史但无 reasoning」纳入 `reasoning.effort: none`；有明文的完整 reasoning 历史继续保留原设置，不编造思考。Responses Retry 复用 live route 的 carrier helper，保留原始 body，headers 为空，不转发管理端鉴权。
-- **验证与限制**：三项回归先红后绿，相关两文件共 284 测试通过，core/gateway 类型检查通过；真实 DeepSeek 接受无 reasoning 工具历史配合 effort none。原失败 `a374e50b` 的原生请求当前经公开网关重放成功（`b5b2de1c`，单 token 上限），因此本次补齐两个已证实缺口，不把它们断言为该历史失败的根因。
-
-## 2026-09-19 · DeepSeek 工具图片保留结构并压缩（Provider / 协议互译，docs/05，原则 8）
-
-- **根因与修复**：Codex `exec` 的工具结果包含 `input_image` 数组，旧的 custom → function 转换把整个数组 JSON 字符串化，使图片 Base64 被当成文本计入上下文。保留字符串或内容数组；其他旧式对象仍按原逻辑序列化。[DeepSeek 官方 Responses 文档](https://api-docs.deepseek.com/guides/responses_api)明确支持工具结果中的图片数组。
-- **压缩与边界**：DeepSeek 合同发送前复用现有图片优化器：最长边 2048、WebP quality 82，仅采用比原图更小的结果；不改调用方原始图片，不下载外部 URL。沿用内存准入、取消信号、单图 1600 万像素、每请求 12 张/累计 3200 万像素上限；超限、资源不足或解码失败保留原图。压缩是有界尽力优化，结构修复始终生效。其他 provider 不启用此处理。
-- **验证范围**：流式/非流式回归先红后绿，覆盖图片结构、压缩、原数据保留和普通 Responses 客户端隔离；未将本地验证当成生产部署或真实上游验收。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-19 · 分类器 Jev 有序回退（Classifier，docs/03）**：可选 eval.chain 复用总超时、严格校验与稳定缓存，失败回退 default_lane；完整记录见 git history。
+- **2026-09-21 · Codex 工具历史 namespace（Provider，docs/05）**：只按已声明工具规范化 `namespace::name`，冲突/未声明不猜测；完整记录见 git history。
 
 ## 更早历史总览
+
+2026-09-19—20：DeepSeek 工具图片保留结构并有界压缩，缺失 reasoning 历史时关闭思考；Admin Responses 重放保留原生 carrier。分类器 Jev 有序回退复用总超时与严格校验。完整记录见 git history。
 
 2026-09-18 Codex 短冷却在原账号等待，长冷却原样返回，禁止换账号和误触发重连；完整记录见 git history。
 

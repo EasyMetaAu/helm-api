@@ -39,6 +39,7 @@ import {
   ResponseWorkCapacityError,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
+import { type CodexRecoveryHistory, createCodexBufferedTurn } from "./codex-buffered-recovery.js";
 import { CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE } from "./failover-guard.js";
 import {
   type PreparedNativePassthroughRequest,
@@ -2253,6 +2254,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   const websocketMetadataFired = new WeakSet<CodexResponsesWebSocketConnection>();
   const websocketHttpFallbackSessions = new Set<string>();
   const responseWebsocketSessions = new Map<string, string>();
+  const recoveryHistory = new Map<string, CodexRecoveryHistory>();
   const websocketSessions = new Map<
     string,
     {
@@ -3063,6 +3065,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }
 
   async function closeWebSocketSession(sessionId: string): Promise<void> {
+    recoveryHistory.get(sessionId)?.lease.release();
+    recoveryHistory.delete(sessionId);
     websocketHttpFallbackSessions.delete(sessionId);
     for (const [responseId, ownerSessionId] of responseWebsocketSessions) {
       if (ownerSessionId === sessionId) responseWebsocketSessions.delete(responseId);
@@ -3085,6 +3089,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         terminal: boolean;
         reusable: boolean;
         responseId: string | null;
+        data: Record<string, unknown>;
       }
     | {
         kind: "rate_limits";
@@ -3241,6 +3246,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return {
       kind: "frame",
       frame: `event: ${type}\ndata: ${text}\n\n`,
+      data: event,
       preamble: type === "response.created" || type === "response.in_progress",
       terminal:
         type === "response.completed" ||
@@ -3403,225 +3409,306 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         const maxRetries = websocketRetryCount();
         let retries = 0;
         let retriedInvalidPreviousResponseId = false;
-        while (!websocketHttpFallbackSessions.has(sessionId)) {
-          let lease:
-            | {
-                connection: CodexResponsesWebSocketConnection;
-                release: () => void;
-              }
-            | undefined;
-          try {
-            lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
-            if (!lease) break;
-          } catch (error) {
-            if (
-              error instanceof UpstreamError &&
-              (error.upstreamStatus === 426 || error.upstreamStatus === null) &&
-              !opts?.signal?.aborted
-            ) {
-              if (hasPreviousResponseId) {
-                throw new CodexResponsesBeforeSendError(
-                  "previous_response_id cannot be continued because its original websocket connection failed; send the full conversation input instead",
-                  { reason: "websocket_connection_failed" },
-                );
-              }
-              websocketHttpFallbackSessions.add(sessionId);
-              break;
-            }
-            throw error;
-          }
-
-          let retryConnection = false;
-          let retryTurn = false;
-          let fallbackToHttp = false;
-          let sendingRequest = false;
-          let outputStarted = false;
-          let receivedAnyFrame = false;
-          const preambleFrames: string[] = [];
-          const fallbackOversizedRequestToHttp = async (): Promise<boolean> => {
-            if (
-              hasPreviousResponseId ||
-              receivedAnyFrame ||
-              outputStarted ||
-              preambleFrames.length > 0 ||
-              lease?.connection.closeInfo?.()?.code !== 1009
-            ) {
-              return false;
-            }
-            await closeWebSocketSession(sessionId);
-            websocketHttpFallbackSessions.add(sessionId);
-            fallbackToHttp = true;
-            return true;
-          };
-          try {
-            if (!websocketMetadataFired.has(lease.connection)) {
-              websocketMetadataFired.add(lease.connection);
-              fireResponseMetaHeaders(lease.connection.responseHeaders, opts?.onResponseMeta);
-            }
-            const turnState =
-              lease.connection.responseHeaders.get(CODEX_TURN_STATE_HEADER) ?? undefined;
-            rememberTurnState(turnKey, turnState);
-            const requestText = JSON.stringify({ type: "response.create", ...prepared.body });
-            opts?.captureUpstream?.(requestText);
-            sendingRequest = true;
-            await lease.connection.send(requestText);
-            sendingRequest = false;
-            while (true) {
-              let received: CodexResponsesWebSocketReceivedMessage | null;
-              try {
-                received = await receiveResponsesWebSocketMessage(
-                  lease.connection,
-                  timeoutMs,
-                  opts?.signal,
-                );
-              } catch (error) {
-                if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
-                if (await fallbackOversizedRequestToHttp()) break;
-                throw responseCreateOutcomeUnknown(
-                  lease.connection,
-                  outputStarted
-                    ? "after_send_after_output"
-                    : preambleFrames.length > 0
-                      ? "after_send_after_preamble"
-                      : "after_send_before_event",
-                );
-              }
-              if (received === null) {
-                if (await fallbackOversizedRequestToHttp()) break;
-                if (hasPreviousResponseId && !outputStarted && preambleFrames.length === 0) {
-                  throw responseCreateOutcomeUnknown(lease.connection, "after_send_before_event");
+        let replayedResponse = false;
+        let replayFailure: UpstreamError | null = null;
+        const buffered = opts?.codexBufferedStreamRecovery
+          ? createCodexBufferedTurn(
+              prepared.body,
+              recoveryHistory.get(sessionId),
+              deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+            )
+          : null;
+        try {
+          while (!websocketHttpFallbackSessions.has(sessionId)) {
+            let lease:
+              | {
+                  connection: CodexResponsesWebSocketConnection;
+                  release: () => void;
                 }
-                throw responseCreateOutcomeUnknown(
-                  lease.connection,
-                  outputStarted
-                    ? "after_send_after_output"
-                    : preambleFrames.length > 0
-                      ? "after_send_after_preamble"
-                      : "after_send_before_event",
-                );
-              }
-              receivedAnyFrame = true;
-              try {
-                let event: ParsedWebSocketEvent;
-                try {
-                  event = websocketSseFrame(received.text);
-                } catch {
-                  continue;
+              | undefined;
+            try {
+              lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
+              if (!lease) break;
+            } catch (error) {
+              if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+              if (replayFailure) throw replayFailure;
+              if (
+                error instanceof UpstreamError &&
+                (error.upstreamStatus === 426 || error.upstreamStatus === null) &&
+                !opts?.signal?.aborted
+              ) {
+                if (hasPreviousResponseId) {
+                  throw new CodexResponsesBeforeSendError(
+                    "previous_response_id cannot be continued because its original websocket connection failed; send the full conversation input instead",
+                    { reason: "websocket_connection_failed" },
+                  );
                 }
-                if (event.kind === "rate_limits") {
-                  fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
-                  continue;
-                }
-                if (event.kind === "error") {
-                  fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
-                  if (
-                    !outputStarted &&
-                    hasPreviousResponseId &&
-                    !retriedInvalidPreviousResponseId &&
-                    isInvalidPreviousResponseIdError(event.error)
-                  ) {
-                    if (preambleFrames.length > 0) {
-                      throw responseCreateOutcomeUnknown(
-                        lease.connection,
-                        "after_send_after_preamble",
-                      );
-                    }
-                    retriedInvalidPreviousResponseId = true;
-                    retryTurn = true;
-                    break;
-                  }
-                  if (isWebsocketConnectionLimitError(event.error)) {
-                    if (preambleFrames.length > 0) {
-                      throw responseCreateOutcomeUnknown(
-                        lease.connection,
-                        "after_send_after_preamble",
-                      );
-                    }
-                    await closeWebSocketSession(sessionId);
-                    if (hasPreviousResponseId) {
-                      throw continuationSessionUnavailable(
-                        "previous_response_id cannot be continued because its original websocket cannot accept another turn; send the full conversation input instead",
-                      );
-                    }
-                    if (!outputStarted && retries < maxRetries) {
-                      retryConnection = true;
-                    } else if (!outputStarted) {
-                      websocketHttpFallbackSessions.add(sessionId);
-                      fallbackToHttp = true;
-                    } else {
-                      throw event.error;
-                    }
-                    break;
-                  }
-                  await closeWebSocketSession(sessionId);
-                  throw event.error;
-                }
-                if (event.responseId !== null) {
-                  rememberResponseWebSocketSession(event.responseId, sessionId);
-                }
-                if (!outputStarted && event.preamble && preambleFrames.length < 2) {
-                  preambleFrames.push(event.frame);
-                  continue;
-                }
-                if (!outputStarted) {
-                  outputStarted = true;
-                  yield* preambleFrames;
-                }
-                if (event.terminal && !event.reusable) {
-                  await closeWebSocketSession(sessionId);
-                }
-                yield event.frame;
-                if (event.terminal) {
-                  return;
-                }
-              } finally {
-                received.release();
-              }
-            }
-          } catch (error) {
-            if (opts?.signal?.aborted) {
-              await closeWebSocketSession(sessionId);
-              throw opts.signal.reason ?? error;
-            }
-            if (error instanceof CodexResponsesWebSocketNotOpenError) {
-              const websocket = websocketCloseDetails(lease.connection, "before_send");
-              await closeWebSocketSession(sessionId);
-              if (hasPreviousResponseId) {
-                throw new CodexResponsesBeforeSendError(
-                  "previous_response_id cannot be continued because its websocket closed before send; send the full conversation input instead",
-                  { ...websocket, reason: "websocket_closed_before_send" },
-                );
-              } else if (retries < maxRetries) {
-                retryConnection = true;
-              } else {
                 websocketHttpFallbackSessions.add(sessionId);
-                fallbackToHttp = true;
+                break;
               }
-            } else if (sendingRequest) {
-              const outcomeUnknown = responseCreateOutcomeUnknown(
-                lease.connection,
-                "send_callback_error",
-              );
-              await closeWebSocketSession(sessionId);
-              throw outcomeUnknown;
-            } else {
-              await closeWebSocketSession(sessionId);
               throw error;
             }
-          } finally {
-            lease.release();
+
+            let retryConnection = false;
+            let retryTurn = false;
+            let fallbackToHttp = false;
+            let sendingRequest = false;
+            let outputStarted = false;
+            let receivedAnyFrame = false;
+            const preambleFrames: string[] = [];
+            const retryBufferedClose = async (error?: unknown): Promise<boolean> => {
+              const code = lease.connection.closeInfo?.()?.code;
+              if (
+                !buffered?.replaySafe ||
+                replayedResponse ||
+                opts?.signal?.aborted ||
+                (code !== undefined && ![1000, 1001, 1006].includes(code)) ||
+                (error !== undefined && (error instanceof UpstreamError || code !== 1006))
+              )
+                return false;
+              replayFailure = responseCreateOutcomeUnknown(
+                lease.connection,
+                "after_send_after_output",
+              );
+              // This client belongs to one OAuth account; never retry through the pool.
+              const fullBody: Record<string, unknown> = { ...prepared.body, input: buffered.input };
+              delete fullBody.previous_response_id;
+              prepared.body = fullBody;
+              await closeWebSocketSession(sessionId);
+              buffered.reset();
+              replayedResponse = true;
+              retryConnection = true;
+              try {
+                opts?.onStreamRecovery?.({ attempt: 1, reason: "websocket_transport_closed" });
+              } catch {
+                /* telemetry is fail-open */
+              }
+              return true;
+            };
+            const fallbackOversizedRequestToHttp = async (): Promise<boolean> => {
+              if (
+                replayedResponse ||
+                hasPreviousResponseId ||
+                receivedAnyFrame ||
+                outputStarted ||
+                preambleFrames.length > 0 ||
+                lease?.connection.closeInfo?.()?.code !== 1009
+              ) {
+                return false;
+              }
+              await closeWebSocketSession(sessionId);
+              websocketHttpFallbackSessions.add(sessionId);
+              fallbackToHttp = true;
+              return true;
+            };
+            try {
+              if (!websocketMetadataFired.has(lease.connection)) {
+                websocketMetadataFired.add(lease.connection);
+                fireResponseMetaHeaders(lease.connection.responseHeaders, opts?.onResponseMeta);
+              }
+              const turnState =
+                lease.connection.responseHeaders.get(CODEX_TURN_STATE_HEADER) ?? undefined;
+              rememberTurnState(turnKey, turnState);
+              const requestText = JSON.stringify({ type: "response.create", ...prepared.body });
+              opts?.captureUpstream?.(requestText);
+              sendingRequest = true;
+              await lease.connection.send(requestText);
+              sendingRequest = false;
+              while (true) {
+                let received: CodexResponsesWebSocketReceivedMessage | null;
+                try {
+                  received = await receiveResponsesWebSocketMessage(
+                    lease.connection,
+                    timeoutMs,
+                    opts?.signal,
+                  );
+                } catch (error) {
+                  if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+                  if (await fallbackOversizedRequestToHttp()) break;
+                  if (await retryBufferedClose(error)) break;
+                  throw responseCreateOutcomeUnknown(
+                    lease.connection,
+                    outputStarted
+                      ? "after_send_after_output"
+                      : preambleFrames.length > 0
+                        ? "after_send_after_preamble"
+                        : "after_send_before_event",
+                  );
+                }
+                if (received === null) {
+                  if (await fallbackOversizedRequestToHttp()) break;
+                  if (await retryBufferedClose()) break;
+                  if (hasPreviousResponseId && !outputStarted && preambleFrames.length === 0) {
+                    throw responseCreateOutcomeUnknown(lease.connection, "after_send_before_event");
+                  }
+                  throw responseCreateOutcomeUnknown(
+                    lease.connection,
+                    outputStarted
+                      ? "after_send_after_output"
+                      : preambleFrames.length > 0
+                        ? "after_send_after_preamble"
+                        : "after_send_before_event",
+                  );
+                }
+                receivedAnyFrame = true;
+                try {
+                  let event: ParsedWebSocketEvent;
+                  try {
+                    event = websocketSseFrame(received.text);
+                  } catch {
+                    if (buffered)
+                      throw responseCreateOutcomeUnknown(lease.connection, "unparseable_event");
+                    continue;
+                  }
+                  if (event.kind === "rate_limits") {
+                    fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                    continue;
+                  }
+                  if (event.kind === "error") {
+                    fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                    if (replayFailure) throw replayFailure;
+                    if (
+                      !outputStarted &&
+                      hasPreviousResponseId &&
+                      !retriedInvalidPreviousResponseId &&
+                      isInvalidPreviousResponseIdError(event.error)
+                    ) {
+                      if (preambleFrames.length > 0 || (buffered?.frames.length ?? 0) > 0) {
+                        throw responseCreateOutcomeUnknown(
+                          lease.connection,
+                          "after_send_after_preamble",
+                        );
+                      }
+                      retriedInvalidPreviousResponseId = true;
+                      retryTurn = true;
+                      break;
+                    }
+                    if (isWebsocketConnectionLimitError(event.error)) {
+                      if (preambleFrames.length > 0 || (buffered?.frames.length ?? 0) > 0) {
+                        throw responseCreateOutcomeUnknown(
+                          lease.connection,
+                          "after_send_after_preamble",
+                        );
+                      }
+                      await closeWebSocketSession(sessionId);
+                      if (hasPreviousResponseId) {
+                        throw continuationSessionUnavailable(
+                          "previous_response_id cannot be continued because its original websocket cannot accept another turn; send the full conversation input instead",
+                        );
+                      }
+                      if (!outputStarted && retries < maxRetries) {
+                        retryConnection = true;
+                      } else if (!outputStarted) {
+                        websocketHttpFallbackSessions.add(sessionId);
+                        fallbackToHttp = true;
+                      } else {
+                        throw event.error;
+                      }
+                      break;
+                    }
+                    await closeWebSocketSession(sessionId);
+                    throw event.error;
+                  }
+                  if (event.responseId !== null) {
+                    rememberResponseWebSocketSession(event.responseId, sessionId);
+                  }
+                  if (buffered) {
+                    try {
+                      buffered.append(event.frame, event.data);
+                    } catch (error) {
+                      if (error instanceof ResponseWorkCapacityError)
+                        throw responseWorkCapacityUpstreamError(error);
+                      throw error;
+                    }
+                    if (!event.terminal) continue;
+                    const snapshot = buffered.snapshot(event.data);
+                    recoveryHistory.get(sessionId)?.lease.release();
+                    recoveryHistory.delete(sessionId);
+                    if (snapshot) {
+                      if (recoveryHistory.size >= MAX_CODEX_TURN_STATES) {
+                        const oldest = recoveryHistory.keys().next().value;
+                        if (oldest !== undefined) {
+                          recoveryHistory.get(oldest)?.lease.release();
+                          recoveryHistory.delete(oldest);
+                        }
+                      }
+                      recoveryHistory.set(sessionId, snapshot);
+                    }
+                    if (!event.reusable) await closeWebSocketSession(sessionId);
+                    yield* buffered.frames;
+                    return;
+                  }
+                  if (!outputStarted && event.preamble && preambleFrames.length < 2) {
+                    preambleFrames.push(event.frame);
+                    continue;
+                  }
+                  if (!outputStarted) {
+                    outputStarted = true;
+                    yield* preambleFrames;
+                  }
+                  if (event.terminal && !event.reusable) {
+                    await closeWebSocketSession(sessionId);
+                  }
+                  yield event.frame;
+                  if (event.terminal) {
+                    return;
+                  }
+                } finally {
+                  received.release();
+                }
+              }
+            } catch (error) {
+              if (opts?.signal?.aborted) {
+                await closeWebSocketSession(sessionId);
+                throw opts.signal.reason ?? error;
+              }
+              if (replayFailure) {
+                await closeWebSocketSession(sessionId);
+                throw replayFailure;
+              }
+              if (error instanceof CodexResponsesWebSocketNotOpenError) {
+                const websocket = websocketCloseDetails(lease.connection, "before_send");
+                await closeWebSocketSession(sessionId);
+                if (hasPreviousResponseId) {
+                  throw new CodexResponsesBeforeSendError(
+                    "previous_response_id cannot be continued because its websocket closed before send; send the full conversation input instead",
+                    { ...websocket, reason: "websocket_closed_before_send" },
+                  );
+                } else if (retries < maxRetries) {
+                  retryConnection = true;
+                } else {
+                  websocketHttpFallbackSessions.add(sessionId);
+                  fallbackToHttp = true;
+                }
+              } else if (sendingRequest) {
+                const outcomeUnknown = responseCreateOutcomeUnknown(
+                  lease.connection,
+                  "send_callback_error",
+                );
+                await closeWebSocketSession(sessionId);
+                throw outcomeUnknown;
+              } else {
+                await closeWebSocketSession(sessionId);
+                throw error;
+              }
+            } finally {
+              lease.release();
+            }
+            if (retryTurn) {
+              await waitForWebsocketRetry(0, opts?.signal);
+              continue;
+            }
+            if (fallbackToHttp) break;
+            if (retryConnection) {
+              await waitForWebsocketRetry(retries, opts?.signal);
+              retries += 1;
+              continue;
+            }
+            break;
           }
-          if (retryTurn) {
-            await waitForWebsocketRetry(0, opts?.signal);
-            continue;
-          }
-          if (fallbackToHttp) break;
-          if (retryConnection) {
-            await waitForWebsocketRetry(retries, opts?.signal);
-            retries += 1;
-            continue;
-          }
-          break;
+          if (replayFailure) throw replayFailure;
+        } finally {
+          buffered?.release();
         }
       }
       const result = await requestWithRetry(outboundBody, modelInfo, {

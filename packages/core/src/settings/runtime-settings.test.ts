@@ -36,6 +36,7 @@ describe("defaultSettingsFromConfig", () => {
       capture_sessions: true,
       native_protocol_passthrough: true,
       tool_call_xml_recovery: true,
+      codex_buffered_stream_recovery: false,
       visual_context_compression: "off",
       payload_retention_days: 30,
       rate_limit_enabled: true,

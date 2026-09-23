@@ -3761,6 +3761,7 @@ export async function buildServer(
             // covers BOTH the OpenAI chat and Anthropic /v1/messages surfaces.
             nativeProtocolPassthroughEnabled: () => settings.native_protocol_passthrough,
             toolCallXmlRecoveryEnabled: () => settings.tool_call_xml_recovery,
+            codexBufferedStreamRecoveryEnabled: () => settings.codex_buffered_stream_recovery,
             visualContextCompressionMode: () => settings.visual_context_compression,
             // Auto-park: a genuine 429 on a subscription alias parks the served account
             // so the pool routes around it (account read from the serving-account ALS).

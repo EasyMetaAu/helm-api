@@ -37,6 +37,7 @@
     // through Save unchanged and is never reset to false (the #225 lesson).
     native_protocol_passthrough: true,
     tool_call_xml_recovery: true,
+    codex_buffered_stream_recovery: false,
     visual_context_compression: 'off',
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,

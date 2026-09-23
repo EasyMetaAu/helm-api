@@ -132,6 +132,9 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Opt-in atomic Codex delivery; may repeat inference once, never hosted tools. */
+  codexBufferedStreamRecovery?: boolean;
+  onStreamRecovery?: (event: { attempt: number; reason: string }) => void;
   overloadRetry?: OverloadRetryBudget;
   signal?: AbortSignal;
   /** Media pools invoke this after selecting an account and before the paid write. */
