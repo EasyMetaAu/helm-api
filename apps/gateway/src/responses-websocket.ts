@@ -3,12 +3,14 @@ import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
   type ResponseWorkAdmission,
   readSSE,
   runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
 } from "@helm/core";
+import { ERROR_CLASS_HTTP_STATUS, ErrorClassSchema } from "@helm/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
 import {
@@ -258,7 +260,6 @@ async function responseErrorEnvelope(response: Response): Promise<Record<string,
   return {
     type: "error",
     status: response.status,
-    status_code: response.status,
     error,
     headers: selectedResponseHeaders(response.headers),
   };
@@ -269,7 +270,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
     return {
       type: "error",
       status: error.status,
-      status_code: error.status,
       error: {
         type: "server_error",
         code: error.code,
@@ -282,7 +282,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
     return {
       type: "error",
       status: error.status,
-      status_code: error.status,
       error: {
         type: "invalid_request_error",
         code: error.code,
@@ -294,7 +293,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
   return {
     type: "error",
     status: 500,
-    status_code: 500,
     error: {
       type: "internal_error",
       code: "websocket_bridge_error",
@@ -398,16 +396,45 @@ async function closeForFullHistoryRecovery(
 function websocketPayload(event: string | undefined, data: string): string | null {
   const trimmed = data.trim();
   if (trimmed === "" || trimmed === "[DONE]") return null;
-  if (event === undefined) return data;
   try {
     const parsed = JSON.parse(data) as unknown;
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      typeof (parsed as { type?: unknown }).type !== "string"
-    ) {
-      return JSON.stringify({ ...(parsed as Record<string, unknown>), type: event });
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if ((record.type ?? event) === "error" && record.error === undefined) {
+        const errorClass = ErrorClassSchema.safeParse(record.code);
+        const suppliedStatus = record.status_code ?? record.status;
+        const status = isCodexResponsesPostSendFailureCode(record.code)
+          ? 400
+          : typeof suppliedStatus === "number" &&
+              Number.isInteger(suppliedStatus) &&
+              suppliedStatus >= 400 &&
+              suppliedStatus <= 599
+            ? suppliedStatus
+            : errorClass.success
+              ? ERROR_CLASS_HTTP_STATUS[errorClass.data]
+              : 500;
+        const envelope: Record<string, unknown> = {
+          ...record,
+          type: "error",
+          status,
+          error: errorShape(record, "upstream stream failed"),
+        };
+        // Codex treats status_code as an alias: both fields make decoding fail.
+        delete envelope.status_code;
+        return JSON.stringify(envelope);
+      }
+      if (
+        (record.type ?? event) === "error" &&
+        record.status !== undefined &&
+        record.status_code !== undefined
+      ) {
+        const envelope: Record<string, unknown> = { ...record, type: "error" };
+        delete envelope.status_code;
+        return JSON.stringify(envelope);
+      }
+      if (event !== undefined && typeof record.type !== "string") {
+        return JSON.stringify({ ...record, type: event });
+      }
     }
   } catch {
     return data;
@@ -798,7 +825,6 @@ export function installResponsesWebSocketBridge({
           JSON.stringify({
             type: "error",
             status: 503,
-            status_code: 503,
             error: {
               type: "server_error",
               code: "websocket_preflight_capacity_exceeded",
