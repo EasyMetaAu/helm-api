@@ -103,9 +103,9 @@ describe("isPreConnectError", () => {
         }),
       ),
     ).toBe(true);
-    expect(isPreConnectError(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }))).toBe(
-      false,
-    );
+    expect(
+      isPreConnectError(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })),
+    ).toBe(false);
     expect(isPreConnectError(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(
       false,
     );
