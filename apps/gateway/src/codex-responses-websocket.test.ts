@@ -91,6 +91,84 @@ describe("createCodexResponsesWebSocketConnector", () => {
     expect(await connection.receive()).toContain("response.completed");
   });
 
+  it.each([
+    "close",
+    "reset",
+    "error",
+  ] as const)("drains received response frames before reporting transport %s", async (termination) => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const serverConnection = once(websocketServer, "connection");
+    const port = await listen(server);
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 10_000,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      responseWorkAdmission: admission,
+    });
+    const connection = await connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    connections.push(connection);
+    const [socket] = (await serverConnection) as [WebSocket];
+    const frames = [
+      '{"type":"response.created","response":{"id":"resp-drain"}}',
+      '{"type":"response.output_text.delta","delta":"complete text"}',
+      '{"type":"response.completed","response":{"id":"resp-drain","status":"completed"}}',
+    ];
+    for (const frame of frames) socket.send(frame);
+    await expect
+      .poll(() => admission.reservedBytes)
+      .toBe(frames.reduce((bytes, frame) => bytes + Buffer.byteLength(frame), 0));
+    if (termination === "close") socket.close(1000);
+    else if (termination === "reset") socket.terminate();
+    else {
+      const raw = (socket as WebSocket & { _socket: { write(data: Buffer): boolean } })._socket;
+      raw.write(Buffer.from([0xa1, 0x00]));
+    }
+    await expect.poll(() => connection.closeInfo?.()).not.toBeNull();
+
+    for (const frame of frames) expect(await connection.receive()).toBe(frame);
+    expect(admission.reservedBytes).toBe(0);
+    if (termination === "error") await expect(connection.receive()).rejects.toThrow();
+    else expect(await connection.receive()).toBeNull();
+  });
+
+  it("releases undrained frames on explicit disposal after a remote close", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const serverConnection = once(websocketServer, "connection");
+    const port = await listen(server);
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 100,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const connection = await createCodexResponsesWebSocketConnector({
+      responseWorkAdmission: admission,
+    })({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    connections.push(connection);
+    const [socket] = (await serverConnection) as [WebSocket];
+    socket.send("unread");
+    await expect.poll(() => admission.reservedBytes).toBe(6);
+    socket.close();
+    await expect.poll(() => connection.closeInfo?.()).not.toBeNull();
+    await connection.close();
+    expect(admission.reservedBytes).toBe(0);
+    expect(await connection.receive()).toBeNull();
+  });
+
   it("reports a typed error when send is attempted after the socket closes", async () => {
     const server = createServer();
     const websocketServer = new WebSocketServer({ noServer: true });
@@ -250,7 +328,7 @@ describe("createCodexResponsesWebSocketConnector", () => {
       headers: {},
     });
     connections.push(connection);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect.poll(() => connection.closeInfo?.()).not.toBeNull();
 
     let caught: unknown;
     try {
