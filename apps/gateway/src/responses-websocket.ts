@@ -260,7 +260,6 @@ async function responseErrorEnvelope(response: Response): Promise<Record<string,
   return {
     type: "error",
     status: response.status,
-    status_code: response.status,
     error,
     headers: selectedResponseHeaders(response.headers),
   };
@@ -271,7 +270,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
     return {
       type: "error",
       status: error.status,
-      status_code: error.status,
       error: {
         type: "server_error",
         code: error.code,
@@ -284,7 +282,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
     return {
       type: "error",
       status: error.status,
-      status_code: error.status,
       error: {
         type: "invalid_request_error",
         code: error.code,
@@ -296,7 +293,6 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
   return {
     type: "error",
     status: 500,
-    status_code: 500,
     error: {
       type: "internal_error",
       code: "websocket_bridge_error",
@@ -417,13 +413,24 @@ function websocketPayload(event: string | undefined, data: string): string | nul
             : errorClass.success
               ? ERROR_CLASS_HTTP_STATUS[errorClass.data]
               : 500;
-        return JSON.stringify({
+        const envelope: Record<string, unknown> = {
           ...record,
           type: "error",
           status,
-          status_code: status,
           error: errorShape(record, "upstream stream failed"),
-        });
+        };
+        // Codex treats status_code as an alias: both fields make decoding fail.
+        delete envelope.status_code;
+        return JSON.stringify(envelope);
+      }
+      if (
+        (record.type ?? event) === "error" &&
+        record.status !== undefined &&
+        record.status_code !== undefined
+      ) {
+        const envelope = { ...record, type: "error" };
+        delete envelope.status_code;
+        return JSON.stringify(envelope);
       }
       if (event !== undefined && typeof record.type !== "string") {
         return JSON.stringify({ ...record, type: event });
@@ -818,7 +825,6 @@ export function installResponsesWebSocketBridge({
           JSON.stringify({
             type: "error",
             status: 503,
-            status_code: 503,
             error: {
               type: "server_error",
               code: "websocket_preflight_capacity_exceeded",

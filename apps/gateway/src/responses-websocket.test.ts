@@ -1065,10 +1065,31 @@ describe("Responses websocket bridge", () => {
         message: "unsupported tools",
         param: null,
         status: 400,
-        status_code: 400,
         error: { type: "upstream_error", code: "invalid_request", message: "unsupported tools" },
       },
     ]);
+  });
+
+  it("removes a duplicate status alias from a chained native SSE error", async () => {
+    const error = {
+      type: "error",
+      status: 429,
+      status_code: 429,
+      error: { code: "rate_limited", message: "busy" },
+    };
+    const baseUrl = await startBridge(
+      () =>
+        new Response(`event: error\ndata: ${JSON.stringify(error)}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+    });
+    expect(events).toEqual([{ type: "error", status: 429, error: error.error }]);
   });
 
   it("wraps HTTP errors in the Codex websocket error envelope", async () => {
@@ -1104,7 +1125,6 @@ describe("Responses websocket bridge", () => {
       {
         type: "error",
         status: 401,
-        status_code: 401,
         error: {
           type: "authentication_error",
           code: "invalid_api_key",
@@ -1152,7 +1172,6 @@ describe("Responses websocket bridge", () => {
       {
         type: "error",
         status: 422,
-        status_code: 422,
         error: {
           type: "invalid_request_error",
           code: "unsupported_input",
@@ -1410,7 +1429,6 @@ describe("Responses websocket bridge", () => {
         code: "response_create_outcome_unknown",
         message: "outcome unknown",
         status: 400,
-        status_code: 400,
         error: {
           type: "upstream_error",
           code: "response_create_outcome_unknown",
@@ -1748,7 +1766,6 @@ describe("Responses websocket bridge", () => {
       {
         type: "error",
         status: 400,
-        status_code: 400,
         error: {
           type: "invalid_request_error",
           code: "invalid_websocket_request",
