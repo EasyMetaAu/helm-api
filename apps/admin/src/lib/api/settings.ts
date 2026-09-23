@@ -23,6 +23,8 @@ export interface RuntimeSettings {
   // Defensive recovery for upstream models that leak tool calls as literal
   // Anthropic <invoke> XML. Kept in every save even if the UI surface changes.
   tool_call_xml_recovery: boolean;
+  // Preserve the opt-in buffering setting across unrelated admin saves.
+  codex_buffered_stream_recovery: boolean;
   // Lossy visual context compression for bulky Anthropic-native requests. Default
   // OFF; observe records would-apply telemetry while sending original text.
   visual_context_compression: VisualContextCompressionMode;
@@ -99,9 +101,7 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
   return {
     capture_payloads: hasLegacyPayloadChoice ? raw.capture_payloads === true : false,
     capture_sessions:
-      typeof raw.capture_sessions === 'boolean'
-        ? raw.capture_sessions
-        : !hasLegacyPayloadChoice,
+      typeof raw.capture_sessions === 'boolean' ? raw.capture_sessions : !hasLegacyPayloadChoice,
     payload_retention_days:
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
     // Default ON (a missing field reads as true), and — critically — KEEP it
@@ -109,9 +109,10 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     // this would silently reset the flag on every save (the #225 lesson).
     native_protocol_passthrough: raw.native_protocol_passthrough !== false,
     tool_call_xml_recovery: raw.tool_call_xml_recovery !== false,
-    visual_context_compression: (
-      VISUAL_CONTEXT_COMPRESSION_OPTIONS as readonly string[]
-    ).includes(raw.visual_context_compression as string)
+    codex_buffered_stream_recovery: raw.codex_buffered_stream_recovery === true,
+    visual_context_compression: (VISUAL_CONTEXT_COMPRESSION_OPTIONS as readonly string[]).includes(
+      raw.visual_context_compression as string,
+    )
       ? (raw.visual_context_compression as VisualContextCompressionMode)
       : 'off',
     rate_limit_enabled: raw.rate_limit_enabled === true,
