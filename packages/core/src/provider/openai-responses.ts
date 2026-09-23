@@ -61,6 +61,7 @@ import {
 } from "./openai.js";
 import {
   isFetchTransportError,
+  isPreConnectError,
   isTransientConnectionError,
   withConnectionRetry,
   withOverloadRetry,
@@ -3991,6 +3992,7 @@ export function createGenericOpenAIResponsesClient(
               retries: cfg.connectRetries,
               backoffMs: cfg.connectRetryBackoffMs,
               signal: external,
+              shouldRetry: isPreConnectError,
             },
           ),
         { signal: external, budget },
