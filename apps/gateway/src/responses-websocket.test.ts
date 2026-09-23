@@ -1039,6 +1039,38 @@ describe("Responses websocket bridge", () => {
     });
   });
 
+  it.each([
+    "event: error\n",
+    "",
+  ])("wraps flat SSE terminal errors for Codex (%s)", async (prefix) => {
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          `${prefix}data: {"type":"error","code":"invalid_request","message":"unsupported tools","param":null}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "invalid_request",
+        message: "unsupported tools",
+        param: null,
+        status: 400,
+        status_code: 400,
+        error: { type: "upstream_error", code: "invalid_request", message: "unsupported tools" },
+      },
+    ]);
+  });
+
   it("wraps HTTP errors in the Codex websocket error envelope", async () => {
     const baseUrl = await startBridge(
       () =>
@@ -1377,6 +1409,13 @@ describe("Responses websocket bridge", () => {
         type: "error",
         code: "response_create_outcome_unknown",
         message: "outcome unknown",
+        status: 400,
+        status_code: 400,
+        error: {
+          type: "upstream_error",
+          code: "response_create_outcome_unknown",
+          message: "outcome unknown",
+        },
       },
     ]);
     expect(socket.readyState).toBe(WebSocket.OPEN);

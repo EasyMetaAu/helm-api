@@ -13,6 +13,7 @@
 - **WebSocket 边界**：首轮 `response.create` 发送前发生网络失败或非鉴权 upgrade 拒绝时，改走同一 Responses HTTP/SSE 请求。401/403/429、增量 `previous_response_id`、发送后结果不明仍原样失败，禁止自动重放。
 - **部署限制**：请求总超时无法改变 Undici 独立的 10 秒 TCP 建连上限；生产内网节点应优先使用稳定的专网路径。代码重试只吸收专网短抖动，不掩盖鉴权、配额或确定性请求错误。
 - **工具续轮边界**：真实 Codex 经远端 DeepSeek 回退后，`previous_response_id` 加单条 `function_call_output` 被误删为空输入。带有效非空 continuation ID 时保留工具结果，配对由上游已有响应校验；完整历史仍沿用孤立结果清理。generic HTTP 重试仅允许明确的建连超时，socket reset/pipe 错误不证明请求未发送。
+- **错误终止边界**：真实链路的扁平 SSE `type:error` 在 WebSocket 出口补齐 Codex 所需的嵌套 `error` 和状态字段；复用共享错误状态映射，保留原 code、显式状态和恢复字段。已是原生嵌套结构的事件不改写，发送后结果不明禁止重放仍保持。
 
 ## 2026-09-23 · Claude Opus 5.5（模型目录 / 协议 / 计费，docs/04、05、07）
 

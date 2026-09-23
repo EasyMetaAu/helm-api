@@ -3,12 +3,14 @@ import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
   type ResponseWorkAdmission,
   readSSE,
   runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
 } from "@helm/core";
+import { ERROR_CLASS_HTTP_STATUS, ErrorClassSchema } from "@helm/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
 import {
@@ -398,16 +400,34 @@ async function closeForFullHistoryRecovery(
 function websocketPayload(event: string | undefined, data: string): string | null {
   const trimmed = data.trim();
   if (trimmed === "" || trimmed === "[DONE]") return null;
-  if (event === undefined) return data;
   try {
     const parsed = JSON.parse(data) as unknown;
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      typeof (parsed as { type?: unknown }).type !== "string"
-    ) {
-      return JSON.stringify({ ...(parsed as Record<string, unknown>), type: event });
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if ((record.type ?? event) === "error" && record.error === undefined) {
+        const errorClass = ErrorClassSchema.safeParse(record.code);
+        const suppliedStatus = record.status_code ?? record.status;
+        const status = isCodexResponsesPostSendFailureCode(record.code)
+          ? 400
+          : typeof suppliedStatus === "number" &&
+              Number.isInteger(suppliedStatus) &&
+              suppliedStatus >= 400 &&
+              suppliedStatus <= 599
+            ? suppliedStatus
+            : errorClass.success
+              ? ERROR_CLASS_HTTP_STATUS[errorClass.data]
+              : 500;
+        return JSON.stringify({
+          ...record,
+          type: "error",
+          status,
+          status_code: status,
+          error: errorShape(record, "upstream stream failed"),
+        });
+      }
+      if (event !== undefined && typeof record.type !== "string") {
+        return JSON.stringify({ ...record, type: event });
+      }
     }
   } catch {
     return data;
