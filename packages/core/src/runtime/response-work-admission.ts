@@ -114,3 +114,21 @@ export function acquireResponseWork(
   if (!acquired.ok) throw new ResponseWorkCapacityError(admission.capacityBytes);
   return acquired.lease;
 }
+
+/** Account for state retained across frames, separately from the parser's current frame. */
+export function createRetainedResponseWork(admission = runtimeResponseWorkAdmission()) {
+  let lease: ResponseWorkLease | undefined;
+  let bytes = 0;
+  return {
+    retain(additionalBytes: number) {
+      const next = Math.max(0, bytes + additionalBytes);
+      if (next === bytes) return;
+      if (lease === undefined) lease = acquireResponseWork(admission, next);
+      else if (!lease.resize(next).ok) throw new ResponseWorkCapacityError(admission.capacityBytes);
+      bytes = next;
+    },
+    release() {
+      lease?.release();
+    },
+  };
+}

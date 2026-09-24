@@ -55,13 +55,13 @@ import {
 } from "./native-memory-inject.js";
 import {
   backfillCompletionCost,
+  createAnthropicUsageAccumulator,
   createResponsesDeltaAccumulator,
   createStreamGenerationTimer,
   estimateInterruptedResponsesUsage,
   type StreamUsage,
   tokensFromUsage,
   usageFromAnthropicResponse,
-  usageFromAnthropicSSE,
   usageFromBody,
   usageFromGeminiResponse,
   usageFromGeminiSSE,
@@ -349,11 +349,14 @@ function memoryScopeFromMeta(
 // this reads the delta.content off ONE parsed chunk. Used to reconstruct the
 // assistant turn WITHOUT buffering or altering the events forwarded downstream
 // (CLAUDE.md principle 8 — both Anthropic + Responses surfaces share this).
-function accumulateAssistantText(buffer: { text: string }, chunk: Record<string, unknown>): void {
+function accumulateAssistantText(
+  buffer: AssistantTextAccumulator,
+  chunk: Record<string, unknown>,
+): void {
   const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
   for (const ch of choices) {
     const delta = (ch as { delta?: unknown })?.delta as { content?: unknown } | undefined;
-    if (typeof delta?.content === "string") buffer.text += delta.content;
+    if (typeof delta?.content === "string") buffer.push(delta.content);
   }
 }
 
@@ -626,16 +629,20 @@ export function createAssistantTextAccumulator(
   maxBytes = runtimeMemoryBudget().responseCaptureBytes,
 ): AssistantTextAccumulator {
   const limit = Math.max(0, Math.floor(maxBytes));
+  let retainedBytes = 0;
   return {
     text: "",
     limited: false,
     push(text) {
       if (this.limited) return;
-      if (Buffer.byteLength(this.text) + Buffer.byteLength(text) > limit) {
+      const addedBytes = Buffer.byteLength(text);
+      if (retainedBytes + addedBytes > limit) {
+        retainedBytes = 0;
         this.text = "";
         this.limited = true;
         return;
       }
+      retainedBytes += addedBytes;
       this.text += text;
     },
   };
@@ -1202,14 +1209,9 @@ export function createMessagesPipeline(
                 : protocol === "gemini"
                   ? data.includes("usageMetadata")
                   : data.includes("message_start") || data.includes("message_delta");
-            // Bounded usage buffer: keep ONLY the usage-bearing frames. Anthropic
-            // carries usage on message_start (input/cache) + the trailing message_delta
-            // (output); Responses carries the totals on the terminal response.completed/
-            // response.incomplete event. This is O(usage frames), not O(response),
-            // regardless of body length — the assistant text (which can be large) is
-            // never retained, only its running concatenation in `assistant.text` which
-            // observeOutbound consumes once.
-            let usageBuffer = "";
+            // Parse usage as frames arrive; retain counters rather than full response snapshots.
+            let reportedUsage: StreamUsage | null = null;
+            const anthropicUsage = createAnthropicUsageAccumulator();
             // Only semantic token-bearing DELTAS are retained. Done snapshots and
             // encrypted/base64 payloads are ignored, while fragments are joined
             // before tokenization so network chunking cannot change the estimate.
@@ -1222,10 +1224,12 @@ export function createMessagesPipeline(
                 // touches the bytes yielded downstream (byte-faithful forward). The
                 // usage-frame filter is generalized to catch BOTH protocols' carriers.
                 if (isUsageCarrierFrame(frame.data)) {
-                  // Gemini's usageMetadata is CUMULATIVE per frame → keep ONLY the latest
-                  // (stays bounded). Anthropic/Responses need their distinct carriers
-                  // appended (input on message_start, output on message_delta / terminal).
-                  usageBuffer = protocol === "gemini" ? frame.raw : usageBuffer + frame.raw;
+                  if (protocol === "anthropic_messages") anthropicUsage.push(frame.raw);
+                  else
+                    reportedUsage =
+                      (protocol === "gemini"
+                        ? usageFromGeminiSSE(frame.raw)
+                        : usageFromResponsesSSE(frame.raw)) ?? reportedUsage;
                 }
                 if (protocol === "openai_responses") {
                   responsesDeltas.observe(frame.data);
@@ -1254,12 +1258,7 @@ export function createMessagesPipeline(
               // budget settle, and per-account OAuth usage. All fail-open. The usage
               // extractor matches the inbound protocol (Responses totals on the terminal
               // event; Anthropic split across message_start/message_delta).
-              const reportedUsage =
-                protocol === "openai_responses"
-                  ? usageFromResponsesSSE(usageBuffer)
-                  : protocol === "gemini"
-                    ? usageFromGeminiSSE(usageBuffer)
-                    : usageFromAnthropicSSE(usageBuffer);
+              if (protocol === "anthropic_messages") reportedUsage = anthropicUsage.value();
               // A provider terminal usage block, including explicit zeros, always
               // wins. Any Responses stream without reported usage falls back to a
               // partial estimate, including failed/incomplete terminals that omit it.
@@ -1338,7 +1337,7 @@ export function createMessagesPipeline(
           // accumulator serves ALL protocols) WITHOUT buffering or altering the
           // events forwarded downstream (principle 8). observeOutbound runs in a
           // finally so a client disconnect mid-stream still records what arrived.
-          const assistant = { text: "" };
+          const assistant = createAssistantTextAccumulator();
           // Capture the trailing OpenAI usage chunk (include_usage) so the budget
           // settle + streamed-cost backfill below have the real token/cost — the
           // upstream is OpenAI SSE on EVERY face, so this one extractor serves all.
@@ -1412,7 +1411,7 @@ export function createMessagesPipeline(
             // reconstructed — e.g. a tool-call-only stream) so the served-model
             // stamp still lands for auto-compaction pricing; empty
             // responseMessages persist nothing.
-            if (memory !== undefined) {
+            if (memory !== undefined && !assistant.limited) {
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               const memoryObserve = memory.observe;

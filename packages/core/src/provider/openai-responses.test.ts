@@ -8946,3 +8946,52 @@ describe("createGenericOpenAIResponsesClient — scrub via currentSecrets", () =
     expect(JSON.stringify((caught as UpstreamError).providerRaw)).toContain("[redacted]");
   });
 });
+
+it.each([
+  "text",
+  "reasoning",
+  "pending-tool",
+])("bounds cumulative Responses %s retained across small SSE frames", async (kind) => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const type =
+    kind === "text"
+      ? "response.output_text.delta"
+      : kind === "reasoning"
+        ? "response.reasoning_summary_text.delta"
+        : "response.function_call_arguments.delta";
+  let sent = 0;
+  const cancel = vi.fn();
+  const response = new Response(
+    new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const event =
+            sent++ < 100
+              ? { type, call_id: "call_a", delta: "x".repeat(64) }
+              : { type: "response.completed", response: {} };
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+          if (sent > 100) controller.close();
+        },
+        cancel,
+      },
+      { highWaterMark: 0 },
+    ),
+  );
+  const operation =
+    kind === "pending-tool"
+      ? (async () => {
+          for await (const _ of translateResponsesSSE(response, "m", 0, {
+            workAdmission: admission,
+          })) {
+            /* drain */
+          }
+        })()
+      : aggregateResponsesStream(response, "m", 0, { workAdmission: admission });
+  await expect(operation).rejects.toThrow("memory capacity");
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(admission.reservedBytes).toBe(0);
+});

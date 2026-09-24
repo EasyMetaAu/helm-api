@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import type { OpenAIChunk } from "./anthropic/stream.js";
 import type { IRResponse } from "./ir.js";
 import {
@@ -1346,4 +1347,45 @@ describe("convertOpenAIStreamToResponses — forward-path edge branches", () => 
     expect(completed.response.model).toBe("unknown");
     expect(completed.response.id).toBe("resp_seed");
   });
+});
+
+it("bounds accumulated Responses output across individually small chunks", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  let stopped = false;
+  async function* source() {
+    try {
+      for (let i = 0; i < 100; i++) yield textChunk("x".repeat(64));
+    } finally {
+      stopped = true;
+    }
+  }
+  const events = await collect(convertOpenAIStreamToResponses(source(), undefined, admission));
+  expect(events.at(-1)).toMatchObject({
+    type: "error",
+    error: { message: expect.stringContaining("memory capacity") },
+  });
+  expect(events.some((event) => event.type === "response.completed")).toBe(false);
+  expect(stopped).toBe(true);
+  expect(admission.reservedBytes).toBe(0);
+});
+
+it("releases accumulated Responses memory when the downstream stops reading", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const iterator = convertOpenAIStreamToResponses(feed([textChunk("hello")]), undefined, admission)[
+    Symbol.asyncIterator
+  ]();
+  while ((await iterator.next()).value?.type !== "response.output_text.delta") {
+    /* reach retained output */
+  }
+  expect(admission.reservedBytes).toBeGreaterThan(0);
+  await iterator.return?.();
+  expect(admission.reservedBytes).toBe(0);
 });

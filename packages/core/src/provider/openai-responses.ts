@@ -35,6 +35,7 @@ import {
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
 import {
+  createRetainedResponseWork,
   type ResponseWorkAdmission,
   ResponseWorkCapacityError,
   runtimeResponseWorkAdmission,
@@ -2382,6 +2383,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }
 
   function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
+    if (error instanceof ResponseWorkCapacityError)
+      error = responseWorkCapacityUpstreamError(error);
     const raw =
       error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
     if (
@@ -4382,7 +4385,16 @@ export function createGenericOpenAIResponsesClient(
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
-        return await aggregateResponsesStream(res, model, timeoutMs, { allowIncomplete: true });
+        try {
+          return await aggregateResponsesStream(res, model, timeoutMs, {
+            allowIncomplete: true,
+            signal: opts?.signal,
+          });
+        } catch (error) {
+          if (error instanceof ResponseWorkCapacityError)
+            throw responseWorkCapacityUpstreamError(error);
+          throw error;
+        }
       }
       return responsesJsonToChatResponse(await readUnaryJson(res), model);
     },
@@ -4399,9 +4411,16 @@ export function createGenericOpenAIResponsesClient(
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs, {
-        strictTerminal: requestContract?.forceSse === true,
-      });
+      try {
+        yield* translateResponsesSSE(res, model, timeoutMs, {
+          strictTerminal: requestContract?.forceSse === true,
+          signal: opts?.signal,
+        });
+      } catch (error) {
+        if (error instanceof ResponseWorkCapacityError)
+          throw responseWorkCapacityUpstreamError(error);
+        throw error;
+      }
     },
 
     async nativePassthrough(body, opts) {
@@ -4879,75 +4898,61 @@ export async function* translateResponsesSSE(
     signal?: AbortSignal;
   } = {},
 ): AsyncGenerator<string> {
-  const strictTerminal = options.strictTerminal ?? true;
-  let started = false;
-  let hadToolCall = false;
-  let status: unknown = "completed";
-  let currentToolId = "";
-  const tools = new Map<string, ResponsesToolCallState>();
-  const pendingToolArguments = new Map<string, string>();
+  const work = createRetainedResponseWork(options.workAdmission);
+  try {
+    const strictTerminal = options.strictTerminal ?? true;
+    let started = false;
+    let hadToolCall = false;
+    let status: unknown = "completed";
+    let currentToolId = "";
+    const tools = new Map<string, ResponsesToolCallState>();
+    const pendingToolArguments = new Map<string, string>();
 
-  const ensureTool = (item: Record<string, unknown>, fallbackId = ""): ResponsesToolCallState => {
-    const id = responseToolCallId(item, fallbackId || `call_${tools.size}`);
-    const existing = tools.get(id);
-    if (existing) {
-      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
-      return existing;
-    }
-    const state: ResponsesToolCallState = {
-      index: tools.size,
-      id,
-      name: typeof item.name === "string" ? item.name : "",
-      arguments: pendingToolArguments.get(id) ?? "",
-      started: false,
-      streamedArguments: false,
-    };
-    tools.set(id, state);
-    return state;
-  };
-
-  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
-    const type = evt.type;
-    if (type === "error" || type === "response.failed") {
-      throw responseEventError(evt);
-    }
-    if (!started) {
-      started = true;
-      yield openaiChunk(model, { role: "assistant", content: "" }, null);
-    }
-    if (type === "response.output_item.added") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        hadToolCall = true;
-        const tool = ensureTool(item);
-        currentToolId = tool.id;
-        tool.started = true;
-        yield openaiChunk(
-          model,
-          {
-            tool_calls: [
-              {
-                index: tool.index,
-                id: tool.id,
-                type: "function",
-                function: { name: tool.name, arguments: "" },
-              },
-            ],
-          },
-          null,
-        );
+    const ensureTool = (item: Record<string, unknown>, fallbackId = ""): ResponsesToolCallState => {
+      const id = responseToolCallId(item, fallbackId || `call_${tools.size}`);
+      const existing = tools.get(id);
+      if (existing) {
+        if (typeof item.name === "string" && item.name.length > 0) {
+          work.retain(2 * (item.name.length - existing.name.length));
+          existing.name = item.name;
+        }
+        return existing;
       }
-    } else if (type === "response.output_item.done") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        hadToolCall = true;
-        const tool = ensureTool(item, currentToolId);
-        currentToolId = tool.id;
-        const completeArguments =
-          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
-        if (!tool.started) {
+      work.retain(128 + 2 * (id.length + (typeof item.name === "string" ? item.name.length : 0)));
+      const state: ResponsesToolCallState = {
+        index: tools.size,
+        id,
+        name: typeof item.name === "string" ? item.name : "",
+        arguments: pendingToolArguments.get(id) ?? "",
+        started: false,
+        streamedArguments: false,
+      };
+      if (pendingToolArguments.delete(id)) work.retain(-128 - 2 * id.length);
+      tools.set(id, state);
+      return state;
+    };
+
+    for await (const evt of readResponsesEvents(
+      res,
+      idleMs,
+      options.workAdmission,
+      options.signal,
+    )) {
+      const type = evt.type;
+      if (type === "error" || type === "response.failed") {
+        throw responseEventError(evt);
+      }
+      if (!started) {
+        started = true;
+        yield openaiChunk(model, { role: "assistant", content: "" }, null);
+      }
+      if (type === "response.output_item.added") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          hadToolCall = true;
+          const tool = ensureTool(item);
+          currentToolId = tool.id;
           tool.started = true;
-          tool.arguments = completeArguments;
           yield openaiChunk(
             model,
             {
@@ -4956,73 +4961,110 @@ export async function* translateResponsesSSE(
                   index: tool.index,
                   id: tool.id,
                   type: "function",
-                  function: { name: tool.name, arguments: completeArguments },
+                  function: { name: tool.name, arguments: "" },
                 },
               ],
             },
             null,
           );
-        } else if (!tool.streamedArguments && completeArguments.length > 0) {
-          tool.arguments = completeArguments;
-          yield openaiChunk(
-            model,
-            {
-              tool_calls: [{ index: tool.index, function: { arguments: completeArguments } }],
-            },
-            null,
-          );
         }
-      }
-    } else if (type === "response.output_text.delta") {
-      if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
-    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
-      if (typeof evt.delta === "string") {
-        yield openaiChunk(model, { reasoning_content: evt.delta }, null);
-      }
-    } else if (
-      type === "response.function_call_arguments.delta" ||
-      type === "response.custom_tool_call_input.delta"
-    ) {
-      if (typeof evt.delta === "string") {
-        const eventToolId =
-          typeof evt.call_id === "string"
-            ? evt.call_id
-            : typeof evt.item_id === "string"
-              ? evt.item_id
-              : currentToolId;
-        const tool = tools.get(eventToolId);
-        if (tool?.started) {
-          tool.arguments += evt.delta;
-          tool.streamedArguments = true;
-          yield openaiChunk(
-            model,
-            { tool_calls: [{ index: tool.index, function: { arguments: evt.delta } }] },
-            null,
-          );
-        } else if (eventToolId.length > 0) {
-          pendingToolArguments.set(
-            eventToolId,
-            `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
-          );
+      } else if (type === "response.output_item.done") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          hadToolCall = true;
+          const tool = ensureTool(item, currentToolId);
+          currentToolId = tool.id;
+          const completeArguments =
+            responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
+          if (!tool.started) {
+            tool.started = true;
+            work.retain(2 * (completeArguments.length - tool.arguments.length));
+            tool.arguments = completeArguments;
+            yield openaiChunk(
+              model,
+              {
+                tool_calls: [
+                  {
+                    index: tool.index,
+                    id: tool.id,
+                    type: "function",
+                    function: { name: tool.name, arguments: completeArguments },
+                  },
+                ],
+              },
+              null,
+            );
+          } else if (!tool.streamedArguments && completeArguments.length > 0) {
+            work.retain(2 * (completeArguments.length - tool.arguments.length));
+            tool.arguments = completeArguments;
+            yield openaiChunk(
+              model,
+              {
+                tool_calls: [{ index: tool.index, function: { arguments: completeArguments } }],
+              },
+              null,
+            );
+          }
         }
+      } else if (type === "response.output_text.delta") {
+        if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
+      } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+        if (typeof evt.delta === "string") {
+          yield openaiChunk(model, { reasoning_content: evt.delta }, null);
+        }
+      } else if (
+        type === "response.function_call_arguments.delta" ||
+        type === "response.custom_tool_call_input.delta"
+      ) {
+        if (typeof evt.delta === "string") {
+          const eventToolId =
+            typeof evt.call_id === "string"
+              ? evt.call_id
+              : typeof evt.item_id === "string"
+                ? evt.item_id
+                : currentToolId;
+          const tool = tools.get(eventToolId);
+          if (tool?.started) {
+            // Already forwarded arguments are never needed for a terminal fallback.
+            work.retain(-2 * tool.arguments.length);
+            tool.arguments = "";
+            tool.streamedArguments = true;
+            yield openaiChunk(
+              model,
+              { tool_calls: [{ index: tool.index, function: { arguments: evt.delta } }] },
+              null,
+            );
+          } else if (eventToolId.length > 0) {
+            work.retain(
+              2 * evt.delta.length +
+                (pendingToolArguments.has(eventToolId) ? 0 : 128 + 2 * eventToolId.length),
+            );
+            pendingToolArguments.set(
+              eventToolId,
+              `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+            );
+          }
+        }
+      } else if (type === "response.completed" || type === "response.incomplete") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
+        yield openaiChunk(model, {}, finishReason(status, hadToolCall));
+        // include_usage terminal frame before [DONE] (order 14).
+        const usage = (response.usage ?? {}) as Record<string, unknown>;
+        yield openaiUsageChunk(model, usage);
+        yield "data: [DONE]\n\n";
+        return;
       }
-    } else if (type === "response.completed" || type === "response.incomplete") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
-      yield openaiChunk(model, {}, finishReason(status, hadToolCall));
-      // include_usage terminal frame before [DONE] (order 14).
-      const usage = (response.usage ?? {}) as Record<string, unknown>;
-      yield openaiUsageChunk(model, usage);
-      yield "data: [DONE]\n\n";
-      return;
     }
-  }
-  if (strictTerminal) {
-    throw new UpstreamError("upstream_error", "stream closed before response.completed");
-  }
-  if (started) {
-    yield openaiChunk(model, {}, finishReason(status, hadToolCall));
-    yield "data: [DONE]\n\n";
+    if (strictTerminal) {
+      throw new UpstreamError("upstream_error", "stream closed before response.completed");
+    }
+    if (started) {
+      yield openaiChunk(model, {}, finishReason(status, hadToolCall));
+      yield "data: [DONE]\n\n";
+    }
+  } finally {
+    work.release();
   }
 }
 
@@ -5065,152 +5107,189 @@ export async function aggregateResponsesStream(
     signal?: AbortSignal;
   } = {},
 ): Promise<ChatCompletionResponse> {
-  const allowIncomplete = options.allowIncomplete ?? false;
-  let text = "";
-  let id = `chatcmpl-${Date.now()}`;
-  let status: unknown = "completed";
-  let inTok = 0;
-  let outTok = 0;
-  let cacheRead = 0;
-  let cacheCreation = 0;
-  let reasoning = "";
-  let completed = false;
-  // call_id -> accumulated arguments, preserving first-seen order.
-  const toolOrder: string[] = [];
-  const toolById = new Map<string, { id: string; name: string; arguments: string }>();
-  const pendingToolArguments = new Map<string, string>();
-  let currentCallId = "";
+  const work = createRetainedResponseWork(options.workAdmission);
+  try {
+    const allowIncomplete = options.allowIncomplete ?? false;
+    let text = "";
+    let id = `chatcmpl-${Date.now()}`;
+    let status: unknown = "completed";
+    let inTok = 0;
+    let outTok = 0;
+    let cacheRead = 0;
+    let cacheCreation = 0;
+    let reasoning = "";
+    let completed = false;
+    // call_id -> accumulated arguments, preserving first-seen order.
+    const toolOrder: string[] = [];
+    const toolById = new Map<string, { id: string; name: string; arguments: string }>();
+    const pendingToolArguments = new Map<string, string>();
+    let currentCallId = "";
 
-  const ensureTool = (
-    item: Record<string, unknown>,
-    fallbackId = "",
-  ): { id: string; name: string; arguments: string } => {
-    const callId = responseToolCallId(item, fallbackId || `call_${toolOrder.length}`);
-    const existing = toolById.get(callId);
-    if (existing) {
-      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
-      return existing;
-    }
-    const tool = {
-      id: callId,
-      name: typeof item.name === "string" ? item.name : "",
-      arguments: pendingToolArguments.get(callId) ?? "",
+    const ensureTool = (
+      item: Record<string, unknown>,
+      fallbackId = "",
+    ): { id: string; name: string; arguments: string } => {
+      const callId = responseToolCallId(item, fallbackId || `call_${toolOrder.length}`);
+      const existing = toolById.get(callId);
+      if (existing) {
+        if (typeof item.name === "string" && item.name.length > 0) {
+          work.retain(2 * (item.name.length - existing.name.length));
+          existing.name = item.name;
+        }
+        return existing;
+      }
+      work.retain(
+        128 + 2 * (callId.length + (typeof item.name === "string" ? item.name.length : 0)),
+      );
+      const tool = {
+        id: callId,
+        name: typeof item.name === "string" ? item.name : "",
+        arguments: pendingToolArguments.get(callId) ?? "",
+      };
+      if (pendingToolArguments.delete(callId)) work.retain(-128 - 2 * callId.length);
+      toolById.set(callId, tool);
+      toolOrder.push(callId);
+      return tool;
     };
-    toolById.set(callId, tool);
-    toolOrder.push(callId);
-    return tool;
-  };
 
-  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
-    const type = evt.type;
-    if (
-      type === "error" ||
-      type === "response.failed" ||
-      (type === "response.incomplete" && !allowIncomplete)
-    ) {
-      throw responseEventError(evt);
-    }
-    if (type === "response.created") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      if (typeof response.id === "string") id = response.id;
-    } else if (type === "response.output_item.added") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        const tool = ensureTool(item);
-        currentCallId = tool.id;
-        const args = responseToolArguments(item);
-        if (args.length > 0) tool.arguments = args;
+    for await (const evt of readResponsesEvents(
+      res,
+      idleMs,
+      options.workAdmission,
+      options.signal,
+    )) {
+      const type = evt.type;
+      if (
+        type === "error" ||
+        type === "response.failed" ||
+        (type === "response.incomplete" && !allowIncomplete)
+      ) {
+        throw responseEventError(evt);
       }
-    } else if (type === "response.output_item.done") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        const tool = ensureTool(item, currentCallId);
-        currentCallId = tool.id;
-        tool.arguments =
-          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
-      }
-    } else if (type === "response.output_text.delta") {
-      if (typeof evt.delta === "string") text += evt.delta;
-    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
-      if (typeof evt.delta === "string") reasoning += evt.delta;
-    } else if (
-      type === "response.function_call_arguments.delta" ||
-      type === "response.custom_tool_call_input.delta"
-    ) {
-      if (typeof evt.delta !== "string") continue;
-      const eventToolId =
-        typeof evt.call_id === "string"
-          ? evt.call_id
-          : typeof evt.item_id === "string"
-            ? evt.item_id
-            : currentCallId;
-      const tool = toolById.get(eventToolId);
-      if (tool) tool.arguments += evt.delta;
-      else if (eventToolId.length > 0) {
-        pendingToolArguments.set(
-          eventToolId,
-          `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
-        );
-      }
-    } else if (type === "response.function_call_arguments.done") {
-      const eventToolId =
-        typeof evt.call_id === "string"
-          ? evt.call_id
-          : typeof evt.item_id === "string"
-            ? evt.item_id
-            : currentCallId;
-      const tc = toolById.get(eventToolId);
-      if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed" || type === "response.incomplete") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
-      const usage = (response.usage ?? {}) as Record<string, unknown>;
-      if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
-      if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
-      const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
-      if (typeof details.cached_tokens === "number") cacheRead = details.cached_tokens;
-      if (typeof details.cache_creation_input_tokens === "number")
-        cacheCreation = details.cache_creation_input_tokens;
-      // Terminal event: stop reading NOW so the idle guard cannot turn a completed
-      // aggregation into a timeout if the upstream delays closing the body.
-      completed = true;
-      break;
-    }
-  }
-
-  if (!completed) {
-    throw new UpstreamError("upstream_error", "stream closed before response.completed");
-  }
-
-  const toolCalls = toolOrder.map((cid) => {
-    const tc = toolById.get(cid) as { id: string; name: string; arguments: string };
-    return {
-      id: tc.id,
-      type: "function",
-      function: { name: tc.name, arguments: tc.arguments || "{}" },
-    };
-  });
-  const message: Record<string, unknown> = { role: "assistant", content: text || null };
-  if (reasoning !== "") message.reasoning_content = reasoning;
-  if (toolCalls.length) message.tool_calls = toolCalls;
-  return {
-    id,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, message, finish_reason: finishReason(status, toolCalls.length > 0) }],
-    usage: {
-      prompt_tokens: inTok,
-      completion_tokens: outTok,
-      total_tokens: inTok + outTok,
-      ...(cacheRead > 0 || cacheCreation > 0
-        ? {
-            prompt_tokens_details: {
-              cached_tokens: cacheRead,
-              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
-            },
+      if (type === "response.created") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        if (typeof response.id === "string") id = response.id;
+      } else if (type === "response.output_item.added") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          const tool = ensureTool(item);
+          currentCallId = tool.id;
+          const args = responseToolArguments(item);
+          if (args.length > 0) {
+            work.retain(2 * (args.length - tool.arguments.length));
+            tool.arguments = args;
           }
-        : {}),
-    },
-  } as ChatCompletionResponse;
+        }
+      } else if (type === "response.output_item.done") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          const tool = ensureTool(item, currentCallId);
+          currentCallId = tool.id;
+          const args =
+            responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
+          work.retain(2 * (args.length - tool.arguments.length));
+          tool.arguments = args;
+        }
+      } else if (type === "response.output_text.delta") {
+        if (typeof evt.delta === "string") {
+          work.retain(2 * evt.delta.length);
+          text += evt.delta;
+        }
+      } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+        if (typeof evt.delta === "string") {
+          work.retain(2 * evt.delta.length);
+          reasoning += evt.delta;
+        }
+      } else if (
+        type === "response.function_call_arguments.delta" ||
+        type === "response.custom_tool_call_input.delta"
+      ) {
+        if (typeof evt.delta !== "string") continue;
+        const eventToolId =
+          typeof evt.call_id === "string"
+            ? evt.call_id
+            : typeof evt.item_id === "string"
+              ? evt.item_id
+              : currentCallId;
+        const tool = toolById.get(eventToolId);
+        if (tool) {
+          work.retain(2 * evt.delta.length);
+          tool.arguments += evt.delta;
+        } else if (eventToolId.length > 0) {
+          work.retain(
+            2 * evt.delta.length +
+              (pendingToolArguments.has(eventToolId) ? 0 : 128 + 2 * eventToolId.length),
+          );
+          pendingToolArguments.set(
+            eventToolId,
+            `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+          );
+        }
+      } else if (type === "response.function_call_arguments.done") {
+        const eventToolId =
+          typeof evt.call_id === "string"
+            ? evt.call_id
+            : typeof evt.item_id === "string"
+              ? evt.item_id
+              : currentCallId;
+        const tc = toolById.get(eventToolId);
+        if (tc && typeof evt.arguments === "string") {
+          work.retain(2 * (evt.arguments.length - tc.arguments.length));
+          tc.arguments = evt.arguments;
+        }
+      } else if (type === "response.completed" || type === "response.incomplete") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
+        const usage = (response.usage ?? {}) as Record<string, unknown>;
+        if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
+        if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
+        const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
+        if (typeof details.cached_tokens === "number") cacheRead = details.cached_tokens;
+        if (typeof details.cache_creation_input_tokens === "number")
+          cacheCreation = details.cache_creation_input_tokens;
+        // Terminal event: stop reading NOW so the idle guard cannot turn a completed
+        // aggregation into a timeout if the upstream delays closing the body.
+        completed = true;
+        break;
+      }
+    }
+
+    if (!completed) {
+      throw new UpstreamError("upstream_error", "stream closed before response.completed");
+    }
+
+    const toolCalls = toolOrder.map((cid) => {
+      const tc = toolById.get(cid) as { id: string; name: string; arguments: string };
+      return {
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.arguments || "{}" },
+      };
+    });
+    const message: Record<string, unknown> = { role: "assistant", content: text || null };
+    if (reasoning !== "") message.reasoning_content = reasoning;
+    if (toolCalls.length) message.tool_calls = toolCalls;
+    return {
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message, finish_reason: finishReason(status, toolCalls.length > 0) }],
+      usage: {
+        prompt_tokens: inTok,
+        completion_tokens: outTok,
+        total_tokens: inTok + outTok,
+        ...(cacheRead > 0 || cacheCreation > 0
+          ? {
+              prompt_tokens_details: {
+                cached_tokens: cacheRead,
+                ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+              },
+            }
+          : {}),
+      },
+    } as ChatCompletionResponse;
+  } finally {
+    work.release();
+  }
 }

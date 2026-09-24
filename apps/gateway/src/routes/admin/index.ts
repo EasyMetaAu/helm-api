@@ -1,3 +1,4 @@
+import { consumeResponseTextWithinBudget, ResponseWorkCapacityError } from "@helm/core";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import { registerClassifierRoutes } from "./classifier.js";
@@ -23,6 +24,27 @@ import { registerStatsRoutes } from "./stats.js";
 // no IO — every dependency is injected via AdminApiDeps.
 
 export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
+  // Admin edits and replays must share the same live memory budget as provider work.
+  app.use("/admin/api/*", async (c, next) => {
+    if (c.req.raw.body === null) return await next();
+    try {
+      await consumeResponseTextWithinBudget(
+        new Response(c.req.raw.body, { headers: c.req.raw.headers }),
+        0,
+        async (text) => {
+          // Hono caches promises at runtime; its public BodyCache type omits Promise.
+          Object.assign(c.req.bodyCache, { text: Promise.resolve(text) });
+          await next();
+        },
+        deps.responseWorkAdmission,
+        c.req.raw.signal,
+      );
+    } catch (error) {
+      if (!(error instanceof ResponseWorkCapacityError)) throw error;
+      c.header("retry-after", "1");
+      return c.json({ error: { code: "server_overloaded", message: error.message } }, 503);
+    }
+  });
   registerLanesRoutes(app, deps);
   registerModelsRoutes(app, deps);
   registerPoliciesRoutes(app, deps);
