@@ -389,11 +389,27 @@ export const requestPayloads = pgTable("request_payloads", {
   requestId: text("request_id").primaryKey(),
   requestJson: text("request_json").notNull(),
   responseJson: text("response_json"),
+  responseBodyGeneration: text("response_body_generation"),
   // EXACT body forwarded upstream (post memory-inject + protocol-translation). NULL
   // when capture off / no provider served / pre-feature row. NO plaintext key.
   upstreamRequestJson: text("upstream_request_json"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
+
+export const requestPayloadResponseChunks = pgTable(
+  "request_payload_response_chunks",
+  {
+    requestId: text("request_id")
+      .notNull()
+      .references(() => requestPayloads.requestId, { onDelete: "cascade" }),
+    generation: text("generation").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    codec: text("codec").$type<"gzip" | "raw">().notNull(),
+    rawBytes: integer("raw_bytes").notNull(),
+    bytes: bytea("bytes").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.requestId, t.generation, t.chunkIndex] })],
+);
 
 // Content-addressed store for base64 images pulled OUT of request_payloads
 // (store/payload-blobs.ts) — pg mirror of the sqlite payload_blobs table. Claude

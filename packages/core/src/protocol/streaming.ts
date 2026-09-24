@@ -89,6 +89,7 @@ function responseWorkError(): UpstreamError {
   return new UpstreamError(
     "upstream_error",
     "upstream response memory capacity is temporarily exhausted",
+    { error: { code: "response_work_capacity_exhausted" } },
   );
 }
 

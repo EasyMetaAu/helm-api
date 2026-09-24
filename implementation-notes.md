@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-25 · 内存复查：Replay 分块落盘与已接收请求防重放（Runtime / Provider / Store，docs/04、05、07、08）
+
+- **修复**：generic Responses 已收到 HTTP 成功响应后遇到本机内存准入失败，沿用结果不明的禁止重放边界；保留原始容量错误，不惩罚 provider 熔断。MCP 与 Portal 请求体接入现有共享预算，没有新增正文大小、输出长度或批量数量上限。
+- **Replay**：关闭 capture 时只留有界 usage 尾部；开启时 SQLite/Postgres 使用现有 codec 分块写入并等待存储，完整保留输出。SQLite v53 / Postgres v52 为增量迁移；旧行保持可读。新 writer 仅接受新的服务端 request_id，先保存请求，提交时发布 response generation；失败清理暂存分块，保留请求。FK 让暂存及正式分块跟随 payload retention 清理，包括进程崩溃后的未提交分块。
+- **读取与边界**：管理界面按原下载契约流式读取分块，校验初始分块数和字节数；清理/替换导致缺块时终止流，不能把前缀当作完整正文。完整物化接口仍保留，管理路由先用大小元数据执行既有准入检查。自定义 Store 若未实现可选 streaming port，仍沿用原 insertPayload 行为；archive 的旧全量行契约没有在此变更。
+- **引用释放**：Responses 有界 delta 前缀使用独立 UTF-16 副本；Memory stats 每次访问回收过期 scope，不增加条目上限。定向测试及 heap probe 验证引用释放；不能据此承诺任意负载下永不 OOM。数据库备份、完整 CI、确切 SHA 镜像和生产回读须分别验收。
+
 ## 2026-09-24 · 流式累计内存与读取生命周期（Runtime / 协议 / 可观测性，docs/02、05、07、08）
 
 - **边界**：单帧 SSE 限制不能约束整轮累计状态。Responses 的完整终止输出、Gemini 的完整工具参数、协议工具索引及暂存参数，统一计入现有共享 response-work 准入；在追加前检查，在完成、异常和消费者取消时释放。Responses 超限输出结构化错误，不伪造 completed；Codex 保留发送后结果不明的恢复边界。
@@ -74,13 +81,9 @@
 - **价格**：每百万 token 的输入/输出/缓存读取，标准版为 $2/$6/$0.5，超过 200,000 prompt tokens 为 $4/$12/$1；priority 按官方 2 倍计。Build Fast 为 $4/$12/$1，长上下文为 $6/$18/$1.5，不能套用标准版 priority 的长上下文价格。订阅仍按 API 等价估算计入遥测与 key 预算，不是 SuperGrok 订阅账单。
 - **通道与边界**：稳定 grok 主模型从 4.6 切到 4.7，所有引用它的 fallback 链随之升级；新增 grok-fast，并把 grok-*-build-fast 别名导向该通道。旧型号能力与价格保留，媒体通道不变。不添加未公开定价的 Fast priority 档，不为当前订阅代理启用美国区域 API 费率。
 
-## 2026-09-21 · HTTP 降级后禁止发送增量 continuation（Provider / WebSocket，docs/05）
-
-- **证据**：`223a933e-f396-4556-98d9-18523b0aa3c6` 与前一成功请求绑定同一 Codex 账号，HTTP 上游却拒绝 `previous_response_id`。旧分支让 HTTP fallback 会话绕过 WebSocket continuation guard，现有测试还错误假设 HTTP 能接受该参数。
-- **修复**：HTTP fallback 中的增量 continuation 在发送前走已有 `response_create_not_sent` 恢复协议。可信 WebSocket 桥发送 1012，客户端重连补全历史；完整历史仍可 HTTP fallback。原账号绑定、结果不明时禁止重放、鉴权与恢复证明校验保持原样。
-- **边界**：不能拿旧账号的 response ID 盲轮转；自动恢复依赖客户端重连并重发完整历史。没有保存完整历史时不伪造上下文。无需配置或数据库迁移。
-
 ## 更早历史总览
+
+2026-09-21：WebSocket 降级到 HTTP 后禁止发送无法恢复上下文的增量 continuation；完整记录见 git history.
 
 2026-09-19—20：DeepSeek 工具图片保留结构并有界压缩，缺失 reasoning 历史时关闭思考；Admin Responses 重放保留原生 carrier。分类器 Jev 有序回退复用总超时与严格校验。完整记录见 git history。
 

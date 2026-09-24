@@ -1708,6 +1708,58 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
     });
 
     // --- full-payload capture (admin capture_payloads) ---
+    it("streams complete payload responses with atomic publication, abort and legacy replacement", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.beginPayloadResponse || !t.selectPayloadsOlderThan)
+        throw new Error("streaming payload ports required");
+      const input = {
+        requestId: "streamed",
+        requestJson: '{"hello":true}',
+        createdAt: new Date(1000),
+      };
+      const writer = await t.beginPayloadResponse(input);
+      const large = "中文😀".repeat(100_000);
+      await writer.append(large);
+      await writer.append("\ud83d");
+      await writer.append("\ude00\n");
+      expect((await t.getPayload(input.requestId))?.responseJson).toBeNull();
+      await writer.commit();
+      const expected = `${large}😀\n`;
+      expect((await t.getPayload(input.requestId))?.responseJson).toBe(expected);
+      expect((await t.getPayloadPart?.(input.requestId, "response"))?.json).toBe(expected);
+      expect((await t.getPayloadMeta?.(input.requestId))?.parts.response).toBe(true);
+      const encoded = await t.getPayloadPartStream?.(input.requestId, "response");
+      if (!encoded) throw new Error("expected chunk stream");
+      const chunks: Uint8Array[] = [];
+      for await (const bytes of encoded.stream) {
+        expect(bytes.byteLength).toBeLessThanOrEqual(256 * 1024);
+        chunks.push(bytes);
+      }
+      expect(Buffer.concat(chunks).toString("utf8")).toBe(expected);
+      expect((await t.selectPayloadsOlderThan(2000, 10))[0]?.responseJson).toBe(expected);
+      const interrupted = await t.getPayloadPartStream?.(input.requestId, "response");
+      if (!interrupted) throw new Error("expected chunk stream");
+      const iterator = interrupted.stream[Symbol.asyncIterator]();
+      expect((await iterator.next()).done).toBe(false);
+      await t.insertPayload({ ...input, responseJson: "legacy replacement" });
+      await expect(iterator.next()).rejects.toThrow("missing payload response chunk");
+      expect((await t.getPayload(input.requestId))?.responseJson).toBe("legacy replacement");
+      expect(await t.getPayloadPartStream?.(input.requestId, "response")).toBeNull();
+      const aborted = await t.beginPayloadResponse({ ...input, requestId: "aborted" });
+      await aborted.append(large);
+      await aborted.abort();
+      expect((await t.getPayload("aborted"))?.responseJson).toBeNull();
+      const uncertain = await t.beginPayloadResponse({ ...input, requestId: "uncertain" });
+      await uncertain.append("committed before connection loss");
+      await uncertain.commit();
+      await uncertain.abort();
+      expect((await t.getPayloadMeta?.("uncertain"))?.parts.response).toBe(false);
+      await t.prunePayloads(2000);
+      expect(await t.getPayload("aborted")).toBeNull();
+      expect(await t.getPayload("streamed")).toBeNull();
+    });
+
     it("round-trips a captured request/response payload verbatim", async () => {
       ctx = await make();
       const requestJson = JSON.stringify({

@@ -1819,6 +1819,92 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("streams captured response chunks without materializing the payload", async () => {
+    let closed = false;
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayloadPart: async () => {
+        throw new Error("must not materialize");
+      },
+      getPayloadPartEncoded: async () => {
+        throw new Error("must not materialize encoded body");
+      },
+      getPayloadPartStream: async () => ({
+        requestId: "chunked",
+        part: "response",
+        byteLength: Buffer.byteLength("first 中文😀"),
+        createdAt: new Date(1234),
+        stream: (async function* () {
+          try {
+            yield Buffer.from("first ");
+            yield Buffer.from("中文😀");
+          } finally {
+            closed = true;
+          }
+        })(),
+      }),
+    } as unknown as TelemetryStore;
+    const res = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/chunked/payload?part=response",
+      { headers: { accept: "application/vnd.helm.payload" } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-helm-payload-created-at")).toBe("1234");
+    expect(await res.text()).toBe("first 中文😀");
+    expect(closed).toBe(true);
+  });
+
+  it("errors a payload download if stored chunks disappear during the read", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayloadPartStream: async () => ({
+        requestId: "chunked",
+        part: "response",
+        createdAt: new Date(1234),
+        byteLength: 100,
+        stream: (async function* () {
+          yield Buffer.from("prefix");
+          throw new Error("missing payload response chunk");
+        })(),
+      }),
+    } as unknown as TelemetryStore;
+    const res = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/chunked/payload?part=response",
+      { headers: { accept: "application/vnd.helm.payload" } },
+    );
+    await expect(res.text()).rejects.toThrow("missing payload response chunk");
+  });
+
+  it("preflights large chunked responses before a materializing payload read", async () => {
+    const getPayload = vi.fn(async () => {
+      throw new Error("must not materialize");
+    });
+    const getPayloadPart = vi.fn(async () => {
+      throw new Error("must not materialize");
+    });
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload,
+      getPayloadPart,
+      getPayloadMeta: async () => ({
+        requestId: "chunked",
+        createdAt: new Date(1234),
+        responseBytes: Number.MAX_SAFE_INTEGER,
+        parts: { request: true, response: true, upstreamRequest: false },
+      }),
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    for (const part of ["response", "full"]) {
+      const res = await app.request(`/admin/api/requests/chunked/payload?part=${part}`);
+      expect(await res.json()).toMatchObject({
+        captured: false,
+        reason: "payload_recovery_limited",
+      });
+    }
+    expect(getPayload).not.toHaveBeenCalled();
+    expect(getPayloadPart).not.toHaveBeenCalled();
+  });
+
   it("returns the stored payload bytes without server-side decompression when requested", async () => {
     const compressed = Buffer.from([0x1f, 0x8b, 0x08, 0x00]);
     const telemetry = {

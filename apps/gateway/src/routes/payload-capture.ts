@@ -195,7 +195,10 @@ export function createResponsesDeltaAccumulator(): ResponsesDeltaAccumulator {
       if (inspected.sequenceNumber !== null) lastSequenceNumber = inspected.sequenceNumber;
       if (inspected.delta !== null && inspected.channel !== null) {
         const available = Math.max(0, maxRetainedChars - retainedChars);
-        const retained = inspected.delta.slice(0, available);
+        // Own the bounded prefix: a V8 substring can pin the entire provider delta.
+        const retained = Buffer.from(inspected.delta.slice(0, available), "utf16le").toString(
+          "utf16le",
+        );
         const dropped = inspected.delta.slice(available);
         if (retained.length > 0) {
           const chunks = channels.get(inspected.channel) ?? [];

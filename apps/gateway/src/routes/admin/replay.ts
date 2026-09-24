@@ -23,6 +23,8 @@ import { createMessagesPipeline, PipelineError } from "../messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "../native-carrier.js";
 import {
   backfillCompletionCost,
+  captureEnabled,
+  createSseCapture,
   type PayloadCaptureDeps,
   persistPayload,
   stampRequestBodyBytes,
@@ -145,16 +147,17 @@ export async function runReplay(
     },
     key.request_content_mode,
   );
-  await persistPayload(
-    captureDeps,
-    {
-      requestId,
-      requestJson: prepared.requestJson,
-      responseJson: prepared.responseJson,
-      now: deps.replay.now(),
-    },
-    args.log,
-  );
+  if (!prepared.payloadHandled)
+    await persistPayload(
+      captureDeps,
+      {
+        requestId,
+        requestJson: prepared.requestJson,
+        responseJson: prepared.responseJson,
+        now: deps.replay.now(),
+      },
+      args.log,
+    );
   // UNLIKE the live routes (where telemetry is fail-open so a logging hiccup
   // never 5xx's a served client request), the replay's WHOLE deliverable is the
   // recorded trace — the UI navigates straight to it. A swallowed insert failure
@@ -187,8 +190,90 @@ export async function runReplay(
 // (the build/transform rejected the edited body). Carries the LIVE decision the
 // stream branch may have mutated (cost backfill) before it is recorded.
 type PreparedReplay =
-  | { ok: true; decision: DecisionRecord; requestJson: string; responseJson: string | null }
+  | {
+      ok: true;
+      decision: DecisionRecord;
+      requestJson: string;
+      responseJson: string | null;
+      payloadHandled?: boolean;
+    }
   | { ok: false; status: 400; error: string };
+
+// Both Replay protocols drain through one capture path. Official stores append
+// with backpressure; older custom adapters retain their existing insert contract.
+async function consumeReplayStream(
+  deps: RunReplayDeps,
+  args: { signal: AbortSignal; log: (msg: string) => void },
+  key: ApiKeyRecord,
+  requestId: string,
+  requestJson: string,
+  stream: AsyncIterable<string>,
+  observe?: (chunk: string) => void,
+  emptyResponseIsNull = false,
+): Promise<{ responseJson: string | null; payloadHandled: boolean }> {
+  const enabled = captureEnabled(
+    withRequestContentMode(
+      { telemetry: deps.telemetry, capturePayloads: deps.replay.capturePayloads },
+      key.request_content_mode,
+    ),
+  );
+  const incremental = enabled && deps.telemetry.beginPayloadResponse !== undefined;
+  let writer: Awaited<ReturnType<NonNullable<TelemetryStore["beginPayloadResponse"]>>> | undefined;
+  const captured: string[] | null = enabled && !incremental ? [] : null;
+  let received = false;
+  const abortCapture = async () => {
+    const failed = writer;
+    writer = undefined;
+    try {
+      await failed?.abort();
+    } catch {
+      args.log("replay.payload_abort_failed");
+    }
+  };
+  if (incremental && deps.telemetry.beginPayloadResponse) {
+    try {
+      writer = await deps.telemetry.beginPayloadResponse({
+        requestId,
+        requestJson,
+        createdAt: new Date(deps.replay.now()),
+      });
+    } catch {
+      args.log("replay.payload_capture_failed");
+    }
+  }
+  try {
+    for await (const chunk of stream) {
+      if (args.signal.aborted) break;
+      received = true;
+      observe?.(chunk);
+      captured?.push(chunk);
+      if (writer) {
+        try {
+          await writer.append(chunk);
+        } catch {
+          args.log("replay.payload_capture_failed");
+          await abortCapture();
+        }
+      }
+      if (args.signal.aborted) break;
+    }
+  } catch {
+    args.log("replay.stream_failed");
+  }
+  if (args.signal.aborted || (emptyResponseIsNull && !received)) await abortCapture();
+  else if (writer) {
+    try {
+      await writer.commit();
+    } catch {
+      args.log("replay.payload_capture_failed");
+      await abortCapture();
+    }
+  }
+  return {
+    responseJson: emptyResponseIsNull && !received ? null : (captured?.join("") ?? null),
+    payloadHandled: !enabled || incremental,
+  };
+}
 
 // Protocol inference for LEGACY records (no stored protocol): the Responses body
 // carries `input[]`, Gemini carries `contents[]`; anything else (the OpenAI/
@@ -241,21 +326,31 @@ async function replayOpenAIChat(
   const finalAlias =
     result.decision.final.status === "ok" ? result.decision.final.model_alias : null;
   let responseJson: string | null;
+  let payloadHandled = false;
   if (internal.stream && result.stream !== null) {
-    const captured: string[] = [];
-    // Drain inside a catch: a mid-stream upstream failure must NOT abort the
-    // persistence — the failed retry stays viewable with the bytes that arrived.
+    const tail = createSseCapture(false);
+    let usage: ReturnType<typeof usageFromSSE> = null;
     try {
-      for await (const chunk of result.stream) captured.push(chunk);
-    } catch {
-      args.log("replay.stream_failed");
+      const capture = await consumeReplayStream(
+        deps,
+        args,
+        key,
+        requestId,
+        JSON.stringify(parsed.data),
+        result.stream,
+        (chunk) => {
+          tail.push(chunk);
+          usage = usageFromSSE(tail.value()) ?? usage;
+        },
+      );
+      responseJson = capture.responseJson;
+      payloadHandled = capture.payloadHandled;
+    } finally {
+      tail.release();
     }
-    const rawSse = captured.join("");
-    responseJson = rawSse;
     // Streamed completion-cost backfill — identical to the live chat path: the
     // cost is unknown at peek time, so price the trailing usage tail here.
     try {
-      const usage = usageFromSSE(rawSse);
       if (usage) {
         // Token stamp needs no pricing — land it whenever the tail has usage;
         // price the cost only when costOf is wired (identical to the live path).
@@ -274,6 +369,7 @@ async function replayOpenAIChat(
     decision: result.decision,
     requestJson: JSON.stringify(parsed.data),
     responseJson,
+    payloadHandled,
   };
 }
 
@@ -403,15 +499,23 @@ async function replayViaPipeline(
   // completion-cost backfill is intentionally absent (the pipeline only backfills
   // when budget deps are wired, which a replay omits — documented limitation).
   let responseJson: string | null = null;
+  let payloadHandled = false;
   if (ir.stream === true) {
-    const captured: string[] = [];
-    try {
-      for await (const event of result.streamIR())
-        captured.push(adapter.serializeStreamEvent(event));
-    } catch {
-      args.log("replay.stream_failed");
-    }
-    responseJson = captured.length > 0 ? captured.join("") : null;
+    const nativeStream = (async function* () {
+      for await (const event of result.streamIR()) yield adapter.serializeStreamEvent(event);
+    })();
+    const capture = await consumeReplayStream(
+      deps,
+      args,
+      key,
+      requestId,
+      JSON.stringify(args.body),
+      nativeStream,
+      undefined,
+      true,
+    );
+    responseJson = capture.responseJson;
+    payloadHandled = capture.payloadHandled;
   } else {
     try {
       responseJson = JSON.stringify(await adapter.transformResponseOut(await result.collect()));
@@ -425,6 +529,7 @@ async function replayViaPipeline(
     decision: result.decision,
     requestJson: JSON.stringify(args.body),
     responseJson,
+    payloadHandled,
   };
 }
 
