@@ -327,6 +327,62 @@ describe("runReplay", () => {
     expect(rec.inserts).toHaveLength(1);
   });
 
+  it("retains usage counters when keepalives outlive the bounded stream tail", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: null,
+      stream: sse([
+        'data: {"usage":{"prompt_tokens":10,"completion_tokens":20}}\n\n',
+        `: ${" ".repeat(200_000)}\n\n`,
+      ]),
+      error: null,
+    });
+    await runReplay(
+      {
+        replay: wiring(route, rec, { capturePayloads: () => false }),
+        telemetry: fakeTelemetry("key_1", rec),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      {
+        originalTraceId: "orig",
+        body: { ...okBody, stream: true },
+        signal: new AbortController().signal,
+        log: noop,
+      },
+    );
+    expect(rec.inserts[0]?.decision.cost_breakdown.completion_usd).toBe(0.5);
+  });
+
+  it("keeps the native response absent when routing fails before any stream event", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id, { status: "error" } as DecisionRecord["final"]),
+      final: { status: "error" },
+      body: null,
+      stream: null,
+      error: null,
+    });
+    const commit = vi.fn(async () => {});
+    const abort = vi.fn(async () => {});
+    const telemetry = fakeTelemetry("key_1", rec, {
+      original: { ...decision("orig"), protocol: "openai_responses" },
+    });
+    telemetry.beginPayloadResponse = async () => ({ append: async () => {}, commit, abort });
+    await runReplay(
+      { replay: wiring(route, rec), telemetry, keyStore: fakeKeyStore([fakeKey()]) },
+      {
+        originalTraceId: "orig",
+        body: { model: "gpt-5.5", input: "hi", stream: true },
+        signal: new AbortController().signal,
+        log: noop,
+      },
+    );
+    expect(commit).not.toHaveBeenCalled();
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
   it("rejects a malformed body (400) without routing or recording", async () => {
     const rec = emptyRec();
     const out = await runReplay(

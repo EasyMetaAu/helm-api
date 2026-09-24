@@ -209,6 +209,7 @@ async function consumeReplayStream(
   requestJson: string,
   stream: AsyncIterable<string>,
   observe?: (chunk: string) => void,
+  emptyResponseIsNull = false,
 ): Promise<{ responseJson: string | null; payloadHandled: boolean }> {
   const enabled = captureEnabled(
     withRequestContentMode(
@@ -219,6 +220,7 @@ async function consumeReplayStream(
   const incremental = enabled && deps.telemetry.beginPayloadResponse !== undefined;
   let writer: Awaited<ReturnType<NonNullable<TelemetryStore["beginPayloadResponse"]>>> | undefined;
   const captured: string[] | null = enabled && !incremental ? [] : null;
+  let received = false;
   const abortCapture = async () => {
     const failed = writer;
     writer = undefined;
@@ -242,6 +244,7 @@ async function consumeReplayStream(
   try {
     for await (const chunk of stream) {
       if (args.signal.aborted) break;
+      received = true;
       observe?.(chunk);
       captured?.push(chunk);
       if (writer) {
@@ -257,7 +260,7 @@ async function consumeReplayStream(
   } catch {
     args.log("replay.stream_failed");
   }
-  if (args.signal.aborted) await abortCapture();
+  if (args.signal.aborted || (emptyResponseIsNull && !received)) await abortCapture();
   else if (writer) {
     try {
       await writer.commit();
@@ -266,7 +269,10 @@ async function consumeReplayStream(
       await abortCapture();
     }
   }
-  return { responseJson: captured?.join("") ?? null, payloadHandled: !enabled || incremental };
+  return {
+    responseJson: emptyResponseIsNull && !received ? null : (captured?.join("") ?? null),
+    payloadHandled: !enabled || incremental,
+  };
 }
 
 // Protocol inference for LEGACY records (no stored protocol): the Responses body
@@ -323,7 +329,7 @@ async function replayOpenAIChat(
   let payloadHandled = false;
   if (internal.stream && result.stream !== null) {
     const tail = createSseCapture(false);
-    let rawSse: string;
+    let usage: ReturnType<typeof usageFromSSE> = null;
     try {
       const capture = await consumeReplayStream(
         deps,
@@ -332,18 +338,19 @@ async function replayOpenAIChat(
         requestId,
         JSON.stringify(parsed.data),
         result.stream,
-        (chunk) => tail.push(chunk),
+        (chunk) => {
+          tail.push(chunk);
+          usage = usageFromSSE(tail.value()) ?? usage;
+        },
       );
       responseJson = capture.responseJson;
       payloadHandled = capture.payloadHandled;
-      rawSse = tail.value();
     } finally {
       tail.release();
     }
     // Streamed completion-cost backfill — identical to the live chat path: the
     // cost is unknown at peek time, so price the trailing usage tail here.
     try {
-      const usage = usageFromSSE(rawSse);
       if (usage) {
         // Token stamp needs no pricing — land it whenever the tail has usage;
         // price the cost only when costOf is wired (identical to the live path).
@@ -504,6 +511,8 @@ async function replayViaPipeline(
       requestId,
       JSON.stringify(args.body),
       nativeStream,
+      undefined,
+      true,
     );
     responseJson = capture.responseJson;
     payloadHandled = capture.payloadHandled;
