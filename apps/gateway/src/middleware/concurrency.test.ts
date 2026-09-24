@@ -62,6 +62,22 @@ describe("createConcurrencyGate", () => {
     expect(semaphore.inFlight("k")).toBe(0); // nothing was tracked
   });
 
+  it("does not apply the global limit while queueing is disabled", async () => {
+    const semaphore = createKeyedSemaphore();
+    const gate = createConcurrencyGate({
+      semaphore,
+      getConfig: () => cfg({ enabled: false, globalLimit: 1 }),
+    });
+    const lease = await gate.acquire({
+      keyId: "k",
+      limit: null,
+      signal: new AbortController().signal,
+    });
+    expect(lease.ok).toBe(true);
+    expect(semaphore.inFlight("global")).toBe(0);
+    if (lease.ok) await lease.release();
+  });
+
   it("computes maxQueue = MAX(floor(multiplier × limit), minSize); 0 ⇒ minSize only", async () => {
     const semaphore = createKeyedSemaphore();
     // multiplier 2 × limit 2 = 4 > minSize 1 ⇒ queue of 4: 2 run, 4 wait, 7th rejected
@@ -102,7 +118,7 @@ describe("createConcurrencyGate", () => {
     const semaphore = createKeyedSemaphore();
     const gate = createConcurrencyGate({
       semaphore,
-      getConfig: () => cfg({ enabled: false, globalLimit: 1, minSize: 1 }),
+      getConfig: () => cfg({ globalLimit: 1, minSize: 1 }),
     });
     const signal = new AbortController().signal;
     const first = await gate.acquire({ keyId: "a", limit: null, signal });

@@ -295,6 +295,21 @@
 
             <div class="grid grid-cols-1 gap-3 border-l-2 border-slate-100 pl-3 sm:grid-cols-3">
               <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Process-wide concurrent requests')}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1000"
+                  step="1"
+                  data-testid="global-concurrency-limit"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.global_concurrency_limit}
+                />
+                <span class="field-help"
+                  >{$t('0 disables the process-wide cap. The queue toggle above remains the master switch.')}</span
+                >
+              </label>
+              <label class="flex flex-col gap-1">
                 <span class="font-medium">{$t('Minimum queue size')}</span>
                 <input
                   type="number"
