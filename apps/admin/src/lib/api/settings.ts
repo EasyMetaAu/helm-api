@@ -127,7 +127,8 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     default_lane:
       typeof raw.default_lane === 'string' && raw.default_lane ? raw.default_lane : 'balanced',
     concurrency_queue_enabled: raw.concurrency_queue_enabled === true,
-    global_concurrency_limit: typeof raw.global_concurrency_limit === 'number' ? raw.global_concurrency_limit : 0,
+    global_concurrency_limit:
+      typeof raw.global_concurrency_limit === 'number' ? raw.global_concurrency_limit : 0,
     concurrency_queue_min_size:
       typeof raw.concurrency_queue_min_size === 'number' ? raw.concurrency_queue_min_size : 5,
     concurrency_queue_size_multiplier:
