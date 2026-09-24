@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-24 · Responses 内存准入与 Codex 恢复诊断（Runtime / Provider，docs/04、05）
+
+- **决定**：在 gateway 入口增加固定的进程级并发上限 4，并复用现有有界 FIFO semaphore；它独立于 per-key `concurrency_limit`，因此没有配置 per-key 上限的 key 也受保护。队列满或等待超时继续返回既有 429，数据库租约不可用继续 fail-closed。该上限按 Remote 1.5 GiB 容器的当前观测值保守设定，后续只有在测得足够 headroom 后才提高。
+- **诊断**：Codex buffered recovery 的 eligibility 失败不再静默；passthrough mutation 记录 `codex_stream_recovery_eligible` 与 `codex_stream_recovery_skip_reason`，并保留现有 attempts/cost-unknown 字段。skip reason 只记录无正文的原因（例如 hosted tools、previous response mismatch、unsupported input、capacity exhausted）。
+- **限制**：进程级 cap 是单一固定值，不是按实时 RSS 自动调节；它先控制并发峰值，单个响应仍受现有 response-work admission 保护。提升上限前必须有新的生产内存证据和定向压测。
+- **验证**：新增 global-cap 与 recovery skip reason 定向测试；发布前仍需完整 CI、不可变镜像核对，以及 Remote `/version`、`/healthz`、配置和 telemetry 回读。
+
 ## 2026-09-23 · Codex 整轮暂存与同账号断流恢复（Provider / 流式协议，docs/04、05，原则 8）
 
 - **选择**：用户明确选择延迟首字来换取透明恢复；新增运行时开关 `codex_buffered_stream_recovery`，默认关闭，Remote 按本次授权开启。仅 Codex 原生 WebSocket 的合格请求暂存整轮，收到终止事件后按原序交付；不合成完成、不让失败尝试的文本或客户端工具调用泄漏。

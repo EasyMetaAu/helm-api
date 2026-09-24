@@ -2034,6 +2034,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       onStreamRecovery: (event) => {
                         const mutations = nativePassthroughMutations(passthroughBody);
                         if (mutations) {
+                          mutations.codex_stream_recovery_eligible = true;
+                          delete mutations.codex_stream_recovery_skip_reason;
                           mutations.codex_stream_recovery_attempts = event.attempt;
                           mutations.codex_stream_recovery_cost_unknown = true;
                         }
@@ -2043,6 +2045,21 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                           same_account: true,
                           additional_inference_cost_unknown: true,
                         });
+                      },
+                      onStreamRecoveryEligibility: (event) => {
+                        const mutations = nativePassthroughMutations(passthroughBody);
+                        if (mutations) {
+                          mutations.codex_stream_recovery_eligible = event.eligible;
+                          if (event.reason !== undefined) {
+                            mutations.codex_stream_recovery_skip_reason = event.reason;
+                          }
+                        }
+                        if (!event.eligible && event.reason !== undefined) {
+                          log?.("info", "provider.stream_recovery_skip", {
+                            trace_id: correlationTraceId(req),
+                            reason: event.reason,
+                          });
+                        }
                       },
                       toolCallXmlRecovery:
                         target.targetProviderProtocol === "anthropic_messages" &&

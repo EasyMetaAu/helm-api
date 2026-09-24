@@ -52,6 +52,10 @@ export const NativePassthroughMutationLedgerSchema = z
     codex_installation_id: z.string().optional(),
     codex_installation_id_client: z.string().optional(),
     codex_installation_id_source: z.enum(["rebound", "client", "absent"]).optional(),
+    codex_stream_recovery_eligible: z.boolean().optional(),
+    codex_stream_recovery_skip_reason: z.string().optional(),
+    codex_stream_recovery_attempts: z.number().int().positive().optional(),
+    codex_stream_recovery_cost_unknown: z.boolean().optional(),
     // Visual context compression telemetry. Body-free by design: reason strings,
     // counts, and flags only. Never store the imaged source text or PNG bytes here.
     visual_context_compression: z

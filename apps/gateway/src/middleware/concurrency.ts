@@ -14,6 +14,9 @@ import { requestSignal } from "./limits.js";
 
 export interface ConcurrencyGateConfig {
   enabled: boolean;
+  // Fixed process-wide cap for memory-heavy provider work. Unlike the optional
+  // per-key queue, this also protects keys whose concurrency_limit is null.
+  globalLimit?: number;
   // 固定最小排队数: fixed minimum queue capacity per key.
   minSize: number;
   // 排队数倍数: effective max queue = multiplier > 0
@@ -49,18 +52,44 @@ export interface ConcurrencyGateDeps {
   getConfig: () => ConcurrencyGateConfig;
 }
 
-const NOOP_LEASE = {
-  ok: true as const,
-  signal: new AbortController().signal,
-  release: async (): Promise<void> => {},
-};
-
 export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGatePort {
   return {
     async acquire({ keyId, limit, signal }) {
       const cfg = deps.getConfig();
-      // Disabled feature or an unlimited key: zero-touch pass-through.
-      if (!cfg.enabled || limit === null || limit <= 0) return NOOP_LEASE;
+      let globalRelease: (() => Promise<void>) | undefined;
+      let acquiredSignal = signal;
+      if ((cfg.globalLimit ?? 0) > 0) {
+        const global = await deps.semaphore.acquire({
+          // NUL-prefixed namespace cannot collide with an API-key id.
+          key: "\0global",
+          limit: Math.floor(cfg.globalLimit as number),
+          maxQueue: cfg.minSize,
+          timeoutMs: cfg.waitTimeoutMs,
+          signal,
+        });
+        if (!global.ok) {
+          return {
+            ok: false,
+            reason: global.reason,
+            retryAfterSeconds: global.reason === "queue_full" ? 1 : 5,
+          };
+        }
+        globalRelease = async () => {
+          await global.release();
+        };
+        acquiredSignal = "signal" in global ? global.signal : signal;
+      }
+
+      // Disabled feature or an unlimited key: retain the global lease, if any.
+      if (!cfg.enabled || limit === null || limit <= 0) {
+        return {
+          ok: true,
+          signal: acquiredSignal,
+          release: async () => {
+            await globalRelease?.();
+          },
+        };
+      }
       const maxQueue =
         cfg.multiplier > 0
           ? Math.max(Math.floor(cfg.multiplier * limit), cfg.minSize)
@@ -70,17 +99,19 @@ export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGat
         limit,
         maxQueue,
         timeoutMs: cfg.waitTimeoutMs,
-        signal,
+        signal: acquiredSignal,
       });
       if (result.ok) {
         return {
           ok: true,
-          signal: "signal" in result ? result.signal : signal,
+          signal: "signal" in result ? result.signal : acquiredSignal,
           release: async () => {
             await result.release();
+            await globalRelease?.();
           },
         };
       }
+      await globalRelease?.();
       // queue_full: queue itself saturated. PostgreSQL unavailability is a
       // fail-closed boundary, rendered as 503 before provider execution.
       return {

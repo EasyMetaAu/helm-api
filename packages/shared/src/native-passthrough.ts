@@ -14,6 +14,10 @@ export interface NativePassthroughMutationLedger {
   codex_installation_id?: string;
   codex_installation_id_client?: string;
   codex_installation_id_source?: "rebound" | "client" | "absent";
+  codex_stream_recovery_eligible?: boolean;
+  codex_stream_recovery_skip_reason?: string;
+  codex_stream_recovery_attempts?: number;
+  codex_stream_recovery_cost_unknown?: boolean;
   [key: string]: unknown;
 }
 

@@ -95,14 +95,29 @@ describe("Codex buffered stream recovery", () => {
       jsonAmplification: 1,
       minChargeBytes: 1,
     });
+    const reasons: string[] = [];
     expect(
       createCodexBufferedTurn(
         input({ input: [{ type: "additional_tools" }] }).body,
         undefined,
         admission,
+        (reason) => reasons.push(reason),
       ),
     ).toBeNull();
+    expect(reasons).toEqual(["unsupported_input"]);
     expect(admission.reservedBytes).toBe(0);
+  });
+
+  it("reports a previous-response mismatch instead of silently disabling recovery", () => {
+    const reasons: string[] = [];
+    const turn = createCodexBufferedTurn(
+      input({ previous_response_id: "missing" }).body,
+      undefined,
+      createResponseWorkAdmission({ capacityBytes: 1000, jsonAmplification: 1, minChargeBytes: 1 }),
+      (reason) => reasons.push(reason),
+    );
+    expect(turn).toBeNull();
+    expect(reasons).toEqual(["previous_response_mismatch"]);
   });
 
   it("bounds all retained histories to a quarter of the shared response budget", () => {

@@ -134,6 +134,7 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   /** Opt-in atomic Codex delivery; may repeat inference once, never hosted tools. */
   codexBufferedStreamRecovery?: boolean;
+  onStreamRecoveryEligibility?: (event: { eligible: boolean; reason?: string }) => void;
   onStreamRecovery?: (event: { attempt: number; reason: string }) => void;
   overloadRetry?: OverloadRetryBudget;
   signal?: AbortSignal;
