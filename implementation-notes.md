@@ -9,7 +9,7 @@
 
 ## 2026-09-24 · Responses 内存准入与 Codex 恢复诊断（Runtime / Provider，docs/04、05）
 
-- **决定**：新增运行时 `global_concurrency_limit`（0 关闭，默认 0），Remote 初始设为 4；复用本地有界 FIFO semaphore 控制当前进程的执行并发。该上限独立于 per-key 开关和 limit，共用 queue min-size 与 wait-timeout 设置；全局队列不访问分布式 key 租约表。先取得 key 租约，避免 key 等待者占用全局名额；全局等待失败会释放 key 租约。排队满或超时返回既有 429。
+- **决定**：新增运行时 `global_concurrency_limit`（0 关闭，默认 0），并由现有 `concurrency_queue_enabled` 作为总开关；Remote 保持 0，只有运维明确在设置中启用后才生效。复用本地有界 FIFO semaphore 控制当前进程的执行并发。该上限独立于 per-key limit，共用 queue min-size 与 wait-timeout 设置；全局队列不访问分布式 key 租约表。先取得 key 租约，避免 key 等待者占用全局名额；全局等待失败会释放 key 租约。排队满或超时返回既有 429。
 - **生命周期**：全局名额随真实请求/流结束释放，不使用会提前释放长请求的 watchdog。WebSocket 每轮经 Responses 路由取得名额，结束时释放。上限在线调整作用于之后的准入；既有排队者与持有者按原生命周期退出，不中断运行中的请求。
 - **诊断**：记录 `codex_stream_recovery_eligible` 与无正文的 `codex_stream_recovery_skip_reason`，区分 disabled、HTTP、hosted tools、缺少历史、parent mismatch、unsupported input/event、capacity、不可重试 close/error 和 retry exhausted；保留 attempts/cost-unknown 字段。诊断失败不影响执行。
 - **限制**：并发 cap 降低峰值但不保证单个大响应永不触发内存准入，既有内存保护仍生效；初始 4 是保守运维值，需结合线上等待/失败率调整。长回答在 buffered 模式下仍延迟首字；上游断线并非全部可安全重放。

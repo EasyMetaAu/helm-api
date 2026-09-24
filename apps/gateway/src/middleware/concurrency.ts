@@ -87,7 +87,9 @@ export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGat
           keyRelease = result.release;
           acquiredSignal = "signal" in result ? AbortSignal.any([signal, result.signal]) : signal;
         }
-        if ((cfg.globalLimit ?? 0) > 0) {
+        // The existing queue toggle is the master switch. A global limit is
+        // inert while queueing is disabled, just like the per-key limit.
+        if (cfg.enabled && (cfg.globalLimit ?? 0) > 0) {
           const result = await globalSemaphore.acquire({
             key: "global",
             limit: cfg.globalLimit ?? 0,
