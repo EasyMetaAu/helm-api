@@ -319,7 +319,11 @@ describe("/admin/api/memory routes (docs/13)", () => {
     const { store } = seededStore();
     const originalSet = Map.prototype.set;
     let cache: Map<unknown, unknown> | undefined;
-    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key,
+      value,
+    ) {
       if (typeof key === "string" && key.includes("\u0000") && value?.expiresAt !== undefined)
         cache = this;
       return originalSet.call(this, key, value);
