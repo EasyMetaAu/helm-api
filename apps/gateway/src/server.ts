@@ -3513,6 +3513,9 @@ export async function buildServer(
       }),
     getConfig: () => ({
       enabled: settings.concurrency_queue_enabled,
+      // ponytail: one small process-wide queue protects the 1.5 GiB Remote
+      // container; raise only after measured headroom proves it is safe.
+      globalLimit: 4,
       minSize: settings.concurrency_queue_min_size,
       multiplier: settings.concurrency_queue_size_multiplier,
       waitTimeoutMs: settings.concurrency_queue_wait_timeout_ms,

@@ -3411,13 +3411,32 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         let retriedInvalidPreviousResponseId = false;
         let replayedResponse = false;
         let replayFailure: UpstreamError | null = null;
-        const buffered = opts?.codexBufferedStreamRecovery
-          ? createCodexBufferedTurn(
-              prepared.body,
-              recoveryHistory.get(sessionId),
-              deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
-            )
-          : null;
+        let buffered = null;
+        if (opts?.codexBufferedStreamRecovery) {
+          buffered = createCodexBufferedTurn(
+            prepared.body,
+            recoveryHistory.get(sessionId),
+            deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+            (reason) => {
+              try {
+                opts.onStreamRecoveryEligibility?.({ eligible: false, reason });
+              } catch {
+                /* telemetry is fail-open */
+              }
+            },
+          );
+          try {
+            opts.onStreamRecoveryEligibility?.({ eligible: buffered !== null });
+          } catch {
+            /* telemetry is fail-open */
+          }
+        } else {
+          try {
+            opts?.onStreamRecoveryEligibility?.({ eligible: false, reason: "disabled" });
+          } catch {
+            /* telemetry is fail-open */
+          }
+        }
         try {
           while (!websocketHttpFallbackSessions.has(sessionId)) {
             let lease:

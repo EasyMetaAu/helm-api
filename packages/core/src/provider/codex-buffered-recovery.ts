@@ -39,20 +39,22 @@ export function createCodexBufferedTurn(
   body: Record<string, unknown>,
   previous: CodexRecoveryHistory | undefined,
   admission: ResponseWorkAdmission,
+  onSkip?: (reason: string) => void,
 ) {
-  if (
-    body.store !== false ||
-    body.background === true ||
-    body.generate === false ||
-    body.conversation != null ||
-    body.prompt != null ||
-    !Array.isArray(body.input) ||
-    !localTools(body.tools)
-  )
+  const skip = (reason: string): null => {
+    onSkip?.(reason);
     return null;
+  };
+  if (body.store !== false) return skip("store_required_false");
+  if (body.background === true) return skip("background");
+  if (body.generate === false) return skip("generate_false");
+  if (body.conversation != null) return skip("conversation_stateful");
+  if (body.prompt != null) return skip("prompt_mode");
+  if (!Array.isArray(body.input)) return skip("missing_input");
+  if (!localTools(body.tools)) return skip("hosted_tools");
   const parentId = body.previous_response_id;
   if (parentId != null && (parentId !== previous?.responseId || body.model !== previous?.model))
-    return null;
+    return skip("previous_response_mismatch");
   const input = parentId != null && previous ? [...previous.input, ...body.input] : body.input;
   const inputTypes = new Set([
     "message",
@@ -73,10 +75,10 @@ export function createCodexBufferedTurn(
           (!Array.isArray(item.tools) || !localTools(item.tools))),
     )
   )
-    return null;
+    return skip("unsupported_input");
   const inputBytes = Buffer.byteLength(JSON.stringify(input));
   const acquired = admission.acquire(inputBytes);
-  if (!acquired.ok) return null;
+  if (!acquired.ok) return skip("response_work_capacity_exhausted");
   const lease = acquired.lease;
   let bytes = inputBytes;
   const frames: string[] = [];

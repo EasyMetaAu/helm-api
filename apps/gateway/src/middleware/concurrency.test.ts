@@ -97,6 +97,22 @@ describe("createConcurrencyGate", () => {
     expect(blocked).toMatchObject({ ok: false, reason: "timeout", retryAfterSeconds: 5 });
     if (lease.ok) lease.release();
   });
+
+  it("applies the global cap to unlimited keys and releases it with the request", async () => {
+    const semaphore = createKeyedSemaphore();
+    const gate = createConcurrencyGate({
+      semaphore,
+      getConfig: () => cfg({ enabled: false, globalLimit: 1, minSize: 1 }),
+    });
+    const signal = new AbortController().signal;
+    const first = await gate.acquire({ keyId: "a", limit: null, signal });
+    expect(first.ok).toBe(true);
+    const queued = gate.acquire({ keyId: "b", limit: null, signal });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await Promise.race([queued, Promise.resolve(null)])) ?? null).toBeNull();
+    if (first.ok) await first.release();
+    expect((await queued).ok).toBe(true);
+  });
 });
 
 describe("concurrencyMiddleware", () => {
