@@ -1,3 +1,7 @@
+import {
+  createRetainedResponseWork,
+  type ResponseWorkAdmission,
+} from "../../runtime/response-work-admission.js";
 import type {
   IRContentPart,
   IRMessage,
@@ -1389,136 +1393,153 @@ interface OutToolSlot {
   argBuffer: string; // accumulated argument fragments across chunks
 }
 
-async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<GeminiSSEEvent> {
-  // Tool-call fragments arrive split across chunks (id/name early, arguments later);
-  // buffer per IR tool index — mirroring the inbound side — and emit each as a single
-  // complete functionCall part once the stream finishes (never a half-parsed snapshot).
-  const toolIndexToSlot = new Map<number, OutToolSlot>();
+async function* transformStreamOut(
+  src: AsyncIterable<IRChunk>,
+  workAdmission?: ResponseWorkAdmission,
+): AsyncIterable<GeminiSSEEvent> {
+  const work = createRetainedResponseWork(workAdmission);
+  try {
+    // Tool-call fragments arrive split across chunks (id/name early, arguments later);
+    // buffer per IR tool index — mirroring the inbound side — and emit each as a single
+    // complete functionCall part once the stream finishes (never a half-parsed snapshot).
+    const toolIndexToSlot = new Map<number, OutToolSlot>();
 
-  // Build the completed functionCall parts in allocation order (skip un-named slots).
-  const flushToolParts = (): GeminiPart[] => {
-    const parts: GeminiPart[] = [];
-    for (const slot of [...toolIndexToSlot.values()].sort((a, b) => a.index - b.index)) {
-      if (slot.name === "") continue;
-      parts.push({ functionCall: { name: slot.name, args: parseArgs(slot.argBuffer) } });
-    }
-    return parts;
-  };
-
-  const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => {
-    const nestedPromptDetails = usage.prompt_tokens_details;
-    const cached = usage.cached_tokens ?? nonNegativeToken(nestedPromptDetails?.cached_tokens);
-    const cacheCreation =
-      usage.cache_creation_tokens ??
-      nonNegativeToken(nestedPromptDetails?.cache_creation_tokens) ??
-      nonNegativeToken(nestedPromptDetails?.cache_creation_input_tokens) ??
-      nonNegativeToken(nestedPromptDetails?.cache_write_tokens);
-    const prompt =
-      usage.prompt_tokens !== undefined
-        ? usage.prompt_tokens + (cached ?? 0) + (cacheCreation ?? 0)
-        : undefined;
-    const candidates =
-      usage.completion_tokens !== undefined
-        ? Math.max(0, usage.completion_tokens - (usage.reasoning_tokens ?? 0))
-        : undefined;
-    return {
-      ...(prompt !== undefined ? { promptTokenCount: prompt } : {}),
-      ...(candidates !== undefined ? { candidatesTokenCount: candidates } : {}),
-      // The real Gemini wire always carries totalTokenCount on the terminal frame.
-      ...(prompt !== undefined || usage.completion_tokens !== undefined
-        ? { totalTokenCount: (prompt ?? 0) + (usage.completion_tokens ?? 0) }
-        : {}),
-      ...(usage.reasoning_tokens !== undefined
-        ? { thoughtsTokenCount: usage.reasoning_tokens }
-        : {}),
-      ...(cached !== undefined ? { cachedContentTokenCount: cached } : {}),
+    // Build the completed functionCall parts in allocation order (skip un-named slots).
+    const flushToolParts = (): GeminiPart[] => {
+      const parts: GeminiPart[] = [];
+      for (const slot of [...toolIndexToSlot.values()].sort((a, b) => a.index - b.index)) {
+        if (slot.name === "") continue;
+        parts.push({ functionCall: { name: slot.name, args: parseArgs(slot.argBuffer) } });
+      }
+      return parts;
     };
-  };
 
-  // The terminal frame (text delta + functionCall parts + finishReason) is held back
-  // until stream end so a late usage-only chunk merges into it as ONE frame.
-  let terminalParts: GeminiPart[] | null = null;
-  let terminalFinish: string | undefined;
-  let latestUsage: GeminiUsageMetadata | undefined;
-  let latestServiceTier: string | undefined;
+    const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => {
+      const nestedPromptDetails = usage.prompt_tokens_details;
+      const cached = usage.cached_tokens ?? nonNegativeToken(nestedPromptDetails?.cached_tokens);
+      const cacheCreation =
+        usage.cache_creation_tokens ??
+        nonNegativeToken(nestedPromptDetails?.cache_creation_tokens) ??
+        nonNegativeToken(nestedPromptDetails?.cache_creation_input_tokens) ??
+        nonNegativeToken(nestedPromptDetails?.cache_write_tokens);
+      const prompt =
+        usage.prompt_tokens !== undefined
+          ? usage.prompt_tokens + (cached ?? 0) + (cacheCreation ?? 0)
+          : undefined;
+      const candidates =
+        usage.completion_tokens !== undefined
+          ? Math.max(0, usage.completion_tokens - (usage.reasoning_tokens ?? 0))
+          : undefined;
+      return {
+        ...(prompt !== undefined ? { promptTokenCount: prompt } : {}),
+        ...(candidates !== undefined ? { candidatesTokenCount: candidates } : {}),
+        // The real Gemini wire always carries totalTokenCount on the terminal frame.
+        ...(prompt !== undefined || usage.completion_tokens !== undefined
+          ? { totalTokenCount: (prompt ?? 0) + (usage.completion_tokens ?? 0) }
+          : {}),
+        ...(usage.reasoning_tokens !== undefined
+          ? { thoughtsTokenCount: usage.reasoning_tokens }
+          : {}),
+        ...(cached !== undefined ? { cachedContentTokenCount: cached } : {}),
+      };
+    };
 
-  for await (const chunk of src) {
-    const choice = chunk.choices?.[0];
-    const content = choice?.delta?.content;
-    const reasoning = choice?.delta?.reasoning_content;
+    // The terminal frame (text delta + functionCall parts + finishReason) is held back
+    // until stream end so a late usage-only chunk merges into it as ONE frame.
+    let terminalParts: GeminiPart[] | null = null;
+    let terminalFinish: string | undefined;
+    let latestUsage: GeminiUsageMetadata | undefined;
+    let latestServiceTier: string | undefined;
 
-    for (const tc of choice?.delta?.tool_calls ?? []) {
-      let slot = toolIndexToSlot.get(tc.index);
-      if (slot === undefined) {
-        slot = { index: tc.index, name: tc.function?.name ?? "", argBuffer: "" };
-        toolIndexToSlot.set(tc.index, slot);
-      } else if (tc.function?.name !== undefined && tc.function.name !== "") {
-        slot.name = tc.function.name; // backfill a late-arriving name
+    for await (const chunk of src) {
+      const choice = chunk.choices?.[0];
+      const content = choice?.delta?.content;
+      const reasoning = choice?.delta?.reasoning_content;
+
+      for (const tc of choice?.delta?.tool_calls ?? []) {
+        let slot = toolIndexToSlot.get(tc.index);
+        work.retain(
+          (slot ? 0 : 128) +
+            2 *
+              ((tc.function?.arguments?.length ?? 0) +
+                (tc.function?.name ? tc.function.name.length - (slot?.name.length ?? 0) : 0)),
+        );
+        if (slot === undefined) {
+          slot = { index: tc.index, name: tc.function?.name ?? "", argBuffer: "" };
+          toolIndexToSlot.set(tc.index, slot);
+        } else if (tc.function?.name !== undefined && tc.function.name !== "") {
+          slot.name = tc.function.name; // backfill a late-arriving name
+        }
+        if (tc.function?.arguments !== undefined) slot.argBuffer += tc.function.arguments;
       }
-      if (tc.function?.arguments !== undefined) slot.argBuffer += tc.function.arguments;
-    }
 
-    if (chunk.usage != null) latestUsage = toUsageMetadata(chunk.usage);
-    if (chunk.service_tier !== undefined) latestServiceTier = chunk.service_tier;
+      if (chunk.usage != null) latestUsage = toUsageMetadata(chunk.usage);
+      if (chunk.service_tier !== undefined) latestServiceTier = chunk.service_tier;
 
-    if (choice?.finish_reason != null) {
-      // Terminal chunk: assemble the final frame but hold it (usage may still trail).
-      terminalParts = [];
+      if (choice?.finish_reason != null) {
+        // Terminal chunk: assemble the final frame but hold it (usage may still trail).
+        work.retain(2 * ((reasoning?.length ?? 0) + (content?.length ?? 0)));
+        terminalParts = [];
+        if (typeof reasoning === "string" && reasoning !== "") {
+          terminalParts.push({ text: reasoning, thought: true });
+        }
+        if (typeof content === "string" && content !== "") terminalParts.push({ text: content });
+        terminalParts.push(...flushToolParts());
+        terminalFinish = mapFinishReasonToGemini(choice.finish_reason) ?? "STOP";
+        continue;
+      }
+
+      // Non-terminal: forward a reasoning delta as a thought part and/or a real text
+      // delta. Role-only announcements, tool-arg fragments, and usage-only chunks carry
+      // no Gemini frame (Gemini has no empty/role frame; their payload surfaces on the
+      // terminal frame instead).
       if (typeof reasoning === "string" && reasoning !== "") {
-        terminalParts.push({ text: reasoning, thought: true });
+        yield {
+          candidates: [
+            { content: { role: "model", parts: [{ text: reasoning, thought: true }] }, index: 0 },
+          ],
+        };
       }
-      if (typeof content === "string" && content !== "") terminalParts.push({ text: content });
-      terminalParts.push(...flushToolParts());
-      terminalFinish = mapFinishReasonToGemini(choice.finish_reason) ?? "STOP";
-      continue;
+      if (typeof content === "string" && content !== "") {
+        yield {
+          candidates: [{ content: { role: "model", parts: [{ text: content }] }, index: 0 }],
+        };
+      }
     }
 
-    // Non-terminal: forward a reasoning delta as a thought part and/or a real text
-    // delta. Role-only announcements, tool-arg fragments, and usage-only chunks carry
-    // no Gemini frame (Gemini has no empty/role frame; their payload surfaces on the
-    // terminal frame instead).
-    if (typeof reasoning === "string" && reasoning !== "") {
+    const usageMetadata =
+      latestUsage !== undefined || latestServiceTier !== undefined
+        ? {
+            ...(latestUsage ?? {}),
+            ...(latestServiceTier !== undefined ? { serviceTier: latestServiceTier } : {}),
+          }
+        : undefined;
+
+    if (terminalParts !== null) {
       yield {
         candidates: [
-          { content: { role: "model", parts: [{ text: reasoning, thought: true }] }, index: 0 },
+          {
+            content: { role: "model", parts: terminalParts },
+            finishReason: terminalFinish,
+            index: 0,
+          },
         ],
+        ...(usageMetadata !== undefined ? { usageMetadata } : {}),
+      };
+      return;
+    }
+
+    // Defensive: the IR stream ended WITHOUT a finish chunk (e.g. an abort). Still
+    // surface any buffered tool calls + usage once so the client loses nothing.
+    const parts = flushToolParts();
+    if (parts.length > 0 || usageMetadata !== undefined) {
+      yield {
+        candidates: [{ content: { role: "model", parts }, index: 0 }],
+        ...(usageMetadata !== undefined ? { usageMetadata } : {}),
       };
     }
-    if (typeof content === "string" && content !== "") {
-      yield { candidates: [{ content: { role: "model", parts: [{ text: content }] }, index: 0 }] };
-    }
-  }
-
-  const usageMetadata =
-    latestUsage !== undefined || latestServiceTier !== undefined
-      ? {
-          ...(latestUsage ?? {}),
-          ...(latestServiceTier !== undefined ? { serviceTier: latestServiceTier } : {}),
-        }
-      : undefined;
-
-  if (terminalParts !== null) {
-    yield {
-      candidates: [
-        {
-          content: { role: "model", parts: terminalParts },
-          finishReason: terminalFinish,
-          index: 0,
-        },
-      ],
-      ...(usageMetadata !== undefined ? { usageMetadata } : {}),
-    };
-    return;
-  }
-
-  // Defensive: the IR stream ended WITHOUT a finish chunk (e.g. an abort). Still
-  // surface any buffered tool calls + usage once so the client loses nothing.
-  const parts = flushToolParts();
-  if (parts.length > 0 || usageMetadata !== undefined) {
-    yield {
-      candidates: [{ content: { role: "model", parts }, index: 0 }],
-      ...(usageMetadata !== undefined ? { usageMetadata } : {}),
-    };
+  } finally {
+    work.release();
   }
 }
 
@@ -1527,7 +1548,10 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
 
 export const geminiTransformer: Transformer & {
   transformStreamIn: (src: AsyncIterable<GeminiSSEEvent>) => AsyncIterable<IRChunk>;
-  transformStreamOut: (src: AsyncIterable<IRChunk>) => AsyncIterable<GeminiSSEEvent>;
+  transformStreamOut: (
+    src: AsyncIterable<IRChunk>,
+    workAdmission?: ResponseWorkAdmission,
+  ) => AsyncIterable<GeminiSSEEvent>;
 } = {
   name: "gemini",
   endPoint: GEMINI_ENDPOINT,

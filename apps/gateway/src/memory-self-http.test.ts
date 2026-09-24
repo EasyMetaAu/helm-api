@@ -1,13 +1,9 @@
+import { createRuntimeMemoryCoordinator, runtimeResponseWorkAdmission } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createSelfHttpClient } from "./memory-self-http.js";
 
 function fakeResponse(ok: boolean, body: unknown, status = 200): Response {
-  return {
-    ok,
-    status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  } as Response;
+  return new Response(JSON.stringify(body), { status: ok ? 200 : status });
 }
 
 describe("createSelfHttpClient", () => {
@@ -133,4 +129,35 @@ describe("createSelfHttpClient", () => {
     const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
     expect(init.signal).toBe(ctrl.signal);
   });
+});
+
+it.each([200, 500])("bounds self-HTTP response reads for status %s", async (status) => {
+  runtimeResponseWorkAdmission(createRuntimeMemoryCoordinator({ capacityBytes: () => 1024 }));
+  try {
+    const cancel = vi.fn();
+    const client = createSelfHttpClient({
+      baseUrl: "http://127.0.0.1:8080",
+      apiKey: "k",
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(new ReadableStream({ cancel }), {
+            status,
+            headers: { "content-length": String(Number.MAX_SAFE_INTEGER) },
+          }),
+      ) as typeof fetch,
+    });
+    const result = await Promise.race([
+      client.chatCompletion({ model: "m", messages: [] }).then(
+        () => "unexpected success",
+        () => "rejected",
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still reading"), 50)),
+    ]);
+    expect(result).toBe("rejected");
+    expect(cancel).toHaveBeenCalledOnce();
+  } finally {
+    runtimeResponseWorkAdmission(
+      createRuntimeMemoryCoordinator({ capacityBytes: () => Number.MAX_SAFE_INTEGER }),
+    );
+  }
 });

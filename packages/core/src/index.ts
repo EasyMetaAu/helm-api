@@ -821,6 +821,7 @@ export {
   routeRequest,
 } from "./routing/route-request.js";
 export {
+  consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
   readResponseTextWithinBudget,
 } from "./runtime/bounded-response.js";

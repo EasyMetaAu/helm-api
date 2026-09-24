@@ -3214,3 +3214,36 @@ describe("admin.api rule persist failures", () => {
     expect(json.error as string).not.toContain("not writable");
   });
 });
+
+it("rejects chunked admin bodies before JSON parsing when shared memory is exhausted", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 16,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const deps = buildDeps({ responseWorkAdmission: admission });
+  const app = buildApp(deps);
+  const cancel = vi.fn();
+  let sent = false;
+  const response = await app.request("/admin/api/settings", {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(new TextEncoder().encode(" ".repeat(32)));
+          } else controller.close();
+        },
+        cancel,
+      },
+      { highWaterMark: 0 },
+    ),
+    duplex: "half",
+  } as RequestInit);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ error: { code: "server_overloaded" } });
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(admission.reservedBytes).toBe(0);
+});

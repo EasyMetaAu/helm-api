@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-24 · 流式累计内存与读取生命周期（Runtime / 协议 / 可观测性，docs/02、05、07、08）
+
+- **边界**：单帧 SSE 限制不能约束整轮累计状态。Responses 的完整终止输出、Gemini 的完整工具参数、协议工具索引及暂存参数，统一计入现有共享 response-work 准入；在追加前检查，在完成、异常和消费者取消时释放。Responses 超限输出结构化错误，不伪造 completed；Codex 保留发送后结果不明的恢复边界。
+- **减少复制**：Anthropic 与 Responses 转译不再保存已转发的工具参数；有界文本读取逐块解码 UTF-8，不再保留所有二进制分块并拼接第二份完整字节数组。原生流的 usage 逐帧提取为计数器，保留已有计费语义。
+- **生命周期**：客户端取消时主动终止请求体读取并释放 reader/租约。管理 API 与 Memory/eval 内部 HTTP 读取复用共享预算，预算覆盖 JSON 解析；超大可选 Memory 文本沿用既有 fail-open 丢弃策略，字节计数改为逐片累计。关键词正则缓存限制为 1024 项，避免多次配置热更新长期积累。
+- **限制与验证**：JSON 路由校验、完整终止事件及显式开启的 Codex 整轮恢复仍需要有界暂存；不为降低内存删除这些契约。详见 `docs/memory-safety-audit-2026-09-24.md`。本条记录源码与本机验收边界；提交、CI、发布及生产回读须分别验证，不能将局部压力验证解释为任意负载下永不 OOM。
+
 ## 2026-09-24 · Responses 内存准入与 Codex 恢复诊断（Runtime / Provider，docs/04、05）
 
 - **决定**：新增运行时 `global_concurrency_limit`（0 关闭，默认 0），并由现有 `concurrency_queue_enabled` 作为总开关；Remote 保持 0，只有运维明确在设置中启用后才生效。复用本地有界 FIFO semaphore 控制当前进程的执行并发。该上限独立于 per-key limit，共用 queue min-size 与 wait-timeout 设置；全局队列不访问分布式 key 租约表。先取得 key 租约，避免 key 等待者占用全局名额；全局等待失败会释放 key 租约。排队满或超时返回既有 429。
@@ -73,13 +80,6 @@
 - **修复**：HTTP fallback 中的增量 continuation 在发送前走已有 `response_create_not_sent` 恢复协议。可信 WebSocket 桥发送 1012，客户端重连补全历史；完整历史仍可 HTTP fallback。原账号绑定、结果不明时禁止重放、鉴权与恢复证明校验保持原样。
 - **边界**：不能拿旧账号的 response ID 盲轮转；自动恢复依赖客户端重连并重发完整历史。没有保存完整历史时不伪造上下文。无需配置或数据库迁移。
 
-## 2026-09-21 · 外部 Jev Decisions 与强制无正文审计（Provider / Auth / Telemetry，docs/05、06、07）
-
-- **接口**：新增 `POST /v1/decisions`，复用 Jev transport 与服务端 OpenRouter 凭证；接受 noul／choice／score，严格校验完整分布、实际模型和有限用量。业务模板留在调用方，无聊天回退或自动重试。契约与示例见 `docs/integrations/jev-decisions.zh-CN.md`。
-- **权限与计费**：要求 allow_custom_model；有模型封禁规则时必须日期固定版本。缺失用量／费用为 null；token／金额硬额度 key 拒绝。请求次数在现有 SQLite／Postgres budget 表原子预留，失败或结果不明仍计尝试；其他入口保留既有事后结算语义，无迁移。
-- **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
-- **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
-
 ## 更早历史总览
 
 2026-09-19—20：DeepSeek 工具图片保留结构并有界压缩，缺失 reasoning 历史时关闭思考；Admin Responses 重放保留原生 carrier。分类器 Jev 有序回退复用总超时与严格校验。完整记录见 git history。
@@ -103,3 +103,5 @@
 2026-09-06：Codex 模型发现使用上游 client_version 和可选 base_instructions；订阅模型自动/手动列表统一依据官方目录与数据库权威，完整记录见 Git history。
 
 2026-09-05 Fable 5.1 目录/价格、2026-09-02 HTTP 结果不明禁止重放（保留明确拒绝的有界重试）、2026-09-01 超大历史发送前保护已并入历史；完整内容见基线 `8a7df80c6684b10bfa7ff7f4f07f237a92f95d58`。2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。
+
+2026-09-21（docs/05、06、07）：Jev Decisions 独立协议面保留权限与请求数原子预留，强制无正文审计，采用 32 KB 请求、256 KB 响应与 30 秒上游边界。完整记录见 Git 历史。

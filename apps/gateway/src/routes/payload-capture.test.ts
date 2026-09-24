@@ -10,6 +10,7 @@ import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
   capturedResponsesResponse,
+  createAnthropicUsageAccumulator,
   createResponsesDeltaAccumulator,
   createSseCapture,
   createStreamGenerationTimer,
@@ -2020,5 +2021,27 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     await writes.flush();
     expect(insert).toHaveBeenCalledOnce();
     expect(upsertSessionRevision).toHaveBeenCalledOnce();
+  });
+});
+
+it("accumulates Anthropic usage incrementally without keeping response frames", () => {
+  const usage = createAnthropicUsageAccumulator();
+  usage.push(
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":7,"cache_read_input_tokens":3}}}\n\n',
+  );
+  for (const output of [5, 9, 6]) {
+    usage.push(
+      `data: ${JSON.stringify({ type: "message_delta", usage: { output_tokens: output } })}\n\n`,
+    );
+  }
+  usage.push(
+    'data: {"type":"message_delta","usage":{"speed":"fast","cache_creation":{"ephemeral_1h_input_tokens":4}}}\n\n',
+  );
+  expect(usage.value()).toMatchObject({
+    input_tokens: 7,
+    output_tokens: 9,
+    cache_read_input_tokens: 3,
+    service_tier: "fast",
+    prompt_tokens_details: { ephemeral_1h_input_tokens: 4 },
   });
 });

@@ -297,3 +297,43 @@ describe("body memory admission (unlimited body size and aggregate capacity)", (
     if (acquired.ok) acquired.lease.release();
   });
 });
+
+it("cancels a stalled request and releases its reader and reservation on disconnect", async () => {
+  const admission = createBodyMemoryAdmission({
+    activeRequestBytes: 100,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
+  const controller = new AbortController();
+  const cancel = vi.fn();
+  let source!: ReadableStreamDefaultController;
+  const request = new Request("http://helm.test/v1/responses", {
+    method: "POST",
+    signal: controller.signal,
+    body: new ReadableStream({
+      start(value) {
+        source = value;
+      },
+      cancel,
+    }),
+    duplex: "half",
+  } as RequestInit);
+  const pending = readAdmittedRequestBody(request, admission);
+  controller.abort(new Error("client aborted"));
+  const result = await Promise.race([
+    pending.then(
+      () => "unexpected success",
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("still retained"), 50)),
+  ]);
+  // Clean up the old implementation too, so a red run leaves no live read.
+  if (result === "still retained") {
+    source.close();
+    await pending;
+  }
+  expect(result).toBe("client aborted");
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(request.body?.locked).toBe(false);
+  expect(admission.reservedBytes).toBe(0);
+});

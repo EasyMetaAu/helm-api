@@ -1213,6 +1213,13 @@ export function usageFromSSE(raw: string): StreamUsage | null {
 // max). Returns an Anthropic-shaped StreamUsage — tokensFromUsage already sums it
 // (input + output + cache_read + cache_creation). null when no usage event is present.
 export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
+  const accumulator = createAnthropicUsageAccumulator();
+  accumulator.push(raw);
+  return accumulator.value();
+}
+
+/** Retain only usage counters, never the surrounding response frames. */
+export function createAnthropicUsageAccumulator() {
   let seenUsage = false;
   let input = 0;
   let output = 0;
@@ -1222,102 +1229,108 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
   let cacheCreation1h = 0;
   let speed: string | undefined;
   let inferenceGeo: string | undefined;
-  for (const frame of raw.split("\n\n")) {
-    // Each frame may have multiple lines (event:/data:); read the data line only.
-    let payload: string | null = null;
-    for (const line of frame.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("data:")) {
-        payload = trimmed.slice("data:".length).trim();
-        break;
-      }
-    }
-    if (payload === null || payload === "" || payload === "[DONE]") continue;
-    let evt: { type?: unknown; message?: unknown; usage?: unknown };
-    try {
-      evt = JSON.parse(payload);
-    } catch {
-      // ping / keepalive / non-JSON line — ignore
-      continue;
-    }
-    if (!evt || typeof evt !== "object") continue;
-    if (evt.type === "message_start") {
-      const u = ((evt.message as { usage?: unknown } | undefined)?.usage ?? {}) as Record<
-        string,
-        unknown
-      >;
-      if (typeof u.speed === "string") speed = u.speed;
-      if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
-      if (typeof u.input_tokens === "number") {
-        input = u.input_tokens;
-        seenUsage = true;
-      }
-      if (typeof u.cache_read_input_tokens === "number") {
-        cacheRead = u.cache_read_input_tokens;
-        seenUsage = true;
-      }
-      if (typeof u.cache_creation_input_tokens === "number") {
-        cacheCreation = u.cache_creation_input_tokens;
-        seenUsage = true;
-      }
-      const creation =
-        u.cache_creation && typeof u.cache_creation === "object"
-          ? (u.cache_creation as Record<string, unknown>)
-          : undefined;
-      if (typeof creation?.ephemeral_5m_input_tokens === "number") {
-        cacheCreation5m = creation.ephemeral_5m_input_tokens;
-        seenUsage = true;
-      }
-      if (typeof creation?.ephemeral_1h_input_tokens === "number") {
-        cacheCreation1h = creation.ephemeral_1h_input_tokens;
-        seenUsage = true;
-      }
-    } else if (evt.type === "message_delta") {
-      const u = (evt.usage ?? {}) as Record<string, unknown>;
-      if (typeof u.speed === "string") speed = u.speed;
-      if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
-      if (typeof u.output_tokens === "number") {
-        output = Math.max(output, u.output_tokens);
-        seenUsage = true;
-      }
-      if (typeof u.cache_read_input_tokens === "number") {
-        cacheRead = Math.max(cacheRead, u.cache_read_input_tokens);
-        seenUsage = true;
-      }
-      if (typeof u.cache_creation_input_tokens === "number") {
-        cacheCreation = Math.max(cacheCreation, u.cache_creation_input_tokens);
-        seenUsage = true;
-      }
-      const creation =
-        u.cache_creation && typeof u.cache_creation === "object"
-          ? (u.cache_creation as Record<string, unknown>)
-          : undefined;
-      if (typeof creation?.ephemeral_5m_input_tokens === "number") {
-        cacheCreation5m = Math.max(cacheCreation5m, creation.ephemeral_5m_input_tokens);
-        seenUsage = true;
-      }
-      if (typeof creation?.ephemeral_1h_input_tokens === "number") {
-        cacheCreation1h = Math.max(cacheCreation1h, creation.ephemeral_1h_input_tokens);
-        seenUsage = true;
-      }
-    }
-  }
-  if (!seenUsage) return null;
   return {
-    input_tokens: input,
-    output_tokens: output,
-    cache_read_input_tokens: cacheRead,
-    cache_creation_input_tokens: cacheCreation,
-    ...(speed !== undefined ? { service_tier: speed } : {}),
-    ...(inferenceGeo !== undefined ? { inference_geo: inferenceGeo } : {}),
-    ...(cacheCreation5m > 0 || cacheCreation1h > 0
-      ? {
-          prompt_tokens_details: {
-            ...(cacheCreation5m > 0 ? { ephemeral_5m_input_tokens: cacheCreation5m } : {}),
-            ...(cacheCreation1h > 0 ? { ephemeral_1h_input_tokens: cacheCreation1h } : {}),
-          },
+    push(raw: string): void {
+      for (const frame of raw.split("\n\n")) {
+        // Each frame may have multiple lines (event:/data:); read the data line only.
+        let payload: string | null = null;
+        for (const line of frame.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data:")) {
+            payload = trimmed.slice("data:".length).trim();
+            break;
+          }
         }
-      : {}),
+        if (payload === null || payload === "" || payload === "[DONE]") continue;
+        let evt: { type?: unknown; message?: unknown; usage?: unknown };
+        try {
+          evt = JSON.parse(payload);
+        } catch {
+          // ping / keepalive / non-JSON line — ignore
+          continue;
+        }
+        if (!evt || typeof evt !== "object") continue;
+        if (evt.type === "message_start") {
+          const u = ((evt.message as { usage?: unknown } | undefined)?.usage ?? {}) as Record<
+            string,
+            unknown
+          >;
+          if (typeof u.speed === "string") speed = u.speed;
+          if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
+          if (typeof u.input_tokens === "number") {
+            input = u.input_tokens;
+            seenUsage = true;
+          }
+          if (typeof u.cache_read_input_tokens === "number") {
+            cacheRead = u.cache_read_input_tokens;
+            seenUsage = true;
+          }
+          if (typeof u.cache_creation_input_tokens === "number") {
+            cacheCreation = u.cache_creation_input_tokens;
+            seenUsage = true;
+          }
+          const creation =
+            u.cache_creation && typeof u.cache_creation === "object"
+              ? (u.cache_creation as Record<string, unknown>)
+              : undefined;
+          if (typeof creation?.ephemeral_5m_input_tokens === "number") {
+            cacheCreation5m = creation.ephemeral_5m_input_tokens;
+            seenUsage = true;
+          }
+          if (typeof creation?.ephemeral_1h_input_tokens === "number") {
+            cacheCreation1h = creation.ephemeral_1h_input_tokens;
+            seenUsage = true;
+          }
+        } else if (evt.type === "message_delta") {
+          const u = (evt.usage ?? {}) as Record<string, unknown>;
+          if (typeof u.speed === "string") speed = u.speed;
+          if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
+          if (typeof u.output_tokens === "number") {
+            output = Math.max(output, u.output_tokens);
+            seenUsage = true;
+          }
+          if (typeof u.cache_read_input_tokens === "number") {
+            cacheRead = Math.max(cacheRead, u.cache_read_input_tokens);
+            seenUsage = true;
+          }
+          if (typeof u.cache_creation_input_tokens === "number") {
+            cacheCreation = Math.max(cacheCreation, u.cache_creation_input_tokens);
+            seenUsage = true;
+          }
+          const creation =
+            u.cache_creation && typeof u.cache_creation === "object"
+              ? (u.cache_creation as Record<string, unknown>)
+              : undefined;
+          if (typeof creation?.ephemeral_5m_input_tokens === "number") {
+            cacheCreation5m = Math.max(cacheCreation5m, creation.ephemeral_5m_input_tokens);
+            seenUsage = true;
+          }
+          if (typeof creation?.ephemeral_1h_input_tokens === "number") {
+            cacheCreation1h = Math.max(cacheCreation1h, creation.ephemeral_1h_input_tokens);
+            seenUsage = true;
+          }
+        }
+      }
+    },
+    value(): StreamUsage | null {
+      if (!seenUsage) return null;
+      return {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_input_tokens: cacheRead,
+        cache_creation_input_tokens: cacheCreation,
+        ...(speed !== undefined ? { service_tier: speed } : {}),
+        ...(inferenceGeo !== undefined ? { inference_geo: inferenceGeo } : {}),
+        ...(cacheCreation5m > 0 || cacheCreation1h > 0
+          ? {
+              prompt_tokens_details: {
+                ...(cacheCreation5m > 0 ? { ephemeral_5m_input_tokens: cacheCreation5m } : {}),
+                ...(cacheCreation1h > 0 ? { ephemeral_1h_input_tokens: cacheCreation1h } : {}),
+              },
+            }
+          : {}),
+      };
+    },
   };
 }
 
