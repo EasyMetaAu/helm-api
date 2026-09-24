@@ -41,6 +41,7 @@ export interface RuntimeSettings {
   // Per-key concurrency overflow queue (issue #93, feature A). When ON, a key
   // with a concurrency_limit queues excess requests instead of an instant 429.
   concurrency_queue_enabled: boolean;
+  global_concurrency_limit: number;
   concurrency_queue_min_size: number; // 固定最小排队数 (1-100)
   concurrency_queue_size_multiplier: number; // 排队数倍数; 0 = use min size only
   concurrency_queue_wait_timeout_ms: number; // 排队超时 (5s-5min)
@@ -126,6 +127,8 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     default_lane:
       typeof raw.default_lane === 'string' && raw.default_lane ? raw.default_lane : 'balanced',
     concurrency_queue_enabled: raw.concurrency_queue_enabled === true,
+    global_concurrency_limit:
+      typeof raw.global_concurrency_limit === 'number' ? raw.global_concurrency_limit : 0,
     concurrency_queue_min_size:
       typeof raw.concurrency_queue_min_size === 'number' ? raw.concurrency_queue_min_size : 5,
     concurrency_queue_size_multiplier:

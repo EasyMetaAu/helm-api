@@ -3369,6 +3369,14 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // the upstream Responses SSE is BYTE-RELAYED unchanged via readResponsesSSERaw — no SSE
     // re-mapping state machine to mangle reasoning.encrypted_content / tools (principle 8).
     async *nativePassthroughStream(body, opts) {
+      const reportRecovery = (eligible: boolean, reason?: string) => {
+        try {
+          opts?.onStreamRecoveryEligibility?.({ eligible, ...(reason ? { reason } : {}) });
+        } catch {
+          /* telemetry is fail-open */
+        }
+      };
+      if (!opts?.codexBufferedStreamRecovery) reportRecovery(false, "disabled");
       const modelInfo = await resolveModelInfo(nativeInputModel(body));
       const sessionId = websocketSessionId(body);
       const nativeBody = isNativePassthroughCarrier(body) ? body.body : body;
@@ -3397,6 +3405,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           !websocketSessions.has(sessionId) ||
           responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
       ) {
+        if (opts?.codexBufferedStreamRecovery)
+          reportRecovery(false, "websocket_session_unavailable");
         throw new CodexResponsesBeforeSendError(
           "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
           { reason: "websocket_session_unavailable" },
@@ -3411,32 +3421,15 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         let retriedInvalidPreviousResponseId = false;
         let replayedResponse = false;
         let replayFailure: UpstreamError | null = null;
-        let buffered = null;
-        if (opts?.codexBufferedStreamRecovery) {
-          buffered = createCodexBufferedTurn(
-            prepared.body,
-            recoveryHistory.get(sessionId),
-            deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
-            (reason) => {
-              try {
-                opts.onStreamRecoveryEligibility?.({ eligible: false, reason });
-              } catch {
-                /* telemetry is fail-open */
-              }
-            },
-          );
-          try {
-            opts.onStreamRecoveryEligibility?.({ eligible: buffered !== null });
-          } catch {
-            /* telemetry is fail-open */
-          }
-        } else {
-          try {
-            opts?.onStreamRecoveryEligibility?.({ eligible: false, reason: "disabled" });
-          } catch {
-            /* telemetry is fail-open */
-          }
-        }
+        const buffered = opts?.codexBufferedStreamRecovery
+          ? createCodexBufferedTurn(
+              prepared.body,
+              recoveryHistory.get(sessionId),
+              deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+              (reason) => reportRecovery(false, reason),
+            )
+          : null;
+        if (buffered) reportRecovery(true);
         try {
           while (!websocketHttpFallbackSessions.has(sessionId)) {
             let lease:
@@ -3477,14 +3470,22 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             const preambleFrames: string[] = [];
             const retryBufferedClose = async (error?: unknown): Promise<boolean> => {
               const code = lease.connection.closeInfo?.()?.code;
-              if (
-                !buffered?.replaySafe ||
-                replayedResponse ||
-                opts?.signal?.aborted ||
-                (code !== undefined && ![1000, 1001, 1006].includes(code)) ||
-                (error !== undefined && (error instanceof UpstreamError || code !== 1006))
-              )
+              if (!buffered) return false;
+              const skipReason = !buffered.replaySafe
+                ? "unsupported_event"
+                : replayedResponse
+                  ? "retry_exhausted"
+                  : opts?.signal?.aborted
+                    ? "aborted"
+                    : code !== undefined && ![1000, 1001, 1006].includes(code)
+                      ? "close_code_not_retryable"
+                      : error !== undefined && (error instanceof UpstreamError || code !== 1006)
+                        ? "non_transport_error"
+                        : undefined;
+              if (skipReason) {
+                reportRecovery(false, skipReason);
                 return false;
+              }
               replayFailure = responseCreateOutcomeUnknown(
                 lease.connection,
                 "after_send_after_output",
@@ -3635,8 +3636,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                     try {
                       buffered.append(event.frame, event.data);
                     } catch (error) {
-                      if (error instanceof ResponseWorkCapacityError)
+                      if (error instanceof ResponseWorkCapacityError) {
+                        reportRecovery(false, "response_work_capacity_exhausted");
                         throw responseWorkCapacityUpstreamError(error);
+                      }
                       throw error;
                     }
                     if (!event.terminal) continue;
@@ -3730,6 +3733,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           buffered?.release();
         }
       }
+      if (opts?.codexBufferedStreamRecovery) reportRecovery(false, "http_transport");
       const result = await requestWithRetry(outboundBody, modelInfo, {
         signal: opts?.signal,
         overloadRetry: opts?.overloadRetry,

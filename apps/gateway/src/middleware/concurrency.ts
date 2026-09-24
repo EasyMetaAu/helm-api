@@ -1,4 +1,8 @@
-import type { DistributedKeyedSemaphore, KeyedSemaphore } from "@helm/core";
+import {
+  createKeyedSemaphore,
+  type DistributedKeyedSemaphore,
+  type KeyedSemaphore,
+} from "@helm/core";
 import type { Context, MiddlewareHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
@@ -53,72 +57,70 @@ export interface ConcurrencyGateDeps {
 }
 
 export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGatePort {
+  // Memory capacity belongs to this process, not the distributed API-key store.
+  const globalSemaphore = createKeyedSemaphore();
   return {
     async acquire({ keyId, limit, signal }) {
       const cfg = deps.getConfig();
-      let globalRelease: (() => Promise<void>) | undefined;
+      let keyRelease: (() => void | Promise<void>) | undefined;
+      let globalRelease: (() => void) | undefined;
       let acquiredSignal = signal;
-      if ((cfg.globalLimit ?? 0) > 0) {
-        const global = await deps.semaphore.acquire({
-          // NUL-prefixed namespace cannot collide with an API-key id.
-          key: "\0global",
-          limit: Math.floor(cfg.globalLimit as number),
-          maxQueue: cfg.minSize,
-          timeoutMs: cfg.waitTimeoutMs,
-          signal,
-        });
-        if (!global.ok) {
-          return {
-            ok: false,
-            reason: global.reason,
-            retryAfterSeconds: global.reason === "queue_full" ? 1 : 5,
-          };
+      let handedOff = false;
+      try {
+        if (cfg.enabled && limit !== null && limit > 0) {
+          const result = await deps.semaphore.acquire({
+            key: keyId,
+            limit,
+            maxQueue:
+              cfg.multiplier > 0
+                ? Math.max(Math.floor(cfg.multiplier * limit), cfg.minSize)
+                : cfg.minSize,
+            timeoutMs: cfg.waitTimeoutMs,
+            signal,
+          });
+          if (!result.ok)
+            return {
+              ok: false,
+              reason: result.reason,
+              retryAfterSeconds: result.reason === "queue_full" ? 1 : 5,
+            };
+          keyRelease = result.release;
+          acquiredSignal = "signal" in result ? AbortSignal.any([signal, result.signal]) : signal;
         }
-        globalRelease = async () => {
-          await global.release();
-        };
-        acquiredSignal = "signal" in global ? global.signal : signal;
-      }
-
-      // Disabled feature or an unlimited key: retain the global lease, if any.
-      if (!cfg.enabled || limit === null || limit <= 0) {
+        if ((cfg.globalLimit ?? 0) > 0) {
+          const result = await globalSemaphore.acquire({
+            key: "global",
+            limit: cfg.globalLimit ?? 0,
+            maxQueue: cfg.minSize,
+            timeoutMs: cfg.waitTimeoutMs,
+            signal: acquiredSignal,
+            // A long-running stream still owns memory. Only its lifecycle may
+            // release the slot; the request deadline handles abandoned work.
+            maxHoldMs: 0,
+          });
+          if (!result.ok)
+            return {
+              ok: false,
+              reason: result.reason,
+              retryAfterSeconds: result.reason === "queue_full" ? 1 : 5,
+            };
+          globalRelease = result.release;
+        }
+        handedOff = true;
         return {
           ok: true,
           signal: acquiredSignal,
           release: async () => {
-            await globalRelease?.();
+            globalRelease?.();
+            await keyRelease?.();
           },
         };
+      } finally {
+        if (!handedOff) {
+          globalRelease?.();
+          await keyRelease?.();
+        }
       }
-      const maxQueue =
-        cfg.multiplier > 0
-          ? Math.max(Math.floor(cfg.multiplier * limit), cfg.minSize)
-          : cfg.minSize;
-      const result = await deps.semaphore.acquire({
-        key: keyId,
-        limit,
-        maxQueue,
-        timeoutMs: cfg.waitTimeoutMs,
-        signal: acquiredSignal,
-      });
-      if (result.ok) {
-        return {
-          ok: true,
-          signal: "signal" in result ? result.signal : acquiredSignal,
-          release: async () => {
-            await result.release();
-            await globalRelease?.();
-          },
-        };
-      }
-      await globalRelease?.();
-      // queue_full: queue itself saturated. PostgreSQL unavailability is a
-      // fail-closed boundary, rendered as 503 before provider execution.
-      return {
-        ok: false,
-        reason: result.reason,
-        retryAfterSeconds: result.reason === "queue_full" ? 1 : 5,
-      };
     },
   };
 }

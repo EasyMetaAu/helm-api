@@ -42,7 +42,11 @@ export function createCodexBufferedTurn(
   onSkip?: (reason: string) => void,
 ) {
   const skip = (reason: string): null => {
-    onSkip?.(reason);
+    try {
+      onSkip?.(reason);
+    } catch {
+      /* telemetry is fail-open */
+    }
     return null;
   };
   if (body.store !== false) return skip("store_required_false");
@@ -54,7 +58,7 @@ export function createCodexBufferedTurn(
   if (!localTools(body.tools)) return skip("hosted_tools");
   const parentId = body.previous_response_id;
   if (parentId != null && (parentId !== previous?.responseId || body.model !== previous?.model))
-    return skip("previous_response_mismatch");
+    return skip(previous === undefined ? "incomplete_history" : "previous_response_mismatch");
   const input = parentId != null && previous ? [...previous.input, ...body.input] : body.input;
   const inputTypes = new Set([
     "message",

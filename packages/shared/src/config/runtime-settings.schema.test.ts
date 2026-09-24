@@ -61,6 +61,7 @@ describe("RuntimeSettingsSchema", () => {
       default_lane: "balanced",
       // Queueing fields backfilled by their schema defaults (both OFF).
       concurrency_queue_enabled: false,
+      global_concurrency_limit: 0,
       concurrency_queue_min_size: 5,
       concurrency_queue_size_multiplier: 0,
       concurrency_queue_wait_timeout_ms: 10_000,

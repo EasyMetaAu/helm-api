@@ -9,10 +9,11 @@
 
 ## 2026-09-24 · Responses 内存准入与 Codex 恢复诊断（Runtime / Provider，docs/04、05）
 
-- **决定**：在 gateway 入口增加固定的进程级并发上限 4，并复用现有有界 FIFO semaphore；它独立于 per-key `concurrency_limit`，因此没有配置 per-key 上限的 key 也受保护。队列满或等待超时继续返回既有 429，数据库租约不可用继续 fail-closed。该上限按 Remote 1.5 GiB 容器的当前观测值保守设定，后续只有在测得足够 headroom 后才提高。
-- **诊断**：Codex buffered recovery 的 eligibility 失败不再静默；passthrough mutation 记录 `codex_stream_recovery_eligible` 与 `codex_stream_recovery_skip_reason`，并保留现有 attempts/cost-unknown 字段。skip reason 只记录无正文的原因（例如 hosted tools、previous response mismatch、unsupported input、capacity exhausted）。
-- **限制**：进程级 cap 是单一固定值，不是按实时 RSS 自动调节；它先控制并发峰值，单个响应仍受现有 response-work admission 保护。提升上限前必须有新的生产内存证据和定向压测。
-- **验证**：新增 global-cap 与 recovery skip reason 定向测试；发布前仍需完整 CI、不可变镜像核对，以及 Remote `/version`、`/healthz`、配置和 telemetry 回读。
+- **决定**：新增运行时 `global_concurrency_limit`（0 关闭，默认 0），Remote 初始设为 4；复用本地有界 FIFO semaphore 控制当前进程的执行并发。该上限独立于 per-key 开关和 limit，共用 queue min-size 与 wait-timeout 设置；全局队列不访问分布式 key 租约表。先取得 key 租约，避免 key 等待者占用全局名额；全局等待失败会释放 key 租约。排队满或超时返回既有 429。
+- **生命周期**：全局名额随真实请求/流结束释放，不使用会提前释放长请求的 watchdog。WebSocket 每轮经 Responses 路由取得名额，结束时释放。上限在线调整作用于之后的准入；既有排队者与持有者按原生命周期退出，不中断运行中的请求。
+- **诊断**：记录 `codex_stream_recovery_eligible` 与无正文的 `codex_stream_recovery_skip_reason`，区分 disabled、HTTP、hosted tools、缺少历史、parent mismatch、unsupported input/event、capacity、不可重试 close/error 和 retry exhausted；保留 attempts/cost-unknown 字段。诊断失败不影响执行。
+- **限制**：并发 cap 降低峰值但不保证单个大响应永不触发内存准入，既有内存保护仍生效；初始 4 是保守运维值，需结合线上等待/失败率调整。长回答在 buffered 模式下仍延迟首字；上游断线并非全部可安全重放。
+- **验证**：定向回归覆盖进程/分布式隔离、key 等待公平性、取消释放、配置回读及恢复拒绝原因；发布须等待完整 CI 和确切 SHA 的 Publish，并回读 Remote 的版本、digest、配置与真实请求 telemetry。
 
 ## 2026-09-23 · Codex 整轮暂存与同账号断流恢复（Provider / 流式协议，docs/04、05，原则 8）
 
@@ -78,10 +79,6 @@
 - **权限与计费**：要求 allow_custom_model；有模型封禁规则时必须日期固定版本。缺失用量／费用为 null；token／金额硬额度 key 拒绝。请求次数在现有 SQLite／Postgres budget 表原子预留，失败或结果不明仍计尝试；其他入口保留既有事后结算语义，无迁移。
 - **隐私与资源**：直接写无正文 telemetry，绕过通用 recordServed 的失败强制捕获，禁止该接口任何 payload／session 留存。正文上限 32,000 字节、响应 256,000 字节、上游最多 30 秒；共享有界读取器增加可选取消信号以释放慢上传资源。此保证不覆盖 OpenRouter／TypeSafe 或调用方自身留存。
 - **交付边界**：本地 mock 和临时数据库验证不等于上游真实付费调用或生产验收；无凭证／费用授权未执行真实 smoke，未提交或部署。
-
-## 历史条目摘要（最新要点）
-
-- **2026-09-21 · Codex 工具历史 namespace（Provider，docs/05）**：只按已声明工具规范化 `namespace::name`，冲突/未声明不猜测；完整记录见 git history。
 
 ## 更早历史总览
 

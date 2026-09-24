@@ -2052,6 +2052,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                           mutations.codex_stream_recovery_eligible = event.eligible;
                           if (event.reason !== undefined) {
                             mutations.codex_stream_recovery_skip_reason = event.reason;
+                          } else if (event.eligible) {
+                            delete mutations.codex_stream_recovery_skip_reason;
                           }
                         }
                         if (!event.eligible && event.reason !== undefined) {
