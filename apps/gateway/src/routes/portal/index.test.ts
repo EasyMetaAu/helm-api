@@ -8,6 +8,10 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../../app.js";
 import { authMiddleware } from "../../middleware/auth.js";
+import {
+  type BodyMemoryAdmission,
+  createBodyMemoryAdmission,
+} from "../../runtime/memory-admission.js";
 import { registerPortalApi } from "./index.js";
 
 const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
@@ -213,11 +217,17 @@ function buildApp(
   rec: ApiKeyRecord | null,
   tel: PortalTelemetry = telemetry(),
   updateKey: (keyId: string, patch: MemoryPatch) => Promise<void> = vi.fn(async () => {}),
+  memoryAdmission?: BodyMemoryAdmission,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
-  registerPortalApi(app, { telemetry: tel, keyStore: { updateKey }, now: () => 10_000 });
+  registerPortalApi(app, {
+    telemetry: tel,
+    keyStore: { updateKey },
+    now: () => 10_000,
+    memoryAdmission,
+  });
   return app;
 }
 
@@ -678,4 +688,31 @@ describe("portal API", () => {
       expect(readParts).toEqual([]);
     });
   });
+});
+
+it("accounts for portal bodies without adding a wire-size limit", async () => {
+  let capacity = 0;
+  const memoryAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: 1024,
+    capacityBytes: () => capacity,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
+  const updateKey = vi.fn(async () => {});
+  const app = buildApp(record(), undefined, updateKey, memoryAdmission);
+  const request = {
+    method: "PATCH",
+    headers: AUTH,
+    body: " ".repeat(256 * 1024) + JSON.stringify({ memory_mode: "off", memory_project_id: null }),
+  };
+  const denied = await app.request("/portal/api/memory-settings", request);
+  expect(denied.status).toBe(503);
+  expect(denied.headers.get("retry-after")).toBe("1");
+  expect(updateKey).not.toHaveBeenCalled();
+  expect(memoryAdmission.reservedBytes).toBe(0);
+  capacity = 1024 * 1024;
+  const accepted = await app.request("/portal/api/memory-settings", request);
+  expect(accepted.status).toBe(200);
+  expect(updateKey).toHaveBeenCalledTimes(1);
+  expect(memoryAdmission.reservedBytes).toBe(0);
 });

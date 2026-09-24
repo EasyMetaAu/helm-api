@@ -346,10 +346,49 @@ function responseBodyTooLargeUpstreamError(error: ResponseBodyTooLargeError): Up
   });
 }
 
+function httpResponseOutcomeUnknown(
+  cause: unknown,
+  lifecyclePhase = "after_send_before_response",
+): UpstreamError {
+  const message =
+    lifecyclePhase === "after_send_before_response"
+      ? "upstream HTTP connection failed after Responses POST; outcome unknown"
+      : "upstream HTTP response ended before a terminal Responses event; outcome unknown";
+  return new UpstreamError(
+    "upstream_error",
+    message,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
+        message,
+      },
+      http: { lifecycle_phase: lifecyclePhase },
+      ...(cause instanceof UpstreamError ? { transport: cause.providerRaw } : {}),
+    },
+    400,
+    null,
+    cause,
+  );
+}
+
 function responseWorkCapacityUpstreamError(error: ResponseWorkCapacityError): UpstreamError {
   return new UpstreamError("upstream_error", error.message, {
     error: { code: "response_work_capacity_exhausted", limit_bytes: error.capacityBytes },
   });
+}
+
+// Local allocation failure says nothing about an accepted Responses request's
+// outcome. Preserve the capacity cause while using the existing no-replay seam.
+function throwAcceptedResponseCapacityError(error: unknown): never {
+  const cause =
+    error instanceof ResponseWorkCapacityError ? responseWorkCapacityUpstreamError(error) : error;
+  const raw =
+    cause instanceof UpstreamError && isRecord(cause.providerRaw) ? cause.providerRaw : null;
+  if (isRecord(raw?.error) && raw.error.code === "response_work_capacity_exhausted") {
+    throw httpResponseOutcomeUnknown(cause, "after_response_before_terminal");
+  }
+  throw error;
 }
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
@@ -2356,32 +2395,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     turnKey?: string;
   }
 
-  function httpResponseOutcomeUnknown(
-    cause: unknown,
-    lifecyclePhase = "after_send_before_response",
-  ): UpstreamError {
-    const message =
-      lifecyclePhase === "after_send_before_response"
-        ? "upstream HTTP connection failed after Responses POST; outcome unknown"
-        : "upstream HTTP response ended before a terminal Responses event; outcome unknown";
-    return new UpstreamError(
-      "upstream_error",
-      message,
-      {
-        error: {
-          type: "invalid_request_error",
-          code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
-          message,
-        },
-        http: { lifecycle_phase: lifecyclePhase },
-        ...(cause instanceof UpstreamError ? { transport: cause.providerRaw } : {}),
-      },
-      400,
-      null,
-      cause,
-    );
-  }
-
   function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
     if (error instanceof ResponseWorkCapacityError)
       error = responseWorkCapacityUpstreamError(error);
@@ -4142,10 +4155,7 @@ export function createGenericOpenAIResponsesClient(
       if (error instanceof ResponseBodyTooLargeError) {
         throw responseBodyTooLargeUpstreamError(error);
       }
-      if (error instanceof ResponseWorkCapacityError) {
-        throw responseWorkCapacityUpstreamError(error);
-      }
-      throw error;
+      throwAcceptedResponseCapacityError(error);
     }
   }
 
@@ -4391,9 +4401,7 @@ export function createGenericOpenAIResponsesClient(
             signal: opts?.signal,
           });
         } catch (error) {
-          if (error instanceof ResponseWorkCapacityError)
-            throw responseWorkCapacityUpstreamError(error);
-          throw error;
+          throwAcceptedResponseCapacityError(error);
         }
       }
       return responsesJsonToChatResponse(await readUnaryJson(res), model);
@@ -4417,9 +4425,7 @@ export function createGenericOpenAIResponsesClient(
           signal: opts?.signal,
         });
       } catch (error) {
-        if (error instanceof ResponseWorkCapacityError)
-          throw responseWorkCapacityUpstreamError(error);
-        throw error;
+        throwAcceptedResponseCapacityError(error);
       }
     },
 
@@ -4436,10 +4442,14 @@ export function createGenericOpenAIResponsesClient(
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
-        return untranslateCustomToolResponse(
-          await aggregateNativeResponsesStream(res, timeoutMs),
-          translated,
-        );
+        try {
+          return untranslateCustomToolResponse(
+            await aggregateNativeResponsesStream(res, timeoutMs),
+            translated,
+          );
+        } catch (error) {
+          throwAcceptedResponseCapacityError(error);
+        }
       }
       return untranslateCustomToolResponse(await readUnaryJson(res), translated);
     },
@@ -4487,12 +4497,16 @@ export function createGenericOpenAIResponsesClient(
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      const frames = readResponsesSSERaw(res, timeoutMs);
-      if (translated.size === 0) {
-        yield* frames;
-        return;
+      try {
+        const frames = readResponsesSSERaw(res, timeoutMs);
+        if (translated.size === 0) {
+          yield* frames;
+          return;
+        }
+        yield* untranslateCustomToolSSE(frames, translated);
+      } catch (error) {
+        throwAcceptedResponseCapacityError(error);
       }
-      yield* untranslateCustomToolSSE(frames, translated);
     },
 
     async responsesRetrieve(responseId, opts) {

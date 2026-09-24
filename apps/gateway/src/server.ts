@@ -3640,6 +3640,7 @@ export async function buildServer(
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
   registerPortalApi(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     keyStore,
     telemetry,
     resolveModelLabel: (wire) => wireToAlias.get(wire) ?? null,
@@ -3683,6 +3684,7 @@ export async function buildServer(
         );
       }
       registerMcpServer(app, {
+        memoryAdmission: requestBodyMemoryAdmission,
         memoryStore: store.memory,
         now: () => new Date(),
         estimateTokens: estimateMemoryTokens,

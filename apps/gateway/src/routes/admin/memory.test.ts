@@ -315,6 +315,31 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect(statsSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("reclaims expired stats scopes without removing fresh cached results", async () => {
+    const { store } = seededStore();
+    const originalSet = Map.prototype.set;
+    let cache: Map<unknown, unknown> | undefined;
+    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+      if (typeof key === "string" && key.includes("\u0000") && value?.expiresAt !== undefined)
+        cache = this;
+      return originalSet.call(this, key, value);
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const app = buildApp(store);
+      for (let i = 0; i < 50; i++) await app.request(`/admin/api/memory/stats?projectId=p${i}`);
+      expect(cache?.size).toBe(50);
+      now.mockReturnValue(61_000);
+      await app.request("/admin/api/memory/stats?projectId=fresh");
+      expect(cache?.size).toBe(1);
+      await app.request("/admin/api/memory/stats?projectId=another");
+      expect(cache?.size).toBe(2);
+    } finally {
+      now.mockRestore();
+      setSpy.mockRestore();
+    }
+  });
+
   it("lists facts with default 'all' status visibility and supports filters", async () => {
     const { store } = seededStore();
     await addFact(store, "fav", "old", undefined);

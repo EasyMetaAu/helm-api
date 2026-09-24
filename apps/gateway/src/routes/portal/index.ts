@@ -13,6 +13,12 @@ import {
 } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../../runtime/memory-admission.js";
 import { assertOwnsTrace } from "./ownership.js";
 
 // The self-service portal REST surface (docs/12 §4.2). EVERY handler write-forces
@@ -22,6 +28,7 @@ import { assertOwnsTrace } from "./ownership.js";
 // a scopeless read. Memory CRUD is deliberately absent: the SPA calls the existing
 // POST /mcp JSON-RPC directly (§4.2 endpoint 6 — zero new backend).
 export interface PortalApiDeps {
+  memoryAdmission?: BodyMemoryAdmission;
   keyStore: Pick<KeyStore, "updateKey">;
   telemetry: Pick<
     TelemetryStore,
@@ -73,15 +80,30 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
 
   // The only customer-writable key settings. Scope is forced from the bearer
   // identity and the strict schema rejects every administrator-owned field.
+  app.use("/portal/api/memory-settings", memoryAdmissionReleaseGuard());
   app.patch("/portal/api/memory-settings", async (c) => {
     const identity = c.get("identity");
     // Root is the management-plane key and must remain memory-inert.
     if (identity.role === "root") {
       return c.json({ error: "root key memory settings are read-only" }, 403);
     }
-    const parsed = PortalMemorySettingsRequestSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+    let body: unknown;
+    try {
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      if (admitted) c.set("requestMemoryRelease", admitted.release);
+      body = admitted ? JSON.parse(admitted.text) : await c.req.json();
+      admitted?.materialized();
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) {
+        c.header("retry-after", "1");
+        return c.json({ error: { code: error.code, message: error.message } }, 503);
+      }
+      body = null;
+    }
+    const parsed = PortalMemorySettingsRequestSchema.safeParse(body);
     if (!parsed.success) {
       return c.json({ error: "invalid memory settings", issues: parsed.error.issues }, 400);
     }

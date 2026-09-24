@@ -230,6 +230,32 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       });
     }
     if (part !== "full") {
+      if (c.req.header("accept")?.includes("application/vnd.helm.payload")) {
+        const chunked = await deps.telemetry.getPayloadPartStream?.(traceId, part);
+        if (chunked) {
+          const iterator = chunked.stream[Symbol.asyncIterator]();
+          return c.body(
+            new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                const { done, value } = await iterator.next();
+                if (done) controller.close();
+                else controller.enqueue(value);
+              },
+              async cancel() {
+                await iterator.return?.();
+              },
+            }),
+            200,
+            {
+              "cache-control": "no-store",
+              "content-type": "application/vnd.helm.payload",
+              "content-length": String(chunked.byteLength),
+              "x-content-type-options": "nosniff",
+              "x-helm-payload-created-at": String(chunked.createdAt.getTime()),
+            },
+          );
+        }
+      }
       if (
         c.req.header("accept")?.includes("application/vnd.helm.payload") &&
         deps.telemetry.getPayloadPartEncoded
@@ -259,6 +285,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
             deps,
             () => getPayloadPart(deps, traceId, part),
             payloadPartWireBytes,
+            part === "response" ? exactMeta?.responseBytes : undefined,
           )
         : ({ status: "missing", value: null } as const);
       if (admitted.status === "limited")
@@ -319,6 +346,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
             deps,
             () => deps.telemetry.getPayload(traceId),
             payloadWireBytes,
+            exactMeta?.responseBytes,
           );
     if (admitted.status === "limited")
       return c.json({
@@ -619,6 +647,7 @@ async function readPayloadWithinResponseWork<T>(
   deps: AdminApiDeps,
   read: () => Promise<T | null>,
   wireBytes: (value: T) => number,
+  minimumWireBytes = 0,
 ): Promise<
   | { status: "loaded"; value: T; release: () => void }
   | { status: "missing"; value: null }
@@ -626,6 +655,7 @@ async function readPayloadWithinResponseWork<T>(
 > {
   const admission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
   const maxWireBytes = sessionRecoveryMaxWireBytes(admission);
+  if (minimumWireBytes > maxWireBytes) return { status: "limited" };
   const acquired = admission.acquire(maxWireBytes);
   if (!acquired.ok) return { status: "limited" };
   try {

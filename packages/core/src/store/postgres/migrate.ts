@@ -1372,6 +1372,23 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 52,
+    async run(db) {
+      if (!(await pgTableHasColumns(db, "request_payloads", ["request_id"]))) return;
+      for (const statement of splitStatements(`ALTER TABLE request_payloads ADD COLUMN response_body_generation TEXT;
+CREATE TABLE request_payload_response_chunks (
+  request_id TEXT NOT NULL REFERENCES request_payloads(request_id) ON DELETE CASCADE,
+  generation TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  codec TEXT NOT NULL,
+  raw_bytes INTEGER NOT NULL,
+  bytes BYTEA NOT NULL,
+  PRIMARY KEY (request_id, generation, chunk_index)
+);`))
+        await db.execute(sql.raw(statement));
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -1393,7 +1410,8 @@ async function pgTableHasColumns(
     | "oauth_quota"
     | "oauth_reset_period"
     | "session_revisions"
-    | "telemetry",
+    | "telemetry"
+    | "request_payloads",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(

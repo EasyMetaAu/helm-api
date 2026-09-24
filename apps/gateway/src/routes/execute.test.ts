@@ -8961,3 +8961,86 @@ describe("createExecute — concurrency lease loss", () => {
     });
   });
 });
+
+it.each([
+  { protocol: "openai_chat" as const, forceSse: true, stream: true },
+  { protocol: "openai_responses" as const, forceSse: true, stream: true },
+  { protocol: "openai_chat" as const, forceSse: true },
+  { protocol: "openai_chat" as const, forceSse: false },
+  { protocol: "openai_responses" as const, forceSse: true },
+  { protocol: "openai_responses" as const, forceSse: false },
+])("does not replay accepted $protocol work on local memory exhaustion (SSE=$forceSse, stream=$stream)", async ({
+  protocol,
+  forceSse,
+  stream = false,
+}) => {
+  const admission = runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => 10_000_000 }),
+  );
+  const fetch = vi.fn(async () =>
+    forceSse
+      ? new Response(
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(4_000_000), output_index: 0, content_index: 0 })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      : new Response(
+          JSON.stringify({
+            output: [
+              { type: "message", content: [{ type: "output_text", text: "x".repeat(2_000_000) }] },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+  );
+  const head = createGenericOpenAIResponsesClient({
+    config: { baseUrl: "https://unused.test/v1", apiKey: "test" },
+    requestContract: { forceSse },
+    fetch,
+  });
+  const tail = {
+    chatCompletion: vi.fn().mockResolvedValue({ choices: [{ message: { content: "tail" } }] }),
+    chatCompletionStream: vi.fn(),
+    nativePassthrough: vi.fn().mockResolvedValue({ output: [] }),
+  } as unknown as ProviderClient;
+  const cb = breaker();
+  const recordFailure = vi.spyOn(cb, "recordFailure");
+  const execute = createExecute({
+    defaultProvider: head,
+    providers: new Map([
+      ["head", head],
+      ["tail", tail],
+    ]),
+    registry: protocolRegistry({
+      a: { providerName: "head", providerModel: "m", targetProviderProtocol: "openai_responses" },
+      b: { providerName: "tail", providerModel: "m", targetProviderProtocol: "openai_responses" },
+    }),
+    breaker: cb,
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const out = await execute(
+    plan(["a", "b"]),
+    req({
+      protocol,
+      stream,
+      ...(protocol === "openai_responses"
+        ? {
+            native_request: createNativePassthroughCarrier({
+              protocol,
+              body: { model: "m", input: "hello", stream },
+              headers: {},
+            }),
+          }
+        : {}),
+    }),
+  );
+  expect(out.final.status).toBe("error");
+  expect(out.attempts).toHaveLength(1);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(tail.chatCompletion).not.toHaveBeenCalled();
+  expect(tail.nativePassthrough).not.toHaveBeenCalled();
+  expect(recordFailure).not.toHaveBeenCalled();
+  expect(admission.reservedBytes).toBe(0);
+});

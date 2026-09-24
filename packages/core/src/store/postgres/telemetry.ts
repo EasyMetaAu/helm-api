@@ -4,10 +4,12 @@ import { and, asc, count, desc, eq, gt, gte, inArray, lt, lte, type SQL, sql } f
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
+import { createPayloadResponseWriter } from "../payload-response.js";
 import type {
   EncodedRequestPayloadPartRecord,
   InsertPayloadInput,
   InsertTelemetryInput,
+  PayloadResponseWriter,
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
@@ -15,6 +17,7 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  RequestPayloadPartStream,
   SessionContinuationRecord,
   SessionEventHead,
   SessionRecord,
@@ -37,6 +40,7 @@ import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
 import {
   payloadBlobs,
+  requestPayloadResponseChunks,
   requestPayloads,
   sessionHeadEventHashes,
   sessionRevisionBodyChunks,
@@ -54,7 +58,7 @@ const BLOB_SHA_RE = /helm-blob:sha256:([0-9a-f]{64})/g;
 // both expose `insert(...)`. Typing writePayloadTx against this (not PgDb) lets it
 // accept the `tx` drizzle hands the transaction callback (a PgTransaction, which
 // lacks the PgDb `$close` lifecycle hook) without an unsound cast.
-type PgWriter = Pick<PgDb, "insert">;
+type PgWriter = Pick<PgDb, "insert" | "delete">;
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 type SessionRevisionRow = typeof sessionRevisions.$inferSelect;
@@ -1024,6 +1028,9 @@ export class PgTelemetryStore implements TelemetryStore {
     const up = this.externalizeColumn(input.upstreamRequestJson ?? null, blobs);
     const ts = input.createdAt.getTime();
     await tx
+      .delete(requestPayloadResponseChunks)
+      .where(eq(requestPayloadResponseChunks.requestId, input.requestId));
+    await tx
       .insert(requestPayloads)
       .values({
         requestId: input.requestId,
@@ -1037,6 +1044,7 @@ export class PgTelemetryStore implements TelemetryStore {
         set: {
           requestJson: req,
           responseJson: resp,
+          responseBodyGeneration: null,
           upstreamRequestJson: up,
           createdAt: ts,
         },
@@ -1093,6 +1101,119 @@ export class PgTelemetryStore implements TelemetryStore {
     return (text) => (text === null ? null : rehydrateImages(text, fetchBlob));
   }
 
+  async beginPayloadResponse(
+    input: Omit<InsertPayloadInput, "responseJson">,
+  ): Promise<PayloadResponseWriter> {
+    const generation = randomUUID();
+    await this.db.transaction(async (tx) => {
+      // Reserve a fresh id before using the normal image-aware writer.
+      await tx.insert(requestPayloads).values({
+        requestId: input.requestId,
+        requestJson: "",
+        createdAt: input.createdAt.getTime(),
+      });
+      await this.writePayloadTx(tx, { ...input, responseJson: null });
+    });
+    return createPayloadResponseWriter({
+      write: async (chunk) => {
+        await this.db
+          .insert(requestPayloadResponseChunks)
+          .values({ ...chunk, requestId: input.requestId, generation });
+      },
+      commit: async () => {
+        await this.db
+          .update(requestPayloads)
+          .set({ responseBodyGeneration: generation })
+          .where(eq(requestPayloads.requestId, input.requestId));
+      },
+      abort: async () => {
+        await this.db.transaction(async (tx) => {
+          await tx
+            .update(requestPayloads)
+            .set({ responseBodyGeneration: null })
+            .where(
+              and(
+                eq(requestPayloads.requestId, input.requestId),
+                eq(requestPayloads.responseBodyGeneration, generation),
+              ),
+            );
+          await tx
+            .delete(requestPayloadResponseChunks)
+            .where(
+              and(
+                eq(requestPayloadResponseChunks.requestId, input.requestId),
+                eq(requestPayloadResponseChunks.generation, generation),
+              ),
+            );
+        });
+      },
+    });
+  }
+
+  async getPayloadPartStream(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartStream | null> {
+    if (part !== "response") return null;
+    const [row] = await this.db
+      .select({
+        generation: requestPayloads.responseBodyGeneration,
+        createdAt: requestPayloads.createdAt,
+        chunkCount: sql<number>`(SELECT count(*) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
+        byteLength: sql<number>`(SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
+      })
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .limit(1);
+    if (!row?.generation) return null;
+    const db = this.db;
+    const generation = row.generation;
+    return {
+      requestId,
+      part,
+      createdAt: new Date(row.createdAt),
+      byteLength: Number(row.byteLength),
+      stream: (async function* () {
+        let deliveredBytes = 0;
+        for (let index = 0; index < Number(row.chunkCount); index++) {
+          const [chunk] = await db
+            .select()
+            .from(requestPayloadResponseChunks)
+            .where(
+              and(
+                eq(requestPayloadResponseChunks.requestId, requestId),
+                eq(requestPayloadResponseChunks.generation, generation),
+                eq(requestPayloadResponseChunks.chunkIndex, index),
+              ),
+            )
+            .limit(1);
+          if (!chunk) throw new Error("missing payload response chunk");
+          const text = decodePayloadTextChunks([{ ...chunk, chunkIndex: 0 }]);
+          if (text === null) throw new Error("invalid payload response chunk");
+          const bytes = Buffer.from(text, "utf8");
+          deliveredBytes += bytes.byteLength;
+          yield bytes;
+        }
+        if (deliveredBytes !== Number(row.byteLength))
+          throw new Error("invalid payload response length");
+      })(),
+    };
+  }
+
+  private async readPayloadResponse(requestId: string, generation: string): Promise<string | null> {
+    const chunks = await this.db
+      .select()
+      .from(requestPayloadResponseChunks)
+      .where(
+        and(
+          eq(requestPayloadResponseChunks.requestId, requestId),
+          eq(requestPayloadResponseChunks.generation, generation),
+        ),
+      )
+      .orderBy(asc(requestPayloadResponseChunks.chunkIndex));
+    return decodePayloadTextChunks(chunks);
+  }
+
   async getPayload(requestId: string): Promise<RequestPayload | null> {
     const rows = await this.db
       .select()
@@ -1109,7 +1230,9 @@ export class PgTelemetryStore implements TelemetryStore {
     return {
       requestId: row.requestId,
       requestJson: decode(row.requestJson) ?? "",
-      responseJson: decode(row.responseJson),
+      responseJson: row.responseBodyGeneration
+        ? await this.readPayloadResponse(requestId, row.responseBodyGeneration)
+        : decode(row.responseJson),
       upstreamRequestJson: decode(row.upstreamRequestJson) ?? null,
       createdAt: new Date(row.createdAt), // epoch-ms bigint → Date
     };
@@ -1119,8 +1242,11 @@ export class PgTelemetryStore implements TelemetryStore {
     const rows = await this.db
       .select({
         requestId: requestPayloads.requestId,
+        responseBytes: sql<
+          number | null
+        >`CASE WHEN ${requestPayloads.responseBodyGeneration} IS NOT NULL THEN (SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration}) END`,
         hasRequest: sql<boolean>`${requestPayloads.requestJson} IS NOT NULL`,
-        hasResponse: sql<boolean>`${requestPayloads.responseJson} IS NOT NULL`,
+        hasResponse: sql<boolean>`(${requestPayloads.responseJson} IS NOT NULL OR ${requestPayloads.responseBodyGeneration} IS NOT NULL)`,
         hasUpstream: sql<boolean>`${requestPayloads.upstreamRequestJson} IS NOT NULL`,
         createdAt: requestPayloads.createdAt,
       })
@@ -1131,6 +1257,7 @@ export class PgTelemetryStore implements TelemetryStore {
     if (!row) return null;
     return {
       requestId: row.requestId,
+      ...(row.responseBytes === null ? {} : { responseBytes: Number(row.responseBytes) }),
       createdAt: new Date(row.createdAt),
       parts: {
         request: row.hasRequest,
@@ -1154,6 +1281,7 @@ export class PgTelemetryStore implements TelemetryStore {
       .select({
         requestId: requestPayloads.requestId,
         value: column,
+        generation: requestPayloads.responseBodyGeneration,
         createdAt: requestPayloads.createdAt,
       })
       .from(requestPayloads)
@@ -1165,7 +1293,10 @@ export class PgTelemetryStore implements TelemetryStore {
     return {
       requestId: row.requestId,
       part,
-      json: decode(row.value),
+      json:
+        part === "response" && row.generation
+          ? await this.readPayloadResponse(requestId, row.generation)
+          : decode(row.value),
       createdAt: new Date(row.createdAt),
     };
   }
@@ -1184,12 +1315,15 @@ export class PgTelemetryStore implements TelemetryStore {
       .select({
         requestId: requestPayloads.requestId,
         value: column,
+        generation: requestPayloads.responseBodyGeneration,
         createdAt: requestPayloads.createdAt,
       })
       .from(requestPayloads)
       .where(eq(requestPayloads.requestId, requestId))
       .limit(1);
     const row = rows[0];
+    if (row && part === "response" && row.generation)
+      row.value = await this.readPayloadResponse(requestId, row.generation);
     if (!row || row.value === null) return null;
     return {
       requestId: row.requestId,
@@ -1311,7 +1445,9 @@ export class PgTelemetryStore implements TelemetryStore {
         id: r.requestId,
         requestId: r.requestId,
         requestJson: decode(r.requestJson) ?? "",
-        responseJson: decode(r.responseJson),
+        responseJson: r.responseBodyGeneration
+          ? await this.readPayloadResponse(r.requestId, r.responseBodyGeneration)
+          : decode(r.responseJson),
         upstreamRequestJson: decode(r.upstreamRequestJson) ?? null,
         createdAt: r.createdAt,
       });
