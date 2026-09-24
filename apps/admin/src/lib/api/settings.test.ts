@@ -19,6 +19,7 @@ const FULL: RuntimeSettings = {
   log_level: 'debug',
   default_lane: 'premium',
   concurrency_queue_enabled: true,
+  global_concurrency_limit: 4,
   concurrency_queue_min_size: 8,
   concurrency_queue_size_multiplier: 1.5,
   concurrency_queue_wait_timeout_ms: 20000,
@@ -80,6 +81,7 @@ describe('settings api client', () => {
       default_lane: 'balanced',
       // Queueing fields default to the schema's documented values (both OFF).
       concurrency_queue_enabled: false,
+      global_concurrency_limit: 0,
       concurrency_queue_min_size: 5,
       concurrency_queue_size_multiplier: 0,
       concurrency_queue_wait_timeout_ms: 10000,

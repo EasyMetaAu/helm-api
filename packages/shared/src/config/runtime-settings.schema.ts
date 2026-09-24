@@ -79,6 +79,8 @@ const RuntimeSettingsObjectSchema = z
     // a FIFO queue instead of an immediate 429. Default OFF: without it the limit
     // is simply not enforced (keys with no limit are never touched either way).
     concurrency_queue_enabled: z.boolean().default(false),
+    // Per-process cap independent of per-key limits; zero disables it.
+    global_concurrency_limit: z.number().int().min(0).max(1000).default(0),
     // Fixed minimum queue capacity per key (固定最小排队数).
     concurrency_queue_min_size: z.number().int().min(1).max(100).default(5),
     // Queue capacity multiplier (排队数倍数): effective max queue =

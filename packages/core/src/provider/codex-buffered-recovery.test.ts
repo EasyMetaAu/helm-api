@@ -77,15 +77,17 @@ function setup(turns: object[][][], capacityBytes = 1_000_000) {
       connectRetryBackoffMs: [0],
     },
   });
+  const eligibility = vi.fn();
   const run = async (body = input()) => {
     const chunks: string[] = [];
     for await (const chunk of client.nativePassthroughStream!(body, {
       codexBufferedStreamRecovery: true,
+      onStreamRecoveryEligibility: eligibility,
     }))
       chunks.push(chunk);
     return chunks.join("");
   };
-  return { client, sockets, connect, admission, run };
+  return { client, sockets, connect, admission, run, eligibility };
 }
 
 describe("Codex buffered stream recovery", () => {
@@ -108,7 +110,7 @@ describe("Codex buffered stream recovery", () => {
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("reports a previous-response mismatch instead of silently disabling recovery", () => {
+  it("reports missing previous history instead of silently disabling recovery", () => {
     const reasons: string[] = [];
     const turn = createCodexBufferedTurn(
       input({ previous_response_id: "missing" }).body,
@@ -117,7 +119,7 @@ describe("Codex buffered stream recovery", () => {
       (reason) => reasons.push(reason),
     );
     expect(turn).toBeNull();
-    expect(reasons).toEqual(["previous_response_mismatch"]);
+    expect(reasons).toEqual(["incomplete_history"]);
   });
 
   it("bounds all retained histories to a quarter of the shared response budget", () => {
@@ -218,6 +220,17 @@ describe("Codex buffered stream recovery", () => {
     });
     expect(s.connect).toHaveBeenCalledTimes(1);
     expect(s.admission.reservedBytes).toBe(0);
+  });
+
+  it("reports unsupported activity when an armed turn cannot be replayed", async () => {
+    const s = setup([[[created("failed"), { type: "response.web_search_call.in_progress" }]]]);
+    await expect(s.run()).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
+    expect(s.eligibility).toHaveBeenLastCalledWith({
+      eligible: false,
+      reason: "unsupported_event",
+    });
   });
 
   it("stops after one replay and releases all buffered work", async () => {

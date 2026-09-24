@@ -1,6 +1,6 @@
 import { createKeyedSemaphore } from "@helm/core";
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type ConcurrencyGateConfig,
   concurrencyMiddleware,
@@ -111,7 +111,45 @@ describe("createConcurrencyGate", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect((await Promise.race([queued, Promise.resolve(null)])) ?? null).toBeNull();
     if (first.ok) await first.release();
-    expect((await queued).ok).toBe(true);
+    const second = await queued;
+    expect(second.ok).toBe(true);
+    if (second.ok) await second.release();
+  });
+  it("keeps process capacity independent of the distributed key store", async () => {
+    const acquire = vi.fn(async () => ({ ok: false as const, reason: "unavailable" as const }));
+    const gate = createConcurrencyGate({
+      semaphore: { acquire, shutdown: async () => {} },
+      getConfig: () => cfg({ globalLimit: 1 }),
+    });
+    const lease = await gate.acquire({
+      keyId: "a",
+      limit: null,
+      signal: new AbortController().signal,
+    });
+    expect(lease.ok).toBe(true);
+    expect(acquire).not.toHaveBeenCalled();
+    if (lease.ok) await lease.release();
+  });
+
+  it("key waiters do not occupy process slots and aborted global waits release the key", async () => {
+    const semaphore = createKeyedSemaphore();
+    const gate = createConcurrencyGate({ semaphore, getConfig: () => cfg({ globalLimit: 2 }) });
+    const signal = new AbortController().signal;
+    const first = await gate.acquire({ keyId: "a", limit: 1, signal });
+    const abort = new AbortController();
+    const sameKey = gate.acquire({ keyId: "a", limit: 1, signal: abort.signal });
+    const other = await gate.acquire({ keyId: "b", limit: 1, signal });
+    expect(other.ok).toBe(true);
+    abort.abort();
+    expect(await sameKey).toMatchObject({ ok: false, reason: "aborted" });
+    const globalAbort = new AbortController();
+    const waiting = gate.acquire({ keyId: "c", limit: 1, signal: globalAbort.signal });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    globalAbort.abort();
+    expect(await waiting).toMatchObject({ ok: false, reason: "aborted" });
+    expect(semaphore.inFlight("c")).toBe(0);
+    if (first.ok) await first.release();
+    if (other.ok) await other.release();
   });
 });
 
