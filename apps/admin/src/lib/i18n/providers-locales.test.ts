@@ -11,6 +11,18 @@ import zhHans from '../../locales/zh-hans.json';
 import zhHant from '../../locales/zh-hant.json';
 
 const providerPageKeys = [
+  'A previous Claude reset is still unconfirmed',
+  'No Claude reset is currently available',
+  'Claude reset outcome is unconfirmed; refresh usage before retrying',
+  'Claude usage reset',
+  'Claude reset was not applied',
+  'Use one Claude reset for',
+  '{n} resets remaining',
+  'Claude reset is currently cooling down',
+  'Claude reset affects every connected token in the same Claude organization',
+  'Reset Claude usage',
+  'Confirm Claude usage reset',
+  'Failed to reset Claude usage',
   'Failed to load OAuth providers',
   'Failed to refresh providers',
   'Provider refresh queued',

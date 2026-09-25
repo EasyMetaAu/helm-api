@@ -15,6 +15,9 @@ import type {
   TelemetryStore,
 } from "@helm/core";
 import type {
+  AnthropicResetRequest,
+  AnthropicResetResult,
+  AnthropicResetStatus,
   ClassifierConfig,
   DecisionRecord,
   InternalRequest,
@@ -259,6 +262,10 @@ export interface OAuthAdminAccess {
     account: string;
     force?: boolean;
   }): Promise<OAuthQuotaWindow[] | null>;
+  getAnthropicResetStatus?(input: { account: string }): Promise<AnthropicResetStatus>;
+  consumeAnthropicReset?(
+    input: AnthropicResetRequest,
+  ): Promise<AnthropicResetResult & { affectedAccounts: string[] }>;
   // Pull the consumer Grok subscription's weekly usage window from Grok Build's
   // authenticated JSON billing endpoint. The existing xAI OAuth bearer is sufficient;
   // no browser cookie is persisted. Same proxy/refresh/cache/fail-open contract as

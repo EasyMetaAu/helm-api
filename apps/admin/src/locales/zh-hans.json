@@ -1099,5 +1099,17 @@
   "Jev uses the configured OpenRouter credential. Test confidence thresholds on your own Chinese and English requests.": "Jev 使用已配置的 OpenRouter 凭证。请结合实际中英文请求验证置信度阈值。",
   "Use unique classifiers, valid model IDs, positive timeouts up to 60000 ms, and confidence values from 0 to 1.": "候选不可重复；请填写有效模型 ID、1～60000 毫秒的超时，以及 0～1 的置信度。",
   "Shared evaluation limits. Candidate order is configured above; other limits are in": "以上可调整候选顺序，其他公共评估限制配置于",
-  "System default lane": "系统默认通道"
+  "System default lane": "系统默认通道",
+  "A previous Claude reset is still unconfirmed": "上一次 Claude 重置尚未确认",
+  "No Claude reset is currently available": "当前没有可用的 Claude 重置",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 重置结果未确认；请刷新用量后再试",
+  "Claude usage reset": "Claude 用量已重置",
+  "Claude reset was not applied": "Claude 重置未执行",
+  "Use one Claude reset for": "为以下账户使用一次 Claude 重置：",
+  "{n} resets remaining": "剩余 {n} 次重置",
+  "Claude reset is currently cooling down": "Claude 重置当前处于冷却中",
+  "Reset Claude usage": "重置 Claude 用量",
+  "Confirm Claude usage reset": "确认重置 Claude 用量",
+  "Failed to reset Claude usage": "重置 Claude 用量失败",
+  "Claude reset affects every connected token in the same Claude organization": "Claude 重置会影响同一 Claude 组织中的所有已连接令牌"
 }

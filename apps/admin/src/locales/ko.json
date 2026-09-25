@@ -1099,5 +1099,17 @@
   "Jev uses the configured OpenRouter credential. Test confidence thresholds on your own Chinese and English requests.": "Jev는 설정된 OpenRouter 인증 정보를 사용합니다. 실제 중국어 및 영어 요청으로 신뢰도 기준을 테스트하세요.",
   "Use unique classifiers, valid model IDs, positive timeouts up to 60000 ms, and confidence values from 0 to 1.": "중복 없는 분류기, 유효한 모델 ID, 1~60000ms의 제한 시간, 0~1의 신뢰도를 입력하세요.",
   "Shared evaluation limits. Candidate order is configured above; other limits are in": "공통 평가 제한입니다. 후보 순서는 위에서 설정하며, 기타 제한의 설정 위치:",
-  "System default lane": "시스템 기본 레인"
+  "System default lane": "시스템 기본 레인",
+  "A previous Claude reset is still unconfirmed": "이전 Claude 재설정이 확인되지 않았습니다",
+  "No Claude reset is currently available": "현재 사용할 수 있는 Claude 재설정이 없습니다",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 재설정 결과를 확인할 수 없습니다. 사용량을 새로 고친 후 다시 시도하세요",
+  "Claude usage reset": "Claude 사용량이 재설정되었습니다",
+  "Claude reset was not applied": "Claude 재설정이 적용되지 않았습니다",
+  "Use one Claude reset for": "다음 계정에 Claude 재설정 1회 사용:",
+  "{n} resets remaining": "재설정 {n}회 남음",
+  "Claude reset is currently cooling down": "Claude 재설정이 현재 대기 중입니다",
+  "Reset Claude usage": "Claude 사용량 재설정",
+  "Confirm Claude usage reset": "Claude 사용량 재설정 확인",
+  "Failed to reset Claude usage": "Claude 사용량 재설정 실패",
+  "Claude reset affects every connected token in the same Claude organization": "Claude 재설정은 같은 Claude 조직의 연결된 모든 토큰에 적용됩니다"
 }

@@ -6,9 +6,14 @@
   import {
     isCodexQuotaWindowPlaceholder,
     selectCodexAccountWeeklyQuotaWindows,
+    usableAnthropicResetGrant,
+    type AnthropicResetGrant,
+    type AnthropicResetStatus,
   } from '@helm/shared';
   import {
     consumeCodexResetCredit,
+    consumeAnthropicReset,
+    getAnthropicResetStatus,
     getOAuthOverview,
     logoutOAuth,
     requestOAuthRefresh,
@@ -90,6 +95,11 @@
     creditId?: string;
     creditTitle?: string;
     idempotencyKey: string;
+  } | null>(null);
+  let confirmingAnthropicReset = $state<{
+    account: string;
+    status: AnthropicResetStatus;
+    grant: AnthropicResetGrant;
   } | null>(null);
   // True while the confirmed consume is in flight (disables the dialog's buttons).
   let resettingLimit = $state<boolean>(false);
@@ -797,6 +807,45 @@
     }
   }
 
+  async function prepareAnthropicReset(account: string): Promise<void> {
+    try {
+      const status = await getAnthropicResetStatus(account);
+      const grant = usableAnthropicResetGrant(status, Date.now());
+      if (!grant)
+        throw new Error(
+          status.pending
+            ? $t('A previous Claude reset is still unconfirmed')
+            : $t('No Claude reset is currently available'),
+        );
+      confirmingAnthropicReset = { account, status, grant };
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to read Claude reset status');
+    }
+  }
+  async function confirmAnthropicReset(): Promise<void> {
+    if (!confirmingAnthropicReset) return;
+    resettingLimit = true;
+    error = null;
+    try {
+      const { account, grant } = confirmingAnthropicReset;
+      const result = await consumeAnthropicReset({
+        account,
+        grantId: grant.id,
+        expectedResetsLeft: grant.resets_left,
+      });
+      if (result.result === 'unknown')
+        throw new Error($t('Claude reset outcome is unconfirmed; refresh usage before retrying'));
+      confirmingAnthropicReset = null;
+      await invalidateAll();
+      resetNotice =
+        result.result === 'reset' ? $t('Claude usage reset') : $t('Claude reset was not applied');
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to reset Claude usage');
+    } finally {
+      resettingLimit = false;
+    }
+  }
+
   async function confirmDisconnect(): Promise<void> {
     if (!confirming) return;
     error = null;
@@ -1349,6 +1398,15 @@
                         : $t('Reset limit')}</button
                     >
                   {/if}
+                  {#if row.provider.id === 'anthropic'}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={resettingLimit}
+                      onclick={() => prepareAnthropicReset(row.account.account)}
+                      >{$t('Reset Claude usage')}</button
+                    >
+                  {/if}
                   <button
                     type="button"
                     class="btn-danger-outline col-span-2 sm:col-span-1"
@@ -1437,6 +1495,52 @@
           disabled={resettingLimit}
           onclick={confirmResetLimit}
           >{resettingLimit ? $t('Resetting…') : $t('Reset limit')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if confirmingAnthropicReset}
+    <Modal
+      label={$t('Confirm Claude usage reset')}
+      onclose={() => {
+        if (!resettingLimit) confirmingAnthropicReset = null;
+      }}
+    >
+      <h2 class="section-header">{$t('Confirm Claude usage reset')}</h2>
+      <p class="mt-3 text-sm text-ink-body">
+        {$t('Use one Claude reset for')}
+        <code class="font-mono text-ink-strong">{confirmingAnthropicReset.account}</code>?
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {confirmingAnthropicReset.grant.label ?? confirmingAnthropicReset.grant.id}; {$t(
+          '{n} resets remaining',
+          { n: confirmingAnthropicReset.grant.resets_left },
+        )}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t('Scope')}: {confirmingAnthropicReset.grant.clears.join(', ')} · {$t('Expires')}: {new Date(
+          confirmingAnthropicReset.grant.ends_at,
+        ).toLocaleString()}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t('Claude reset affects every connected token in the same Claude organization')}
+      </p>
+      {#if confirmingAnthropicReset.status.cooldown_until}<p class="mt-2 text-sm text-ink-muted">
+          {$t('Claude reset is currently cooling down')}
+        </p>{/if}
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={resettingLimit}
+          onclick={() => (confirmingAnthropicReset = null)}>{$t('Cancel')}</button
+        ><button
+          type="button"
+          class="btn-primary"
+          disabled={resettingLimit}
+          onclick={confirmAnthropicReset}
+          >{resettingLimit ? $t('Resetting…') : $t('Reset Claude usage')}</button
         >
       </div>
     </Modal>
