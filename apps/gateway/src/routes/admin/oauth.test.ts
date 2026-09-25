@@ -2765,4 +2765,60 @@ describe("admin OAuth routes — Anthropic reset grants", () => {
     expect(upsert).toHaveBeenCalledTimes(2);
     expect(applyQuotaSnapshot).toHaveBeenCalledTimes(2);
   });
+  it("preserves an active cooldown when a partial reset leaves 7d at 98 percent", async () => {
+    const now = Date.now();
+    const weeklyReset = now + 86_400_000;
+    const windows = [
+      { key: "5h", usedPercent: 0, resetsAtMs: now + 3_600_000, windowMinutes: null },
+      { key: "7d", usedPercent: 98, resetsAtMs: weeklyReset, windowMinutes: null },
+    ];
+    const applyUsageLimit = vi.fn(async () => {});
+    const res = await app({
+      oauth: fullSeam({
+        consumeAnthropicReset: vi.fn(async () => ({
+          result: "reset" as const,
+          status,
+          quotaRefreshed: true,
+          affectedAccounts: ["work"],
+        })),
+        fetchAnthropicQuota: vi.fn(async () => windows),
+      }),
+      oauthQuota: {
+        get: vi.fn(async () => ({ usageLimitedUntilMs: now + 60_000 })),
+        upsert: vi.fn(async () => {}),
+      } as never,
+      applyUsageLimit,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "work", weeklyReset, "replace");
+  });
+
+  it("reports incomplete identity or quota refresh without hiding confirmed success", async () => {
+    const fetchAnthropicQuota = vi.fn(async ({ account }: { account: string }) => {
+      if (account === "sibling") throw new Error("temporary failure");
+      return [{ key: "5h", usedPercent: 0, resetsAtMs: null, windowMinutes: null }];
+    });
+    const res = await app({
+      oauth: fullSeam({
+        consumeAnthropicReset: vi.fn(async () => ({
+          result: "reset" as const,
+          status,
+          quotaRefreshed: false,
+          affectedAccounts: ["work", "sibling"],
+        })),
+        fetchAnthropicQuota,
+      }),
+      oauthQuota: { upsert: vi.fn(async () => {}) } as never,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(await res.json()).toMatchObject({ result: "reset", quotaRefreshed: false });
+    expect(fetchAnthropicQuota).toHaveBeenCalledWith({ account: "sibling", force: true });
+  });
 });

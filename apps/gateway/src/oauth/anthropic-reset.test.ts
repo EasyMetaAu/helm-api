@@ -95,6 +95,68 @@ describe("Anthropic manual reset", () => {
   });
 
   it.each([
+    false,
+    true,
+  ])("confirms observable windows when overage is null (timeout=%s)", async (timeout) => {
+    const s = setup();
+    const before = usage();
+    const beforeGrant = before.cedar_ember.grants[0];
+    if (!beforeGrant) throw new Error("test grant missing");
+    const clears = ["five_hour", "seven_day", "seven_day_overage_included"];
+    beforeGrant.clears = clears;
+    s.setBody(before);
+    s.post.mockImplementationOnce(async () => {
+      const after = usage(1, 0);
+      const afterGrant = after.cedar_ember.grants[0];
+      if (!afterGrant) throw new Error("test grant missing");
+      afterGrant.clears = clears;
+      s.setBody(after);
+      if (timeout) throw new Error("timeout");
+      return {
+        result: "reset",
+        grant_id: "opus55",
+        resets_left: 1,
+        cleared: clears,
+      };
+    });
+    const result = await s.access.consumeAnthropicReset(input);
+    expect(result.result).toBe("reset");
+    expect(result.status?.pending).toBe(false);
+    expect(s.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not confirm when an observed window disappears", async () => {
+    const s = setup();
+    s.post.mockImplementationOnce(async () => {
+      const after = usage(1, 0);
+      Object.assign(after, { seven_day: null });
+      s.setBody(after);
+      return {
+        result: "reset",
+        grant_id: "opus55",
+        resets_left: 1,
+        cleared: ["five_hour", "seven_day"],
+      };
+    });
+    const result = await s.access.consumeAnthropicReset(input);
+    expect(result.result).toBe("unknown");
+    expect(result.status?.pending).toBe(true);
+  });
+
+  it("keeps verified siblings in the refresh set when their usage read fails", async () => {
+    const s = setup();
+    const sibling = vi.fn(async (path: string) => {
+      if (path === "/api/oauth/profile") return { organization: { uuid: ORG } };
+      throw new Error("temporary usage failure");
+    });
+    s.deps.getClient = async (account) => (account === "sibling" ? sibling : s.request);
+    const result = await s.access.consumeAnthropicReset(input);
+    expect(result.result).toBe("reset");
+    expect(result.affectedAccounts).toEqual(["a", "sibling"]);
+    expect(result.quotaRefreshed).toBe(false);
+  });
+
+  it.each([
     "paused",
     "ineligible",
     "empty",
