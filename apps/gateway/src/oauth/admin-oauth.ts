@@ -75,6 +75,7 @@ import {
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
+import { createAnthropicResetAccess } from "./anthropic-reset.js";
 import type { CodexModelCacheKey } from "./codex-model-cache.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
 import {
@@ -892,7 +893,63 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
 
+  const anthropicReset = createAnthropicResetAccess({
+    config: deps.config,
+    now,
+    listAccounts: async () =>
+      (await deps.store.list())
+        .filter((row) => row.providerId === ANTHROPIC)
+        .map((row) => row.account),
+    invalidate: () => {
+      for (const key of [...quotaCache.keys()]) {
+        if (key.startsWith(`${ANTHROPIC} `))
+          invalidateQuotaCache(ANTHROPIC, key.slice(ANTHROPIC.length + 1));
+      }
+    },
+    getClient: async (account) => {
+      const provider = getOAuthProvider(ANTHROPIC);
+      if (!provider) throw new Error("Anthropic OAuth is not configured");
+      const proxy = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        ANTHROPIC,
+        account,
+      ).proxy as ProxyConfig | undefined;
+      const doFetch = makeFetch(proxy);
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId: ANTHROPIC, account },
+        tokenStore: deps.store,
+        encKey: deps.encKey,
+        oauthProvider: provider,
+        fetch: doFetch,
+        now,
+      });
+      const authorization = await tm.getAuthHeader();
+      return async (path, init) => {
+        const signal = AbortSignal.timeout(
+          init?.method === "POST" ? 25_000 : QUOTA_FETCH_TIMEOUT_MS,
+        );
+        // No mutation retry. The reset service persists uncertainty before sending.
+        const response = await doFetch(`https://api.anthropic.com${path}`, {
+          ...init,
+          redirect: "error",
+          signal,
+          headers: {
+            ...ANTHROPIC_USAGE_HEADERS,
+            authorization,
+            "content-type": "application/json",
+          },
+        });
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          throw new Error(`Anthropic reset request failed (status ${response.status})`);
+        }
+        return readBoundedJsonResponse(response, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
+      };
+    },
+  });
+
   return {
+    ...anthropicReset,
     async listCachedStatus(): Promise<OAuthAdminStatusResponse> {
       return buildStatus({ refresh: false, forceRefresh: false, serial: false });
     },

@@ -9,6 +9,7 @@ import {
   windowsToUsageLimit,
 } from "@helm/core";
 import {
+  AnthropicResetRequestSchema,
   isCodexQuotaWindowPlaceholder,
   type OAuthQuotaWindow,
   type OAuthResetPeriod,
@@ -17,6 +18,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
 import { createOAuthAdminRefreshCoordinator } from "../../oauth/admin-refresh-coordinator.js";
+import { AnthropicResetError } from "../../oauth/anthropic-reset.js";
 import {
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
   canConsumeResetCredit,
@@ -974,6 +976,76 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     } catch (e) {
       // Upstream said no (no credits, expired token, network) — not a client error.
       return c.json({ error: errMessage(e) }, 502);
+    }
+  });
+
+  app.get("/admin/api/oauth/anthropic/reset-grants", async (c) => {
+    const status = seam()?.getAnthropicResetStatus;
+    if (!status) return c.json({ error: "Anthropic reset is not configured" }, 503);
+    const account = c.req.query("account") ?? DEFAULT_ACCOUNT;
+    try {
+      return c.json(await status({ account }));
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 502);
+    }
+  });
+
+  app.post("/admin/api/oauth/anthropic/reset-grants", async (c) => {
+    const s = seam();
+    const consume = s?.consumeAnthropicReset;
+    if (!consume) return c.json({ error: "usage reset is only supported for openai-codex" }, 400);
+    const parsed = AnthropicResetRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      return c.json({ error: "account, grantId, and expectedResetsLeft are required" }, 400);
+    try {
+      const result = await consume(parsed.data);
+      let quotaRefreshed = false;
+      if (result.result === "reset" && deps.oauthQuota && s?.fetchAnthropicQuota) {
+        quotaRefreshed = true;
+        for (const account of result.affectedAccounts) {
+          try {
+            const windows = await s.fetchAnthropicQuota({ account, force: true });
+            if (!windows || windows.length === 0) {
+              quotaRefreshed = false;
+              continue;
+            }
+            const capturedAt = Date.now();
+            await recordObservedQuotaResetPeriods({
+              quotaStore: deps.oauthQuota,
+              periodStore: deps.oauthResetPeriod,
+              providerId: "anthropic",
+              account,
+              windows,
+              observedAtMs: capturedAt,
+            });
+            await deps.oauthQuota.upsert({
+              providerId: "anthropic",
+              account,
+              windows,
+              capturedAt,
+              source: "anthropic",
+            });
+            deps.applyQuotaSnapshot?.("anthropic", account, windows, capturedAt);
+            if (deps.applyUsageLimit) {
+              const until = windowsToUsageLimit(windows, capturedAt);
+              await deps.applyUsageLimit(
+                "anthropic",
+                account,
+                until,
+                until === null ? "replace" : "extend",
+              );
+            }
+          } catch {
+            // The upstream reset is already verified. Keep the success response but
+            // tell the operator that the local quota snapshot still needs refresh.
+            quotaRefreshed = false;
+          }
+        }
+      }
+      return c.json({ result: result.result, status: result.status, quotaRefreshed });
+    } catch (e) {
+      const status = e instanceof AnthropicResetError ? e.status : 502;
+      return c.json({ error: errMessage(e) }, status);
     }
   });
 

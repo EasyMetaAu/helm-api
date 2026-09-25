@@ -1099,5 +1099,17 @@
   "Jev uses the configured OpenRouter credential. Test confidence thresholds on your own Chinese and English requests.": "Jev usa a credencial configurada do OpenRouter. Teste os limites de confiança com suas próprias solicitações em chinês e inglês.",
   "Use unique classifiers, valid model IDs, positive timeouts up to 60000 ms, and confidence values from 0 to 1.": "Use classificadores únicos, IDs de modelo válidos, tempos limite de 1 a 60000 ms e valores de confiança de 0 a 1.",
   "Shared evaluation limits. Candidate order is configured above; other limits are in": "Limites de avaliação compartilhados. A ordem é configurada acima; os outros limites ficam em",
-  "System default lane": "Rota padrão do sistema"
+  "System default lane": "Rota padrão do sistema",
+  "A previous Claude reset is still unconfirmed": "O reset anterior do Claude não foi confirmado",
+  "No Claude reset is currently available": "Nenhum reset do Claude está disponível",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "O resultado não foi confirmado; atualize o uso antes de tentar novamente",
+  "Claude usage reset": "Uso do Claude redefinido",
+  "Claude reset was not applied": "O reset do Claude não foi aplicado",
+  "Use one Claude reset for": "Usar um reset do Claude para",
+  "{n} resets remaining": "Restam {n} resets",
+  "Claude reset is currently cooling down": "O reset do Claude está em espera",
+  "Reset Claude usage": "Redefinir uso do Claude",
+  "Confirm Claude usage reset": "Confirmar reset do Claude",
+  "Failed to reset Claude usage": "Falha ao redefinir o uso do Claude",
+  "Claude reset affects every connected token in the same Claude organization": "O reset do Claude afeta todos os tokens conectados na mesma organização Claude"
 }

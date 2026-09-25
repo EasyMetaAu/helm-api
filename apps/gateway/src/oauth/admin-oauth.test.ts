@@ -2118,6 +2118,92 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
   });
 });
 
+describe("createOAuthAdmin > Anthropic reset grants", () => {
+  it("uses the account token and Claude headers for read-only status and one consume", async () => {
+    const { tokens, config } = makeStores();
+    const now = Date.parse("2026-09-25T08:00:00Z");
+    const org = "12345678-1234-4234-8234-123456789abc";
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "work",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: now + 3_600_000,
+      meta: null,
+      updatedAt: now,
+    });
+    let left = 2;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchFn = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).endsWith("/api/oauth/profile")) return json({ organization: { uuid: org } });
+      if (String(url).includes("/api/oauth/usage"))
+        return json({
+          five_hour: { utilization: left === 1 ? 0 : 95, resets_at: "2026-09-25T12:00:00Z" },
+          cedar_ember: {
+            eligible: true,
+            at_limit: false,
+            exhausted: [],
+            next_grant_id: "grant_1",
+            cooldown_until: null,
+            grants: [
+              {
+                id: "grant_1",
+                label: "Claude",
+                resets_total: 2,
+                resets_left: left,
+                starts_at: "2026-09-01T00:00:00Z",
+                ends_at: "2026-10-01T00:00:00Z",
+                clears: ["five_hour"],
+                paused: false,
+                usable_now: left > 0,
+                use_requires_limit: false,
+                blocking: [],
+              },
+            ],
+          },
+        });
+      if (init?.method === "POST") {
+        left = 1;
+        return json({ result: "reset", grant_id: "grant_1", cleared: ["five_hour"] });
+      }
+      throw new Error(`unexpected URL ${String(url)}`);
+    }) as unknown as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      now: () => now,
+      makeFetch: () => fetchFn,
+    });
+    const getStatus = admin.getAnthropicResetStatus;
+    const consume = admin.consumeAnthropicReset;
+    if (!getStatus || !consume) throw new Error("Anthropic reset access is not wired");
+    expect((await getStatus({ account: "work" })).grants[0]?.resets_left).toBe(2);
+    const result = await consume({
+      account: "work",
+      grantId: "grant_1",
+      expectedResetsLeft: 2,
+    });
+    expect(result.result).toBe("reset");
+    expect(
+      calls.some(
+        (call) =>
+          call.init?.method === "POST" &&
+          call.url.endsWith(`/api/organizations/${org}/reset_rate_limits`),
+      ),
+    ).toBe(true);
+    const request = calls.find((call) => call.init?.method === "POST");
+    expect(new Headers(request?.init?.headers).get("authorization")).toBe("Bearer AT");
+    expect(new Headers(request?.init?.headers).get("anthropic-beta")).toBe("oauth-2025-04-20");
+    expect(JSON.parse(String(request?.init?.body))).toMatchObject({
+      program: "cedar_ember",
+      grant_id: "grant_1",
+      request_id: expect.any(String),
+    });
+  });
+});
+
 describe("createOAuthAdmin > fetchXaiQuota", () => {
   async function seedFreshXai(tokens: SqliteOAuthTokenStore): Promise<void> {
     await tokens.upsert({

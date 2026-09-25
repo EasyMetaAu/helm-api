@@ -11,6 +11,12 @@ import {
   type OAuthUsagePeriod as SharedOAuthUsagePeriod,
   type OAuthUsagePeriods as SharedOAuthUsagePeriods,
   OAuthUsagePeriodsSchema,
+  AnthropicResetRequestSchema,
+  AnthropicResetResultSchema,
+  AnthropicResetStatusSchema,
+  type AnthropicResetRequest,
+  type AnthropicResetResult,
+  type AnthropicResetStatus,
 } from '@helm/shared';
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
@@ -63,6 +69,22 @@ export interface OAuthProviderStatus {
 }
 
 const BASE = '/admin/api/oauth';
+
+export async function getAnthropicResetStatus(account: string): Promise<AnthropicResetStatus> {
+  const res = await fetch(`${BASE}/anthropic/reset-grants?account=${encodeURIComponent(account)}`);
+  return AnthropicResetStatusSchema.parse(await asJson<unknown>(res));
+}
+export async function consumeAnthropicReset(
+  input: AnthropicResetRequest,
+): Promise<AnthropicResetResult> {
+  const body = AnthropicResetRequestSchema.parse(input);
+  const res = await fetch(`${BASE}/anthropic/reset-grants`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return AnthropicResetResultSchema.parse(await asJson<unknown>(res));
+}
 
 export type OAuthApiErrorCode =
   | 'device_authorization_denied'
