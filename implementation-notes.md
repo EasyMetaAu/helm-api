@@ -11,6 +11,7 @@
 
 - **决定**：新增独立的 `reset-grants` 管理端点，读取官方 Claude OAuth usage/profile，并在二次确认后发送一次 `cedar_ember` reset 请求；保留现有 Codex `/reset` 路径语义。
 - **安全边界**：POST 前重新读取并校验同一组织、下一个 grant、额度计数、有效期、scope 与冷却；请求 ID 在发送前持久化。超时或读回不确定时保持 pending，禁止自动重试和重复消费。不会在测试或部署验收中点击真实重置。
+- **交互边界**：Claude 重置确认框禁止点击遮罩或按 Escape 关闭，必须明确点击“取消”或二次确认；避免把一次性额度操作误触成直接消费。
 - **读回限制**：只有 grant 计数减少且受影响 quota windows 读回恢复才报告 `reset`；已确认后逐个刷新已验证同组织别名并更新 quota store/cooldown。刷新失败仍返回已确认的上游结果，但 `quotaRefreshed=false`，需后续只读刷新。
 - **读回校验**：仅对重置前可观测的 scope 要求恢复，nullable overage 不阻止确认；已观测窗口消失仍拒绝确认。部分重置复用既有 95% 活跃限额恢复判定，保留未清除周窗的 cooldown。同组织身份核实后即纳入刷新集合，暂时读取失败标记刷新不完整；结果不明时关闭确认框并提示可能已扣次数，需人工核查。
 - **供应商差异**：Claude 的 early-use grant 不套 Codex 的 90% 阈值；未知 scope 不授权消费。上游接口若变化，管理端点 fail-closed，普通 Anthropic quota PULL 保持原 schema。
