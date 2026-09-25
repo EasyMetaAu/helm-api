@@ -21,10 +21,14 @@ const setAccountSchedule = vi.fn();
 const setSelectionStrategy = vi.fn();
 const streamAccountTest = vi.fn();
 const consumeCodexResetCredit = vi.fn();
+const getAnthropicResetStatus = vi.fn();
+const consumeAnthropicReset = vi.fn();
 const getOAuthOverview = vi.fn();
 const requestOAuthRefresh = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
+  getAnthropicResetStatus: (...args: unknown[]) => getAnthropicResetStatus(...args),
+  consumeAnthropicReset: (...args: unknown[]) => consumeAnthropicReset(...args),
   consumeCodexResetCredit: (...args: unknown[]) => consumeCodexResetCredit(...args),
   getAccountModels: (...args: unknown[]) => getAccountModels(...args),
   getAccountProxy: (...args: unknown[]) => getAccountProxy(...args),
@@ -131,6 +135,8 @@ function renderPage(
 describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
+    getAnthropicResetStatus.mockReset();
+    consumeAnthropicReset.mockReset();
     getAccountModels.mockReset();
     getAccountProxy.mockReset();
     getAccountSchedule.mockReset();
@@ -174,6 +180,50 @@ describe('providers page', () => {
       retryAfterMs: 0,
       status: { ...idleRefresh, state: 'queued', jobId: 'refresh-1', requestedAt: Date.now() },
     });
+  });
+
+  it('requires the explicit Claude confirmation and cannot dismiss by backdrop or Escape', async () => {
+    getAnthropicResetStatus.mockResolvedValue({
+      eligible: true,
+      at_limit: false,
+      pending: false,
+      next_grant_id: 'launch',
+      grants: [
+        {
+          id: 'launch',
+          label: 'Launch reset',
+          resets_total: 1,
+          resets_left: 1,
+          ends_at: new Date(Date.now() + 86_400_000).toISOString(),
+          clears: ['five_hour', 'seven_day'],
+          paused: false,
+          usable_now: true,
+          use_requires_limit: false,
+          blocking: [],
+        },
+      ],
+    });
+    consumeAnthropicReset.mockResolvedValue({
+      result: 'reset',
+      status: null,
+      quotaRefreshed: true,
+    });
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: 'Reset Claude usage' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
+    expect(consumeAnthropicReset).not.toHaveBeenCalled();
+    expect(within(dialog).getByText(/1 resets remaining/)).toBeInTheDocument();
+    expect(screen.queryByTestId('modal-scrim')).not.toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: 'Confirm Claude usage reset' })).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(consumeAnthropicReset).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await fireEvent.click(within(row).getByRole('button', { name: 'Reset Claude usage' }));
+    const confirmation = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
+    await fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset Claude usage' }));
+    await waitFor(() => expect(consumeAnthropicReset).toHaveBeenCalledTimes(1));
   });
 
   it('accepts refreshed route data without entering a reactive update loop', async () => {

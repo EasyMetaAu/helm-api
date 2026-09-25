@@ -1503,6 +1503,7 @@
   {#if confirmingAnthropicReset}
     <Modal
       label={$t('Confirm Claude usage reset')}
+      dismissible={false}
       onclose={() => {
         if (!resettingLimit) confirmingAnthropicReset = null;
       }}
