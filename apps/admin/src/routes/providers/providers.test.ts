@@ -220,7 +220,11 @@ describe('providers page', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(consumeAnthropicReset).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    await fireEvent.click(within(row).getByRole('button', { name: 'Reset Claude usage' }));
+    const resetButton = await within(row).findByRole('button', { name: /Reset Claude usage/ });
+    expect(within(resetButton).getByTestId('anthropic-reset-meta')).toHaveTextContent(
+      '1 resets remaining',
+    );
+    await fireEvent.click(resetButton);
     const confirmation = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
     await fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset Claude usage' }));
     await waitFor(() => expect(consumeAnthropicReset).toHaveBeenCalledTimes(1));
