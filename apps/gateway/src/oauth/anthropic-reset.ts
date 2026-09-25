@@ -134,14 +134,18 @@ export function createAnthropicResetAccess(deps: {
           scope.length > 0 &&
           scope.every((name) => {
             const k = ANTHROPIC_RESET_WINDOW_KEYS[name];
+            if (!k) return false;
             const prev = before.windows.find((w) => w.key === k);
+            // Nullable provider scopes (such as overage) may have no observable
+            // window. A previously observed window must still survive readback.
+            if (!prev) return true;
             const next = after?.windows.find((w) => w.key === k);
             return (
               next !== undefined &&
               next.usedPercent < 100 &&
               (outcome?.result === "reset" ||
-                (prev !== undefined &&
-                  (prev.usedPercent === 0 || next.usedPercent < prev.usedPercent)))
+                prev.usedPercent === 0 ||
+                next.usedPercent < prev.usedPercent)
             );
           });
         const confirmed = reduced && windowsRestored;
@@ -166,9 +170,9 @@ export function createAnthropicResetAccess(deps: {
             try {
               const sibling = await context(account);
               if (sibling.org === org) {
+                affectedAccounts.push(account);
                 const siblingRead = await readUsage(sibling.request, key);
-                if (!siblingRead.status.pending) affectedAccounts.push(account);
-                else identitiesComplete = false;
+                if (siblingRead.status.pending) identitiesComplete = false;
               }
             } catch {
               identitiesComplete = false;

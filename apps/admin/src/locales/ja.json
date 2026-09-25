@@ -1102,7 +1102,7 @@
   "System default lane": "システムの既定レーン",
   "A previous Claude reset is still unconfirmed": "前回のClaudeリセットは未確認です",
   "No Claude reset is currently available": "現在利用できるClaudeリセットはありません",
-  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claudeリセットの結果を確認できません。使用量を更新して再試行してください",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claudeのリセット結果を確認できません。クレジットが消費された可能性があります。再度リセットする前に管理者の確認が必要です。",
   "Claude usage reset": "Claudeの使用量をリセットしました",
   "Claude reset was not applied": "Claudeリセットは適用されませんでした",
   "Use one Claude reset for": "次のアカウントでClaudeリセットを1回使用：",

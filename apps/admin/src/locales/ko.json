@@ -1102,7 +1102,7 @@
   "System default lane": "시스템 기본 레인",
   "A previous Claude reset is still unconfirmed": "이전 Claude 재설정이 확인되지 않았습니다",
   "No Claude reset is currently available": "현재 사용할 수 있는 Claude 재설정이 없습니다",
-  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 재설정 결과를 확인할 수 없습니다. 사용량을 새로 고친 후 다시 시도하세요",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 재설정 결과를 확인할 수 없습니다. 크레딧이 사용되었을 수 있습니다. 다시 재설정하기 전에 관리자가 확인해야 합니다.",
   "Claude usage reset": "Claude 사용량이 재설정되었습니다",
   "Claude reset was not applied": "Claude 재설정이 적용되지 않았습니다",
   "Use one Claude reset for": "다음 계정에 Claude 재설정 1회 사용:",

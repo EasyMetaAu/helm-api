@@ -1001,7 +1001,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const result = await consume(parsed.data);
       let quotaRefreshed = false;
       if (result.result === "reset" && deps.oauthQuota && s?.fetchAnthropicQuota) {
-        quotaRefreshed = true;
+        quotaRefreshed = result.quotaRefreshed;
         for (const account of result.affectedAccounts) {
           try {
             const windows = await s.fetchAnthropicQuota({ account, force: true });
@@ -1027,12 +1027,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             });
             deps.applyQuotaSnapshot?.("anthropic", account, windows, capturedAt);
             if (deps.applyUsageLimit) {
-              const until = windowsToUsageLimit(windows, capturedAt);
+              const current = await deps.oauthQuota.get("anthropic", account);
+              const active = (current?.usageLimitedUntilMs ?? 0) > capturedAt;
+              const until = active
+                ? windowsToActiveUsageRecovery(windows, capturedAt)
+                : windowsToUsageLimit(windows, capturedAt);
               await deps.applyUsageLimit(
                 "anthropic",
                 account,
                 until,
-                until === null ? "replace" : "extend",
+                active || until === null ? "replace" : "extend",
               );
             }
           } catch {

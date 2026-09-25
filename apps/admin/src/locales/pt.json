@@ -1102,7 +1102,7 @@
   "System default lane": "Rota padrão do sistema",
   "A previous Claude reset is still unconfirmed": "O reset anterior do Claude não foi confirmado",
   "No Claude reset is currently available": "Nenhum reset do Claude está disponível",
-  "Claude reset outcome is unconfirmed; refresh usage before retrying": "O resultado não foi confirmado; atualize o uso antes de tentar novamente",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "A redefinição do Claude não foi confirmada; um crédito pode ter sido consumido. Um administrador deve verificar antes de outra redefinição.",
   "Claude usage reset": "Uso do Claude redefinido",
   "Claude reset was not applied": "O reset do Claude não foi aplicado",
   "Use one Claude reset for": "Usar um reset do Claude para",

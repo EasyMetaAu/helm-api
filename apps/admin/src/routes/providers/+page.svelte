@@ -833,9 +833,9 @@
         grantId: grant.id,
         expectedResetsLeft: grant.resets_left,
       });
+      confirmingAnthropicReset = null;
       if (result.result === 'unknown')
         throw new Error($t('Claude reset outcome is unconfirmed; refresh usage before retrying'));
-      confirmingAnthropicReset = null;
       await invalidateAll();
       resetNotice =
         result.result === 'reset' ? $t('Claude usage reset') : $t('Claude reset was not applied');

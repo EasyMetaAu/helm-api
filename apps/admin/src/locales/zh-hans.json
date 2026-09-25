@@ -1102,7 +1102,7 @@
   "System default lane": "系统默认通道",
   "A previous Claude reset is still unconfirmed": "上一次 Claude 重置尚未确认",
   "No Claude reset is currently available": "当前没有可用的 Claude 重置",
-  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 重置结果未确认；请刷新用量后再试",
+  "Claude reset outcome is unconfirmed; refresh usage before retrying": "Claude 重置结果未确认，可能已消耗一次重置额度。再次重置前须由管理员核查。",
   "Claude usage reset": "Claude 用量已重置",
   "Claude reset was not applied": "Claude 重置未执行",
   "Use one Claude reset for": "为以下账户使用一次 Claude 重置：",

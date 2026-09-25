@@ -12,6 +12,7 @@
 - **决定**：新增独立的 `reset-grants` 管理端点，读取官方 Claude OAuth usage/profile，并在二次确认后发送一次 `cedar_ember` reset 请求；保留现有 Codex `/reset` 路径语义。
 - **安全边界**：POST 前重新读取并校验同一组织、下一个 grant、额度计数、有效期、scope 与冷却；请求 ID 在发送前持久化。超时或读回不确定时保持 pending，禁止自动重试和重复消费。不会在测试或部署验收中点击真实重置。
 - **读回限制**：只有 grant 计数减少且受影响 quota windows 读回恢复才报告 `reset`；已确认后逐个刷新已验证同组织别名并更新 quota store/cooldown。刷新失败仍返回已确认的上游结果，但 `quotaRefreshed=false`，需后续只读刷新。
+- **读回校验**：仅对重置前可观测的 scope 要求恢复，nullable overage 不阻止确认；已观测窗口消失仍拒绝确认。部分重置复用既有 95% 活跃限额恢复判定，保留未清除周窗的 cooldown。同组织身份核实后即纳入刷新集合，暂时读取失败标记刷新不完整；结果不明时关闭确认框并提示可能已扣次数，需人工核查。
 - **供应商差异**：Claude 的 early-use grant 不套 Codex 的 90% 阈值；未知 scope 不授权消费。上游接口若变化，管理端点 fail-closed，普通 Anthropic quota PULL 保持原 schema。
 
 ## 2026-09-25 · 内存复查：Replay 分块落盘与已接收请求防重放（Runtime / Provider / Store，docs/04、05、07、08）
@@ -82,13 +83,9 @@
 - **证据**：Grok 4.7 的 PR 全绿；相同合并提交在共享 runner 上三次执行，第一次 100 项通过但 Chromium 下载重试耗尽 job 时间，后两次分别为五秒并发队列和固定等待 1.5 秒的记忆 worker 测试失败，其余 99 项通过。不是稳定复现的 Grok 配置失败。
 - **决定**：main E2E 与 PR 一样使用独立 ubuntu-24.04 runner，沿用 verify/store 的隔离做法。保留原有 100 项断言、十分钟 job 上限、真实 PostgreSQL、浏览器安装、只读权限和完整发布门禁，不增加重试或放宽超时。版本仍为尚未发布的 0.30.7。
 
-## 2026-09-22 · Grok 4.7 与 Build Fast 配置（Config / 路由 / 计费，docs/04、07）
-
-- **来源**：[官方模型页](https://docs.x.ai/developers/models/grok-4.7)、[官方价格页](https://docs.x.ai/developers/pricing)及已认证的 Grok CLI 目录。两个型号均为 500K 上下文，支持 low/medium/high/xhigh；沿用订阅通道的工具、图片和流式能力，未知输出上限保留 null。公共 API 的结构化输出声明不代表订阅代理已验证，JSON 能力继续关闭。
-- **价格**：每百万 token 的输入/输出/缓存读取，标准版为 $2/$6/$0.5，超过 200,000 prompt tokens 为 $4/$12/$1；priority 按官方 2 倍计。Build Fast 为 $4/$12/$1，长上下文为 $6/$18/$1.5，不能套用标准版 priority 的长上下文价格。订阅仍按 API 等价估算计入遥测与 key 预算，不是 SuperGrok 订阅账单。
-- **通道与边界**：稳定 grok 主模型从 4.6 切到 4.7，所有引用它的 fallback 链随之升级；新增 grok-fast，并把 grok-*-build-fast 别名导向该通道。旧型号能力与价格保留，媒体通道不变。不添加未公开定价的 Fast priority 档，不为当前订阅代理启用美国区域 API 费率。
-
 ## 更早历史总览
+
+2026-09-22：Grok 4.7 与 Build Fast 配置沿用订阅能力边界，按官方标准和长上下文价格计费，历史型号保留。
 
 2026-09-21：WebSocket 降级到 HTTP 后禁止发送无法恢复上下文的增量 continuation；完整记录见 git history.
 
