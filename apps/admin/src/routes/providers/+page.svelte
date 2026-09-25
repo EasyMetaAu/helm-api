@@ -101,6 +101,10 @@
     status: AnthropicResetStatus;
     grant: AnthropicResetGrant;
   } | null>(null);
+  // Cached read-only Claude grant status keeps the reset action informative without
+  // changing the consume boundary: the POST still only runs from the confirmation modal.
+  let anthropicResetStatusByAccount = $state<Record<string, AnthropicResetStatus>>({});
+  const anthropicResetRequests = new Set<string>();
   // True while the confirmed consume is in flight (disables the dialog's buttons).
   let resettingLimit = $state<boolean>(false);
   // Transient success line after a credit reset (e.g. "Reset 2 window(s)"); cleared on
@@ -117,6 +121,27 @@
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
+
+  $effect(() => {
+    const anthropicAccounts = overview.providers
+      .filter((provider) => provider.id === 'anthropic')
+      .flatMap((provider) => provider.accounts.map((account) => account.account));
+    untrack(() => {
+      for (const account of anthropicAccounts) {
+        const key = keyOf('anthropic', account);
+        if (anthropicResetRequests.has(key)) continue;
+        anthropicResetRequests.add(key);
+        void Promise.resolve()
+          .then(() => getAnthropicResetStatus(account))
+          .then((status) => {
+            if (status) anthropicResetStatusByAccount[key] = status;
+          })
+          .catch(() => {
+            anthropicResetRequests.delete(key);
+          });
+      }
+    });
+  });
   const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
   const strategyOptions: Array<{
     value: OAuthSelectionStrategy;
@@ -160,6 +185,22 @@
 
   function providerName(id: string): string {
     return overview.providers.find((p) => p.id === id)?.name ?? id;
+  }
+
+  function anthropicResetGrant(account: string): AnthropicResetGrant | null {
+    const status = anthropicResetStatusByAccount[keyOf('anthropic', account)];
+    if (!status) return null;
+    return (
+      status.grants.find((grant) => grant.id === status.next_grant_id && grant.resets_left > 0) ??
+      status.grants.find((grant) => grant.resets_left > 0) ??
+      null
+    );
+  }
+
+  function anthropicResetButtonMeta(account: string): string {
+    const grant = anthropicResetGrant(account);
+    if (!grant) return '';
+    return `${$t('{n} resets remaining', { n: grant.resets_left })} · ${$t('Expires')}: ${new Date(grant.ends_at).toLocaleDateString()}`;
   }
 
   function mediaBadge(model: string): 'Image' | 'Video' | null {
@@ -810,6 +851,7 @@
   async function prepareAnthropicReset(account: string): Promise<void> {
     try {
       const status = await getAnthropicResetStatus(account);
+      anthropicResetStatusByAccount[keyOf('anthropic', account)] = status;
       const grant = usableAnthropicResetGrant(status, Date.now());
       if (!grant)
         throw new Error(
@@ -834,6 +876,7 @@
         expectedResetsLeft: grant.resets_left,
       });
       confirmingAnthropicReset = null;
+      if (result.status) anthropicResetStatusByAccount[keyOf('anthropic', account)] = result.status;
       if (result.result === 'unknown')
         throw new Error($t('Claude reset outcome is unconfirmed; refresh usage before retrying'));
       await invalidateAll();
@@ -1404,7 +1447,10 @@
                       class="btn-secondary"
                       disabled={resettingLimit}
                       onclick={() => prepareAnthropicReset(row.account.account)}
-                      >{$t('Reset Claude usage')}</button
+                      >{$t('Reset Claude usage')}{#if anthropicResetButtonMeta(row.account.account)}
+                        <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
+                          >({anthropicResetButtonMeta(row.account.account)})</span
+                        >{/if}</button
                     >
                   {/if}
                   <button
