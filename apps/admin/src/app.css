@@ -125,8 +125,9 @@
     @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 md:h-7 md:w-7;
   }
 
-  /* — Row action menu ("⋯") — a native <details> so it needs no JS and keeps its
-     items in the DOM (tests, a11y). Primary actions stay as buttons in the row;
+  /* — Row action menu ("⋯") — a native <details> that keeps its items in the DOM
+     (tests, a11y); $lib/menu closes it on click-away / Escape / item choice.
+     Primary actions stay as buttons in the row;
      secondary/destructive ones live here, destructive last. — */
   .menu {
     @apply relative;

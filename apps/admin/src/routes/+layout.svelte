@@ -7,12 +7,14 @@
   import PageSkeleton from '$lib/components/PageSkeleton.svelte';
   import StatusCluster from '$lib/components/StatusCluster.svelte';
   import { initI18n, t } from '$lib/i18n';
+  import { installMenuDismiss } from '$lib/menu';
 
   let { children } = $props();
 
   // Resolve the saved/browser language once on the client (SPA — no SSR).
   onMount(() => {
     void initI18n();
+    return installMenuDismiss(document);
   });
 
   // Mobile slide-over state. Desktop (md+) keeps the sidebar pinned.
