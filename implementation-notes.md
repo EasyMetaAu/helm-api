@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-26 · 订阅账号重新连接入口（Admin / OAuth）
+
+- **决定**：账号显示 `needs reconnect` 状态时，在账号行 Actions 区显示 `Reconnect`；复用现有 OAuth 对话框并预选原 provider/account，打开后自动开始授权流程。重新连接的启动请求带 account 标识，网关从已保存的账号设置恢复 egress proxy，避免重新授权时意外绕过原代理。
+- **边界**：保留既有手动粘贴和 device-code 流程、账号标签和完成后的 pool rebuild；普通 `Connect` 仍从空白表单开始。代理密钥不经过管理端，只在网关内从加密设置严格恢复；读取或解密失败则拒绝启动。Copilot 沿用已保存的 Enterprise 域名。重连在服务端 session 固定原账号，完成或轮询时拒绝账号不匹配；原标签保留空白，不隐式改名。取消后不再打开迟到的授权页。
+
+
 ## 2026-09-25 · Claude OAuth 手动重置额度（OAuth / Admin，研究契约）
 
 - **决定**：新增独立的 `reset-grants` 管理端点，读取官方 Claude OAuth usage/profile，并在二次确认后发送一次 `cedar_ember` reset 请求；保留现有 Codex `/reset` 路径语义。
@@ -79,13 +85,10 @@
 - **恢复边界**：原连接缺失或远端明确未发送时保持 response_create_not_sent 恢复语义；发送后连接失败标记结果不明，禁止自动重放。普通 HTTP 与其他 generic Responses provider 保持原路由。需要真实同 socket 两轮 continuation 作为验收，普通 CLI 或 SSE 成功不足以覆盖此问题。
 - **本次验收**：328 项定向测试、core/gateway 类型检查与构建通过；独立审查提出的握手 401/403/429 错误保真已补测试修复。`.12` 的 0.30.7 派生镜像部署后，同 socket 两轮均 response.completed、远端账号一致；Claude/Grok/Codex CLI 工具调用通过，测试 Key 全部删除。正式发布仍需通过完整 CI 与不可变镜像验收。
 
-
-## 2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）
-
-- **证据**：Grok 4.7 的 PR 全绿；相同合并提交在共享 runner 上三次执行，第一次 100 项通过但 Chromium 下载重试耗尽 job 时间，后两次分别为五秒并发队列和固定等待 1.5 秒的记忆 worker 测试失败，其余 99 项通过。不是稳定复现的 Grok 配置失败。
-- **决定**：main E2E 与 PR 一样使用独立 ubuntu-24.04 runner，沿用 verify/store 的隔离做法。保留原有 100 项断言、十分钟 job 上限、真实 PostgreSQL、浏览器安装、只读权限和完整发布门禁，不增加重试或放宽超时。版本仍为尚未发布的 0.30.7。
-
 ## 更早历史总览
+
+2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）：完整记录见 git history。
+
 
 2026-09-22：Grok 4.7 与 Build Fast 配置沿用订阅能力边界，按官方标准和长上下文价格计费，历史型号保留。
 

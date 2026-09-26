@@ -166,6 +166,7 @@ export interface OAuthAdminAccess {
   // it from the start, never the operator's real IP (issue #38).
   startManualPaste(input: {
     providerId: string;
+    account?: string;
     proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; authorizeUrl: string }>;
   completeManualPaste(input: {
@@ -179,6 +180,7 @@ export interface OAuthAdminAccess {
   // the first device-code call so step 1 already egresses through it (issue #38).
   startDeviceCode(input: {
     providerId: string;
+    account?: string;
     enterprise?: string;
     proxy?: AccountProxyInput;
   }): Promise<{

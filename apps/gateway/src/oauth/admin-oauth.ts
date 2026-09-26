@@ -66,6 +66,7 @@ import {
   clearAccountSettings,
   getAccountSettings,
   loadAccountSettings,
+  loadAccountSettingsForMutation,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
@@ -275,6 +276,7 @@ type Session =
   | {
       kind: "manual";
       providerId: string;
+      account?: string;
       verifier: string;
       state: string;
       proxy?: ProxyConfig;
@@ -283,6 +285,7 @@ type Session =
   | {
       kind: "device";
       providerId: string;
+      account?: string;
       deviceCode: string;
       domain?: string;
       tokenEndpoint?: string;
@@ -442,6 +445,19 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
     validateProxyConfig(next);
     return next;
+  }
+
+  async function reconnectProxy(
+    providerId: string,
+    account: string,
+  ): Promise<ProxyConfig | undefined> {
+    const stored = getAccountSettings(
+      await loadAccountSettingsForMutation(deps.config, deps.encKey),
+      providerId,
+      account,
+    ).proxy;
+    if (stored) validateProxyConfig(stored);
+    return stored;
   }
   // Persist the bind-time proxy to the account settings so refresh + execution +
   // quota reuse it (the SAME blob resolveProviderProxy reads) — true 全程 coverage.
@@ -962,7 +978,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       });
     },
 
-    async startManualPaste({ providerId, proxy }) {
+    async startManualPaste({ providerId, account, proxy }) {
       const flow = MANUAL_FLOWS[providerId];
       if (!flow) {
         throw new Error(`provider '${providerId}' does not support the manual-paste flow`);
@@ -971,12 +987,14 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // Validate the proxy up-front (fail-closed) and pin it to the session. begin()
       // is a pure URL build (no network), so the only flow call that egresses — the
       // token exchange in complete — already has the proxy.
-      const pinned = toProxy(proxy);
+      const pinned = account && !proxy ? await reconnectProxy(providerId, account) : toProxy(proxy);
+      ensureSessionCapacity();
       const { authorizeUrl, verifier, state } = flow.begin();
       const sessionId = genId();
       sessions.set(sessionId, {
         kind: "manual",
         providerId,
+        account,
         verifier,
         state,
         proxy: pinned,
@@ -988,6 +1006,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     async completeManualPaste({ sessionId, redirectInput, account }) {
       const s = take(sessionId);
       if (s.kind !== "manual") throw new Error("wrong flow for this session");
+      if (s.account !== undefined && s.account !== account)
+        throw new Error("reconnect account mismatch");
       const flow = MANUAL_FLOWS[s.providerId];
       if (!flow)
         throw new Error(`provider '${s.providerId}' does not support the manual-paste flow`);
@@ -1007,7 +1027,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       sessions.delete(sessionId);
     },
 
-    async startDeviceCode({ providerId, enterprise, proxy }) {
+    async startDeviceCode({ providerId, account, enterprise, proxy }) {
       if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
@@ -1016,7 +1036,22 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       try {
         // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
         // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
-        const pinned = toProxy(proxy);
+        const pinned =
+          account && !proxy ? await reconnectProxy(providerId, account) : toProxy(proxy);
+        if (account && providerId === COPILOT && !enterprise) {
+          const row = await deps.store.get(providerId, account);
+          if (row?.meta) {
+            const metadata: unknown = JSON.parse(row.meta);
+            if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+              throw new Error("invalid stored account metadata");
+            }
+            const domain = Reflect.get(metadata, "enterpriseUrl");
+            if (domain !== undefined && typeof domain !== "string") {
+              throw new Error("invalid stored enterprise domain");
+            }
+            enterprise = domain;
+          }
+        }
         const doFetch = makeFetch(pinned);
         const start =
           providerId === XAI
@@ -1026,6 +1061,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         sessions.set(sessionId, {
           kind: "device",
           providerId,
+          account,
           deviceCode: start.deviceCode,
           ...(providerId === XAI
             ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
@@ -1055,6 +1091,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     async pollDeviceCode({ sessionId, account }) {
       const s = take(sessionId);
       if (s.kind !== "device") throw new Error("wrong flow for this session");
+      if (s.account !== undefined && s.account !== account)
+        throw new Error("reconnect account mismatch");
       const doFetch = makeFetch(s.proxy);
       if (s.providerId === XAI) {
         if (!s.tokenEndpoint) throw new Error("xAI OAuth session is missing its token endpoint");

@@ -55,6 +55,7 @@ const providerPageKeys = [
   'Credits: {balance}',
   'Unlimited',
   'Additional limits',
+  'Reconnect',
 ] as const;
 
 const modelModeKeys = [

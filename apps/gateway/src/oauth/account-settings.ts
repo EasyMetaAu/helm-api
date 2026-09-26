@@ -160,7 +160,7 @@ function parseAccountSettings(blob: string, encKey: Buffer): AccountSettingsMap 
   return normalized;
 }
 
-async function loadAccountSettingsForMutation(
+export async function loadAccountSettingsForMutation(
   config: ConfigStore,
   encKey: Buffer,
 ): Promise<AccountSettingsMap> {

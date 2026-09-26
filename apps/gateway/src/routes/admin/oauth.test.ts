@@ -2105,6 +2105,31 @@ describe("admin OAuth routes — reset credit", () => {
 });
 
 describe("admin OAuth routes — connect flows", () => {
+  it.each([
+    "manual",
+    "device",
+  ])("%s/start passes the reconnect account and rejects invalid labels", async (flow) => {
+    const seam = fullSeam();
+    const endpoint = `/admin/api/oauth/anthropic/${flow}/start`;
+    const ok = await app({ oauth: seam }).request(endpoint, {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(flow === "manual" ? seam.startManualPaste : seam.startDeviceCode).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "anthropic", account: "work" }),
+    );
+    for (const account of [42, "", " "]) {
+      const bad = await app({ oauth: seam }).request(endpoint, {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account }),
+      });
+      expect(bad.status).toBe(400);
+    }
+  });
+
   it("POST manual/start returns the authorize URL; a bad proxy is 400", async () => {
     const ok = await app({ oauth: fullSeam() }).request("/admin/api/oauth/anthropic/manual/start", {
       method: "POST",
