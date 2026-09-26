@@ -49,9 +49,7 @@
 {:else}
   <div class="min-h-screen bg-canvas text-ink-1">
     <header class="border-b border-border bg-surface">
-      <div
-        class="mx-auto flex h-14 max-w-[1600px] items-center gap-4 px-4 sm:px-6 lg:px-8"
-      >
+      <div class="flex h-14 items-center gap-4 px-4 sm:px-6 lg:px-8">
         <a
           href={hrefFor("")}
           class="flex items-center gap-2 font-semibold text-ink-1"
@@ -145,7 +143,7 @@
       {/if}
     </header>
 
-    <main class="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8">
+    <main class="px-4 py-6 sm:px-6 lg:px-8">
       {@render children()}
     </main>
   </div>

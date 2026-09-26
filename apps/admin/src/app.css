@@ -236,14 +236,11 @@
     @apply h-full rounded-full transition-all;
   }
 
-  /* — Page shells — one width policy app-wide. Data pages (tables, charts) use the
-     wide shell, capped so a 2560px monitor doesn't stretch rows edge to edge; form
-     and detail pages use the narrow shell so labels stay next to their controls. */
-  .page-wide {
-    @apply mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-4 py-6 md:px-8;
-  }
-  .page-narrow {
-    @apply mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 md:px-8;
+  /* — Page shell — every page fills the window (no max width): wide monitors show
+     more, and full screen reads as full screen. Tables stay readable at 1440px
+     through column grouping, not by capping the container. */
+  .page {
+    @apply flex w-full flex-col gap-4 px-4 py-6 md:px-8;
   }
 
   /* — Typography roles — */

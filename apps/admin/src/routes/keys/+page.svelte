@@ -263,7 +263,7 @@
   }
 </script>
 
-<section class="page-wide">
+<section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('API Keys')}</h1>

@@ -7,9 +7,9 @@ const layout = readFileSync(
 );
 
 describe("Portal layout", () => {
-  it("caps page content width consistently on wide screens", () => {
-    expect(layout).toContain("max-w-[1600px]");
-    expect(layout).toContain("mx-auto");
+  it("lets page content fill the window instead of capping it on wide screens", () => {
+    expect(layout).not.toContain("max-w-[1600px]");
+    expect(layout).not.toContain("mx-auto max-w");
   });
 
   it("puts the locale switcher directly in the top nav, and Account as a nav item", () => {

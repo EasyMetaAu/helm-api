@@ -184,7 +184,7 @@
   }
 </script>
 
-<section class="page-wide">
+<section class="page">
   <header class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Requests')}</h1>

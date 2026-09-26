@@ -54,7 +54,7 @@
   }
 </script>
 
-<section class="page-narrow">
+<section class="page">
   <header>
     <h1 class="page-title">{$t('Lanes')}</h1>
     <p class="section-desc">

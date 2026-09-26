@@ -7,10 +7,13 @@ const page = readFileSync(
 );
 
 describe("Portal account page", () => {
-  it("constrains width and lays out key details as a 2-column description list", () => {
-    expect(page).toContain("max-w-3xl");
+  it("fills the window and lays out key details as a 2-column description list", () => {
+    expect(page).not.toContain("max-w-3xl");
     expect(page).toContain("<dl");
     expect(page).toContain("grid-cols-2");
+    // The three cards sit side by side on wide screens, so a full-width page never
+    // stretches a label away from its value.
+    expect(page).toContain("xl:grid-cols-3");
   });
 
   it("shows budgets as used / limit with a progress bar, backed by real usage data", () => {

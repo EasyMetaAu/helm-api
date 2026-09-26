@@ -159,7 +159,7 @@
   }
 </script>
 
-<section class="page-narrow gap-6">
+<section class="page gap-6">
   <header class="flex flex-col gap-2">
     <h1 class="page-title">{$t('System Settings')}</h1>
     <p class="section-desc">

@@ -48,7 +48,7 @@
   );
 </script>
 
-<div class="mx-auto max-w-3xl">
+<div>
   <h1 class="page-title mb-1">{$t("Account")}</h1>
   <p class="section-desc mb-4">
     {$t(
@@ -61,102 +61,106 @@
   {:else if loadError}
     <p class="alert-error">{loadError}</p>
   {:else if me}
-    <div class="card">
-      <h2 class="section-header mb-3">{$t("Key")}</h2>
-      <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
-        <dt class="text-ink-muted">{$t("Key")}</dt>
-        <dd class="text-right font-mono">{me.key_prefix}…</dd>
-        <dt class="text-ink-muted">{$t("Role")}</dt>
-        <dd class="text-right">{me.role}</dd>
-        <dt class="text-ink-muted">{$t("Available lanes")}</dt>
-        <dd class="text-right">{me.allowed_lanes?.join(", ") ?? $t("all")}</dd>
-        <dt class="text-ink-muted">{$t("Rate limit")}</dt>
-        <dd class="text-right">
-          {rpm === null || rpm === undefined
-            ? $t("unlimited")
-            : `${rpm} rpm`}
-        </dd>
-      </dl>
-    </div>
+    <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
+      <div class="card">
+        <h2 class="section-header mb-3">{$t("Key")}</h2>
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+          <dt class="text-ink-muted">{$t("Key")}</dt>
+          <dd class="text-right font-mono">{me.key_prefix}…</dd>
+          <dt class="text-ink-muted">{$t("Role")}</dt>
+          <dd class="text-right">{me.role}</dd>
+          <dt class="text-ink-muted">{$t("Available lanes")}</dt>
+          <dd class="text-right">
+            {me.allowed_lanes?.join(", ") ?? $t("all")}
+          </dd>
+          <dt class="text-ink-muted">{$t("Rate limit")}</dt>
+          <dd class="text-right">
+            {rpm === null || rpm === undefined ? $t("unlimited") : `${rpm} rpm`}
+          </dd>
+        </dl>
+      </div>
 
-    <div class="card mt-4">
-      <h2 class="section-header mb-3">{$t("Your budget")}</h2>
-      <div class="flex flex-col gap-4">
-        <div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-ink-muted">{$t("Spend limit")}</span>
-            <span>
-              {me.budget.spend_usd === null
-                ? $t("unlimited")
-                : `${formatUsd(spent)} ${$t("of")} ${formatUsd(me.budget.spend_usd)}`}
-            </span>
-          </div>
-          {#if spendPct !== null}
-            <div class="progress-track mt-1.5">
-              <div class="progress-bar" style:width={`${spendPct}%`}></div>
-            </div>
-          {/if}
-        </div>
-        <div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-ink-muted">{$t("Token budget")}</span>
-            <span>
-              {me.budget.tokens === null
-                ? $t("unlimited")
-                : `${formatTokens(tokensUsed)} ${$t("of")} ${formatTokens(me.budget.tokens)}`}
-            </span>
-          </div>
-          {#if tokensPct !== null}
-            <div class="progress-track mt-1.5">
-              <div class="progress-bar" style:width={`${tokensPct}%`}></div>
-            </div>
-          {/if}
-        </div>
-        {#if me.budget.requests !== null}
+      <div class="card">
+        <h2 class="section-header mb-3">{$t("Your budget")}</h2>
+        <div class="flex flex-col gap-4">
           <div>
             <div class="flex items-center justify-between text-sm">
-              <span class="text-ink-muted">{$t("Requests")}</span>
-              <span
-                >{formatTokens(requestsUsed)} {$t("of")} {formatTokens(
-                  me.budget.requests,
-                )}</span
-              >
+              <span class="text-ink-muted">{$t("Spend limit")}</span>
+              <span>
+                {me.budget.spend_usd === null
+                  ? $t("unlimited")
+                  : `${formatUsd(spent)} ${$t("of")} ${formatUsd(me.budget.spend_usd)}`}
+              </span>
             </div>
-            {#if requestsPct !== null}
+            {#if spendPct !== null}
               <div class="progress-track mt-1.5">
-                <div class="progress-bar" style:width={`${requestsPct}%`}
-                ></div>
+                <div class="progress-bar" style:width={`${spendPct}%`}></div>
               </div>
             {/if}
           </div>
-        {/if}
-        {#if me.budget.window_seconds}
-          <p class="field-help">
-            {$t("Resets every {hours}h. Over budget: {behavior}.", {
-              hours: Math.round(me.budget.window_seconds / 3600),
-              behavior: me.budget.behavior,
-            })}
-          </p>
-        {/if}
+          <div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-ink-muted">{$t("Token budget")}</span>
+              <span>
+                {me.budget.tokens === null
+                  ? $t("unlimited")
+                  : `${formatTokens(tokensUsed)} ${$t("of")} ${formatTokens(me.budget.tokens)}`}
+              </span>
+            </div>
+            {#if tokensPct !== null}
+              <div class="progress-track mt-1.5">
+                <div class="progress-bar" style:width={`${tokensPct}%`}></div>
+              </div>
+            {/if}
+          </div>
+          {#if me.budget.requests !== null}
+            <div>
+              <div class="flex items-center justify-between text-sm">
+                <span class="text-ink-muted">{$t("Requests")}</span>
+                <span
+                  >{formatTokens(requestsUsed)}
+                  {$t("of")}
+                  {formatTokens(me.budget.requests)}</span
+                >
+              </div>
+              {#if requestsPct !== null}
+                <div class="progress-track mt-1.5">
+                  <div
+                    class="progress-bar"
+                    style:width={`${requestsPct}%`}
+                  ></div>
+                </div>
+              {/if}
+            </div>
+          {/if}
+          {#if me.budget.window_seconds}
+            <p class="field-help">
+              {$t("Resets every {hours}h. Over budget: {behavior}.", {
+                hours: Math.round(me.budget.window_seconds / 3600),
+                behavior: me.budget.behavior,
+              })}
+            </p>
+          {/if}
+        </div>
       </div>
-    </div>
 
-    <div class="card mt-4">
-      <h2 class="section-header mb-3">{$t("Memory")}</h2>
-      <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
-        <dt class="text-ink-muted">{$t("Memory mode")}</dt>
-        <dd class="text-right">{me.memory.mode}</dd>
-        <dt class="text-ink-muted">{$t("Project")}</dt>
-        <dd class="truncate text-right"
-          >{me.memory.project_name ?? $t("Private to this key")}</dd
-        >
-        <dt class="text-ink-muted">{$t("Thread source")}</dt>
-        <dd class="text-right">
-          {me.memory.thread_source === "auto"
-            ? $t("Auto (derive from client signals)")
-            : $t("Header only (x-thread-id)")}
-        </dd>
-      </dl>
+      <div class="card">
+        <h2 class="section-header mb-3">{$t("Memory")}</h2>
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+          <dt class="text-ink-muted">{$t("Memory mode")}</dt>
+          <dd class="text-right">{me.memory.mode}</dd>
+          <dt class="text-ink-muted">{$t("Project")}</dt>
+          <dd class="truncate text-right">
+            {me.memory.project_name ?? $t("Private to this key")}
+          </dd>
+          <dt class="text-ink-muted">{$t("Thread source")}</dt>
+          <dd class="text-right">
+            {me.memory.thread_source === "auto"
+              ? $t("Auto (derive from client signals)")
+              : $t("Header only (x-thread-id)")}
+          </dd>
+        </dl>
+      </div>
     </div>
   {/if}
 </div>

@@ -113,7 +113,7 @@
   }
 </script>
 
-<section class="page-narrow">
+<section class="page">
   <header class="flex flex-col gap-1">
     <h1 class="page-title">{$t('Classifier')}</h1>
     <p class="section-desc">

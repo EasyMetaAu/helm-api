@@ -220,7 +220,7 @@
   }
 </script>
 
-<div class="mx-auto w-full max-w-[1600px] px-4 py-6 md:px-8 md:py-8">
+<div class="w-full px-4 py-6 md:px-8 md:py-8">
   <header class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Overview')}</h1>
