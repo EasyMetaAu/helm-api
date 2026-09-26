@@ -4043,6 +4043,9 @@ export function createGenericOpenAIResponsesClient(
     }
     if (!isNativePassthroughCarrier(body)) return next;
     const carrier = cloneCarrierWithBody(body, next);
+    // The executor holds this attempt's ledger; keep provider shims and header
+    // changes observable even when the upstream rejects the rewritten body.
+    carrier.mutations = body.mutations;
     appendMutationList(carrier.mutations, "body_shims_applied", [
       ...(contract.forceSse === true ? ["generic_responses_force_stream"] : []),
       ...(contract.forceStoreFalse === true ? ["generic_responses_force_store_false"] : []),

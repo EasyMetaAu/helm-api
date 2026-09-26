@@ -7698,7 +7698,11 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       output: [],
     });
     expect(carrier.raw_body).toBe('{"stale":true}');
-    expect(carrier.mutations).toEqual({});
+    expect(carrier.body).toEqual({ model: "grok-native", input: "hi", stream: false, store: true });
+    expect(carrier.mutations).toMatchObject({
+      body_shims_applied: ["generic_responses_force_store_false", "generic_responses_force_stream"],
+      auth_replaced: true,
+    });
   });
 
   it.each([
