@@ -127,6 +127,7 @@ type PortalTelemetry = Pick<
   | "queryPage"
   | "getByRequestId"
   | "getApiKeyId"
+  | "getCreatedAt"
   | "getPayload"
   | "getPayloadMeta"
   | "getPayloadPart"
@@ -184,6 +185,9 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
     },
     async getApiKeyId() {
       return "k1";
+    },
+    async getCreatedAt() {
+      return new Date(1000);
     },
     async getPayload() {
       return {
@@ -589,9 +593,79 @@ describe("portal API", () => {
         request_id: "req_internal_1",
         trace_id: "client_trace_1",
         served_model: "gpt-5.5",
+        created_at: 1000,
       });
       expect(body).not.toContain("SECRET_ALIAS");
       expect(body).not.toContain("SECRET_WIRE");
+      expect(body).not.toContain("SECRET_PROVIDER");
+      expect(body).not.toContain("SECRET_PID");
+      expect(body).not.toContain("SECRET_ACCT");
+    });
+
+    it("surfaces fallback attempt outcomes/timing but never alias or provider identity (R7)", async () => {
+      const tel = telemetry({
+        async getByRequestId() {
+          return decision({
+            provider_attempts: [
+              {
+                alias: "SECRET_ALIAS",
+                skipped: false,
+                skip_reason: null,
+                status: "error",
+                error_class: "timeout",
+                latency_ms: 800,
+                cost_usd: null,
+                error_detail: null,
+                provider_name: "SECRET_PROVIDER",
+                provider_model: "SECRET_WIRE",
+              },
+              {
+                alias: "SECRET_ALIAS",
+                skipped: false,
+                skip_reason: null,
+                status: "ok",
+                error_class: null,
+                latency_ms: 500,
+                cost_usd: 0.02,
+                error_detail: null,
+                provider_name: "SECRET_PROVIDER",
+                provider_model: "SECRET_WIRE",
+              },
+            ],
+          });
+        },
+      });
+      const res = await buildApp(record(), tel).request("/portal/api/requests/trace_1", {
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { attempts: unknown };
+      expect(body.attempts).toEqual([
+        { outcome: "timeout", latency_ms: 800 },
+        { outcome: "success", latency_ms: 500 },
+      ]);
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain("SECRET_ALIAS");
+      expect(serialized).not.toContain("SECRET_PROVIDER");
+      expect(serialized).not.toContain("SECRET_WIRE");
+    });
+
+    it("never returns another key's data even when both records share a request_id shape (cross-key isolation)", async () => {
+      const tel = telemetry({
+        async getApiKeyId() {
+          return "some_other_key";
+        },
+        async getByRequestId() {
+          return decision({ request_id: "trace_1" });
+        },
+      });
+      const res = await buildApp(record(), tel).request("/portal/api/requests/trace_1", {
+        headers: AUTH,
+      });
+      expect(res.status).toBe(404);
+      const body = await res.text();
+      expect(body).not.toContain("gpt-5.5");
+      expect(body).not.toContain("coding");
     });
   });
 

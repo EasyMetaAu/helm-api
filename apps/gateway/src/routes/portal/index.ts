@@ -36,6 +36,7 @@ export interface PortalApiDeps {
     | "queryPage"
     | "getByRequestId"
     | "getApiKeyId"
+    | "getCreatedAt"
     | "getPayload"
     | "getPayloadMeta"
     | "getPayloadPart"
@@ -225,7 +226,11 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
     }
     const rec = await deps.telemetry.getByRequestId(traceId);
     if (!rec) return c.json({ error: "request not found" }, 404);
-    return c.json(toPortalDecisionView(rec));
+    const createdAt = await deps.telemetry.getCreatedAt(traceId);
+    return c.json({
+      ...toPortalDecisionView(rec),
+      ...(createdAt ? { created_at: createdAt.getTime() } : {}),
+    });
   });
 
   // GET /portal/api/requests/:traceId/payload?part=meta|request|response — the caller's

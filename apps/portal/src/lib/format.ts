@@ -126,6 +126,21 @@ export function durationParts(ms: number): DurationParts {
   return h > 0 ? { unit: "hm", h, m } : { unit: "m", m };
 }
 
+// Compact duration for the requests list Latency column and the detail page's
+// fallback-attempt timings. Below 1s a raw ms count is more precise than a
+// decimal fraction of a second; at/above 1s (the common case for LLM calls)
+// seconds are far more readable than a 4-5 digit ms count. Mirrors admin's
+// formatDurationMs (apps/admin/src/lib/format.ts) — not imported (no
+// cross-app import), so any future change to one must be mirrored to the other.
+export function formatDurationMs(ms: number): string {
+  const value = Math.max(0, ms);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  const unit = value < 60_000 ? "s" : "min";
+  const divisor = value < 60_000 ? 1000 : 60_000;
+  const scaled = (value / divisor).toFixed(1).replace(/\.0$/, "");
+  return `${scaled}${unit}`;
+}
+
 // Render a recorded ISO timestamp in the viewer's local timezone/locale. The
 // gateway records times in UTC (ISO 8601, `…Z`); both the request list column
 // and the detail header show them through this helper so the operator reads the
