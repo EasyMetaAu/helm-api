@@ -210,7 +210,9 @@
           >
             <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
           </svg>
-          <span class="min-w-0 truncate {sidebarCollapsed ? 'md:hidden' : ''}">{$t(item.label)}</span>
+          <span class="min-w-0 truncate {sidebarCollapsed ? 'md:hidden' : ''}"
+            >{$t(item.label)}</span
+          >
         </a>
       {/each}
     </nav>

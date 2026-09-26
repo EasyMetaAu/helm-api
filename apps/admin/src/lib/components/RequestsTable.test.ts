@@ -84,9 +84,7 @@ describe('RequestsTable key cell', () => {
 describe('RequestsTable variants', () => {
   it('shows the recorded request body size and keeps legacy rows unknown', () => {
     const { unmount } = render(RequestsTable, {
-      items: [
-        item({ request_body_bytes: 1_572_864 }),
-      ],
+      items: [item({ request_body_bytes: 1_572_864 })],
       detailHref,
     });
     expect(screen.getByTestId('cell-request-body')).toHaveAttribute('title', 'Request body');

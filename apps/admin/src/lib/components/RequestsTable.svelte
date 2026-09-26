@@ -280,9 +280,9 @@
   <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
     <div>{formatDurationMs(r.latency_ms)}</div>
     <div data-testid="cell-tps" class="text-ink-muted">{formatTps(r.tps)}</div>
-    <div data-testid="cell-request-body" class="text-ink-muted" title={$t('Request body')}
-      >{formatBytes(r.request_body_bytes)}</div
-    >
+    <div data-testid="cell-request-body" class="text-ink-muted" title={$t('Request body')}>
+      {formatBytes(r.request_body_bytes)}
+    </div>
   </div>
 {/snippet}
 
@@ -346,32 +346,32 @@
           {#if visibleKey || visibleSession}
             <td data-label={visibleKey ? $t('Key') : $t('Session')} class="px-3 py-2">
               {#if visibleKey}
-              {#if r.key_id && onKeyFilter}
-                <!-- In-page filter (the /requests list): a <button> updates the
+                {#if r.key_id && onKeyFilter}
+                  <!-- In-page filter (the /requests list): a <button> updates the
                      querystring; onRowClick lets it handle the click, not the row. -->
-                <button
-                  type="button"
-                  data-testid="key-filter"
-                  class="block text-left hover:underline"
-                  title={$t('Filter by this key')}
-                  onclick={() => onKeyFilter(r.key_id!)}
-                >
-                  {@render keyLabel(r)}
-                </button>
-              {:else if r.key_id && keyHref}
-                <!-- Cross-page: link to the full requests list filtered by this key
+                  <button
+                    type="button"
+                    data-testid="key-filter"
+                    class="block text-left hover:underline"
+                    title={$t('Filter by this key')}
+                    onclick={() => onKeyFilter(r.key_id!)}
+                  >
+                    {@render keyLabel(r)}
+                  </button>
+                {:else if r.key_id && keyHref}
+                  <!-- Cross-page: link to the full requests list filtered by this key
                      (the dashboard has no in-page filter). A real <a> → open-in-new-tab. -->
-                <a
-                  data-testid="key-filter"
-                  class="block text-left hover:underline"
-                  title={$t('Filter by this key')}
-                  href={keyHref(r.key_id)}
-                >
+                  <a
+                    data-testid="key-filter"
+                    class="block text-left hover:underline"
+                    title={$t('Filter by this key')}
+                    href={keyHref(r.key_id)}
+                  >
+                    {@render keyLabel(r)}
+                  </a>
+                {:else}
                   {@render keyLabel(r)}
-                </a>
-              {:else}
-                {@render keyLabel(r)}
-              {/if}
+                {/if}
               {/if}
               {#if visibleSession}
                 <div class={visibleKey ? 'mt-1' : ''}>{@render sessionCell(r)}</div>

@@ -157,7 +157,6 @@
       confirmingVacuum = false;
     }
   }
-
 </script>
 
 <section class="page-narrow gap-6">
@@ -318,7 +317,9 @@
                   bind:value={form.global_concurrency_limit}
                 />
                 <span class="field-help"
-                  >{$t('0 disables the process-wide cap. The queue toggle above remains the master switch.')}</span
+                  >{$t(
+                    '0 disables the process-wide cap. The queue toggle above remains the master switch.',
+                  )}</span
                 >
               </label>
               <label class="flex flex-col gap-1">

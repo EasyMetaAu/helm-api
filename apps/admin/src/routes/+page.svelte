@@ -218,7 +218,6 @@
     const date = value instanceof Date ? value : new Date(value as string | number);
     return Number.isNaN(date.getTime()) ? String(value ?? '') : formatTrendTick(date, data.bucket);
   }
-
 </script>
 
 <div class="mx-auto w-full max-w-[1600px] px-4 py-6 md:px-8 md:py-8">
@@ -517,5 +516,4 @@
       <RequestsTable items={recent} {detailHref} keyHref={keyFilterHref} variant="recent" />
     {/if}
   </section>
-
 </div>

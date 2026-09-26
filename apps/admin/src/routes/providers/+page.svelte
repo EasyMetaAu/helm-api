@@ -1372,7 +1372,11 @@
                       disabled={saving}
                       aria-label={$t('Fast mode')}
                       onchange={(e) =>
-                        toggleFastMode(row.provider.id, row.account.account, e.currentTarget.checked)}
+                        toggleFastMode(
+                          row.provider.id,
+                          row.account.account,
+                          e.currentTarget.checked,
+                        )}
                     />
                   {/if}
                   <span class="text-ink-muted">{$t('Expires')}</span>
@@ -1427,63 +1431,68 @@
                       <span class="sr-only">{$t('More actions')}</span>
                     </summary>
                     <div class="menu-panel w-56">
-                  {#if usageLimit?.retryable && isCodex}
-                    <button
-                      type="button"
-                      class="menu-item"
-                      disabled={resetting[k] === true}
-                      title={$t('Clear Helm local cooldown and try this account again')}
-                      onclick={() => retryAccount(row.provider.id, row.account.account)}
-                      >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
-                    >
-                  {/if}
-                  {#if isCodex}
-                    <button
-                      type="button"
-                      class="menu-item"
-                      disabled={!canResetCodexLimit}
-                      title={resetCreditTitle(quota, codexCredits)}
-                      onclick={() =>
-                        (confirmingReset = (() => {
-                          const credit = quota?.resetCreditDetails?.find(
-                            (item) =>
-                              item.status === 'available' && item.resetType === 'codexRateLimits',
-                          );
-                          return {
+                      {#if usageLimit?.retryable && isCodex}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={resetting[k] === true}
+                          title={$t('Clear Helm local cooldown and try this account again')}
+                          onclick={() => retryAccount(row.provider.id, row.account.account)}
+                          >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
+                        >
+                      {/if}
+                      {#if isCodex}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={!canResetCodexLimit}
+                          title={resetCreditTitle(quota, codexCredits)}
+                          onclick={() =>
+                            (confirmingReset = (() => {
+                              const credit = quota?.resetCreditDetails?.find(
+                                (item) =>
+                                  item.status === 'available' &&
+                                  item.resetType === 'codexRateLimits',
+                              );
+                              return {
+                                providerId: row.provider.id,
+                                account: row.account.account,
+                                credits: codexCredits ?? 0,
+                                autoReset: row.account.autoReset ?? false,
+                                ...(credit?.id ? { creditId: credit.id } : {}),
+                                ...(credit?.title ? { creditTitle: credit.title } : {}),
+                                idempotencyKey: resetRequestId(),
+                              };
+                            })())}
+                          >{codexCredits != null && codexCredits > 0
+                            ? $t('Reset limit ({n})', { n: codexCredits })
+                            : $t('Reset limit')}</button
+                        >
+                      {/if}
+                      {#if row.provider.id === 'anthropic'}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={resettingLimit}
+                          onclick={() => prepareAnthropicReset(row.account.account)}
+                          >{$t(
+                            'Reset Claude usage',
+                          )}{#if anthropicResetButtonMeta(row.account.account)}
+                            <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
+                              >({anthropicResetButtonMeta(row.account.account)})</span
+                            >{/if}</button
+                        >
+                      {/if}
+                      <button
+                        type="button"
+                        class="menu-item-danger"
+                        disabled={disconnecting}
+                        onclick={() =>
+                          (confirming = {
                             providerId: row.provider.id,
                             account: row.account.account,
-                            credits: codexCredits ?? 0,
-                            autoReset: row.account.autoReset ?? false,
-                            ...(credit?.id ? { creditId: credit.id } : {}),
-                            ...(credit?.title ? { creditTitle: credit.title } : {}),
-                            idempotencyKey: resetRequestId(),
-                          };
-                        })())}
-                      >{codexCredits != null && codexCredits > 0
-                        ? $t('Reset limit ({n})', { n: codexCredits })
-                        : $t('Reset limit')}</button
-                    >
-                  {/if}
-                  {#if row.provider.id === 'anthropic'}
-                    <button
-                      type="button"
-                      class="menu-item"
-                      disabled={resettingLimit}
-                      onclick={() => prepareAnthropicReset(row.account.account)}
-                      >{$t('Reset Claude usage')}{#if anthropicResetButtonMeta(row.account.account)}
-                        <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
-                          >({anthropicResetButtonMeta(row.account.account)})</span
-                        >{/if}</button
-                    >
-                  {/if}
-                  <button
-                    type="button"
-                    class="menu-item-danger"
-                    disabled={disconnecting}
-                    onclick={() =>
-                      (confirming = { providerId: row.provider.id, account: row.account.account })}
-                    >{$t('Disconnect')}</button
-                  >
+                          })}>{$t('Disconnect')}</button
+                      >
                     </div>
                   </details>
                 </div>

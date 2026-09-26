@@ -125,7 +125,7 @@
       disabled={total < 2}
       data-testid="policy-drag-handle"
       ondragstart={(event) => ondragstart(index, event)}
-      ondragend={ondragend}
+      {ondragend}
       onpointerdown={(event) => onpointerstart(index, event)}
       onkeydown={handleDragKeydown}
     >

@@ -386,7 +386,9 @@
       <section class="card">
         <h2 class="section-header">{$t('Cost')}</h2>
         <p class="field-help mb-2">
-          {$t('What this single request cost, split across routing, optional eval, and completion.')}
+          {$t(
+            'What this single request cost, split across routing, optional eval, and completion.',
+          )}
         </p>
         <CostBreakdown
           cost={d.cost_breakdown}

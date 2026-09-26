@@ -300,9 +300,11 @@ describe('DecisionChain', () => {
     render(DecisionChain, { detail: detail({ lane_candidates: many }) });
     const lanes = screen.getByTestId('chain-lanes');
     // All candidates stay in the DOM in order (tests, find-in-page)…
-    expect(within(lanes).getAllByTestId('lane-candidate').map((n) => n.textContent?.trim())).toEqual(
-      many,
-    );
+    expect(
+      within(lanes)
+        .getAllByTestId('lane-candidate')
+        .map((n) => n.textContent?.trim()),
+    ).toEqual(many);
     // …but only the first few are visible until expanded.
     const more = within(lanes).getByTestId('lane-candidates-more');
     expect(more.tagName).toBe('DETAILS');

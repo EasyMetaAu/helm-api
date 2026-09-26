@@ -1116,7 +1116,15 @@ describe('safeBackTo (Back-link open-redirect guard)', () => {
 describe('request detail route module', () => {
   it('exports only SvelteKit-valid names (a stray export 500s the page at runtime)', async () => {
     const mod = await import('./[traceId]/+page.js');
-    const valid = new Set(['load', 'prerender', 'csr', 'ssr', 'trailingSlash', 'config', 'entries']);
+    const valid = new Set([
+      'load',
+      'prerender',
+      'csr',
+      'ssr',
+      'trailingSlash',
+      'config',
+      'entries',
+    ]);
     expect(Object.keys(mod).filter((k) => !valid.has(k) && !k.startsWith('_'))).toEqual([]);
   });
 });

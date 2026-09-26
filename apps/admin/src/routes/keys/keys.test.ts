@@ -151,13 +151,17 @@ describe('keys page', () => {
     renderPage([key('k1', { name: 'Prod' }), key('k2', { disabled: true })]);
     const rows = screen.getAllByTestId('key-row');
     // Active row: an explicit Details action (not only the clickable name).
-    expect(within(rows[0]).getByRole('link', { name: /details/i }).getAttribute('href')).toBe(
-      '/keys/k1',
-    );
+    expect(
+      within(rows[0])
+        .getByRole('link', { name: /details/i })
+        .getAttribute('href'),
+    ).toBe('/keys/k1');
     // Disabled (revoked) row still lets an operator inspect its history.
-    expect(within(rows[1]).getByRole('link', { name: /details/i }).getAttribute('href')).toBe(
-      '/keys/k2',
-    );
+    expect(
+      within(rows[1])
+        .getByRole('link', { name: /details/i })
+        .getAttribute('href'),
+    ).toBe('/keys/k2');
   });
 
   it('reveals the full key in a modal without putting it in the list permanently', async () => {
@@ -189,7 +193,9 @@ describe('keys page', () => {
 
     const unavailableDialog = await screen.findByRole('dialog', { name: /full key unavailable/i });
     expect(within(unavailableDialog).getByText(/cannot be reconstructed/i)).toBeInTheDocument();
-    await fireEvent.click(within(unavailableDialog).getByRole('button', { name: /rotate this key/i }));
+    await fireEvent.click(
+      within(unavailableDialog).getByRole('button', { name: /rotate this key/i }),
+    );
 
     const confirm = screen.getByRole('dialog', { name: /rotate key/i });
     expect(rotateKey).not.toHaveBeenCalled();
@@ -220,11 +226,9 @@ describe('keys page', () => {
   });
 
   it('renders the today usage cell for a key with traffic, "—" for one without', () => {
-    renderPage(
-      [key('k1'), key('k2')],
-      undefined,
-      [{ key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 }],
-    );
+    renderPage([key('k1'), key('k2')], undefined, [
+      { key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 },
+    ]);
     expect(screen.getByRole('columnheader', { name: /usage \(today\)/i })).toBeInTheDocument();
     const rows = screen.getAllByTestId('key-row');
     // k1 has usage: request count + error count + cost + tokens all render.

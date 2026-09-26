@@ -441,7 +441,9 @@
                           class="menu-item"
                           disabled={revealing === key.key_id}
                           onclick={() => handleReveal(key)}
-                          >{revealing === key.key_id ? $t('Revealing…') : $t('View full key')}</button
+                          >{revealing === key.key_id
+                            ? $t('Revealing…')
+                            : $t('View full key')}</button
                         >
                         {#if !key.disabled}
                           <button
