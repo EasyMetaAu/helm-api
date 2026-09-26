@@ -75,7 +75,7 @@
       {$t('No lanes are configured yet.')}
     </div>
   {:else}
-    <div class="flex flex-col gap-4">
+    <div class="flex flex-col gap-2">
       {#each lanes as lane (lane.name)}
         <LaneEditor
           {lane}

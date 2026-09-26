@@ -23,6 +23,7 @@
     models = [],
     laneNames = [],
     canDelete = true,
+    open = false,
     onchange,
     ondelete = () => {},
   }: {
@@ -30,6 +31,7 @@
     models?: ModelOption[];
     laneNames?: string[];
     canDelete?: boolean;
+    open?: boolean;
     onchange: (lane: Lane) => void;
     ondelete?: (name: string) => void;
   } = $props();
@@ -178,21 +180,44 @@
   }
 </script>
 
-<section class="card flex flex-col gap-3" data-testid="lane-card">
-  <header class="flex items-center justify-between gap-3">
-    <h2 class="section-header">{lane.name}</h2>
-    <div class="flex items-center gap-2">
+<!-- Collapsed by default: a long lane list reads as a scannable table of
+     "name · primary → +N fallbacks · effort"; expanding a row reveals the full
+     editor. Native <details> keeps every field in the DOM (tests, find-in-page),
+     and an invalid lane forces itself open so its error is never hidden. -->
+<details
+  class="group rounded-lg border border-slate-200 bg-white"
+  data-testid="lane-card"
+  open={open || primaryEmpty}
+>
+  <summary
+    data-testid="lane-summary"
+    class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-slate-50 [&::-webkit-details-marker]:hidden"
+  >
+    <svg
+      viewBox="0 0 20 20"
+      class="h-4 w-4 shrink-0 text-ink-faint transition-transform group-open:rotate-90"
+      fill="currentColor"
+      aria-hidden="true"
+      ><path d="M7.2 4.2a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06L8.26 15.8a.75.75 0 1 1-1.06-1.06L11.94 10 7.2 5.26a.75.75 0 0 1 0-1.06Z" /></svg
+    >
+    <div class="min-w-0 flex-1">
+      <h2 class="text-sm font-semibold text-ink">{lane.name}</h2>
       {#if lane.purpose}
-        <span class="badge-neutral">{lane.purpose}</span>
+        <p class="truncate text-xs text-ink-muted">{lane.purpose}</p>
       {/if}
-      <button
-        type="button"
-        class="btn-danger-outline"
-        disabled={!canDelete}
-        onclick={() => ondelete(initial.name)}>{$t('Delete')}</button
-      >
     </div>
-  </header>
+    <div class="hidden min-w-0 items-center gap-2 text-xs sm:flex">
+      <code class="max-w-[16rem] truncate font-mono text-ink-body">{trimmedPrimary || '—'}</code>
+      {#if fallback.length > 0}
+        <span class="text-ink-muted" title={fallback.join(' → ')}>→ +{fallback.length}</span>
+      {/if}
+      {#if reasoningEffort}
+        <span class="badge-neutral" title={$t('Forced reasoning effort')}>{reasoningEffort}</span>
+      {/if}
+    </div>
+  </summary>
+
+  <div class="flex flex-col gap-3 border-t border-slate-100 px-4 pt-3 pb-4">
 
   <label class="flex flex-col gap-1">
     <span class="field-label">{$t('Primary')}</span>
@@ -359,4 +384,15 @@
       {$t('Primary is required and cannot be empty.')}
     </p>
   {/if}
-</section>
+
+  <div class="flex justify-end border-t border-slate-100 pt-3">
+    <button
+      type="button"
+      class="btn-danger-outline"
+      disabled={!canDelete}
+      title={canDelete ? undefined : $t('The default lane cannot be deleted.')}
+      onclick={() => ondelete(initial.name)}>{$t('Delete')}</button
+    >
+  </div>
+  </div>
+</details>

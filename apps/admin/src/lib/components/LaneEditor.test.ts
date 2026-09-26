@@ -32,6 +32,30 @@ describe('LaneEditor', () => {
     expect(idxPremium).toBeLessThan(idxBalanced);
   });
 
+  it('collapses to a one-line summary (primary → fallback count, effort) and expands to edit', async () => {
+    render(LaneEditor, {
+      lane: makeLane({ reasoning_effort: 'high' }),
+      onchange: vi.fn(),
+    });
+    const card = screen.getByTestId('lane-card');
+    expect(card.tagName).toBe('DETAILS');
+    expect(card).not.toHaveAttribute('open');
+    const summary = within(card).getByTestId('lane-summary');
+    expect(summary).toHaveTextContent('coding');
+    expect(summary).toHaveTextContent('best_code_model');
+    expect(summary).toHaveTextContent('+2');
+    expect(summary).toHaveTextContent('high');
+    // The lane name stays a heading so pages/e2e can scope a card by it.
+    expect(within(card).getByRole('heading', { name: 'coding' })).toBeInTheDocument();
+    await fireEvent.click(summary);
+    expect(card).toHaveAttribute('open');
+  });
+
+  it('starts expanded when asked to (e.g. a lane with a validation error)', () => {
+    render(LaneEditor, { lane: makeLane(), onchange: vi.fn(), open: true });
+    expect(screen.getByTestId('lane-card')).toHaveAttribute('open');
+  });
+
   it('emits the complete lane when primary changes', async () => {
     const onchange = vi.fn();
     render(LaneEditor, { lane: makeLane(), onchange });
