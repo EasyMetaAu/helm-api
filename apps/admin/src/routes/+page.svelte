@@ -219,33 +219,6 @@
     return Number.isNaN(date.getTime()) ? String(value ?? '') : formatTrendTick(date, data.bucket);
   }
 
-  const cards = [
-    {
-      seg: 'requests',
-      label: 'Requests',
-      desc: 'See the full decision trail for every request the gateway handled.',
-    },
-    {
-      seg: 'lanes',
-      label: 'Lanes',
-      desc: 'Set the primary model and fallback chain for each quality and cost tier.',
-    },
-    {
-      seg: 'policies',
-      label: 'Policies',
-      desc: 'Add match rules that force a lane or cap the highest lane a request may use.',
-    },
-    {
-      seg: 'classifier',
-      label: 'Classifier',
-      desc: 'Tune how requests are sorted into lanes, by rules or optional small-model eval.',
-    },
-    {
-      seg: 'keys',
-      label: 'API Keys',
-      desc: 'Issue and revoke client keys, and cap the top lane each key may reach.',
-    },
-  ];
 </script>
 
 <div class="mx-auto w-full max-w-[1600px] px-4 py-6 md:px-8 md:py-8">
@@ -534,27 +507,6 @@
       {$t('The latest requests and how the gateway picked a lane for each one.')}
     </p>
 
-    <!-- Legend explaining how the lane was decided -->
-    <div class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-500">
-      <span class="font-medium text-slate-600">{$t('Decided by:')}</span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="badge-rules">{$t('rules')}</span>
-        <span>{$t('deterministic Layer-1 rules')}</span>
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="badge-eval">{$t('eval')}</span>
-        <span>{$t('small-model Layer-2 evaluation')}</span>
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="badge-classifier-fallback">{$t('fallback')}</span>
-        <span>{$t('defaulted to the balanced lane')}</span>
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="badge-neutral">{$t('default')}</span>
-        <span>{$t('Default (explicit passthrough or fail-open)')}</span>
-      </span>
-    </div>
-
     {#if recent.length === 0}
       <div class="empty-state">
         {$t(
@@ -566,25 +518,4 @@
     {/if}
   </section>
 
-  <!-- Quick links -->
-  <section class="mt-8">
-    <h2 class="section-header mb-1">{$t('Manage')}</h2>
-    <p class="section-desc mb-3">
-      {$t('Jump into the settings that control how the gateway routes traffic.')}
-    </p>
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {#each cards as c (c.seg)}
-        <a
-          href={`${base}/${c.seg}`}
-          class="card group flex items-center justify-between transition-colors hover:border-slate-300 hover:bg-slate-50"
-        >
-          <div>
-            <div class="text-sm font-semibold text-slate-900">{$t(c.label)}</div>
-            <div class="mt-0.5 text-xs text-slate-500">{$t(c.desc)}</div>
-          </div>
-          <span class="text-slate-300 transition-colors group-hover:text-sky-500">→</span>
-        </a>
-      {/each}
-    </div>
-  </section>
 </div>

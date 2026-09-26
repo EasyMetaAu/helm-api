@@ -152,8 +152,10 @@
     <div class="empty-state">{$t('No usage recorded for this account yet.')}</div>
   {:else}
     {#if windowKeys.length > 0}
-    <!-- Window tabs: one per reset cadence (an account can have several). -->
-    <div class="mb-5 flex flex-wrap gap-2" role="tablist">
+    <!-- Window tabs: one per reset cadence (an account can have several). A lone
+         window needs no switcher — its label already shows in the section below. -->
+    {#if windowKeys.length > 1}
+    <div class="mb-5 flex flex-wrap gap-2" role="tablist" aria-label={$t('Reset window')}>
       {#each windowKeys as key (key)}
         <button
           type="button"
@@ -166,6 +168,7 @@
         </button>
       {/each}
     </div>
+    {/if}
 
     {#if isScopedWindow}
       <p class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
@@ -178,6 +181,14 @@
       <div class="mb-2 flex items-baseline justify-between">
         <h2 class="section-header">
           {$t('Current period')}
+          {#if activeKey}
+            <span class="badge-neutral ml-1 align-middle"
+              >{windowLabel(
+                activeKey,
+                data.quota?.windows.find((w) => w.key === activeKey)?.windowMinutes ?? null,
+              )}</span
+            >
+          {/if}
           {#if currentPeriod?.approximate}<span class="text-xs text-ink-muted">≈</span>{/if}
           {#if currentPeriod?.partial}<span class="text-xs text-amber-600">{$t('(partial)')}</span>{/if}
         </h2>
