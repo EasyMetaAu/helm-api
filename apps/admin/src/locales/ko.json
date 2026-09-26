@@ -1113,5 +1113,20 @@
   "Reset Claude usage": "Claude 사용량 재설정",
   "Confirm Claude usage reset": "Claude 사용량 재설정 확인",
   "Failed to reset Claude usage": "Claude 사용량 재설정 실패",
-  "Claude reset affects every connected token in the same Claude organization": "Claude 재설정은 같은 Claude 조직의 연결된 모든 토큰에 적용됩니다"
+  "Claude reset affects every connected token in the same Claude organization": "Claude 재설정은 같은 Claude 조직의 연결된 모든 토큰에 적용됩니다",
+  "Access": "Access",
+  "Account queue wait timeout (ms)": "Account queue wait timeout (ms)",
+  "Defaults": "Defaults",
+  "Key queue wait timeout (ms)": "Key queue wait timeout (ms)",
+  "Limits": "Limits",
+  "More actions": "More actions",
+  "Scheduling": "Scheduling",
+  "Settings sections": "Settings sections",
+  "The default lane cannot be deleted.": "The default lane cannot be deleted.",
+  "What does \"Decided by\" mean?": "What does \"Decided by\" mean?",
+  "When": "When",
+  "any request": "any request",
+  "effort": "effort",
+  "effort ≤ {e}": "effort ≤ {e}",
+  "{n} concurrent": "{n} concurrent"
 }

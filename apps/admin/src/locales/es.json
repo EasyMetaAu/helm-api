@@ -1113,5 +1113,20 @@
   "Reset Claude usage": "Restablecer uso de Claude",
   "Confirm Claude usage reset": "Confirmar restablecimiento de Claude",
   "Failed to reset Claude usage": "No se pudo restablecer el uso de Claude",
-  "Claude reset affects every connected token in the same Claude organization": "El restablecimiento de Claude afecta a todos los tokens conectados de la misma organización de Claude"
+  "Claude reset affects every connected token in the same Claude organization": "El restablecimiento de Claude afecta a todos los tokens conectados de la misma organización de Claude",
+  "Access": "Access",
+  "Account queue wait timeout (ms)": "Account queue wait timeout (ms)",
+  "Defaults": "Defaults",
+  "Key queue wait timeout (ms)": "Key queue wait timeout (ms)",
+  "Limits": "Limits",
+  "More actions": "More actions",
+  "Scheduling": "Scheduling",
+  "Settings sections": "Settings sections",
+  "The default lane cannot be deleted.": "The default lane cannot be deleted.",
+  "What does \"Decided by\" mean?": "What does \"Decided by\" mean?",
+  "When": "When",
+  "any request": "any request",
+  "effort": "effort",
+  "effort ≤ {e}": "effort ≤ {e}",
+  "{n} concurrent": "{n} concurrent"
 }

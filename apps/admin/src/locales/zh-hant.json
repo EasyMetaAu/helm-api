@@ -1113,5 +1113,20 @@
   "Reset Claude usage": "重設 Claude 用量",
   "Confirm Claude usage reset": "確認重設 Claude 用量",
   "Failed to reset Claude usage": "重設 Claude 用量失敗",
-  "Claude reset affects every connected token in the same Claude organization": "Claude 重設會影響同一 Claude 組織中的所有已連線權杖"
+  "Claude reset affects every connected token in the same Claude organization": "Claude 重設會影響同一 Claude 組織中的所有已連線權杖",
+  "Access": "存取權限",
+  "Account queue wait timeout (ms)": "帳戶排隊等待逾時（毫秒）",
+  "Defaults": "預設",
+  "Key queue wait timeout (ms)": "Key 排隊等待逾時（毫秒）",
+  "Limits": "限制",
+  "More actions": "更多操作",
+  "Scheduling": "排程",
+  "Settings sections": "設定分區",
+  "The default lane cannot be deleted.": "預設通道不能刪除。",
+  "What does \"Decided by\" mean?": "「決策來源」是什麼意思？",
+  "When": "當",
+  "any request": "任意請求",
+  "effort": "推理強度",
+  "effort ≤ {e}": "推理強度 ≤ {e}",
+  "{n} concurrent": "{n} 並行"
 }

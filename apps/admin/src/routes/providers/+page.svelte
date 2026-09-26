@@ -1037,14 +1037,10 @@
           <tr>
             <th class="px-3 py-2">{$t('Provider')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
-            <th class="px-3 py-2">{$t('Proxy')}</th>
             <th class="px-3 py-2">{$t('Models')}</th>
             <th class="px-3 py-2">{$t('Today')}</th>
             <th class="px-3 py-2">{$t('Quota')}</th>
-            <th class="px-3 py-2">{$t('Priority')}</th>
-            <th class="px-3 py-2">{$t('Schedulable')}</th>
-            <th class="px-3 py-2">{$t('Fast')}</th>
-            <th class="px-3 py-2">{$t('Expires')}</th>
+            <th class="px-3 py-2">{$t('Scheduling')}</th>
             <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-white">{$t('Actions')}</th>
           </tr>
         </thead>
@@ -1090,7 +1086,7 @@
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge. The name+account is a link into the
                    account usage-detail page (per-reset-period token usage). -->
-              <td data-label={$t('Provider')} class="px-3 py-3">
+              <td data-label={$t('Provider')} class="px-3 py-3 lg:max-w-56 lg:whitespace-normal">
                 <a
                   class="group block"
                   href={accountDetailHref(base, row.provider.id, row.account.account)}
@@ -1107,10 +1103,10 @@
                 </a>
                 {#if hasCodexIdentity}
                   <div
-                    class="mt-1 flex max-w-64 flex-col items-start gap-1 text-xs"
+                    class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs"
                     data-testid="codex-subscription-details"
                   >
-                    {#if row.account.email}
+                    {#if row.account.email && row.account.email !== row.account.account}
                       <span class="break-all text-ink-body">{row.account.email}</span>
                     {/if}
                     {#if codexPlanType || row.account.isFedramp}
@@ -1135,6 +1131,14 @@
                 {/if}
                 <div class="mt-1 flex flex-wrap items-center gap-1">
                   <span class="badge-neutral">{typeBadge(row.provider)}</span>
+                  <!-- Egress proxy (redacted; "Direct" when none) -->
+                  {#if proxyLabel(row.account.proxy)}
+                    <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
+                      >{proxyLabel(row.account.proxy)}</span
+                    >
+                  {:else}
+                    <span class="text-xs text-ink-muted">{$t('Direct')}</span>
+                  {/if}
                   {#if isCodex && row.account.autoReset}
                     <span
                       class="badge-ok"
@@ -1148,7 +1152,7 @@
               </td>
 
               <!-- Status (+ parked pill) -->
-              <td data-label={$t('Status')} class="px-3 py-3">
+              <td data-label={$t('Status')} class="px-3 py-3 lg:whitespace-normal">
                 {#if row.account.healthy}
                   <span class="badge-ok">{$t('connected')}</span>
                 {:else}
@@ -1180,17 +1184,6 @@
                 {/if}
               </td>
 
-              <!-- Egress proxy (redacted; "Direct" when none) -->
-              <td data-label={$t('Proxy')} class="px-3 py-3 text-xs">
-                {#if proxyLabel(row.account.proxy)}
-                  <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
-                    >{proxyLabel(row.account.proxy)}</span
-                  >
-                {:else}
-                  <span class="text-ink-muted">{$t('Direct')}</span>
-                {/if}
-              </td>
-
               <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
               <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
@@ -1202,7 +1195,7 @@
                     .slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
                   <div
-                    class="flex max-w-full flex-wrap gap-1 lg:w-48"
+                    class="flex max-w-full flex-wrap gap-1 lg:w-40"
                     title={row.account.models.join('\n')}
                   >
                     {#each shown as m (m)}
@@ -1237,7 +1230,7 @@
               <!-- Quota / session windows (+ Codex reset-credit count) -->
               <td data-label={$t('Quota')} class="px-3 py-3" data-testid="provider-quota-cell">
                 {#if quota && quota.windows.length > 0}
-                  <div class="flex w-full flex-col gap-1.5 lg:w-40">
+                  <div class="flex w-full flex-col gap-1.5 lg:w-36">
                     {#each quota.windows as w (w.key)}
                       <div>
                         <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
@@ -1335,67 +1328,64 @@
                 {/if}
               </td>
 
-              <!-- Priority (inline, lower = served first) -->
-              <td data-label={$t('Priority')} class="px-3 py-3">
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
-                  value={row.account.priority}
-                  disabled={saving}
-                  aria-label={$t('Priority')}
-                  onchange={(e) =>
-                    savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
-                />
-              </td>
-
-              <!-- Schedulable (inline toggle) -->
-              <td data-label={$t('Schedulable')} class="px-3 py-3">
-                <input
-                  type="checkbox"
-                  class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                  checked={row.account.schedulable}
-                  disabled={saving || credentialFailed}
-                  aria-label={$t('Schedulable')}
-                  title={credentialFailed ? $t('needs reconnect') : undefined}
-                  onchange={(e) =>
-                    toggleSchedulable(
-                      row.provider.id,
-                      row.account.account,
-                      e.currentTarget.checked,
-                    )}
-                />
-              </td>
-
-              <!-- Fast mode (per-account upstream override) -->
-              <td data-label={$t('Fast')} class="px-3 py-3">
-                {#if supportsFast}
+              <!-- Scheduling: priority (lower = served first), schedulable, fast mode,
+                   token expiry — the per-account knobs, grouped in one cell. -->
+              <td
+                data-label={$t('Scheduling')}
+                class="px-3 py-3 text-xs"
+                data-testid="provider-scheduling-cell"
+              >
+                <div class="grid w-36 grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5">
+                  <span class="text-ink-muted">{$t('Priority')}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
+                    value={row.account.priority}
+                    disabled={saving}
+                    aria-label={$t('Priority')}
+                    onchange={(e) =>
+                      savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
+                  />
+                  <span class="text-ink-muted">{$t('Schedulable')}</span>
                   <input
                     type="checkbox"
                     class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                    checked={row.account.fastMode ?? false}
-                    disabled={saving}
-                    aria-label={$t('Fast mode')}
+                    checked={row.account.schedulable}
+                    disabled={saving || credentialFailed}
+                    aria-label={$t('Schedulable')}
+                    title={credentialFailed ? $t('needs reconnect') : undefined}
                     onchange={(e) =>
-                      toggleFastMode(row.provider.id, row.account.account, e.currentTarget.checked)}
+                      toggleSchedulable(
+                        row.provider.id,
+                        row.account.account,
+                        e.currentTarget.checked,
+                      )}
                   />
-                {:else}
-                  <span class="text-xs text-ink-muted">—</span>
-                {/if}
+                  {#if supportsFast}
+                    <span class="text-ink-muted">{$t('Fast')}</span>
+                    <input
+                      type="checkbox"
+                      class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                      checked={row.account.fastMode ?? false}
+                      disabled={saving}
+                      aria-label={$t('Fast mode')}
+                      onchange={(e) =>
+                        toggleFastMode(row.provider.id, row.account.account, e.currentTarget.checked)}
+                    />
+                  {/if}
+                  <span class="text-ink-muted">{$t('Expires')}</span>
+                  <span class="text-ink-body">{expiryLabel(row.account)}</span>
+                </div>
               </td>
-
-              <!-- Token expiry -->
-              <td data-label={$t('Expires')} class="px-3 py-3 text-ink-muted"
-                >{expiryLabel(row.account)}</td
-              >
 
               <!-- Actions -->
               <td
                 data-label={$t('Actions')}
                 class="px-3 py-3 lg:sticky lg:right-0 lg:bg-white lg:text-right"
               >
-                <div class="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap lg:w-48">
+                <div class="flex items-center justify-end gap-2">
                   {#if needsReconnect}
                     <button
                       type="button"
@@ -1431,10 +1421,16 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
+                  <details data-testid="provider-actions" class="menu">
+                    <summary class="menu-trigger" title={$t('More actions')}>
+                      <span aria-hidden="true">⋯</span>
+                      <span class="sr-only">{$t('More actions')}</span>
+                    </summary>
+                    <div class="menu-panel w-56">
                   {#if usageLimit?.retryable && isCodex}
                     <button
                       type="button"
-                      class="btn-secondary"
+                      class="menu-item"
                       disabled={resetting[k] === true}
                       title={$t('Clear Helm local cooldown and try this account again')}
                       onclick={() => retryAccount(row.provider.id, row.account.account)}
@@ -1444,7 +1440,7 @@
                   {#if isCodex}
                     <button
                       type="button"
-                      class="btn-secondary"
+                      class="menu-item"
                       disabled={!canResetCodexLimit}
                       title={resetCreditTitle(quota, codexCredits)}
                       onclick={() =>
@@ -1471,7 +1467,7 @@
                   {#if row.provider.id === 'anthropic'}
                     <button
                       type="button"
-                      class="btn-secondary"
+                      class="menu-item"
                       disabled={resettingLimit}
                       onclick={() => prepareAnthropicReset(row.account.account)}
                       >{$t('Reset Claude usage')}{#if anthropicResetButtonMeta(row.account.account)}
@@ -1482,12 +1478,14 @@
                   {/if}
                   <button
                     type="button"
-                    class="btn-danger-outline col-span-2 sm:col-span-1"
+                    class="menu-item-danger"
                     disabled={disconnecting}
                     onclick={() =>
                       (confirming = { providerId: row.provider.id, account: row.account.account })}
                     >{$t('Disconnect')}</button
                   >
+                    </div>
+                  </details>
                 </div>
               </td>
             </tr>

@@ -255,7 +255,7 @@
         )}
       </p>
     </div>
-    <p class="card text-sm text-ink-body" data-testid="first-match-explainer">
+    <p class="text-sm text-ink-body" data-testid="first-match-explainer">
       {$t('Rules are evaluated top to bottom; the')}
       <strong>{$t('first matching')}</strong>
       {$t(
@@ -281,7 +281,8 @@
     </div>
   {/if}
 
-  <div class="flex flex-col gap-4">
+  <!-- pb-20 keeps the last rule clear of the floating save bar. -->
+  <div class="flex flex-col gap-3 pb-20">
     {#each policyRows as row, i (row.key)}
       <PolicyRow
         policy={row.policy}
