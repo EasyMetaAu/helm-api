@@ -1,4 +1,5 @@
 <script lang="ts">
+  const CHAIN_SHOWN = 5;
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import type { RequestDetail } from '$lib/api/requests.js';
   import { formatDurationMs } from '$lib/format.js';
@@ -120,7 +121,9 @@
     </p>
     <div class="flex flex-wrap items-center gap-2 text-sm">
       <span class="badge-neutral">{cls.task_type}</span>
-      <span class="badge-neutral">{cls.complexity}</span>
+      {#if cls.complexity !== cls.task_type}
+        <span class="badge-neutral">{cls.complexity}</span>
+      {/if}
       <span class="text-ink-muted">{$t('confidence')} {cls.confidence.toFixed(2)}</span>
     </div>
     <!-- Decision source: makes clear WHICH stage produced the verdict above, so an
@@ -250,14 +253,31 @@
     <p class="field-help mb-2">
       {$t('Lanes considered in order — the first one whose model succeeds handles the request.')}
     </p>
+    <!-- A long chain (14+ candidates is common) is folded after the first few: the
+         head of the chain is what normally served the request. -->
     <ol class="flex flex-wrap items-center gap-1 text-sm">
-      {#each detail.lane_candidates as lane, i (lane)}
-        {#if i > 0}<span class="text-ink-faint">-></span>{/if}
+      {#each detail.lane_candidates.slice(0, CHAIN_SHOWN) as lane, i (lane)}
+        {#if i > 0}<span class="text-ink-faint">→</span>{/if}
         <li data-testid="lane-candidate" class="badge-neutral">
           {lane}
         </li>
       {/each}
     </ol>
+    {#if detail.lane_candidates.length > CHAIN_SHOWN}
+      <details data-testid="lane-candidates-more" class="mt-1 text-sm">
+        <summary class="cursor-pointer select-none text-xs text-ink-muted hover:text-ink-strong">
+          +{detail.lane_candidates.length - CHAIN_SHOWN}
+        </summary>
+        <ol class="mt-1 flex flex-wrap items-center gap-1">
+          {#each detail.lane_candidates.slice(CHAIN_SHOWN) as lane (lane)}
+            <span class="text-ink-faint">→</span>
+            <li data-testid="lane-candidate" class="badge-neutral">
+              {lane}
+            </li>
+          {/each}
+        </ol>
+      </details>
+    {/if}
     {#if pinReason}
       <p data-testid="lane-pin-reason" class="field-help mt-2">
         <span title={pinReason}>{$t(pinReasonLabel(pinReason))}</span>

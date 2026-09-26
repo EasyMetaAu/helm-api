@@ -1128,5 +1128,6 @@
   "any request": "any request",
   "effort": "effort",
   "effort ≤ {e}": "effort ≤ {e}",
-  "{n} concurrent": "{n} concurrent"
+  "{n} concurrent": "{n} concurrent",
+  "Measured only for streamed responses.": "Measured only for streamed responses."
 }

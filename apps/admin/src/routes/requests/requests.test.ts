@@ -5,7 +5,8 @@ import type { ApiKeyView } from '$lib/api/keys.js';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import { DEFAULT_FILTERS, type RequestsFilters } from '$lib/requests-filters.js';
 import DetailPage from './[traceId]/+page.svelte';
-import { load as loadDetail, safeBackTo } from './[traceId]/+page.js';
+import { safeBackTo } from '$lib/nav.js';
+import { load as loadDetail } from './[traceId]/+page.js';
 import ListPage from './+page.svelte';
 import { load as loadList } from './+page.js';
 
@@ -1109,5 +1110,13 @@ describe('safeBackTo (Back-link open-redirect guard)', () => {
     for (const bad of [null, '', '//evil.com', '/\\evil.com', 'https://evil.com', 'javascript:1']) {
       expect(safeBackTo(bad, '/requests')).toBe('/requests');
     }
+  });
+});
+
+describe('request detail route module', () => {
+  it('exports only SvelteKit-valid names (a stray export 500s the page at runtime)', async () => {
+    const mod = await import('./[traceId]/+page.js');
+    const valid = new Set(['load', 'prerender', 'csr', 'ssr', 'trailingSlash', 'config', 'entries']);
+    expect(Object.keys(mod).filter((k) => !valid.has(k) && !k.startsWith('_'))).toEqual([]);
   });
 });

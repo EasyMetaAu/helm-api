@@ -1128,5 +1128,6 @@
   "any request": "任意请求",
   "effort": "推理强度",
   "effort ≤ {e}": "推理强度 ≤ {e}",
-  "{n} concurrent": "{n} 并发"
+  "{n} concurrent": "{n} 并发",
+  "Measured only for streamed responses.": "仅对流式响应进行测量。"
 }

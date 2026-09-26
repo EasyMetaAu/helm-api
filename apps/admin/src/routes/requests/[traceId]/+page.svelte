@@ -379,6 +379,58 @@
       </dl>
     </section>
 
+    <!-- Usage & performance: cost, tokens and throughput side by side right under
+         the summary — the three numbers an operator checks first — instead of three
+         full-width cards at the bottom of the page. -->
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <section class="card">
+        <h2 class="section-header">{$t('Cost')}</h2>
+        <p class="field-help mb-2">
+          {$t('What this single request cost, split across routing, optional eval, and completion.')}
+        </p>
+        <CostBreakdown
+          cost={d.cost_breakdown}
+          measurement={d.usage.measurement}
+          apiEquivalent={d.serving_account !== null}
+        />
+      </section>
+
+      <section class="card">
+        <h2 class="section-header">{$t('Token usage')}</h2>
+        <p class="field-help mb-2">
+          {$t('How many tokens this single request used — input, output, and how much was cached.')}
+        </p>
+        <TokenUsage usage={d.usage} />
+      </section>
+
+      <!-- Throughput: true TPS + its denominator (generation window) + the companion
+           time-to-first-token. All '—' for a non-streaming response (no measurable
+           generation window), distinct from a measured 0. -->
+      <section class="card">
+        <h2 class="section-header">{$t('Throughput')}</h2>
+        <p class="field-help mb-2">
+          {$t('Measured only for streamed responses.')}
+        </p>
+        <dl data-testid="throughput" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
+          <dt class="text-ink-muted">{$t('TPS')}</dt>
+          <dd data-testid="tps" class="text-right font-mono text-ink-strong">{formatTps(d.tps)}</dd>
+
+          <dt class="text-ink-muted">{$t('Time to first token')}</dt>
+          <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
+            {d.ttfb_ms === null ? '—' : formatDurationMs(d.ttfb_ms)}
+          </dd>
+
+          <dt class="text-ink-muted">{$t('Generation time')}</dt>
+          <dd data-testid="generation-ms" class="text-right font-mono text-ink-strong">
+            {d.generation_ms === null ? '—' : formatDurationMs(d.generation_ms)}
+          </dd>
+        </dl>
+      </section>
+    </div>
+
+    <!-- Decision chain (classification -> eval -> policy -> lanes -> attempts) -->
+    <DecisionChain detail={d} />
+
     <!-- Media overview: one scan-at-a-glance gallery of every image in this call —
          sent (request) and generated (response) — so the operator never has to expand
          a JSON tree to find a picture. Rendered only when at least one image exists. -->
@@ -600,57 +652,6 @@
         {/if}
       </section>
     {/if}
-
-    <!-- Decision chain (classification -> eval -> policy -> lanes -> attempts) -->
-    <DecisionChain detail={d} />
-
-    <!-- Cost breakdown incl. eval self-cost -->
-    <section class="card">
-      <h2 class="section-header">{$t('Cost')}</h2>
-      <p class="field-help mb-2">
-        {$t('What this single request cost, split across routing, optional eval, and completion.')}
-      </p>
-      <CostBreakdown
-        cost={d.cost_breakdown}
-        measurement={d.usage.measurement}
-        apiEquivalent={d.serving_account !== null}
-      />
-    </section>
-
-    <!-- Token usage: input / output / cached / non-cached split for this request -->
-    <section class="card">
-      <h2 class="section-header">{$t('Token usage')}</h2>
-      <p class="field-help mb-2">
-        {$t('How many tokens this single request used — input, output, and how much was cached.')}
-      </p>
-      <TokenUsage usage={d.usage} />
-    </section>
-
-    <!-- Throughput: true TPS + its denominator (generation window) + the companion
-         time-to-first-token. All '—' for a non-streaming response (no measurable
-         generation window), distinct from a measured 0. -->
-    <section class="card">
-      <h2 class="section-header">{$t('Throughput')}</h2>
-      <p class="field-help mb-2">
-        {$t(
-          'How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.',
-        )}
-      </p>
-      <dl data-testid="throughput" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
-        <dt class="text-ink-muted">{$t('TPS')}</dt>
-        <dd data-testid="tps" class="text-right font-mono text-ink-strong">{formatTps(d.tps)}</dd>
-
-        <dt class="text-ink-muted">{$t('Time to first token')}</dt>
-        <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
-          {d.ttfb_ms === null ? '—' : formatDurationMs(d.ttfb_ms)}
-        </dd>
-
-        <dt class="text-ink-muted">{$t('Generation time')}</dt>
-        <dd data-testid="generation-ms" class="text-right font-mono text-ink-strong">
-          {d.generation_ms === null ? '—' : formatDurationMs(d.generation_ms)}
-        </dd>
-      </dl>
-    </section>
 
     <!-- Final response meta or structured error -->
     {#if d.error}

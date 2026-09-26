@@ -1128,5 +1128,6 @@
   "any request": "任意請求",
   "effort": "推理強度",
   "effort ≤ {e}": "推理強度 ≤ {e}",
-  "{n} concurrent": "{n} 並行"
+  "{n} concurrent": "{n} 並行",
+  "Measured only for streamed responses.": "僅對串流回應進行測量。"
 }
