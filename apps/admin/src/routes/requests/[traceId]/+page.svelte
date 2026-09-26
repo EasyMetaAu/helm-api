@@ -232,7 +232,7 @@
   );
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page-narrow">
   <a href={backTo} data-testid="back-to-requests" class="link-inline text-sm"
     >&larr; {$t('Back to requests')}</a
   >

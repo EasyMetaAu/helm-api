@@ -245,7 +245,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page-narrow">
   <header class="flex flex-col gap-2">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Policies')}</h1>

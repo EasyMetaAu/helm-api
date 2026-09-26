@@ -133,7 +133,7 @@
   }
 </script>
 
-<div class="w-full px-4 py-6 md:px-8 md:py-8">
+<div class="mx-auto w-full max-w-[1600px] px-4 py-6 md:px-8 md:py-8">
   <header class="mb-5">
     <a class="link-inline text-sm" href={`${base}/providers`}>← {$t('Providers')}</a>
     <div class="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">

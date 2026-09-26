@@ -92,11 +92,31 @@ describe('keys page', () => {
     expect(text).not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
   });
 
-  it('shows each key Fast mode passthrough cap in the Caps column', () => {
-    renderPage([key('k1', { allow_fast_mode: true }), key('k2', { allow_fast_mode: false })]);
+  it('flags only NON-default access caps (fast mode / custom model) in the row', () => {
+    renderPage([
+      key('k1', { allow_fast_mode: true, allow_custom_model: true }),
+      key('k2', { allow_fast_mode: false }),
+    ]);
     const rows = screen.getAllByTestId('key-row');
-    expect(within(rows[0]).getByText(/Fast mode:\s*yes/i)).toBeInTheDocument();
-    expect(within(rows[1]).getByText(/Fast mode:\s*no/i)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/fast mode/i)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/custom model/i)).toBeInTheDocument();
+    // Defaults are not spelled out as noise ("Fast mode: no").
+    expect(within(rows[1]).queryByText(/fast mode/i)).toBeNull();
+    expect(within(rows[1]).queryByText(/custom model/i)).toBeNull();
+  });
+
+  it('keeps secondary actions in a row menu, with Details and Edit always visible', async () => {
+    renderPage([key('k1', { name: 'Prod' })]);
+    const row = screen.getByTestId('key-row');
+    expect(within(row).getByRole('link', { name: /details/i })).toBeVisible();
+    expect(within(row).getByRole('button', { name: /^edit$/i })).toBeVisible();
+    const menu = within(row).getByTestId('key-actions');
+    expect(menu.tagName).toBe('DETAILS');
+    expect(menu).not.toHaveAttribute('open');
+    await fireEvent.click(within(menu).getByText(/more actions/i));
+    expect(within(menu).getByRole('button', { name: /view full key/i })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: /rotate/i })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: /revoke/i })).toBeInTheDocument();
   });
 
   it('shows the key name in the row, and an "unnamed" placeholder when null', () => {
@@ -294,17 +314,18 @@ describe('keys page', () => {
       key('k2'), // both null -> inherits the system default
     ]);
     const rows = screen.getAllByTestId('key-row');
-    // k1 shows its explicit RPM; k2 (both null) shows the inherit/default copy
-    // on both the RPM and TPM lines.
-    expect(within(rows[0]).getByText(/60/)).toBeInTheDocument();
-    expect(within(rows[1]).getAllByText(/default/i).length).toBeGreaterThan(0);
+    // k1 shows its explicit RPM (and TPM 0 = unlimited); k2 inherits every
+    // system default, collapsed to a single muted "Defaults" marker.
+    expect(within(rows[0]).getByText(/60 RPM/)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/unlimited TPM/i)).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/^defaults$/i)).toBeInTheDocument();
   });
 
   it('shows the concurrency limit in the row (number, and "unlimited" when null)', () => {
     renderPage([key('k1', { concurrency_limit: 5 }), key('k2', { concurrency_limit: null })]);
     const rows = screen.getAllByTestId('key-row');
-    expect(within(rows[0]).getByText(/concurrency.*5/i)).toBeInTheDocument();
-    expect(within(rows[1]).getByText(/concurrency.*unlimited/i)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/5 concurrent/i)).toBeInTheDocument();
+    expect(within(rows[1]).queryByText(/concurren/i)).toBeNull();
   });
 
   it('shows the memory defaults in the row (mode + thread source + project; "Off" when off)', () => {
@@ -346,7 +367,7 @@ describe('keys page', () => {
       }),
     ]);
     const row = screen.getByTestId('key-row');
-    expect(within(row).getByText(/TPM.*2M/)).toBeInTheDocument();
+    expect(within(row).getByText(/2M TPM/)).toBeInTheDocument();
     expect(within(row).getByText(/50K req/)).toBeInTheDocument();
     expect(within(row).getByText(/100M tok/)).toBeInTheDocument();
     expect(within(row).getByText(/\$5\.00/)).toBeInTheDocument();

@@ -280,7 +280,7 @@ describe('requests list page', () => {
     );
   });
 
-  it('groups high-signal request fields into semantic cells, with trace ID at the end', () => {
+  it('groups high-signal request fields into semantic cells, with the request ID on the time link', () => {
     render(ListPage, {
       data: listData([
         item('tr_first', {
@@ -292,17 +292,19 @@ describe('requests list page', () => {
     const cells = screen.getByTestId('request-row').querySelectorAll('td');
     expect(cells[0]).toHaveTextContent('2026'); // time first
     expect(cells[1]).toHaveTextContent('ok'); // result before diagnostics
-    expect(cells[3]).toHaveTextContent('Support case 42'); // session label
-    expect(cells[3]).toHaveTextContent('session_abc'); // session ref
-    expect(cells[4]).toHaveTextContent('claude-x'); // served model
-    expect(cells[4]).toHaveTextContent('requested: gpt-4o'); // requested model drift
-    expect(cells[5]).toHaveTextContent('premium'); // routing lane
-    expect(cells[5]).toHaveTextContent('coding'); // classifier task
-    expect(cells[5]).toHaveTextContent('high'); // classifier complexity
-    expect(cells[6]).toHaveTextContent('anthropic'); // concrete provider
-    expect(cells[6]).toHaveTextContent('claude-team-a'); // concrete subscription account
-    expect(cells[6]).toHaveTextContent('exec +1'); // execution fallback count
-    expect(cells[cells.length - 1]).toHaveTextContent('tr_first'); // trace id still available
+    expect(cells[2]).toHaveTextContent('helm_live_ab12'); // key
+    expect(cells[2]).toHaveTextContent('Support case 42'); // session label (under the key)
+    expect(cells[2]).toHaveTextContent('session_abc'); // session ref
+    expect(cells[3]).toHaveTextContent('claude-x'); // served model
+    expect(cells[3]).toHaveTextContent('requested: gpt-4o'); // requested model drift
+    expect(cells[3]).toHaveTextContent('anthropic'); // concrete provider (under the model)
+    expect(cells[3]).toHaveTextContent('claude-team-a'); // concrete subscription account
+    expect(cells[3]).toHaveTextContent('exec +1'); // execution fallback count
+    expect(cells[4]).toHaveTextContent('premium'); // routing lane
+    expect(cells[4]).toHaveTextContent('coding'); // classifier task
+    expect(cells[4]).toHaveTextContent('high'); // classifier complexity
+    // The request id is still one hover/click away on the time link.
+    expect(cells[0].querySelector('a')).toHaveAttribute('title', 'tr_first');
     // The trailing "view" link is gone — the whole row is the link now.
     expect(screen.queryByText('view')).not.toBeInTheDocument();
   });

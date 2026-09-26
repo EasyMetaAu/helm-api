@@ -89,7 +89,7 @@ describe('RequestsTable variants', () => {
       ],
       detailHref,
     });
-    expect(screen.getByText('Request body')).toBeInTheDocument();
+    expect(screen.getByTestId('cell-request-body')).toHaveAttribute('title', 'Request body');
     expect(screen.getByTestId('cell-request-body')).toHaveTextContent('1.5 MB');
     unmount();
 
@@ -131,7 +131,6 @@ describe('RequestsTable variants', () => {
       detailHref,
       variant: 'full',
     });
-    expect(screen.getByText('Session')).toBeInTheDocument();
     expect(screen.getByTestId('cell-session')).toHaveTextContent('Support case 42');
     expect(screen.getByTestId('cell-session')).toHaveTextContent('session_abc');
     unmount();
@@ -142,10 +141,11 @@ describe('RequestsTable variants', () => {
       variant: 'key',
     });
     expect(screen.getByText('Session')).toBeInTheDocument();
+    expect(screen.getByTestId('cell-session')).toBeInTheDocument();
     keyScoped.unmount();
 
     render(RequestsTable, { items: [item({ session })], detailHref, variant: 'recent' });
-    expect(screen.queryByText('Session')).toBeNull();
+    expect(screen.queryByTestId('cell-session')).toBeNull();
   });
 
   it('uses request_id for row identity and navigation when client traces are duplicated', () => {
@@ -188,7 +188,18 @@ describe('RequestsTable variants', () => {
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('anthropic');
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('exec +1');
     expect(within(row).getByTestId('cell-performance')).toHaveTextContent('6.9s');
-    expect(screen.getByText('Request ID')).toBeInTheDocument();
+    // The request id rides the time link's title instead of its own wide column.
+    expect(within(row).getByTestId('request-detail-link')).toHaveAttribute('title', 'req_1');
+  });
+
+  it('fits the full audit trail into eight columns so it does not overflow a laptop screen', () => {
+    render(RequestsTable, { items: [item()], detailHref, variant: 'full' });
+    expect(screen.getAllByRole('columnheader')).toHaveLength(8);
+    const row = screen.getByTestId('request-row');
+    // Serving provider/account now sits under the served model.
+    expect(within(row).getByTestId('cell-model')).toContainElement(
+      within(row).getByTestId('cell-serving'),
+    );
   });
 
   it('formats performance latency in minutes from sixty seconds', () => {

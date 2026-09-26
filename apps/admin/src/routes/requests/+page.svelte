@@ -184,7 +184,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page-wide">
   <header class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Requests')}</h1>
@@ -245,7 +245,7 @@
        model / route text. Selects apply immediately; text search applies on Enter
        or Apply. Changing any filter resets to page 1. -->
   <form
-    class="card grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(16rem,1.25fr)_minmax(18rem,1.35fr)_minmax(8rem,.65fr)_minmax(10rem,.75fr)_auto] xl:items-end"
+    class="card grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(12rem,1fr)_minmax(14rem,1.2fr)_minmax(8rem,.65fr)_minmax(7rem,.5fr)_minmax(8rem,.6fr)_auto] xl:items-end"
     onsubmit={(e) => {
       e.preventDefault();
       go();
@@ -357,27 +357,31 @@
     </div>
   {/if}
 
-  <div class="card flex flex-col gap-2 lg:flex-row lg:items-center lg:gap-6">
-    <span class="text-xs font-medium uppercase tracking-wide text-ink-muted"
-      >{$t('Decided by')}</span
-    >
-    <span class="flex items-center gap-2 text-xs text-ink-body">
-      <span class="badge-rules">{$t('rules')}</span>
-      {$t('Layer-1 deterministic rules chose the lane.')}
-    </span>
-    <span class="flex items-center gap-2 text-xs text-ink-body">
-      <span class="badge-eval">{$t('eval')}</span>
-      {$t('Layer-2 small-model evaluation chose the lane.')}
-    </span>
-    <span class="flex items-center gap-2 text-xs text-ink-body">
-      <span class="badge-classifier-fallback">{$t('fallback')}</span>
-      {$t('Classification failed safely and fell back to balanced.')}
-    </span>
-    <span class="flex items-center gap-2 text-xs text-ink-body">
-      <span class="badge-neutral">{$t('default')}</span>
-      {$t('Default (explicit passthrough or fail-open)')}
-    </span>
-  </div>
+  <!-- The "Decided by" legend is reference material, not data: folded by default
+       so the table starts right under the filters. -->
+  <details data-testid="decided-by-legend" class="text-xs text-ink-body">
+    <summary class="cursor-pointer select-none text-ink-muted hover:text-ink-strong">
+      {$t('What does "Decided by" mean?')}
+    </summary>
+    <div class="mt-2 flex flex-col gap-2 lg:flex-row lg:flex-wrap lg:gap-6">
+      <span class="flex items-center gap-2">
+        <span class="badge-rules">{$t('rules')}</span>
+        {$t('Layer-1 deterministic rules chose the lane.')}
+      </span>
+      <span class="flex items-center gap-2">
+        <span class="badge-eval">{$t('eval')}</span>
+        {$t('Layer-2 small-model evaluation chose the lane.')}
+      </span>
+      <span class="flex items-center gap-2">
+        <span class="badge-classifier-fallback">{$t('fallback')}</span>
+        {$t('Classification failed safely and fell back to balanced.')}
+      </span>
+      <span class="flex items-center gap-2">
+        <span class="badge-neutral">{$t('default')}</span>
+        {$t('Default (explicit passthrough or fail-open)')}
+      </span>
+    </div>
+  </details>
 
   {#if data.items.length === 0}
     <div data-testid="requests-empty" class="empty-state">

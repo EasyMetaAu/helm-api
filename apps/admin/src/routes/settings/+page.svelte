@@ -160,7 +160,7 @@
 
 </script>
 
-<section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">
+<section class="page-narrow gap-6">
   <header class="flex flex-col gap-2">
     <h1 class="page-title">{$t('System Settings')}</h1>
     <p class="section-desc">
