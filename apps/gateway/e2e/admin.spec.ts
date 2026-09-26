@@ -120,6 +120,24 @@ test.describe("admin policy editing", () => {
   });
 });
 
+test.describe("admin row action menu", () => {
+  test("the ⋯ menu closes on a click outside it and on Escape", async ({ page }) => {
+    await page.goto(`${BASE}/admin/keys`);
+    const menu = page.getByTestId("key-actions").first();
+    const panel = menu.locator(".menu-panel");
+
+    await menu.locator("summary").click();
+    await expect(panel).toBeVisible();
+    await page.getByRole("heading", { level: 1 }).click();
+    await expect(panel).toBeHidden();
+
+    await menu.locator("summary").click();
+    await expect(panel).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+  });
+});
+
 // ── 3. View a seeded request's decision trail ────────────────────────────────
 test.describe("admin request debugging", () => {
   test("the seeded request appears in the list and opens its decision chain", async ({ page }) => {

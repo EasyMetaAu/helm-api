@@ -48,7 +48,11 @@
   {@render children()}
 {:else}
   <div class="min-h-screen bg-canvas text-ink-1">
-    <header class="border-b border-border bg-surface">
+    <!-- The mobile nav drawer lives inside the header; a click below it closes it. -->
+    <header
+      class="border-b border-border bg-surface"
+      use:clickOutside={() => (navOpen = false)}
+    >
       <div class="flex h-14 items-center gap-4 px-4 sm:px-6 lg:px-8">
         <a
           href={hrefFor("")}
