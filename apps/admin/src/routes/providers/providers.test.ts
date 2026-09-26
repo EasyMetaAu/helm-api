@@ -25,6 +25,7 @@ const getAnthropicResetStatus = vi.fn();
 const consumeAnthropicReset = vi.fn();
 const getOAuthOverview = vi.fn();
 const requestOAuthRefresh = vi.fn();
+const startManualPaste = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
   getAnthropicResetStatus: (...args: unknown[]) => getAnthropicResetStatus(...args),
@@ -43,7 +44,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
   setSelectionStrategy: (...args: unknown[]) => setSelectionStrategy(...args),
   startDeviceCode: vi.fn(),
-  startManualPaste: vi.fn(),
+  startManualPaste: (...args: unknown[]) => startManualPaste(...args),
   streamAccountTest: (...args: unknown[]) => streamAccountTest(...args),
 }));
 
@@ -147,6 +148,7 @@ describe('providers page', () => {
     consumeCodexResetCredit.mockReset();
     getOAuthOverview.mockReset();
     requestOAuthRefresh.mockReset();
+    startManualPaste.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     getAccountModels.mockResolvedValue({
@@ -179,6 +181,10 @@ describe('providers page', () => {
       coalesced: false,
       retryAfterMs: 0,
       status: { ...idleRefresh, state: 'queued', jobId: 'refresh-1', requestedAt: Date.now() },
+    });
+    startManualPaste.mockResolvedValue({
+      sessionId: 'reconnect-session',
+      authorizeUrl: 'https://auth.example/reconnect',
     });
   });
 
@@ -1058,6 +1064,36 @@ describe('providers page', () => {
     expect(checkbox).toBeDisabled();
 
     expect(setAccountSchedule).not.toHaveBeenCalled();
+  });
+
+  it('offers reconnect for unhealthy accounts and starts that account flow', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-claude',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: false,
+              priority: 10,
+              schedulable: false,
+              proxy: null,
+              models: ['claude-opus-4-6'],
+            },
+          ],
+        }),
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^reconnect$/i }));
+
+    await waitFor(() =>
+      expect(startManualPaste).toHaveBeenCalledWith('anthropic', undefined, 'acct-claude'),
+    );
+    expect(screen.getByRole('heading', { name: 'Reconnect subscription' })).toBeInTheDocument();
   });
 
   it('toggles per-account Fast mode through the scheduling endpoint', async () => {

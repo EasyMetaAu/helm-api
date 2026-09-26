@@ -200,6 +200,8 @@
   "Connect": "Connect",
   "Connect a client": "Connect a client",
   "Connect a subscription": "Connect a subscription",
+  "Reconnect": "Reconnect",
+  "Reconnect subscription": "Reconnect subscription",
   "Connect AI subscriptions": "Connect AI subscriptions",
   "Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.": "Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.",
   "Connect Codex and Claude subscriptions": "Connect Codex and Claude subscriptions",

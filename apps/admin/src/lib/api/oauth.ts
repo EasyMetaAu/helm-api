@@ -304,11 +304,12 @@ export async function getOAuthUsagePeriods(
 export async function startManualPaste(
   provider: string,
   proxy?: AccountProxyInput,
+  account?: string,
 ): Promise<{ sessionId: string; authorizeUrl: string }> {
   const res = await fetch(`${BASE}/${provider}/manual/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ proxy }),
+    body: JSON.stringify({ proxy, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }
@@ -332,6 +333,7 @@ export async function startDeviceCode(
   provider: string,
   enterprise?: string,
   proxy?: AccountProxyInput,
+  account?: string,
 ): Promise<{
   sessionId: string;
   userCode: string;
@@ -343,7 +345,7 @@ export async function startDeviceCode(
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enterprise, proxy }),
+    body: JSON.stringify({ enterprise, proxy, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }

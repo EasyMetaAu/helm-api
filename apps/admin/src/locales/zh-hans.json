@@ -200,6 +200,8 @@
   "Connect": "连接",
   "Connect a client": "接入客户端",
   "Connect a subscription": "连接订阅",
+  "Reconnect": "重新连接",
+  "Reconnect subscription": "重新连接订阅",
   "Connect AI subscriptions": "连接 AI 订阅",
   "Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.": "连接 Claude、ChatGPT 或 GitHub Copilot 订阅，以便 Helm 可以路由到它们。你可以为每个提供商连接多个账户。",
   "Connect Codex and Claude subscriptions": "连接 Codex 和 Claude 订阅",

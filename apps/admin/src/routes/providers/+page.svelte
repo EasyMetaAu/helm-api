@@ -58,6 +58,7 @@
   let overview = $state<OAuthOverview & { loadError?: string }>(untrack(() => ({ ...data })));
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let showConnect = $state<boolean>(false);
+  let reconnecting = $state<{ providerId: string; account: string } | null>(null);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   // The account whose connectivity-test dialog is open (providers page "Test"
   // button). Carries the row's chat models; media creates are paid, non-streaming
@@ -532,6 +533,7 @@
 
   function onConnected(): void {
     showConnect = false;
+    reconnecting = null;
     void invalidateAll();
   }
 
@@ -924,7 +926,10 @@
         type="button"
         class="btn-primary flex-1 sm:flex-none"
         disabled={!overview.configured}
-        onclick={() => (showConnect = true)}>{$t('Connect')}</button
+        onclick={() => {
+          reconnecting = null;
+          showConnect = true;
+        }}>{$t('Connect')}</button
       >
     </div>
   </header>
@@ -958,8 +963,12 @@
   {#if showConnect}
     <ConnectProviderDialog
       providers={overview.providers}
+      reconnect={reconnecting}
       onconnected={onConnected}
-      onclose={() => (showConnect = false)}
+      onclose={() => {
+        reconnecting = null;
+        showConnect = false;
+      }}
     />
   {/if}
 
@@ -1036,7 +1045,7 @@
             <th class="px-3 py-2">{$t('Schedulable')}</th>
             <th class="px-3 py-2">{$t('Fast')}</th>
             <th class="px-3 py-2">{$t('Expires')}</th>
-            <th class="px-3 py-2"></th>
+            <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-white">{$t('Actions')}</th>
           </tr>
         </thead>
         <tbody>
@@ -1056,6 +1065,7 @@
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota, isCodex)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
+            {@const needsReconnect = !row.account.healthy}
             {@const credentialFailed = row.account.credentialFailed === true}
             {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
             {@const codexCreditBalance =
@@ -1381,8 +1391,25 @@
               >
 
               <!-- Actions -->
-              <td data-label={$t('Actions')} class="px-3 py-3 lg:text-right">
-                <div class="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap lg:flex-nowrap">
+              <td
+                data-label={$t('Actions')}
+                class="px-3 py-3 lg:sticky lg:right-0 lg:bg-white lg:text-right"
+              >
+                <div class="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap lg:w-48">
+                  {#if needsReconnect}
+                    <button
+                      type="button"
+                      class="btn-primary"
+                      disabled={!overview.configured}
+                      onclick={() => {
+                        reconnecting = {
+                          providerId: row.provider.id,
+                          account: row.account.account,
+                        };
+                        showConnect = true;
+                      }}>{$t('Reconnect')}</button
+                    >
+                  {/if}
                   <button
                     type="button"
                     class="btn-secondary"

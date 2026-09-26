@@ -1059,7 +1059,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.post("/admin/api/oauth/:provider/manual/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as { proxy?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      proxy?: unknown;
+    };
+    if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
+      return c.json({ error: "account must be a non-empty string" }, 400);
+    }
     let proxy: AccountProxyInput | null;
     try {
       proxy = parseProxyInput(body.proxy);
@@ -1070,6 +1076,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json(
         await s.startManualPaste({
           providerId: c.req.param("provider"),
+          ...(typeof body.account === "string" && body.account.trim()
+            ? { account: body.account }
+            : {}),
           proxy: proxy ?? undefined,
         }),
       );
@@ -1117,9 +1126,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
       enterprise?: unknown;
       proxy?: unknown;
     };
+    if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
+      return c.json({ error: "account must be a non-empty string" }, 400);
+    }
     let proxy: AccountProxyInput | null;
     try {
       proxy = parseProxyInput(body.proxy);
@@ -1130,6 +1143,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json(
         await s.startDeviceCode({
           providerId: c.req.param("provider"),
+          ...(typeof body.account === "string" && body.account.trim()
+            ? { account: body.account }
+            : {}),
           enterprise: typeof body.enterprise === "string" ? body.enterprise : undefined,
           proxy: proxy ?? undefined,
         }),

@@ -1797,7 +1797,10 @@ describe("createOAuthAdmin", () => {
 // the global (real-IP) fetch is never touched. The injected `makeFetch` returns the
 // routed spy for a proxy and a THROWING global otherwise, so any leak fails loudly.
 describe("createOAuthAdmin > bind-time egress proxy", () => {
-  it("device-code: the FIRST device-code call + poll go through the proxy, never the global", async () => {
+  it.each([
+    false,
+    true,
+  ])("device-code: first call and poll keep the proxy (reconnect=%s)", async (reconnect) => {
     const { tokens, config } = makeStores();
     const PROXY: ProxyConfig = { type: "socks5", host: "10.9.9.9", port: 1080 };
     const seenProxies: Array<ProxyConfig | undefined> = [];
@@ -1838,7 +1841,12 @@ describe("createOAuthAdmin > bind-time egress proxy", () => {
         return proxy ? routed : (globalThis.fetch as typeof fetch);
       },
     });
-    const start = await admin.startDeviceCode({ providerId: "github-copilot", proxy: PROXY });
+    if (reconnect)
+      await setAccountSettings(config, KEY, "github-copilot", "default", { proxy: PROXY });
+    const start = await admin.startDeviceCode({
+      providerId: "github-copilot",
+      ...(reconnect ? { account: "default" } : { proxy: PROXY }),
+    });
     expect(start.userCode).toBe("WXYZ-1234");
     expect(await admin.pollDeviceCode({ sessionId: "dev", account: "default" })).toEqual({
       status: "done",
@@ -1922,6 +1930,53 @@ describe("createOAuthAdmin > bind-time egress proxy", () => {
     expect(globalThrow).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "manual",
+    "device",
+  ])("reconnect %s rejects unreadable settings before network I/O", async (flow) => {
+    const { tokens, config } = makeStores();
+    await config.set("oauth.account_settings", "corrupt");
+    const makeFetch = vi.fn();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config, makeFetch });
+    const start =
+      flow === "manual"
+        ? admin.startManualPaste({ providerId: "anthropic", account: "work" })
+        : admin.startDeviceCode({ providerId: "github-copilot", account: "work" });
+    await expect(start).rejects.toThrow();
+    expect(makeFetch).not.toHaveBeenCalled();
+  });
+
+  it("device reconnect retains the stored GitHub Enterprise domain", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "github-copilot",
+      account: "work",
+      accessEnc: encryptSecret("old-access", KEY),
+      refreshEnc: encryptSecret("old-refresh", KEY),
+      expiresAt: null,
+      updatedAt: Date.now(),
+      meta: JSON.stringify({ enterpriseUrl: "github.example.com" }),
+    });
+    const routed = routeFetch([
+      [
+        /^https:\/\/github\.example\.com\/login\/device\/code$/,
+        () =>
+          json({
+            device_code: "DC",
+            user_code: "ABCD",
+            verification_uri: "https://github.example.com/login/device",
+            interval: 5,
+            expires_in: 900,
+          }),
+      ],
+    ]);
+    const admin = createOAuthAdmin({ store: tokens, config, encKey: KEY, makeFetch: () => routed });
+    expect(
+      await admin.startDeviceCode({ providerId: "github-copilot", account: "work" }),
+    ).toMatchObject({ userCode: "ABCD" });
+    expect(routed).toHaveBeenCalledOnce();
+  });
+
   it("no proxy: binding still works (direct connection unchanged)", async () => {
     const { tokens, config } = makeStores();
     let proxyArg: ProxyConfig | undefined | "unset" = "unset";
@@ -1949,6 +2004,37 @@ describe("createOAuthAdmin > bind-time egress proxy", () => {
     });
     expect(proxyArg).toBeUndefined();
     expect(await admin.getAccountProxy({ providerId: "anthropic", account: "default" })).toBeNull();
+  });
+
+  it("reconnect reuses the stored account proxy before exchanging the new credential", async () => {
+    const { tokens, config } = makeStores();
+    const proxy: ProxyConfig = { type: "http", host: "stored.proxy", port: 8080 };
+    await setAccountSettings(config, KEY, "anthropic", "work", { proxy });
+    const routed = routeFetch([
+      [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+    ]);
+    let proxyArg: ProxyConfig | undefined;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => "reconnect",
+      makeFetch: (candidate) => {
+        proxyArg = candidate;
+        return routed;
+      },
+    });
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({
+      providerId: "anthropic",
+      account: "work",
+    });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "work",
+    });
+    expect(proxyArg).toEqual(proxy);
   });
 });
 

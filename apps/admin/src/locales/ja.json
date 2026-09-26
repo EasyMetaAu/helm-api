@@ -200,6 +200,8 @@
   "Connect": "接続",
   "Connect a client": "クライアントを接続",
   "Connect a subscription": "サブスクリプションを接続",
+  "Reconnect": "再接続",
+  "Reconnect subscription": "サブスクリプションを再接続",
   "Connect AI subscriptions": "AI サブスクリプションを接続",
   "Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.": "Claude、ChatGPT、または GitHub Copilot のサブスクリプションを接続すると、Helm がそれらにルーティングできます。プロバイダーごとに複数のアカウントを接続できます。",
   "Connect Codex and Claude subscriptions": "CodexとClaudeのサブスクリプションを接続する",
