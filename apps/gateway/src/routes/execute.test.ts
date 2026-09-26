@@ -2541,6 +2541,59 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("strips unsupported output_config.effort for Opus 4.8 from the shipped catalog", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const provider = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.test", apiKey: "sk-test" },
+      fetch: async (_url, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(
+          JSON.stringify({
+            id: "msg_opus48",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        "anthropic/claude-opus-4-8": {
+          providerName: "anthro",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["anthropic/claude-opus-4-8"]),
+      req({ reasoning_effort: "high" }),
+    );
+
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "anthropic/claude-opus-4-8",
+      providerModel: "claude-opus-4-8",
+    });
+    expect(upstreamBodies[0]?.output_config).toBeUndefined();
+    expect(upstreamBodies[0]?.reasoning_effort).toBeUndefined();
+    expect(upstreamBodies[0]?.thinking).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_model"],
+    });
+  });
+
   it("short-circuits the chain on an upstream request-shape 400 and surfaces it verbatim", async () => {
     // A 400 invalid_request_error (oversized image / prompt too long / bad param) is
     // DETERMINISTIC: the identical body fails on every candidate, and Claude Code

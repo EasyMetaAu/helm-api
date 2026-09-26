@@ -219,6 +219,13 @@ describe("checked-in config samples", () => {
     expect(luna?.reasoningEffort?.openaiReasoning?.levels).not.toContain("ultra");
   });
 
+  it("does not forward per-turn effort to Anthropic Opus 4.8", () => {
+    const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
+    expect(capabilities["anthropic/claude-opus-4-8"]?.reasoningEffort).toMatchObject({
+      anthropicOutputConfig: { supported: false },
+    });
+  });
+
   it("ships fail-closed Grok Imagine media capabilities and dedicated lanes", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
