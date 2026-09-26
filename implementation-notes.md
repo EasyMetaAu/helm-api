@@ -10,7 +10,7 @@
 ## 2026-09-26 · Admin UI 走查整改 + 首次安装 key 验证修复（docs/11、12；方案见 docs/ui-audit-2026-09-26.md）
 
 - **安装向导 key 验证（用户反馈"DeepSeek key 一直验证不过"，确认为 bug）**：`testStaticProviderKey` 过去只要非 2xx 就判失败，而 DeepSeek 对**余额为 0 的有效 key** 返回 402，向导又要求测试通过才允许完成，结果有效 key 根本存不进去；错误信息只有 `upstream returned 402`。现改为：401/403 等才判无效；402/429 视为"key 已通过鉴权"，放行并返回 warning；错误与警告都带上脱敏后的上游 `error.message`；服务端与页面都会 trim 粘贴的 key；探测模型跳过图像/视频/TTS/embedding 类（ZenMux 的 `models[0]` 曾是 `gpt-image-2`）；修复错误显示成 `[object Object]` 的问题。未做：代理环境（`HTTPS_PROXY`）下的出站连接，egress 仍是直连 undici Agent。
-- **布局策略**：新增 `.page-wide`（数据页，最大 1600px）/`.page-narrow`（表单与详情，`max-w-5xl`）两个页面外壳；侧栏去掉会被截断的副标题（改为 hover title），顶栏不再重复页面标题。验收标准：1440×812 下主表格不出现横向滚动，2560 下表单不再被拉满整行。
+- **布局策略**：所有页面铺满窗口，不设最大宽度（用户拍板：限宽在全屏外接显示器上显得局促、偏在一边，不好看），统一用 `.page` 外壳，并有测试禁止页面容器加 `max-w-`/`mx-auto`。笔记本屏的可读性靠合并列与折叠次要信息来保证，而不是限宽。侧栏去掉会被截断的副标题（改为 hover title），顶栏不再重复页面标题。验收标准：1440×812 下主表格不出现横向滚动。
 - **表格收敛而不删字段**：Requests 12→8 列（Session 并到 Key 下、Serving 并到 Model 下、请求体大小并到 Performance、Request ID 挪到时间链接的 title）；Keys 只显示非默认的限额（全是默认值时显示灰色 "Defaults"），Rotate/Revoke/查看完整 key 收进原生 `<details>` 做的 `⋯` 菜单；Providers 11→7 列（优先级/可调度/Fast/过期时间合并为一个 Scheduling 列）。三张表在 1440 下所需宽度从 1966/1869/1653px 降到 ≤1150px。`cell-request-body`、`request-detail-link` 等 testid 保持不变（e2e 依赖）。
 - **长配置页**：Lanes 卡片默认折叠为一行摘要（主模型 → +N fallback · 推理强度），页面高度从约 15.5k px 降到约 2k px；校验失败的 lane 会自动展开，避免错误被藏起来。e2e 的 lane 编辑用例先展开卡片再填写。Policies 用一句话概括每条规则；Settings 增加吸顶的分区跳转导航，两个同名的 "Queue wait timeout (ms)" 分别改为 Key/Account 排队超时。
 - **修复**：`requests/[traceId]/+page.ts` 导出了 `safeBackTo`，SvelteKit 开发模式的路由校验会拒绝这种非标准导出，导致 `vite dev` 下请求详情 500（生产构建不做这项检查）。函数移到 `$lib/nav.ts`，并加测试固定路由模块只能导出合法名字。
@@ -19,7 +19,7 @@
 
 ## 2026-09-26 · Self-Service Portal UI 审计整改（docs/12）
 
-- **背景**：对 portal（key 持有者自助门户）做了一轮 UI/信息密度审计，修复 6 项：Overview 增加「按模型」表格与≥7d 的「每日用量」表；Requests 列表改为 ↑input/↓output+cached 分列显示、延迟按秒显示；请求详情页补齐请求时间、requested vs served model、reasoning effort、TTFT/TPS/生成耗时、fallback 尝试；Account 页收窄到 `max-w-3xl` + 两列 `<dl>` + 用量/限额进度条；布局统一 `max-w-[1600px]` 内容宽度、顶部导航直接放 LocaleSwitcher、新增 Account 导航项。
+- **背景**：对 portal（key 持有者自助门户）做了一轮 UI/信息密度审计，修复 6 项：Overview 增加「按模型」表格与≥7d 的「每日用量」表；Requests 列表改为 ↑input/↓output+cached 分列显示、延迟按秒显示；请求详情页补齐请求时间、requested vs served model、reasoning effort、TTFT/TPS/生成耗时、fallback 尝试；Account 页三张卡片在宽屏并排（页面铺满、卡内两列 `<dl>`，标签与值不会被拉开）+ 用量/限额进度条；内容不限宽（见上一条），顶部导航直接放 LocaleSwitcher、新增 Account 导航项。
 - **fallback 尝试展示边界（R7，docs/12 §8）**：详情页新增「Fallback attempts」区块，逐条只显示 outcome（success/timeout/rate_limited/circuit_open/skipped/error）+ latency_ms，**绝不**显示 provider、内部 alias 或 wire model——这些是供应链细节（CLAUDE.md 原则 6），且 `toPortalDecisionView` 的白名单投影本就没有透出这些字段。测试 `request-detail-parity.test.ts` 用 `not.toContain("attempt.provider")` / `not.toContain("attempt.alias")` 固化这条边界，防止未来有人为了"更详细"而误加。
 - **删除 CostBreakdown.svelte（偏离字面任务措辞的决定）**：原任务描述是"修复 Cost 卡片，隐藏空行"，但检查 `CostBreakdownSchema`（`packages/shared/src/decision/schema.ts`）后发现 `routing_usd`/`eval_usd` 对 portal key holder 永远是 null（后端从不为 portal 填充这两项），补丁式"隐藏空行"只会剩一个多余的容器包着一个数字。按 CLAUDE.md「优先复用/删除过时路径而非加兼容层」的原则，直接删除该组件，详情页改为渲染 `detail.cost_usd` 单一 Total。测试同步固化为 `not.toContain("CostBreakdown")` + `cost-total` testid。
 - **Overview 「按模型」表 / 「每日用量」表未引入新字段**：两者都复用既有 `GET /portal/api/usage/stats` 返回的 `by_model` 和 `series`（未新增/修改后端 schema），因此未新增安全边界测试——现有的 key 隔离测试（`apps/gateway/src/routes/portal/index.test.ts` 的 R5 write-force 断言）已覆盖这条数据源。
