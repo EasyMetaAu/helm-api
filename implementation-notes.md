@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-09-26 · Admin UI 走查整改 + 首次安装 key 验证修复（docs/11、12；方案见 docs/ui-audit-2026-09-26.md）
+
+- **安装向导 key 验证（用户反馈"DeepSeek key 一直验证不过"，确认为 bug）**：`testStaticProviderKey` 过去只要非 2xx 就判失败，而 DeepSeek 对**余额为 0 的有效 key** 返回 402，向导又要求测试通过才允许完成，结果有效 key 根本存不进去；错误信息只有 `upstream returned 402`。现改为：401/403 等才判无效；402/429 视为"key 已通过鉴权"，放行并返回 warning；错误与警告都带上脱敏后的上游 `error.message`；服务端与页面都会 trim 粘贴的 key；探测模型跳过图像/视频/TTS/embedding 类（ZenMux 的 `models[0]` 曾是 `gpt-image-2`）；修复错误显示成 `[object Object]` 的问题。未做：代理环境（`HTTPS_PROXY`）下的出站连接，egress 仍是直连 undici Agent。
+- **布局策略**：所有页面铺满窗口，不设最大宽度（用户拍板：限宽在全屏外接显示器上显得局促、偏在一边，不好看），统一用 `.page` 外壳，并有测试禁止页面容器加 `max-w-`/`mx-auto`。笔记本屏的可读性靠合并列与折叠次要信息来保证，而不是限宽。侧栏去掉会被截断的副标题（改为 hover title），顶栏不再重复页面标题。验收标准：1440×812 下主表格不出现横向滚动。
+- **表格收敛而不删字段**：Requests 12→8 列（Session 并到 Key 下、Serving 并到 Model 下、请求体大小并到 Performance、Request ID 挪到时间链接的 title）；Keys 只显示非默认的限额（全是默认值时显示灰色 "Defaults"），Rotate/Revoke/查看完整 key 收进原生 `<details>` 做的 `⋯` 菜单；Providers 11→7 列（优先级/可调度/Fast/过期时间合并为一个 Scheduling 列）。三张表在 1440 下所需宽度从 1966/1869/1653px 降到 ≤1150px。`cell-request-body`、`request-detail-link` 等 testid 保持不变（e2e 依赖）。
+- **长配置页**：Lanes 卡片默认折叠为一行摘要（主模型 → +N fallback · 推理强度），页面高度从约 15.5k px 降到约 2k px；校验失败的 lane 会自动展开，避免错误被藏起来。e2e 的 lane 编辑用例先展开卡片再填写。Policies 用一句话概括每条规则；Settings 增加吸顶的分区跳转导航，两个同名的 "Queue wait timeout (ms)" 分别改为 Key/Account 排队超时。
+- **修复**：`requests/[traceId]/+page.ts` 导出了 `safeBackTo`，SvelteKit 开发模式的路由校验会拒绝这种非标准导出，导致 `vite dev` 下请求详情 500（生产构建不做这项检查）。函数移到 `$lib/nav.ts`，并加测试固定路由模块只能导出合法名字。
+- **验证方式**：本机起 admin/portal 开发服务器，只读代理到线上（非 GET 一律本地 403），在 1440 和 2560 两种视口下截图逐页走查；admin 单测 834/834，svelte-check 0 错误，admin e2e 14/14（真实 gateway + adapter-static 构建）。
+- **TODO（后续 PR）**：方案文档第 6 期"配置 UI 化"——把运行时调优类配置（超时、memory worker、signal feedback 等）并入 DB runtime settings；providers/model-aliases/pricing/capabilities 走 YAML 回写并做跨文件引用校验；引导与密钥类配置在 UI 上只读展示。
+
+## 2026-09-26 · Self-Service Portal UI 审计整改（docs/12）
+
+- **背景**：对 portal（key 持有者自助门户）做了一轮 UI/信息密度审计，修复 6 项：Overview 增加「按模型」表格与≥7d 的「每日用量」表；Requests 列表改为 ↑input/↓output+cached 分列显示、延迟按秒显示；请求详情页补齐请求时间、requested vs served model、reasoning effort、TTFT/TPS/生成耗时、fallback 尝试；Account 页三张卡片在宽屏并排（页面铺满、卡内两列 `<dl>`，标签与值不会被拉开）+ 用量/限额进度条；内容不限宽（见上一条），顶部导航直接放 LocaleSwitcher、新增 Account 导航项。
+- **fallback 尝试展示边界（R7，docs/12 §8）**：详情页新增「Fallback attempts」区块，逐条只显示 outcome（success/timeout/rate_limited/circuit_open/skipped/error）+ latency_ms，**绝不**显示 provider、内部 alias 或 wire model——这些是供应链细节（CLAUDE.md 原则 6），且 `toPortalDecisionView` 的白名单投影本就没有透出这些字段。测试 `request-detail-parity.test.ts` 用 `not.toContain("attempt.provider")` / `not.toContain("attempt.alias")` 固化这条边界，防止未来有人为了"更详细"而误加。
+- **删除 CostBreakdown.svelte（偏离字面任务措辞的决定）**：原任务描述是"修复 Cost 卡片，隐藏空行"，但检查 `CostBreakdownSchema`（`packages/shared/src/decision/schema.ts`）后发现 `routing_usd`/`eval_usd` 对 portal key holder 永远是 null（后端从不为 portal 填充这两项），补丁式"隐藏空行"只会剩一个多余的容器包着一个数字。按 CLAUDE.md「优先复用/删除过时路径而非加兼容层」的原则，直接删除该组件，详情页改为渲染 `detail.cost_usd` 单一 Total。测试同步固化为 `not.toContain("CostBreakdown")` + `cost-total` testid。
+- **Overview 「按模型」表 / 「每日用量」表未引入新字段**：两者都复用既有 `GET /portal/api/usage/stats` 返回的 `by_model` 和 `series`（未新增/修改后端 schema），因此未新增安全边界测试——现有的 key 隔离测试（`apps/gateway/src/routes/portal/index.test.ts` 的 R5 write-force 断言）已覆盖这条数据源。
+- **可视化走查发现并修复的布局坑**：Overview 页最初把「按模型」表放进了甜甜圈图所在的 `lg:col-span-1` 卡片（3 栏网格的 1/3 宽）——5 列（Model/Requests/Tokens/Cost/Share）在该宽度下右侧 Cost/Share 列被裁切。修复：表格移出，改为图表网格下方独立的 `lg:col-span-3` 全宽 `<section class="card mt-4">`（与「每日用量」表同一模式），甜甜圈卡片只保留图 + 精简色块图例。用真实生产数据（只读代理到 helm.easymeta.au）截图两种尺寸（1440×812、2560×1440）验证修复前后对比确认。
+- **真实生产 box 验证发现请求详情页会报错（非回归，是预期的"字段未上线"场景）→ 已补防御**：本次给 `PortalDecisionView` 新增的 `attempts`/`tps`/`ttfb_ms`/`requested_reasoning_effort`/`reasoning_effort` 字段还没有部署到生产 box，代理到真实数据时旧响应缺这些字段（JSON.parse 后是 `undefined` 而非 `null`），`detail.attempts.length` 会触发 `Cannot read properties of undefined`。这不是代码 bug，但客户端理应对"字段未部署"宽容降级：新增 `apps/portal/src/lib/request-detail-normalize.ts`（`normalizePortalDetail`），在 `load()` 拿到响应后立即把缺失的 `attempts`→`[]`、`tps`/`ttfb_ms`/`generation_ms`→`null`，页面模板其余逻辑不用改。单测 `request-detail-normalize.test.ts` 覆盖"字段齐全原样透传"与"字段缺失时按各自类型的哨兵值归一化"两种情况；`request-detail-parity.test.ts` 新增一条固化调用点存在。原先 TODO 已解决。
+- **可视化走查已完成**：真实生产数据 Playwright 走查全部完成（12 张 + 1 张 mock 截图），Overview/Requests/Connect/Memory/Account 五个页面在两种视口下逐一审阅，无遗留视觉问题；定向 vitest 57/57、`svelte-check` 0 错误 0 警告、i18n 对齐 12/12。
+
 ## 2026-09-26 · DeepSeek 兜底与 Responses 请求变更可观测性（Provider fallback，docs/04、07）
 
 - **决定**：保留 DeepSeek 对 opaque reasoning history 的 `effort: none` 降级，并让 request-contract 生成的 body mutation ledger 回写到执行器持有的 carrier。这样首选上游 429 后，DeepSeek 的候选尝试既可成功，也能在管理记录中显示实际应用的降级。
@@ -66,32 +86,13 @@
 - **恢复边界**：发送前安全重连与 HTTP 降级继续使用既有逻辑。Codex 使用 `store:false`，没有可依赖的 GET 取回契约，Remote 的只读接口探测也未成功（403），因此不新增取回轮询。真正丢失上游输出后，透明重放仍可能重复工具或计费，保留结果不明错误；本修复不能承诺所有网络断线都无感。
 - **验证**：真实 ws connector 覆盖正常关闭、1006 reset、协议错误下的已收创建/文本/完成帧顺序，以及关闭后的租约释放；保持容量保护与安全重试回归。
 
-## 2026-09-23 · 远端 Helm 建连重试与 WebSocket 降级（Provider / 协议透传，docs/04、05）
-
-- **证据**：内网 Helm 到远端公网入口间歇出现 Undici `UND_ERR_CONNECT_TIMEOUT`，请求未建立 TCP 连接；共享 API key 尚未参与鉴权，不是该故障原因。此错误加入现有严格连接错误白名单，generic Responses 复用已有两次短退避重试。
-- **WebSocket 边界**：首轮 `response.create` 发送前发生网络失败或非鉴权 upgrade 拒绝时，改走同一 Responses HTTP/SSE 请求。401/403/429、增量 `previous_response_id`、发送后结果不明仍原样失败，禁止自动重放。
-- **部署限制**：请求总超时无法改变 Undici 独立的 10 秒 TCP 建连上限；生产内网节点应优先使用稳定的专网路径。代码重试只吸收专网短抖动，不掩盖鉴权、配额或确定性请求错误。
-- **工具续轮边界**：真实 Codex 经远端 DeepSeek 回退后，`previous_response_id` 加单条 `function_call_output` 被误删为空输入。带有效非空 continuation ID 时保留工具结果，配对由上游已有响应校验；完整历史仍沿用孤立结果清理。generic HTTP 重试仅允许明确的建连超时，socket reset/pipe 错误不证明请求未发送。
-- **错误终止边界**：真实链路的扁平 SSE `type:error` 在 WebSocket 出口补齐 Codex 所需的嵌套 `error` 和唯一 `status` 字段；复用共享错误状态映射，保留原 code、显式状态和恢复字段。Codex 0.154.0 将 `status_code` 声明为 `status` 的 serde 别名，两者同时出现会整条解析失败，因此自产错误与双字段旧节点事件移除 `status_code`；其余原生嵌套事件不改写，发送后结果不明禁止重放仍保持。
-
-## 2026-09-23 · Claude Opus 5.5（模型目录 / 协议 / 计费，docs/04、05、07）
-
-- **来源与范围**：[官方模型页](https://platform.claude.com/docs/en/models/opus-5-5/overview)、[迁移指南](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)和[价格表](https://platform.claude.com/docs/en/about-claude/pricing)，于 2026-09-23 核对。新增原生 `anthropic/claude-opus-5-5`，1M 上下文、128K 输出；Claude Opus 通道优先 5.5，保留旧模型回退。未证实 ZenMux 上架，因此不新增其别名。
-- **兼容决定**：思考始终开启，沿用 `output_config.effort` 的五档控制；适配器统一移除旧版 enabled/disabled 思考配置及 sampling 字段，保留合法 adaptive/display 和签名历史。此模型不声明手动预算策略，以免通用策略删除合法 adaptive 配置。不会把强制工具请求偷偷改为 auto；上游确定性 400 继续按原契约返回。
-- **上线前实测**：远端旧版客户端标识 2.1.278 被上游以 `claude_code_version_too_old` 拒绝，要求至少 2.1.280；通过现有 `pnpm sync:claude-cli` 更新生成文件。真实 Claude Code 客户端仍需自行升级，不伪造其传入版本。
-- **计价与限制**：标准输入/输出 $4/$20 每百万 token；缓存读/5 分钟写/1 小时写 $0.20/$5/$8，fast 全部翻倍，US 区域系数 1.1。订阅显示的是 API 等价费用。旧 computer_20251124 不兼容、强制工具和 assistant prefill 不支持；原生工具集直接透传。签名历史须保持 append-only，跨模型回退不保证签名兼容；不改客户端历史来伪造兼容。新模型是否可用仍由账号发现/手动名单决定，发布时需核对挂载配置与在线账号。
-
-## 2026-09-22 · Helm 上游通道转发（Provider / 协议透传，docs/04、05）
-
-- **决定**：静态 `type: helm` 配合 `target_provider_protocol: openai_responses` 复用 Responses 客户端，明确允许 Codex 原生 items；不应用 DeepSeek 的请求改写。客户端仍使用已有模型别名，内网仅把 lane 转发到远端同名 lane。
-- **媒体边界**：视频 lane 可指向显式 Helm provider，由远端履行 Grok 订阅鉴权；普通静态 OpenAI provider 仍不可调用该入口。本机 API key 鉴权、预算、一次创建与轮询所属 key 校验继续生效。
-- **验证与限制**：原生请求、鉴权替换及 SSE 回归先红后绿；视频创建、轮询隔离与普通 provider 拒绝有定向集成测试。映射采用当前通道快照，远端调整通道内模型无需同步；新增或删除通道需重新同步。远端额度及可用性仍决定最终是否成功。
-
-- **WebSocket 续接修复**：真实两轮验证中，直连远端成功，经过本地 Helm 第二轮因中继降为 HTTP 而丢失上游连接。显式 Helm Responses provider 使用现有有界 WebSocket connector，按可信 ingress session 保持一条远端连接；不透传内部会话证明，不改模型名、不删除 previous_response_id、不重建用户历史。下游关闭时释放连接，复用现有收包超时与内存租约处理。
-- **恢复边界**：原连接缺失或远端明确未发送时保持 response_create_not_sent 恢复语义；发送后连接失败标记结果不明，禁止自动重放。普通 HTTP 与其他 generic Responses provider 保持原路由。需要真实同 socket 两轮 continuation 作为验收，普通 CLI 或 SSE 成功不足以覆盖此问题。
-- **本次验收**：328 项定向测试、core/gateway 类型检查与构建通过；独立审查提出的握手 401/403/429 错误保真已补测试修复。`.12` 的 0.30.7 派生镜像部署后，同 socket 两轮均 response.completed、远端账号一致；Claude/Grok/Codex CLI 工具调用通过，测试 Key 全部删除。正式发布仍需通过完整 CI 与不可变镜像验收。
-
 ## 更早历史总览
+
+2026-09-23 · 远端 Helm 建连重试与 WebSocket 降级：`UND_ERR_CONNECT_TIMEOUT` 加入严格连接错误白名单并复用两次短退避；首轮发送前 WebSocket 失败改走 HTTP/SSE（401/403/429、增量续接、发送后结果不明不重放）；保留带 continuation ID 的单条 `function_call_output`；自产错误移除与 `status` 冲突的 `status_code`。完整记录见 git history。
+
+2026-09-23 · Claude Opus 5.5：新增原生 `anthropic/claude-opus-5-5`（1M 上下文/128K 输出），思考默认开启走 `output_config.effort` 五档；标准 $4/$20 每百万 token；旧 computer_20251124/强制工具/assistant prefill 不支持。完整记录见 git history。
+
+2026-09-22 · Helm 上游通道转发：静态 `type: helm` + `target_provider_protocol: openai_responses` 复用 Responses 客户端并支持 WebSocket 续接；视频 lane 需显式 Helm provider；328 项定向测试通过，0.30.7 派生镜像验收。完整记录见 git history。
 
 2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）：完整记录见 git history。
 

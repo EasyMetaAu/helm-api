@@ -994,5 +994,11 @@
   "Your new API key": "Your new API key",
   "Your requests, filtered by time, status, model, or lane.": "Your requests, filtered by time, status, model, or lane.",
   "Zoom in": "Zoom in",
-  "Zoom out": "Zoom out"
+  "Zoom out": "Zoom out",
+  "Reasoning effort": "Reasoning effort",
+  "Attempt": "Attempt",
+  "Fallback attempts": "Fallback attempts",
+  "Share": "Share",
+  "Date": "Date",
+  "Daily usage": "Daily usage"
 }

@@ -60,6 +60,14 @@ export interface UsageStats {
   budget: Me["budget"];
 }
 
+export type PortalAttemptOutcome =
+  | "success"
+  | "error"
+  | "timeout"
+  | "rate_limited"
+  | "circuit_open"
+  | "skipped";
+
 // The portal-projected request row/detail (toPortalDecisionView + created_at).
 export interface PortalRequestRow {
   request_id: string;
@@ -80,7 +88,19 @@ export interface PortalRequestRow {
   created_at: number;
 }
 
-export type PortalRequestDetail = Omit<PortalRequestRow, "created_at">;
+// The detail response carries everything the list row does, plus fields only
+// the single-request view needs (docs/12 §4.3): reasoning effort, generation
+// timing/throughput, and fallback attempt outcomes — never alias/provider/wire
+// model (see packages/shared/src/decision/portal-view.ts).
+export interface PortalRequestDetail extends Omit<PortalRequestRow, "created_at"> {
+  requested_reasoning_effort: string | null;
+  reasoning_effort: string | null;
+  generation_ms: number | null;
+  tps: number | null;
+  ttfb_ms: number | null;
+  attempts: Array<{ outcome: PortalAttemptOutcome; latency_ms: number }>;
+  created_at?: number;
+}
 
 export interface RequestsPage {
   items: PortalRequestRow[];

@@ -994,5 +994,11 @@
   "Your new API key": "새 API 키",
   "Your requests, filtered by time, status, model, or lane.": "내 요청을 시간, 상태, 모델 또는 레인으로 필터링합니다.",
   "Zoom in": "확대",
-  "Zoom out": "축소"
+  "Zoom out": "축소",
+  "Reasoning effort": "Reasoning effort",
+  "Attempt": "Attempt",
+  "Fallback attempts": "Fallback attempts",
+  "Share": "Share",
+  "Date": "Date",
+  "Daily usage": "Daily usage"
 }

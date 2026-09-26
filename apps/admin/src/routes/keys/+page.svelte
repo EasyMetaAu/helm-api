@@ -113,6 +113,18 @@
     return parts;
   }
 
+  // Only the limits an operator actually set — defaults ("RPM: Default", "Fast
+  // mode: no", "Concurrency: Unlimited") are noise when every key repeats them.
+  function limitChips(key: ApiKeyView): string[] {
+    const chips: string[] = [];
+    if (key.rate_limit_rpm !== null) chips.push(`${limitLabel(key.rate_limit_rpm)} RPM`);
+    if (key.rate_limit_tpm !== null) chips.push(`${limitLabel(key.rate_limit_tpm)} TPM`);
+    if (key.concurrency_limit !== null)
+      chips.push($t('{n} concurrent', { n: key.concurrency_limit }));
+    if (key.max_reasoning_effort) chips.push($t('effort ≤ {e}', { e: key.max_reasoning_effort }));
+    return chips;
+  }
+
   function startEdit(key: ApiKeyView): void {
     error = null;
     editingKey = key;
@@ -251,7 +263,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('API Keys')}</h1>
@@ -299,12 +311,8 @@
         <thead class="table-head">
           <tr>
             <th class="px-3 py-2">{$t('Name')}</th>
-            <th class="px-3 py-2">{$t('Key (prefix)')}</th>
-            <th class="px-3 py-2">{$t('Role')}</th>
-            <th class="px-3 py-2">{$t('Caps')}</th>
-            <th class="px-3 py-2">{$t('Rate limit')}</th>
-            <th class="px-3 py-2">{$t('Budget')}</th>
-            <th class="px-3 py-2">{$t('Memory')}</th>
+            <th class="px-3 py-2">{$t('Access')}</th>
+            <th class="px-3 py-2">{$t('Limits')}</th>
             <th class="px-3 py-2">{$t('Usage (today)')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
@@ -321,23 +329,19 @@
                     <span class="text-ink-muted">{$t('Unnamed')}</span>
                   {/if}
                 </a>
-              </td>
-              <td data-label={$t('Key (prefix)')} class="px-3 py-2">
-                <code class="font-mono text-ink-strong">{key.prefix}</code>
-              </td>
-              <td data-label={$t('Role')} class="px-3 py-2">
-                <span class="text-ink-body">{key.role}</span>
+                <code class="block font-mono text-xs text-ink-muted">{key.prefix}</code>
                 {#if key.role === 'root'}
                   <p
                     data-testid="root-warning"
-                    class="mt-1 w-44 whitespace-normal text-xs text-amber-700"
+                    class="mt-1 max-w-56 whitespace-normal text-xs text-amber-700"
                   >
+                    <span class="badge-warning">{key.role}</span>
                     {$t('Management plane only — do not feed production traffic.')}
                   </p>
                 {/if}
               </td>
-              <td data-label={$t('Caps')} class="px-3 py-2 text-ink-muted">
-                <div>
+              <td data-label={$t('Access')} class="px-3 py-2 text-ink-muted lg:whitespace-normal">
+                <div class="whitespace-normal">
                   {$t('Allowed lanes')}:
                   {key.allowed_lanes === null
                     ? $t('No cap')
@@ -345,41 +349,47 @@
                       ? $t('None')
                       : key.allowed_lanes.join(', ')}
                 </div>
-                <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
-                <div>{$t('Fast mode')}: {key.allow_fast_mode ? $t('yes') : $t('no')}</div>
-              </td>
-              <td data-label={$t('Rate limit')} class="px-3 py-2 text-ink-muted">
-                <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>
-                <div>{$t('TPM')}: {limitLabel(key.rate_limit_tpm)}</div>
-                <!-- Concurrency null = unlimited (NOT inherit), unlike the rate limits above. -->
-                <div>
-                  {$t('Concurrency')}: {key.concurrency_limit ?? $t('Unlimited')}
-                </div>
-              </td>
-              <td data-label={$t('Budget')} class="px-3 py-2 text-ink-muted">
-                {#if budgetParts(key).length > 0}
-                  <div>{budgetParts(key).join(' · ')}</div>
-                  <div class="text-xs">
-                    {key.over_budget_behavior === 'reject'
-                      ? $t('reject')
-                      : `→ ${key.degrade_lane ?? 'economy'}`}
-                  </div>
-                {:else}
-                  <span>{$t('None')}</span>
-                {/if}
-              </td>
-              <td data-label={$t('Memory')} class="px-3 py-2 text-ink-muted">
-                {#if key.memory_mode === 'off'}
-                  <span>{$t('Off')}</span>
-                {:else}
-                  <div>
-                    <span>{key.memory_mode === 'observe' ? $t('Observe') : $t('Inject')}</span>
-                    {#if key.memory_thread_source === 'auto'}
-                      <span class="text-xs">· {$t('auto thread')}</span>
+                {#if key.allow_custom_model || key.allow_fast_mode}
+                  <div class="mt-1 flex flex-wrap gap-1">
+                    {#if key.allow_custom_model}
+                      <span class="badge-neutral">{$t('Custom model')}</span>
+                    {/if}
+                    {#if key.allow_fast_mode}
+                      <span class="badge-neutral">{$t('Fast mode')}</span>
                     {/if}
                   </div>
-                  {#if key.memory_project_id}
-                    <div class="text-xs"><span>{key.memory_project_id}</span></div>
+                {/if}
+                {#if key.memory_mode !== 'off'}
+                  <div class="mt-1 text-xs">
+                    {$t('Memory')}:
+                    <span>{key.memory_mode === 'observe' ? $t('Observe') : $t('Inject')}</span>
+                    {#if key.memory_thread_source === 'auto'}
+                      <span>· {$t('auto thread')}</span>
+                    {/if}
+                    {#if key.memory_project_id}
+                      · <span>{key.memory_project_id}</span>
+                    {/if}
+                  </div>
+                {:else}
+                  <div class="sr-only">{$t('Memory')}: <span>{$t('Off')}</span></div>
+                {/if}
+              </td>
+              <td data-label={$t('Limits')} class="px-3 py-2 text-ink-muted lg:whitespace-normal">
+                {#if limitChips(key).length === 0 && budgetParts(key).length === 0}
+                  <span class="text-ink-faint">{$t('Defaults')}</span>
+                {:else}
+                  {#if limitChips(key).length > 0}
+                    <div>{limitChips(key).join(' · ')}</div>
+                  {/if}
+                  {#if budgetParts(key).length > 0}
+                    <div>
+                      {$t('Budget')}: {budgetParts(key).join(' · ')}
+                      <span class="text-xs">
+                        {key.over_budget_behavior === 'reject'
+                          ? $t('reject')
+                          : `→ ${key.degrade_lane ?? 'economy'}`}
+                      </span>
+                    </div>
                   {/if}
                 {/if}
               </td>
@@ -410,44 +420,54 @@
                 {/if}
               </td>
               <td data-label={$t('Actions')} class="px-3 py-2 lg:text-right">
-                <div class="flex justify-end gap-2">
+                <div class="flex items-center justify-end gap-2">
                   <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
-                  {#if key.key_id === INTERNAL_KEY_ID}
-                    <!-- system-managed internal key: read-only, no edit/revoke/delete -->
-                  {:else}
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      disabled={revealing === key.key_id}
-                      onclick={() => handleReveal(key)}
-                      >{revealing === key.key_id ? $t('Revealing…') : $t('View full key')}</button
+                  {#if key.key_id !== INTERNAL_KEY_ID && !key.disabled}
+                    <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
+                      >{$t('Edit')}</button
                     >
                   {/if}
                   {#if key.key_id === INTERNAL_KEY_ID}
                     <!-- system-managed internal key: read-only, no edit/revoke/delete -->
-                  {:else if !key.disabled}
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      disabled={rotating === key.key_id}
-                      onclick={() => askRotate(key.key_id)}>{$t('Rotate')}</button
-                    >
-                    <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
-                      >{$t('Edit')}</button
-                    >
-                    <button
-                      type="button"
-                      class="btn-danger-outline"
-                      disabled={revoking === key.key_id}
-                      onclick={() => askRevoke(key.key_id)}>{$t('Revoke')}</button
-                    >
                   {:else}
-                    <button
-                      type="button"
-                      class="btn-danger-outline"
-                      disabled={deleting === key.key_id}
-                      onclick={() => askDelete(key.key_id)}>{$t('Delete')}</button
-                    >
+                    <details data-testid="key-actions" class="menu">
+                      <summary class="menu-trigger" title={$t('More actions')}>
+                        <span aria-hidden="true">⋯</span>
+                        <span class="sr-only">{$t('More actions')}</span>
+                      </summary>
+                      <div class="menu-panel">
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={revealing === key.key_id}
+                          onclick={() => handleReveal(key)}
+                          >{revealing === key.key_id
+                            ? $t('Revealing…')
+                            : $t('View full key')}</button
+                        >
+                        {#if !key.disabled}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={rotating === key.key_id}
+                            onclick={() => askRotate(key.key_id)}>{$t('Rotate')}</button
+                          >
+                          <button
+                            type="button"
+                            class="menu-item-danger"
+                            disabled={revoking === key.key_id}
+                            onclick={() => askRevoke(key.key_id)}>{$t('Revoke')}</button
+                          >
+                        {:else}
+                          <button
+                            type="button"
+                            class="menu-item-danger"
+                            disabled={deleting === key.key_id}
+                            onclick={() => askDelete(key.key_id)}>{$t('Delete')}</button
+                          >
+                        {/if}
+                      </div>
+                    </details>
                   {/if}
                 </div>
               </td>

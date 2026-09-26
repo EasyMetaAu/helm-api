@@ -23,12 +23,13 @@
     if (!$apiKey && !onLoginRoute) void goto(`${base}/login`);
   });
 
-  // Top-nav segments (docs/12 §3): Overview / Connect / Requests / Memory.
+  // Top-nav segments (docs/12 §3): Overview / Connect / Requests / Memory / Account.
   const nav = [
     { seg: "", label: "Overview" },
     { seg: "connect", label: "Connect" },
     { seg: "requests", label: "Requests" },
     { seg: "memory", label: "Memory" },
+    { seg: "account", label: "Account" },
   ];
 
   const hrefFor = (seg: string) => (seg ? `${base}/${seg}` : `${base}/`);
@@ -87,6 +88,10 @@
             ☰
           </button>
 
+          <div class="hidden sm:block">
+            <LocaleSwitcher compact />
+          </div>
+
           <!-- Key pill + account menu. clickOutside closes the dropdown when the
                user clicks the blank area (only wired while it's open). -->
           <div class="relative" use:clickOutside={() => (menuOpen = false)}>
@@ -100,16 +105,9 @@
               <div
                 class="absolute right-0 z-20 mt-2 w-48 rounded-lg border border-border bg-surface p-2 shadow-lg"
               >
-                <div class="px-2 py-1.5">
+                <div class="px-2 py-1.5 sm:hidden">
                   <LocaleSwitcher />
                 </div>
-                <a
-                  href={hrefFor("account")}
-                  class="block rounded px-2 py-1.5 text-sm text-ink-2 hover:bg-canvas"
-                  onclick={() => (menuOpen = false)}
-                >
-                  {$t("Account")}
-                </a>
                 <button
                   class="block w-full rounded px-2 py-1.5 text-left text-sm text-danger hover:bg-canvas"
                   onclick={clearKey}
@@ -138,6 +136,9 @@
               {$t(item.label)}
             </a>
           {/each}
+          <div class="mt-2 px-1">
+            <LocaleSwitcher />
+          </div>
         </nav>
       {/if}
     </header>

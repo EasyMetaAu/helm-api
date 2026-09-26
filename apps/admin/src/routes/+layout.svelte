@@ -146,12 +146,12 @@
 
   <!-- Sidebar -->
   <aside
-    class="fixed inset-y-0 left-0 z-30 flex w-64 transform flex-col border-r border-slate-200 bg-white transition-[width,transform] duration-200 ease-out md:static md:translate-x-0 {sidebarCollapsed
+    class="fixed inset-y-0 left-0 z-30 flex w-56 transform flex-col border-r border-slate-200 bg-white transition-[width,transform] duration-200 ease-out md:static md:translate-x-0 {sidebarCollapsed
       ? 'md:w-16'
-      : 'md:w-64'} {navOpen ? 'translate-x-0' : '-translate-x-full'}"
+      : 'md:w-56'} {navOpen ? 'translate-x-0' : '-translate-x-full'}"
   >
     <div
-      class="flex h-16 items-center gap-2.5 px-5 {sidebarCollapsed
+      class="flex h-14 items-center gap-2.5 px-5 {sidebarCollapsed
         ? 'md:justify-center md:px-0'
         : ''}"
     >
@@ -210,10 +210,9 @@
           >
             <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
           </svg>
-          <span class="min-w-0 leading-tight {sidebarCollapsed ? 'md:hidden' : ''}">
-            <span class="block truncate">{$t(item.label)}</span>
-            <span class="block truncate text-xs font-normal text-slate-400">{$t(item.desc)}</span>
-          </span>
+          <span class="min-w-0 truncate {sidebarCollapsed ? 'md:hidden' : ''}"
+            >{$t(item.label)}</span
+          >
         </a>
       {/each}
     </nav>
@@ -255,7 +254,7 @@
   <div class="flex min-w-0 flex-1 flex-col">
     <!-- Top bar: hamburger on mobile + current section label -->
     <header
-      class="flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur md:px-6"
+      class="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur md:px-6"
     >
       <button
         class="-ml-1 flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 md:hidden"
@@ -276,7 +275,7 @@
           />
         </svg>
       </button>
-      <h1 class="text-base font-semibold tracking-tight text-slate-900">{$t(activeLabel)}</h1>
+      <span class="text-sm font-medium text-slate-500 md:hidden">{$t(activeLabel)}</span>
       <div class="ml-auto flex items-center gap-2">
         <StatusCluster />
         <form method="post" action={`${base}/logout`}>

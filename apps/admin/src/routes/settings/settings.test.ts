@@ -29,3 +29,27 @@ describe('settings default lane options', () => {
     expect(select.value).toBe('premium');
   });
 });
+
+describe('settings navigation and labels', () => {
+  const data = {
+    settings: { default_lane: 'balanced' } as RuntimeSettings,
+    lanes: ['balanced'],
+  };
+
+  it('offers an in-page section index linking to every group', () => {
+    render(SettingsPage, { data });
+    const nav = screen.getByRole('navigation', { name: /settings sections/i });
+    const hrefs = Array.from(nav.querySelectorAll('a'), (a) => a.getAttribute('href'));
+    expect(hrefs).toEqual(['#traffic', '#observability', '#retention', '#maintenance']);
+    for (const href of hrefs) {
+      expect(document.querySelector(href ?? '')).not.toBeNull();
+    }
+  });
+
+  it('gives the key-queue and account-queue timeouts distinct labels', () => {
+    render(SettingsPage, { data });
+    expect(screen.getByText('Key queue wait timeout (ms)')).toBeInTheDocument();
+    expect(screen.getByText('Account queue wait timeout (ms)')).toBeInTheDocument();
+    expect(screen.queryByText('Queue wait timeout (ms)')).toBeNull();
+  });
+});

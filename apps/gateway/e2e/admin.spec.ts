@@ -88,6 +88,8 @@ test.describe("admin lane editing", () => {
       .getByTestId("lane-card")
       .filter({ has: page.getByRole("heading", { name: "economy", exact: true }) });
     await expect(card).toBeVisible();
+    // Lane cards start collapsed to a one-line summary; expand to edit.
+    await card.getByTestId("lane-summary").click();
 
     const primary = card.locator("input[name='primary']");
     await primary.fill(newPrimary);

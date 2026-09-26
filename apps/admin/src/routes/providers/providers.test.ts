@@ -961,6 +961,38 @@ describe('providers page', () => {
     expect(resetUsageLimit).not.toHaveBeenCalled();
   });
 
+  it('keeps the account table to seven columns and tucks rare actions into a row menu', () => {
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-copilot',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['m1'],
+            },
+          ],
+        }),
+      ],
+    });
+    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByRole('button', { name: 'Test' })).toBeVisible();
+    expect(within(row).getByRole('button', { name: 'Manage' })).toBeVisible();
+    const menu = within(row).getByTestId('provider-actions');
+    expect(menu.tagName).toBe('DETAILS');
+    expect(within(menu).getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+    // Scheduling controls stay inline, grouped in one cell.
+    const scheduling = within(row).getByTestId('provider-scheduling-cell');
+    expect(within(scheduling).getByLabelText('Priority')).toBeInTheDocument();
+    expect(within(scheduling).getByLabelText('Schedulable')).toBeInTheDocument();
+  });
+
   it('renders "Direct" and caps the models list with a +N pill', () => {
     renderPage({
       providers: [

@@ -157,10 +157,9 @@
       confirmingVacuum = false;
     }
   }
-
 </script>
 
-<section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">
+<section class="page gap-6">
   <header class="flex flex-col gap-2">
     <h1 class="page-title">{$t('System Settings')}</h1>
     <p class="section-desc">
@@ -172,8 +171,20 @@
     <p class="alert-error" role="alert">{error}</p>
   {/if}
 
+  <!-- Section index: the form is long, so jump links keep every group one click
+       away. Sticky so it stays reachable while scrolling. -->
+  <nav
+    aria-label={$t('Settings sections')}
+    class="sticky top-0 z-10 -mx-1 flex flex-wrap gap-1 bg-canvas/95 px-1 py-2 backdrop-blur"
+  >
+    <a class="btn-secondary" href="#traffic">{$t('Traffic controls')}</a>
+    <a class="btn-secondary" href="#observability">{$t('Observability')}</a>
+    <a class="btn-secondary" href="#retention">{$t('Data retention & cleanup')}</a>
+    <a class="btn-secondary" href="#maintenance">{$t('Maintenance actions')}</a>
+  </nav>
+
   {#if data.settings}
-    <div class="flex flex-col gap-3">
+    <div id="traffic" class="flex scroll-mt-16 flex-col gap-3">
       <div class="flex flex-col gap-1">
         <h2 class="section-header">{$t('Traffic controls')}</h2>
         <p class="section-desc">{$t('Routing, limits, queues, and request shaping.')}</p>
@@ -306,7 +317,9 @@
                   bind:value={form.global_concurrency_limit}
                 />
                 <span class="field-help"
-                  >{$t('0 disables the process-wide cap. The queue toggle above remains the master switch.')}</span
+                  >{$t(
+                    '0 disables the process-wide cap. The queue toggle above remains the master switch.',
+                  )}</span
                 >
               </label>
               <label class="flex flex-col gap-1">
@@ -341,7 +354,7 @@
                 >
               </label>
               <label class="flex flex-col gap-1">
-                <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+                <span class="font-medium">{$t('Key queue wait timeout (ms)')}</span>
                 <input
                   type="number"
                   min="5000"
@@ -393,7 +406,7 @@
                 >
               </label>
               <label class="flex flex-col gap-1">
-                <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+                <span class="font-medium">{$t('Account queue wait timeout (ms)')}</span>
                 <input
                   type="number"
                   min="1000"
@@ -411,7 +424,7 @@
       </section>
     </div>
 
-    <div class="flex flex-col gap-3">
+    <div id="observability" class="flex scroll-mt-16 flex-col gap-3">
       <div class="flex flex-col gap-1">
         <h2 class="section-header">{$t('Observability')}</h2>
         <p class="section-desc">{$t('Logs and captured request detail.')}</p>
@@ -483,7 +496,7 @@
       </section>
     </div>
 
-    <div class="flex flex-col gap-3">
+    <div id="retention" class="flex scroll-mt-16 flex-col gap-3">
       <div class="flex flex-col gap-1">
         <h2 class="section-header">{$t('Data retention & cleanup')}</h2>
         <p class="section-desc">
@@ -682,7 +695,7 @@
       </button>
     </div>
 
-    <section class="card flex flex-col gap-3 text-sm">
+    <section id="maintenance" class="card flex scroll-mt-16 flex-col gap-3 text-sm">
       <h2 class="section-header">{$t('Maintenance actions')}</h2>
       <p class="field-help">
         {$t('These actions run immediately and do not wait for Save settings.')}

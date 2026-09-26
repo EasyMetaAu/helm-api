@@ -10,7 +10,7 @@ describe('admin sidebar', () => {
     const { container } = render(Layout, { children });
     const sidebar = container.querySelector('aside');
 
-    expect(sidebar).toHaveClass('md:w-64');
+    expect(sidebar).toHaveClass('md:w-56');
     expect(screen.getByText('LLM Gateway')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Collapse' }));
@@ -21,7 +21,7 @@ describe('admin sidebar', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Expand' }));
 
-    expect(sidebar).toHaveClass('md:w-64');
+    expect(sidebar).toHaveClass('md:w-56');
     expect(screen.getByText('LLM Gateway')).toBeInTheDocument();
   });
 });

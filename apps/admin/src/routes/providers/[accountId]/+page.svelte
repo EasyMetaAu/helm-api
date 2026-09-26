@@ -12,8 +12,7 @@
   // Friendly window-key labels, mirroring the providers list (5h / 7d / 7d · Fable /
   // Weekly). Kept local + small; the providers page owns the richer scoped variant.
   function windowLabel(key: string, windowMinutes: number | null): string {
-    if ((key === 'primary' || key === 'secondary') && windowMinutes === 10_080)
-      return $t('Weekly');
+    if ((key === 'primary' || key === 'secondary') && windowMinutes === 10_080) return $t('Weekly');
     const map: Record<string, string> = {
       '5h': '5h',
       '7d': '7d',
@@ -87,9 +86,7 @@
   let granularity = $state<'period' | 'day' | 'week'>('period');
   const history = $derived.by(() =>
     granularity === 'period'
-      ? [...data.periods.current, ...data.periods.periods].filter(
-          (p) => p.windowKey === activeKey,
-        )
+      ? [...data.periods.current, ...data.periods.periods].filter((p) => p.windowKey === activeKey)
       : granularity === 'day'
         ? data.periods.daily
         : data.periods.weekly,
@@ -152,95 +149,114 @@
     <div class="empty-state">{$t('No usage recorded for this account yet.')}</div>
   {:else}
     {#if windowKeys.length > 0}
-    <!-- Window tabs: one per reset cadence (an account can have several). -->
-    <div class="mb-5 flex flex-wrap gap-2" role="tablist">
-      {#each windowKeys as key (key)}
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeKey === key}
-          class={activeKey === key ? 'btn-primary' : 'btn-secondary'}
-          onclick={() => (activeKey = key)}
+      <!-- Window tabs: one per reset cadence (an account can have several). A lone
+         window needs no switcher — its label already shows in the section below. -->
+      {#if windowKeys.length > 1}
+        <div class="mb-5 flex flex-wrap gap-2" role="tablist" aria-label={$t('Reset window')}>
+          {#each windowKeys as key (key)}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeKey === key}
+              class={activeKey === key ? 'btn-primary' : 'btn-secondary'}
+              onclick={() => (activeKey = key)}
+            >
+              {windowLabel(
+                key,
+                data.quota?.windows.find((w) => w.key === key)?.windowMinutes ?? null,
+              )}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      {#if isScopedWindow}
+        <p
+          class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700"
         >
-          {windowLabel(key, data.quota?.windows.find((w) => w.key === key)?.windowMinutes ?? null)}
-        </button>
-      {/each}
-    </div>
+          {$t(
+            'This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.',
+          )}
+        </p>
+      {/if}
 
-    {#if isScopedWindow}
-      <p class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-        {$t('This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.')}
-      </p>
-    {/if}
-
-    <!-- (a) Current reset-window summary — the real resetsAtMs boundary, exact. -->
-    <section class="mb-6">
-      <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="section-header">
-          {$t('Current period')}
-          {#if currentPeriod?.approximate}<span class="text-xs text-ink-muted">≈</span>{/if}
-          {#if currentPeriod?.partial}<span class="text-xs text-amber-600">{$t('(partial)')}</span>{/if}
-        </h2>
-        {#if quotaWindow && !snapshotStale && resetIn(quotaWindow.resetsAtMs)}
-          <span class="text-sm text-ink-muted"
-            >{$t('resets in {t}', { t: resetIn(quotaWindow.resetsAtMs) })}</span
-          >
-        {/if}
-      </div>
-      <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
-        <div class="card">
-          <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
-            {$t('Requests')}
-          </div>
-          <div class="mt-1 text-2xl font-semibold text-slate-900">
-            {formatCount(currentPeriod?.requests ?? 0)}
-          </div>
+      <!-- (a) Current reset-window summary — the real resetsAtMs boundary, exact. -->
+      <section class="mb-6">
+        <div class="mb-2 flex items-baseline justify-between">
+          <h2 class="section-header">
+            {$t('Current period')}
+            {#if activeKey}
+              <span class="badge-neutral ml-1 align-middle"
+                >{windowLabel(
+                  activeKey,
+                  data.quota?.windows.find((w) => w.key === activeKey)?.windowMinutes ?? null,
+                )}</span
+              >
+            {/if}
+            {#if currentPeriod?.approximate}<span class="text-xs text-ink-muted">≈</span>{/if}
+            {#if currentPeriod?.partial}<span class="text-xs text-amber-600">{$t('(partial)')}</span
+              >{/if}
+          </h2>
+          {#if quotaWindow && !snapshotStale && resetIn(quotaWindow.resetsAtMs)}
+            <span class="text-sm text-ink-muted"
+              >{$t('resets in {t}', { t: resetIn(quotaWindow.resetsAtMs) })}</span
+            >
+          {/if}
         </div>
-        <div class="card">
-          <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
-            {$t('Tokens')}
+        <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
+          <div class="card">
+            <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+              {$t('Requests')}
+            </div>
+            <div class="mt-1 text-2xl font-semibold text-slate-900">
+              {formatCount(currentPeriod?.requests ?? 0)}
+            </div>
           </div>
-          <div class="mt-1 text-2xl font-semibold text-slate-900">
-            {formatTokens(currentPeriod?.tokens ?? 0)}
+          <div class="card">
+            <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+              {$t('Tokens')}
+            </div>
+            <div class="mt-1 text-2xl font-semibold text-slate-900">
+              {formatTokens(currentPeriod?.tokens ?? 0)}
+            </div>
           </div>
-        </div>
-        <div class="card">
-          <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
-            {$t('Cost')}
+          <div class="card">
+            <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+              {$t('Cost')}
+            </div>
+            <div class="mt-1 text-2xl font-semibold text-slate-900">
+              {formatUsd(currentPeriod?.costUsd ?? null)}
+            </div>
           </div>
-          <div class="mt-1 text-2xl font-semibold text-slate-900">
-            {formatUsd(currentPeriod?.costUsd ?? null)}
-          </div>
-        </div>
-        <div class="card">
-          <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
-            {$t('Used')}
-          </div>
-          <!-- Used% comes from the live quota snapshot and is valid as long as the
+          <div class="card">
+            <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+              {$t('Used')}
+            </div>
+            <!-- Used% comes from the live quota snapshot and is valid as long as the
                snapshot boundary is still in the future. Only when the snapshot is STALE
                (resetsAtMs missing/past) does Used% belong to a finished window — then
                show "—" rather than pair a low new-period token count with a high stale
                Used% (a false "shrank" signal). A non-hour-aligned but fresh snapshot
                keeps Used% (grok review R3-1). -->
-          {#if quotaWindow && !snapshotStale}
-            <div class="mt-1 text-2xl font-semibold text-slate-900">
-              {Math.round(quotaWindow.usedPercent)}%
-            </div>
-            <div class="progress-track mt-2">
-              <div
-                class={`progress-bar ${barColor(quotaWindow.usedPercent)}`}
-                style={`width: ${Math.min(100, quotaWindow.usedPercent)}%`}
-              ></div>
-            </div>
-          {:else}
-            <div class="mt-1 text-2xl font-semibold text-slate-900">—</div>
-            {#if quotaWindow && snapshotStale}
-              <div class="mt-1 text-xs text-ink-muted">{$t('snapshot may be stale')}</div>
+            {#if quotaWindow && !snapshotStale}
+              <div class="mt-1 text-2xl font-semibold text-slate-900">
+                {Math.round(quotaWindow.usedPercent)}%
+              </div>
+              <div class="progress-track mt-2">
+                <div
+                  class={`progress-bar ${barColor(quotaWindow.usedPercent)}`}
+                  style={`width: ${Math.min(100, quotaWindow.usedPercent)}%`}
+                ></div>
+              </div>
+            {:else}
+              <div class="mt-1 text-2xl font-semibold text-slate-900">—</div>
+              {#if quotaWindow && snapshotStale}
+                <div class="mt-1 text-xs text-ink-muted">{$t('snapshot may be stale')}</div>
+              {/if}
             {/if}
-          {/if}
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
     {/if}
 
     <!-- Reset periods are primary; natural day/week remain as compatibility views. -->

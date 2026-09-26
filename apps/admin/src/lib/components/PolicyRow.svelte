@@ -86,6 +86,13 @@
     emit();
   }
 
+  // One plain sentence for the header: "coding · simple · JSON → economy · effort low".
+  const conditionText = $derived(
+    [match.task_type, match.complexity, match.needs_json ? 'JSON' : undefined]
+      .filter(Boolean)
+      .join(' · ') || $t('any request'),
+  );
+
   function handleDragKeydown(event: KeyboardEvent): void {
     if (event.key === 'ArrowUp') {
       event.preventDefault();
@@ -118,7 +125,7 @@
       disabled={total < 2}
       data-testid="policy-drag-handle"
       ondragstart={(event) => ondragstart(index, event)}
-      ondragend={ondragend}
+      {ondragend}
       onpointerdown={(event) => onpointerstart(index, event)}
       onkeydown={handleDragKeydown}
     >
@@ -133,10 +140,15 @@
       data-testid="policy-index"
       aria-label={$t('priority')}>{index + 1}</span
     >
-    <span class="text-xs text-ink-muted"
-      >{$t('first match wins — lower number = higher priority')}</span
-    >
-    <span class="flex-1"></span>
+    <span data-testid="policy-summary" class="min-w-0 flex-1 truncate text-sm text-ink-body">
+      <span class="text-ink-muted">{$t('When')}</span>
+      <span class="font-medium text-ink-strong">{conditionText}</span>
+      <span class="text-ink-muted">→</span>
+      <span class="font-medium text-ink-strong">{useLane || '—'}</span>
+      {#if reasoningEffort}
+        <span class="badge-neutral ml-1">{$t('effort')} {reasoningEffort}</span>
+      {/if}
+    </span>
     <button
       type="button"
       class="btn-icon hover:bg-red-50 hover:text-red-600"
@@ -156,7 +168,7 @@
   <fieldset class="flex flex-col gap-3">
     <legend class="field-label">{$t('When a request matches ALL of:')}</legend>
 
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="field">
         <span class="field-label">{$t('Task type')}</span>
         <select
@@ -200,11 +212,10 @@
     </label>
   </fieldset>
 
-  <fieldset class="flex flex-col gap-2">
+  <fieldset class="flex flex-col gap-2 border-t border-slate-100 pt-3">
     <legend class="field-label">{$t('Then apply actions:')}</legend>
-    <p class="field-help">{$t('Force lane sends matching requests to that lane.')}</p>
 
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="field">
         <span class="field-label">{$t('Force lane')}</span>
         <select
@@ -233,9 +244,6 @@
             <option value={eff}>{eff}</option>
           {/each}
         </select>
-        <span class="field-help">
-          {$t('Policy value overrides the selected lane and client reasoning effort.')}
-        </span>
       </label>
     </div>
   </fieldset>

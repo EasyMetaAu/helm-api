@@ -113,7 +113,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page">
   <header class="flex flex-col gap-1">
     <h1 class="page-title">{$t('Classifier')}</h1>
     <p class="section-desc">
