@@ -300,6 +300,69 @@ describe("setup server", () => {
     await expect(stat(join(dataDir, "helm-setup-token"))).rejects.toThrow();
   });
 
+  it("trims pasted keys, surfaces a probe warning, and saves the trimmed key", async () => {
+    const dataDir = await tempDir();
+    const env: Record<string, string | undefined> = {};
+    const testProvider = vi
+      .fn()
+      .mockResolvedValue({ warning: "upstream returned 402: Insufficient Balance" });
+    const setup = await createSetupServer({
+      dataDir,
+      host: "0.0.0.0",
+      port: 8080,
+      providers: [provider],
+      env,
+      testProvider,
+      buildFullServer: vi.fn().mockResolvedValue(fakeHandle()),
+      activate: vi.fn(),
+      readRootKey: vi.fn().mockResolvedValue("helm_live_root"),
+      log: vi.fn(),
+    });
+
+    const tested = await setup.handle.app.request("/setup/api/test-provider", {
+      method: "POST",
+      headers: auth(setup.token),
+      body: JSON.stringify({ providerId: provider.id, apiKey: " sk-padded\n" }),
+    });
+    expect(tested.status).toBe(200);
+    expect(await tested.json()).toMatchObject({
+      ok: true,
+      warning: "upstream returned 402: Insufficient Balance",
+    });
+    expect(testProvider).toHaveBeenCalledWith(provider.id, "sk-padded");
+
+    const completed = await setup.handle.app.request("/setup/api/complete", {
+      method: "POST",
+      headers: auth(setup.token),
+      body: JSON.stringify({
+        username: "owner",
+        password: "a secure password",
+        providerKeys: { DEEPSEEK_API_KEY: "sk-padded " },
+      }),
+    });
+    expect(completed.status).toBe(200);
+    expect(env.DEEPSEEK_API_KEY).toBe("sk-padded");
+  });
+
+  it("renders a structured error message instead of [object Object]", async () => {
+    const dataDir = await tempDir();
+    const setup = await createSetupServer({
+      dataDir,
+      host: "0.0.0.0",
+      port: 8080,
+      providers: [provider],
+      env: {},
+      testProvider: vi.fn(),
+      buildFullServer: vi.fn(),
+      activate: vi.fn(),
+      readRootKey: vi.fn(),
+      log: vi.fn(),
+    });
+    const html = await (await setup.handle.app.request("/setup")).text();
+    // The client error extractor must prefer a string message over an object `error`.
+    expect(html).toContain("typeof data.error==='string'");
+  });
+
   it("allows OAuth-only initialization without any static provider key", async () => {
     const dataDir = await tempDir();
     const full = fakeHandle();

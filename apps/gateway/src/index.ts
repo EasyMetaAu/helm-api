@@ -153,7 +153,7 @@ async function main(): Promise<void> {
         testProvider: async (providerId, apiKey) => {
           const provider = representativeByEnv.get(providerId);
           if (!provider) throw new Error(`unknown provider ${providerId}`);
-          await testStaticProviderKey(provider, apiKey);
+          return await testStaticProviderKey(provider, apiKey);
         },
         buildFullServer: () => buildServer({ logger }),
         activate: (next) => {
