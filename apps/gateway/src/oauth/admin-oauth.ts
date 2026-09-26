@@ -276,6 +276,7 @@ type Session =
   | {
       kind: "manual";
       providerId: string;
+      account?: string;
       verifier: string;
       state: string;
       proxy?: ProxyConfig;
@@ -284,6 +285,7 @@ type Session =
   | {
       kind: "device";
       providerId: string;
+      account?: string;
       deviceCode: string;
       domain?: string;
       tokenEndpoint?: string;
@@ -992,6 +994,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       sessions.set(sessionId, {
         kind: "manual",
         providerId,
+        account,
         verifier,
         state,
         proxy: pinned,
@@ -1003,6 +1006,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     async completeManualPaste({ sessionId, redirectInput, account }) {
       const s = take(sessionId);
       if (s.kind !== "manual") throw new Error("wrong flow for this session");
+      if (s.account !== undefined && s.account !== account)
+        throw new Error("reconnect account mismatch");
       const flow = MANUAL_FLOWS[s.providerId];
       if (!flow)
         throw new Error(`provider '${s.providerId}' does not support the manual-paste flow`);
@@ -1056,6 +1061,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         sessions.set(sessionId, {
           kind: "device",
           providerId,
+          account,
           deviceCode: start.deviceCode,
           ...(providerId === XAI
             ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
@@ -1085,6 +1091,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     async pollDeviceCode({ sessionId, account }) {
       const s = take(sessionId);
       if (s.kind !== "device") throw new Error("wrong flow for this session");
+      if (s.account !== undefined && s.account !== account)
+        throw new Error("reconnect account mismatch");
       const doFetch = makeFetch(s.proxy);
       if (s.providerId === XAI) {
         if (!s.tokenEndpoint) throw new Error("xAI OAuth session is missing its token endpoint");

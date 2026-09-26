@@ -42,13 +42,13 @@ describe('ConnectProviderDialog device-code polling', () => {
     const onclose = vi.fn();
     render(ConnectProviderDialog, {
       providers: [{ id: 'anthropic', name: 'Claude Max', flow: 'manual_paste', accounts: [] }],
-      reconnect: { providerId: 'anthropic', account: 'work' },
+      reconnect: { providerId: 'anthropic', account: ' work ' },
       onconnected: vi.fn(),
       onclose,
     });
 
     await vi.waitFor(() =>
-      expect(oauth.startManualPaste).toHaveBeenCalledWith('anthropic', undefined, 'work'),
+      expect(oauth.startManualPaste).toHaveBeenCalledWith('anthropic', undefined, ' work '),
     );
     await vi.waitFor(() =>
       expect(window.open).toHaveBeenCalledWith(
@@ -61,6 +61,13 @@ describe('ConnectProviderDialog device-code polling', () => {
       screen.getByText('A sign-in page opened in a new tab — approve access there.'),
     ).toBeInTheDocument();
     expect(onclose).not.toHaveBeenCalled();
+    await fireEvent.input(screen.getByRole('textbox'), { target: { value: 'CODE' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Finish' }));
+    expect(oauth.completeManualPaste).toHaveBeenCalledWith('anthropic', {
+      sessionId: 'reconnect-session',
+      redirectInput: 'CODE',
+      account: ' work ',
+    });
   });
 
   it('keeps reconnect identity fixed after a failed start', async () => {

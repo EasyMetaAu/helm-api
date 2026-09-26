@@ -154,7 +154,7 @@
       pendingWindow = window.open('about:blank', '_blank');
       if (pendingWindow) pendingWindow.opener = null;
     }
-    const acct = account.trim() || suggestion;
+    const acct = reconnect?.account ?? (account.trim() || suggestion);
     try {
       if (selected?.flow === 'manual_paste') {
         const s = await startManualPaste(providerId, proxy ?? undefined, reconnect?.account);

@@ -1848,6 +1848,12 @@ describe("createOAuthAdmin > bind-time egress proxy", () => {
       ...(reconnect ? { account: "default" } : { proxy: PROXY }),
     });
     expect(start.userCode).toBe("WXYZ-1234");
+    if (reconnect) {
+      await expect(admin.pollDeviceCode({ sessionId: "dev", account: "other" })).rejects.toThrow(
+        /account mismatch/,
+      );
+      expect(await tokens.get("github-copilot", "other")).toBeNull();
+    }
     expect(await admin.pollDeviceCode({ sessionId: "dev", account: "default" })).toEqual({
       status: "done",
     });
@@ -2029,6 +2035,14 @@ describe("createOAuthAdmin > bind-time egress proxy", () => {
       account: "work",
     });
     const state = new URL(authorizeUrl).searchParams.get("state");
+    await expect(
+      admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account: "other",
+      }),
+    ).rejects.toThrow(/account mismatch/);
+    expect(await tokens.get("anthropic", "other")).toBeNull();
     await admin.completeManualPaste({
       sessionId,
       redirectInput: `https://x/cb?code=C&state=${state}`,
