@@ -9044,3 +9044,105 @@ it.each([
   expect(recordFailure).not.toHaveBeenCalled();
   expect(admission.reservedBytes).toBe(0);
 });
+
+it.each([
+  false,
+  true,
+])("records DeepSeek fallback shims after a Codex 429 (rejected=%s)", async (rejected) => {
+  const head: ProviderClient = {
+    nativeProtocolProfile: "codex_responses",
+    chatCompletion: vi.fn(),
+    chatCompletionStream: vi.fn(),
+    nativePassthrough: vi
+      .fn()
+      .mockRejectedValue(new UpstreamError("upstream_error", "rate limited", null, 429)),
+  };
+  let wire: Record<string, unknown> = {};
+  const tail = createGenericOpenAIResponsesClient({
+    config: { baseUrl: "https://deepseek.test/v1", apiKey: "test" },
+    requestContract: {
+      translateUnsupportedCustomTools: true,
+      disableThinkingOnOpaqueReasoningHistory: true,
+      acceptsResponsesNativeItems: true,
+    },
+    fetch: (async (_url, init) => {
+      wire = JSON.parse(String(init?.body));
+      if (rejected)
+        return Response.json(
+          {
+            error: {
+              message: "The reasoning_text in the thinking mode must be passed back to the API.",
+            },
+          },
+          { status: 400 },
+        );
+      return Response.json({ id: "r", object: "response", status: "completed", output: [] });
+    }) as typeof fetch,
+  });
+  const execute = createExecute({
+    defaultProvider: head,
+    providers: new Map([
+      ["head", head],
+      ["tail", tail],
+    ]),
+    registry: protocolRegistry({
+      a: {
+        providerName: "head",
+        providerModel: "gpt-5.6-terra",
+        targetProviderProtocol: "openai_responses",
+      },
+      b: {
+        providerName: "tail",
+        providerModel: "deepseek-flash",
+        targetProviderProtocol: "openai_responses",
+      },
+    }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const body = {
+    model: "gpt-5.6-terra",
+    store: false,
+    reasoning: { effort: "medium", summary: "detailed", context: "all_turns" },
+    input: [
+      {
+        type: "additional_tools",
+        tools: [{ type: "custom", name: "exec", description: "Execute" }],
+      },
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Check" }],
+        encrypted_content: "gAAAAAopaque",
+      },
+      { type: "custom_tool_call", name: "exec", call_id: "c1", input: "check" },
+      { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+    ],
+  };
+  const out = await execute(
+    plan(["a", "b"]),
+    req({
+      protocol: "openai_responses",
+      reasoning_effort: "medium",
+      native_request: createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        headers: {},
+        body,
+        rawBody: JSON.stringify(body),
+      }),
+    }),
+  );
+  expect(out.final.status).toBe(rejected ? "error" : "ok");
+  expect(wire.reasoning).toMatchObject({ effort: "none" });
+  expect(out.attempts[0]?.status).toBe("error");
+  expect(out.attempts[1]?.status).toBe(rejected ? "error" : "ok");
+  if (rejected) expect(out.attempts[1]?.error_detail?.upstream_status).toBe(400);
+  expect(out.attempts[0]?.passthrough_mutations?.body_shims_applied ?? []).not.toContain(
+    "generic_responses_opaque_reasoning_thinking_disabled",
+  );
+  expect(out.attempts[1]?.passthrough_mutations?.body_shims_applied).toContain(
+    "generic_responses_opaque_reasoning_thinking_disabled",
+  );
+});

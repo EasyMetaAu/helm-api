@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-26 · DeepSeek 兜底与 Responses 请求变更可观测性（Provider fallback，docs/04、07）
+
+- **决定**：保留 DeepSeek 对 opaque reasoning history 的 `effort: none` 降级，并让 request-contract 生成的 body mutation ledger 回写到执行器持有的 carrier。这样首选上游 429 后，DeepSeek 的候选尝试既可成功，也能在管理记录中显示实际应用的降级。
+- **验证与限制**：新增执行器回归覆盖 429 → DeepSeek fallback 成功与拒绝；保留真实 400 详情。原 trace 的历史已在现行部署做限输出回放，未复现 reasoning 400，但没有该失败尝试的完整出站正文，不能据此宣称原始拒绝已修复。此改动只修复诊断缺失。
+
+
 ## 2026-09-26 · 订阅账号重新连接入口（Admin / OAuth）
 
 - **决定**：账号显示 `needs reconnect` 状态时，在账号行 Actions 区显示 `Reconnect`；复用现有 OAuth 对话框并预选原 provider/account，打开后自动开始授权流程。重新连接的启动请求带 account 标识，网关从已保存的账号设置恢复 egress proxy，避免重新授权时意外绕过原代理。
