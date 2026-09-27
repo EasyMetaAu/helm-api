@@ -338,7 +338,12 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           return c.json(counted as Record<string, unknown>);
         } catch (error) {
           const status = error instanceof UpstreamError ? error.upstreamStatus : null;
-          if (status !== null && status >= 400 && status < 500 && status !== 429) {
+          if (
+            status !== null &&
+            status >= 400 &&
+            status < 500 &&
+            ![404, 405, 429].includes(status)
+          ) {
             return c.json(
               {
                 error: {
@@ -357,9 +362,8 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
               status as 400 | 401 | 403 | 404 | 422,
             );
           }
-          // Token helpers are SDK compatibility helpers. A provider counter
-          // outage must not turn the route into a 5xx when deterministic local
-          // estimation is available.
+          // Missing/unsupported counters (404/405), throttling and outages retain
+          // the estimate; request/authentication/permission errors above stay errors.
         }
       }
       return c.json({ totalTokens: estimateGeminiCountTokens(requestJson), estimated: true });

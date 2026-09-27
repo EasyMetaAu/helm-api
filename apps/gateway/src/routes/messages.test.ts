@@ -1165,6 +1165,24 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 });
 
 describe("native token-counter errors", () => {
+  it.each([
+    404, 405, 501,
+  ])("estimates when the upstream counter is unavailable (%s)", async (status) => {
+    const { deps } = makeDeps({
+      countTokens: vi
+        .fn()
+        .mockRejectedValue(
+          new UpstreamError("upstream_error", "counter unavailable", null, status),
+        ),
+    });
+    const response = await buildApp(deps).request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ estimated: true });
+  });
   it.each([400, 401, 403, 422])("preserves deterministic upstream %s", async (status) => {
     const { deps } = makeDeps({
       countTokens: vi

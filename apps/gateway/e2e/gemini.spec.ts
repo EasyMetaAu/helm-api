@@ -170,8 +170,8 @@ test.describe("Gemini auth + error envelopes", () => {
   });
 
   test("countTokens returns the native upstream count", async ({ request }) => {
-    const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
-      headers: GEMINI_AUTH,
+    const res = await request.post("/v1beta/models/zenmux-vertex%2Fgemini-3.5-flash:countTokens", {
+      headers: { ...GEMINI_AUTH, "x-goog-api-key": "helm_live_e2e_custom" },
       data: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
     });
     expect(res.status()).toBe(200);
@@ -179,22 +179,23 @@ test.describe("Gemini auth + error envelopes", () => {
     expect(body).toEqual({ totalTokens: 17 });
   });
 
-  test("countTokens accepts publisher model paths", async ({ request }) => {
+  test("countTokens estimates unresolved publisher model paths", async ({ request }) => {
     const res = await request.post(
       "/models/publishers/google/models/gemini-2.0-flash:countTokens",
       {
-        headers: GEMINI_AUTH,
+        headers: { ...GEMINI_AUTH, "x-goog-api-key": "helm_live_e2e_custom" },
         data: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
       },
     );
     expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ totalTokens: 17 });
+    expect(body).toMatchObject({ estimated: true });
+    expect(body.totalTokens).toBeGreaterThan(0);
   });
 
   test("countTokens preserves an upstream rejection instead of estimating", async ({ request }) => {
-    const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
-      headers: GEMINI_AUTH,
+    const res = await request.post("/v1beta/models/zenmux-vertex%2Fgemini-3.5-flash:countTokens", {
+      headers: { ...GEMINI_AUTH, "x-goog-api-key": "helm_live_e2e_custom" },
       data: { contents: [{ role: "user", parts: [{ text: COUNT_REJECT_SENTINEL }] }] },
     });
     expect(res.status()).toBe(400);

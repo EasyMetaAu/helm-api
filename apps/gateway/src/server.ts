@@ -17,6 +17,7 @@ import {
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
   createAutoVacuumRunner,
+  createBlockedModelMatcher,
   createBudgetGate,
   createCachedKeyStore,
   createCircuitBreaker,
@@ -4138,18 +4139,49 @@ export async function buildServer(
     writeQueue,
     { toolCallXmlRecoveryEnabled: () => settings.tool_call_xml_recovery },
   );
-  const anthropicCountClient = (): ProviderClient | null => {
-    for (const client of providerClients.values()) {
-      if (
-        client.nativeProtocolProfile === "anthropic_messages" &&
-        typeof client.countTokens === "function"
-      ) {
-        return client;
-      }
-    }
-    return null;
+  const countNativeTokens = async (
+    protocol: "anthropic_messages" | "gemini",
+    body: Record<string, unknown>,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+  ) => {
+    const model = String(body.model ?? "");
+    const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
+    if (blocked?.matches(model))
+      throw new UpstreamError("upstream_error", "model is not available to this key", null, 403);
+    const direct = registry.resolve(model);
+    // Explicit aliases win. A bare wire model is safe only when one provider
+    // owns it; lanes, unknown and ambiguous names keep the local estimate.
+    const candidates = direct.ok
+      ? [direct.value]
+      : registry.list().flatMap((alias) => {
+          const target = registry.resolve(alias);
+          return target.ok && target.value.providerModel === model ? [target.value] : [];
+        });
+    const owners = new Map(
+      candidates
+        .filter((target) => target.targetProviderProtocol === protocol)
+        .map((target) => [target.providerName, target]),
+    );
+    const target = owners.size === 1 ? owners.values().next().value : undefined;
+    if (target === undefined) throw new Error("native token counter target unavailable");
+    if (blocked?.matches(target.alias) || blocked?.matches(target.providerModel))
+      throw new UpstreamError("upstream_error", "model is not available to this key", null, 403);
+    // Counters do not run the generation routing/budget gates. Restricted keys
+    // stay local rather than sending their prompt to an unapproved destination.
+    const caps = identity.caps;
+    if (
+      caps?.allowCustomModel !== true ||
+      caps.allowedLanes != null ||
+      caps.budget?.requests != null ||
+      caps.budget?.tokens != null ||
+      caps.budget?.spendUsd != null
+    )
+      throw new Error("native token counter requires unrestricted model selection");
+    const client = providerClients.get(target.providerName);
+    if (!client?.countTokens) throw new Error("native token counter unavailable");
+    return await client.countTokens({ ...body, model: target.providerModel }, { signal });
   };
-  const anthropicCountProvider = anthropicCountClient();
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
   // the rate-limit bypass on /v1/messages + /v1/responses). The Wave2 handlers
@@ -4166,15 +4198,8 @@ export async function buildServer(
     // SAME process-wide gate as the chat middleware (issue #93): a key's
     // in-flight count spans every surface.
     concurrencyGate,
-    ...(anthropicCountProvider?.countTokens
-      ? {
-          countTokens: async (body, _identity, signal) => {
-            const client = anthropicCountClient();
-            if (!client?.countTokens) throw new Error("Anthropic countTokens provider unavailable");
-            return await client.countTokens(body, { signal });
-          },
-        }
-      : {}),
+    countTokens: (body, identity, signal) =>
+      countNativeTokens("anthropic_messages", body, identity, signal),
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -4434,15 +4459,6 @@ export async function buildServer(
     recordOAuthUsage,
     writeQueue,
   );
-  const geminiCountClient = (): ProviderClient | null => {
-    for (const client of providerClients.values()) {
-      if (client.nativeProtocolProfile === "gemini" && typeof client.countTokens === "function") {
-        return client;
-      }
-    }
-    return null;
-  };
-  const geminiCountProvider = geminiCountClient();
   // Shared identity resolver for the self-authenticating routes (gemini + images):
   // plaintext credential → full MessagesIdentity, or null when missing/invalid.
   const resolveIdentity = async (credential: string | null): Promise<MessagesIdentity | null> => {
@@ -4516,15 +4532,7 @@ export async function buildServer(
     memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
     concurrencyGate,
-    ...(geminiCountProvider?.countTokens
-      ? {
-          countTokens: async (body, _identity, signal) => {
-            const client = geminiCountClient();
-            if (!client?.countTokens) throw new Error("Gemini countTokens provider unavailable");
-            return await client.countTokens(body, { signal });
-          },
-        }
-      : {}),
+    countTokens: (body, identity, signal) => countNativeTokens("gemini", body, identity, signal),
     auth: { resolve: resolveIdentity },
     transformer: {
       transformRequestOut: (native) => geminiTransformer.transformRequestOut(native),
