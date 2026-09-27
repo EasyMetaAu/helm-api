@@ -613,11 +613,9 @@ anthropic/claude-opus-5-5:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
-# Claude Opus 5: same request surface as Opus 4.8 — 1M context, 128K output, the full
-# low/medium/high/xhigh/max effort set, no manual budget_tokens mode. Thinking is ON by
-# default (omitting `thinking` runs adaptive, unlike 4.8), and `{type:"disabled"}` is
-# accepted only at effort high or below, so `anthropicThinking.supported` stays false —
-# helm routes effort through anthropicOutputConfig exactly as for 4.8.
+# Claude Opus 5: 1M context, 128K output, and the full low/medium/high/xhigh/max effort
+# set through output_config.effort. Its request surface differs from the older 4.8
+# OAuth model, which rejects per-turn output_config.effort (see its capability entry).
 # https://platform.claude.com/docs/en/about-claude/models/overview
 anthropic/claude-opus-5:
   supportsTools: true
@@ -642,10 +640,9 @@ anthropic/claude-opus-4-8:
   supportsStreaming: true
   reasoningEffort:
     anthropicOutputConfig:
-      supported: true
-      levels: [low, medium, high, xhigh, max]
-      map:
-        minimal: low
+      # The Anthropic OAuth endpoint rejects per-turn output_config.effort for 4.8.
+      # Keep this false so the executor strips the field before fallback attempts.
+      supported: false
     anthropicThinking:
       supported: false
   modalities: [document]

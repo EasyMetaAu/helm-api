@@ -2541,6 +2541,59 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("strips unsupported output_config.effort for Opus 4.8 from the shipped catalog", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const provider = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.test", apiKey: "sk-test" },
+      fetch: async (_url, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(
+          JSON.stringify({
+            id: "msg_opus48",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        "anthropic/claude-opus-4-8": {
+          providerName: "anthro",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["anthropic/claude-opus-4-8"]),
+      req({ reasoning_effort: "high" }),
+    );
+
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "anthropic/claude-opus-4-8",
+      providerModel: "claude-opus-4-8",
+    });
+    expect(upstreamBodies[0]?.output_config).toBeUndefined();
+    expect(upstreamBodies[0]?.reasoning_effort).toBeUndefined();
+    expect(upstreamBodies[0]?.thinking).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_model"],
+    });
+  });
+
   it("short-circuits the chain on an upstream request-shape 400 and surfaces it verbatim", async () => {
     // A 400 invalid_request_error (oversized image / prompt too long / bad param) is
     // DETERMINISTIC: the identical body fails on every candidate, and Claude Code
@@ -5013,7 +5066,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     // Regression for request 5191ce2b...: disabling passthrough sent the request through
     // the compatibility rewrite path, which produced an upstream empty-success stream.
     // Opus 4.8/5/5.5 support this [user, system] placement and its cache boundary, so
-    // the same-protocol request should stay byte-faithful.
+    // the cache boundary must survive model-specific effort cleanup.
     const provider = anthropicProvider(NATIVE_RESP);
     const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
       `anthropic/${providerModel}`,
@@ -5068,6 +5121,8 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual({
       ...nativeWithTrailingSystem,
       model: providerModel,
+      output_config:
+        providerModel === "claude-opus-4-8" ? undefined : nativeWithTrailingSystem.output_config,
     });
     expect(out.nativePassthrough).toBe(true);
     expect(out.attempts[0]?.passthrough_used).toBe(true);
@@ -9403,4 +9458,83 @@ describe("standard Responses tools", () => {
     expect(memberClient.nativePassthrough).toHaveBeenCalled();
     expect(memberClient.chatCompletion).not.toHaveBeenCalled();
   });
+});
+
+it.each([
+  false,
+  true,
+])("Opus 4.8 effort cleanup preserves other native controls (stream=%s)", async (stream) => {
+  const alias = "anthropic/claude-opus-4-8";
+  const body = {
+    model: "claude-opus-4-8",
+    stream,
+    max_tokens: 64,
+    thinking: { type: "adaptive", display: "omitted" },
+    context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+    cache_control: { type: "ephemeral" },
+    output_config: { effort: "high", format: { type: "json_schema", schema: { type: "object" } } },
+    messages: [{ role: "user", content: "hello" }],
+  };
+  const response = {
+    id: "msg_test",
+    type: "message",
+    role: "assistant",
+    model: body.model,
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  const frames = [
+    { type: "message_start", message: { ...response, content: [] } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ]
+    .map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+    .join("");
+  let sent: Record<string, unknown> = {};
+  const provider = createAnthropicClient({
+    config: { baseUrl: "https://api.anthropic.test", apiKey: "test-only" },
+    fetch: async (_url, init) => {
+      sent = JSON.parse(String(init?.body));
+      return new Response(stream ? frames : JSON.stringify(response), {
+        headers: { "content-type": stream ? "text/event-stream" : "application/json" },
+      });
+    },
+  });
+  const execute = createExecute({
+    defaultProvider: provider,
+    providers: new Map([["anthro", provider]]),
+    registry: protocolRegistry({
+      [alias]: {
+        providerName: "anthro",
+        providerModel: body.model,
+        targetProviderProtocol: "anthropic_messages",
+      },
+    }),
+    breaker: breaker(),
+    catalog: loadRuntimeCatalog({ configDir: "config" }),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const out = await execute(
+    plan([alias]),
+    req({
+      protocol: "anthropic_messages",
+      stream,
+      native_request: createNativePassthroughCarrier({
+        protocol: "anthropic_messages",
+        body,
+        headers: {},
+      }),
+    }),
+  );
+  for await (const _ of out.stream ?? []) {
+  }
+  expect(out.final.status).toBe("ok");
+  expect(out.nativePassthrough).toBe(true);
+  expect(sent).toEqual({ ...body, output_config: { format: body.output_config.format } });
 });
