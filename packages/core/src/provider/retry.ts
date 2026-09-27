@@ -40,11 +40,6 @@ const TRANSIENT_MESSAGE_PATTERNS = [
 ];
 
 /**
- * True iff `err` (or a `cause` in its chain) is a transient connection failure
- * safe to retry pre-first-byte. A client abort (`name === "AbortError"`) is never
- * transient — the name check wins even over a socket-ish message.
- */
-/**
  * Only failures that prove no TCP connection was established may replay a POST.
  * Socket reset/pipe errors can happen after the request body was sent.
  */
@@ -54,12 +49,23 @@ export function isPreConnectError(err: unknown): boolean {
     if (typeof cur !== "object") break;
     const e = cur as { name?: unknown; code?: unknown; cause?: unknown };
     if (e.name === "AbortError") return false;
-    if (e.code === "UND_ERR_CONNECT_TIMEOUT") return true;
+    if (
+      e.code === "UND_ERR_CONNECT_TIMEOUT" ||
+      e.code === "ECONNREFUSED" ||
+      e.code === "ENOTFOUND" ||
+      e.code === "EAI_AGAIN"
+    )
+      return true;
     cur = e.cause;
   }
   return false;
 }
 
+/**
+ * True iff `err` (or a `cause` in its chain) is a transient connection failure
+ * safe to retry pre-first-byte. A client abort (`name === "AbortError"`) is never
+ * transient — the name check wins even over a socket-ish message.
+ */
 export function isTransientConnectionError(err: unknown): boolean {
   let cur: unknown = err;
   for (let depth = 0; depth < 5 && cur != null; depth += 1) {

@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { InteractionsRequestSchema } from "./interactions-schema.js";
 
 describe("InteractionsRequestSchema", () => {
+  it.each([
+    ["inline", true],
+    ["uri", false],
+  ] as const)("validates image delivery %s", (delivery, success) => {
+    expect(
+      InteractionsRequestSchema.safeParse({
+        model: "gemini-image",
+        input: "draw",
+        response_format: { type: "image", delivery },
+      }).success,
+    ).toBe(success);
+  });
   it("parses a string input", () => {
     const r = InteractionsRequestSchema.safeParse({
       model: "gemini-3.1-flash-image",

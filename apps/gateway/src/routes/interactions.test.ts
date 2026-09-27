@@ -131,7 +131,12 @@ describe("registerInteractionsRoute", () => {
     const res = await post(app, {
       model: "gemini-3.1-flash-image",
       input: "a red apple",
-      response_format: { type: "image", aspect_ratio: "16:9", image_size: "2K" },
+      response_format: {
+        type: "image",
+        delivery: "inline",
+        aspect_ratio: "16:9",
+        image_size: "2K",
+      },
     });
 
     expect(res.status).toBe(200);

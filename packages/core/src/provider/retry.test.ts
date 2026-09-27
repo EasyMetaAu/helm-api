@@ -93,6 +93,29 @@ describe("isTransientConnectionError", () => {
 });
 
 describe("isPreConnectError", () => {
+  it.each([
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+  ])("recognizes %s before any request can be sent", (code) => {
+    const cause = Object.assign(new Error("connection failed"), { code });
+    expect(isPreConnectError(new TypeError("fetch failed", { cause }))).toBe(true);
+    expect(
+      isPreConnectError(
+        Object.assign(new Error("cancelled"), {
+          name: "AbortError",
+          cause,
+        }),
+      ),
+    ).toBe(false);
+  });
+  it.each([
+    "ECONNRESET",
+    "EPIPE",
+    "UND_ERR_SOCKET",
+    "ETIMEDOUT",
+  ])("does not treat ambiguous %s as proof of non-delivery", (code) =>
+    expect(isPreConnectError(Object.assign(new Error("failed"), { code }))).toBe(false));
   it("allows only errors that prove no TCP connection was established", () => {
     expect(
       isPreConnectError(

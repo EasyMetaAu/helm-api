@@ -164,8 +164,8 @@ provider layers. The native path does not mean “client values always win.”
 - Codex instruction hoisting handles only leading, wholly textual instruction
   items. Mid-history and opaque content stay in place. Unknown encrypted reasoning
   encodings survive; only the known foreign UUID form is removed.
-- Lite image-detail cleanup touches message image parts only, never tool schemas
-  or arbitrary nested data. Custom-tool translation does not recompress images.
+- Lite image-detail cleanup touches direct image parts in message content and
+  function/custom tool outputs, never tool schemas or arbitrary nested data. Custom-tool translation does not recompress images.
 - Codex and generic Responses generation/compact stop on outcome-unknown transport
   or accepted-body failures. Proven pre-connect failures and explicit upstream
   rejections retain their existing handling. Unary bodies have a bounded read phase.
@@ -174,9 +174,14 @@ provider layers. The native path does not mean “client values always win.”
   Gemini Files handles are retained rather than fetched without their provider auth.
 - Responses retrieve/input_items retain query parameters and the recorded account
   through OAuth wrappers. Stream retrieval is rejected by the unary helper.
-- Token counters preserve deterministic upstream 4xx instead of returning an
-  estimate. Translation-only Images/Interactions reject unsupported options or
-  content before inference; mixed image chains retain capable OpenAI targets.
+- Token counters resolve an exact registry alias or unique native provider owner
+  before forwarding the provider model. Unresolved/ambiguous targets, lanes and
+  keys with model/lane/budget restrictions use a local estimate without forwarding
+  the prompt. Blocked models and upstream request/auth/permission errors remain
+  errors; unavailable counters (404/405), throttling and outages use estimates.
+- Translation-only Images/Interactions reject unsupported options or content
+  before inference; Interactions explicitly accepts image delivery `inline` but
+  rejects unimplemented `uri`. Mixed image chains retain capable OpenAI targets.
   Realtime rejects extra/duplicate multipart parts rather than dropping them.
 
 ## Mutation ledger
