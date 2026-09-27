@@ -460,19 +460,14 @@ function decideNativePassthroughForAttempt(input: {
     providerSupportsPassthrough: req.stream
       ? typeof target.provider?.nativePassthroughStream === "function"
       : typeof target.provider?.nativePassthrough === "function",
-    // A Codex-origin body (custom_tool_call / caller-linked PTC / unknown items) forwarded
-    // verbatim to a GENERIC Responses provider (xAI/Grok) 422s. Disable passthrough so the
-    // executor translates it to a clean standard Responses body. The profile is read from
-    // the resolved provider client (OAuth pools forward the member profile — see
-    // serialize-client), so a multi-account pool no longer masks it as undefined.
+    // Preserve native items unless this provider explicitly declares incompatibility.
     sourceCarriesResponsesNativeItems:
       Array.isArray(req.provider_raw?.responses_input_items) ||
       Array.isArray(req.provider_raw?.unknown_items),
-    // A generic-Responses upstream that PARSES those items (DeepSeek) opts out of the
-    // downgrade: translating would strip the reasoning items it requires back.
+    // xAI subscription opts out; standard OpenAI and DeepSeek preserve native items.
     targetIsGenericResponsesProfile:
       target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
-      target.provider?.supportsResponsesNativeItems !== true,
+      target.provider?.supportsResponsesNativeItems === false,
   });
 
   return {
@@ -691,7 +686,7 @@ function prepareNativeRequestForUpstream(
   }
 
   const needsCodexResponsesShim =
-    protocol === "openai_responses" && nativeProtocolProfile !== "generic_openai_responses";
+    protocol === "openai_responses" && nativeProtocolProfile === "codex_responses";
   if (needsCodexResponsesShim && body.store !== false) {
     body = { ...body, store: false };
     bodyChanged = true;
@@ -707,28 +702,6 @@ function prepareNativeRequestForUpstream(
       body = sanitized.body;
       bodyChanged = true;
       if (mutations) appendMutationList(mutations, "body_shims_applied", sanitized.fixes);
-    }
-  }
-
-  // A GENERIC Responses provider (xAI/Grok) passing a body through verbatim cannot parse
-  // Anthropic's `context_management` (an Anthropic-native context-editing control), which
-  // helm carries in the object shape `{ edits: [...] }`. xAI rejects it with HTTP 422
-  // "invalid type: map, expected a sequence". The translation path already drops it via the
-  // forward allowlist; strip it here too so the SAME-protocol passthrough path (openai_responses
-  // -> generic Grok, which bypasses the allowlist) can't leak it. Codex-official keeps it.
-  if (
-    protocol === "openai_responses" &&
-    nativeProtocolProfile === "generic_openai_responses" &&
-    body.context_management !== undefined
-  ) {
-    const rest = { ...body };
-    delete rest.context_management;
-    body = rest;
-    bodyChanged = true;
-    if (mutations) {
-      appendMutationList(mutations, "body_shims_applied", [
-        "context_management_stripped_for_generic",
-      ]);
     }
   }
 
@@ -781,6 +754,7 @@ function prepareNativeRequestForUpstream(
     requestReasoningEffort,
     policyMutations,
     protocol,
+    forcedReasoningEffort === undefined && body.reasoning_effort === undefined,
   );
   if (policyBody !== body) {
     body = policyBody;
@@ -833,7 +807,7 @@ function candidateGuardSkipReason(
     target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
     // DeepSeek parses these items (and ignores the types it doesn't model), so it is
     // a VALID Codex fallback — do not skip the candidate. See supportsResponsesNativeItems.
-    target.provider?.supportsResponsesNativeItems !== true &&
+    target.provider?.supportsResponsesNativeItems === false &&
     (Array.isArray(req.provider_raw?.unknown_items) ||
       responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items))
   ) {
@@ -1023,6 +997,8 @@ function applyOutputConfigEffort(
   decision: WireEffortDecision,
 ): Record<string, unknown> {
   const current = isPlainRecord(body.output_config) ? body.output_config : {};
+  if (decision.kind === "keep" && current.effort === decision.effort) return body;
+  if (decision.kind === "strip" && !Object.hasOwn(current, "effort")) return body;
   const outputConfig = { ...current };
   if (decision.kind === "keep") outputConfig.effort = decision.effort;
   else delete outputConfig.effort;
@@ -1133,6 +1109,7 @@ function applyAnthropicReasoningPolicy(
   policy: ReasoningEffortPolicy,
   fallbackReasoningEffort: string | undefined,
   mutations: NativePassthroughCarrier["mutations"],
+  preserveNativeThinking = false,
 ): Record<string, unknown> {
   const outputPolicy = policy.anthropicOutputConfig;
   const thinkingPolicy = policy.anthropicThinking;
@@ -1159,7 +1136,8 @@ function applyAnthropicReasoningPolicy(
     }
   }
 
-  if (thinkingPolicy !== undefined) {
+  // Generic synthesis capabilities do not describe valid provider-native controls.
+  if (thinkingPolicy !== undefined && !preserveNativeThinking) {
     const thinkingDecision = decideWireEffort(thinkingPolicy, sourceEffort ?? null);
     if (!thinkingPolicy.supported) {
       let stripped = bodyReasoningEffort !== null || fallbackReasoningEffort !== undefined;
@@ -1199,6 +1177,7 @@ function applyReasoningEffortPolicy(
   fallbackReasoningEffort: string | undefined,
   mutations: NativePassthroughCarrier["mutations"],
   sourceProtocol: Protocol,
+  preserveNativeThinking = false,
 ): Record<string, unknown> {
   const policy = caps?.reasoningEffort;
   const crossProtocol = sourceProtocol !== targetProviderProtocol;
@@ -1227,7 +1206,13 @@ function applyReasoningEffortPolicy(
     case "anthropic_messages":
       return policy === undefined
         ? body
-        : applyAnthropicReasoningPolicy(body, policy, fallbackReasoningEffort, mutations);
+        : applyAnthropicReasoningPolicy(
+            body,
+            policy,
+            fallbackReasoningEffort,
+            mutations,
+            preserveNativeThinking,
+          );
   }
 }
 
@@ -1850,6 +1835,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         }
         let visualCompressionMutation: VisualContextCompressionMutation | undefined;
         let optimizedNativeBody: Record<string, unknown> | null = null;
+        let nativeBodyOptimized = false;
         const optimizeAnthropicBodyForAttempt = async (
           body: Record<string, unknown>,
         ): Promise<Record<string, unknown>> => {
@@ -1880,7 +1866,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const body = nativePassthroughBody(input);
           if (optimizedNativeBody === null) {
             optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
+            nativeBodyOptimized = optimizedNativeBody !== body;
           }
+          if (!nativeBodyOptimized) return input;
           return isNativePassthroughCarrier(input)
             ? cloneCarrierWithBody(input, optimizedNativeBody)
             : optimizedNativeBody;
@@ -1970,11 +1958,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 "native streaming passthrough invoked without a native request or client method",
               );
             }
-            // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the gateway
-            // chose this provider/model, so the upstream must be told which one to run —
-            // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
-            // a real upstream model id. Everything else is forwarded verbatim. Mirrors
-            // stripInternal's `model: providerModel`; without it the upstream 404s.
+            // Resolve the upstream model and apply only explicit policy/compatibility
+            // exceptions; preserve native content and raw bytes when unchanged.
             const passthroughBody = await optimizeNativeBodyForAttempt(
               prepareNativeRequestForUpstream(
                 nativeBody,
@@ -2177,10 +2162,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 "native passthrough invoked without a native request or client method",
               );
             }
-            // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the client's
-            // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
-            // picked this upstream model — forward it so the upstream doesn't 404 on the
-            // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
+            // Apply the same native preservation contract as the streaming path.
             const passthroughBody = await optimizeNativeBodyForAttempt(
               prepareNativeRequestForUpstream(
                 nativeBody,

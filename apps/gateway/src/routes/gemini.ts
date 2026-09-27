@@ -3,6 +3,7 @@ import {
   parseGeminiPath,
   type RateLimitProbe,
   type RateLimitResult,
+  UpstreamError,
 } from "@helm/core";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -293,9 +294,9 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       c.set("concurrencyRelease", acquired.release);
     }
 
-    // 2) countTokens is a local deterministic estimate. It shares auth / rate /
-    //    concurrency with generation, but it must never enter the generation
-    //    transformer or provider pipeline.
+    // 2) countTokens uses native counting with a local fallback for unavailable
+    //    counters. It shares auth / rate / concurrency with generation, but
+    //    never enters the generation transformer or provider pipeline.
     if (route.operation === "countTokens") {
       let requestJson = "";
       let native: unknown;
@@ -335,7 +336,27 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             requestSignal(c),
           );
           return c.json(counted as Record<string, unknown>);
-        } catch {
+        } catch (error) {
+          const status = error instanceof UpstreamError ? error.upstreamStatus : null;
+          if (status !== null && status >= 400 && status < 500 && status !== 429) {
+            return c.json(
+              {
+                error: {
+                  code: status,
+                  status:
+                    status === 401
+                      ? "UNAUTHENTICATED"
+                      : status === 403
+                        ? "PERMISSION_DENIED"
+                        : status === 404
+                          ? "NOT_FOUND"
+                          : "INVALID_ARGUMENT",
+                  message: (error as UpstreamError).message,
+                },
+              },
+              status as 400 | 401 | 403 | 404 | 422,
+            );
+          }
           // Token helpers are SDK compatibility helpers. A provider counter
           // outage must not turn the route into a 5xx when deterministic local
           // estimation is available.

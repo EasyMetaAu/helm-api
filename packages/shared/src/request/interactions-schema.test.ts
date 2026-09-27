@@ -36,16 +36,15 @@ describe("InteractionsRequestSchema", () => {
     ).toBe(false);
   });
 
-  it("passes through unknown fields verbatim (loose object)", () => {
-    const r = InteractionsRequestSchema.safeParse({
-      model: "gemini-3.1-flash-image",
-      input: "x",
-      previous_interaction_id: "int_1",
-      tools: [{ type: "google_search" }],
-    });
-    expect(r.success).toBe(true);
-    if (r.success) {
-      expect((r.data as Record<string, unknown>).previous_interaction_id).toBe("int_1");
+  it("rejects fields the generateContent adapter cannot represent", () => {
+    for (const extra of [
+      { previous_interaction_id: "int_1" },
+      { tools: [{ type: "google_search" }] },
+    ]) {
+      expect(
+        InteractionsRequestSchema.safeParse({ model: "gemini-image", input: "x", ...extra })
+          .success,
+      ).toBe(false);
     }
   });
 });

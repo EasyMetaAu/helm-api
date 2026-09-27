@@ -1,4 +1,5 @@
 import type { TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
+import { UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
@@ -950,69 +951,56 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expectNativeCarrier(meta.native_request, "anthropic_messages", REQ_BODY);
   });
 
-  it("normalizes Claude Code date fingerprint markers before native passthrough", async () => {
+  it.each([
+    false,
+    true,
+  ])("preserves original date text and raw native bytes (stream=%s)", async (stream) => {
     const incoming = {
       ...REQ_BODY,
-      system: [
+      stream,
+      system: [{ type: "text", text: "Todayʹs date is 2026/07/01." }],
+      messages: [
+        { role: "user", content: "user marker: Today's date is 2026/07/02." },
         {
-          type: "text",
-          text: "x-anthropic-billing-header: cc_version=2.1.197.abc; cc_entrypoint=cli; cch=12345;",
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "date_check", input: {} }],
         },
-        { type: "text", text: "Todayʹs date is 2026/07/01." },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "Todayʼs date is 2026/07/03." },
+          ],
+        },
       ],
-      messages: [{ role: "user", content: "user marker: Today's date is 2026/07/02." }],
       tools: [
         {
           name: "date_check",
-          description: "tool marker: Todayʼs date is 2026/07/03.",
-          input_schema: { type: "object", properties: {} },
+          description: "Todayʼs date is 2026/07/03.",
+          input_schema: { type: "object" },
         },
       ],
+      future_native_option: { preserve: true },
     };
+    const requestJson = JSON.stringify(incoming, null, 2);
     const { record, insertPayload } = makeRecord({ capturePayloads: true });
-    const { deps, harness } = makeDeps({ record });
-    const app = buildApp(deps);
-
-    await app.request("/v1/messages", {
+    const { deps, harness } = makeDeps({ record, isStream: stream });
+    const response = await buildApp(deps).request("/v1/messages", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(incoming),
+      body: requestJson,
     });
-
-    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
-    const carrier = meta.native_request as {
-      body?: {
-        system?: Array<{ text?: string }>;
-        messages?: Array<{ content?: string }>;
-        tools?: Array<{ description?: string }>;
+    await response.text();
+    const meta = harness.pipelineSawIR?.metadata as {
+      native_request: {
+        body: unknown;
+        raw_body: string;
+        mutations: { body_shims_applied?: string[] };
       };
-      raw_body?: string;
-      mutations?: { body_shims_applied?: string[] };
     };
-    expect(carrier.body?.system?.[1]?.text).toBe("Today's date is 2026-07-01.");
-    expect(carrier.body?.messages?.[0]?.content).toBe("user marker: Today's date is 2026-07-02.");
-    expect(carrier.body?.tools?.[0]?.description).toBe("tool marker: Today's date is 2026-07-03.");
-    const rawCarrier = JSON.parse(carrier.raw_body ?? "{}") as {
-      system: Array<{ text?: string }>;
-      messages: Array<{ content?: string }>;
-      tools: Array<{ description?: string }>;
-    };
-    expect(rawCarrier.system[1]?.text).toBe("Today's date is 2026-07-01.");
-    expect(rawCarrier.messages[0]?.content).toBe("user marker: Today's date is 2026-07-02.");
-    expect(rawCarrier.tools[0]?.description).toBe("tool marker: Today's date is 2026-07-03.");
-    expect(carrier.mutations?.body_shims_applied).toContain(
-      "claude_code_date_fingerprint_normalized",
-    );
-
-    const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
-    const captured = JSON.parse(payload.requestJson) as {
-      system: Array<{ text?: string }>;
-      messages: Array<{ content?: string }>;
-      tools: Array<{ description?: string }>;
-    };
-    expect(captured.system[1]?.text).toBe("Todayʹs date is 2026/07/01.");
-    expect(captured.messages[0]?.content).toBe("user marker: Today's date is 2026/07/02.");
-    expect(captured.tools[0]?.description).toBe("tool marker: Todayʼs date is 2026/07/03.");
+    expect(meta.native_request.body).toEqual(incoming);
+    expect(meta.native_request.raw_body).toBe(requestJson);
+    expect(meta.native_request.mutations.body_shims_applied).toBeUndefined();
+    expect(insertPayload.mock.calls[0]?.[0].requestJson).toBe(requestJson);
   });
 
   it("stamps native_request on a STREAMING request too (Phase 2 streaming passthrough)", async () => {
@@ -1173,5 +1161,26 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(arg.decision.final.status).toBe("error");
     expect(arg.decision.final.error_reason).toBe("upstream_error");
     expect(arg.decision.stream_outcome).toBe("failed");
+  });
+});
+
+describe("native token-counter errors", () => {
+  it.each([400, 401, 403, 422])("preserves deterministic upstream %s", async (status) => {
+    const { deps } = makeDeps({
+      countTokens: vi
+        .fn()
+        .mockRejectedValue(
+          new UpstreamError("upstream_error", "counter rejected request", null, status),
+        ),
+    });
+    const response = await buildApp(deps).request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as { estimated?: boolean; error?: unknown };
+    expect(body.estimated).toBeUndefined();
+    expect(body.error).toBeDefined();
   });
 });

@@ -5,16 +5,82 @@ import {
   type NativePassthroughInput,
 } from "@helm/shared";
 
-// Client-header handling is FORWARD-BY-DEFAULT (for fingerprint fidelity) MINUS the
-// exclusions below — an allowlist-by-exclusion, not a strict allowlist. The
-// load-bearing guarantee (principle 7) is that the Helm credential, cookies, and
-// obviously secret-shaped headers NEVER leave the gateway; provider auth replaces the
-// upstream credential. Limitation by design: the secret detection in
-// `isUnsafeClientHeader` is shape-based, so a generic secret header that matches none
-// of these shapes (e.g. `x-functions-key`) can still ride to the upstream. That is
-// acceptable because the only passthrough upstreams are trusted first-party providers
-// (Anthropic / ChatGPT), and broadening to a bare `*-key` would wrongly drop legitimate
-// headers (`idempotency-key`, beta/feature keys, …). Keep the shapes tight + explicit.
+// Claude requests can reach relay providers. Forward only known protocol/SDK
+// metadata; unknown client headers can carry unrelated credentials.
+const ANTHROPIC_CLIENT_HEADERS = new Set([
+  "accept",
+  "accept-encoding",
+  "accept-language",
+  "content-type",
+  "user-agent",
+  "anthropic-version",
+  "anthropic-beta",
+  "anthropic-dangerous-direct-browser-access",
+  "x-app",
+  "originator",
+  "session_id",
+  "session-id",
+  "x-session-id",
+  "x-session-key",
+  "idempotency-key",
+  "x-idempotency-key",
+  "x-client-request-id",
+  "x-request-id",
+  "x-claude-code-session-id",
+  "x-claude-code-agent-id",
+  "x-claude-code-parent-agent-id",
+  "x-stainless-lang",
+  "x-stainless-package-version",
+  "x-stainless-os",
+  "x-stainless-arch",
+  "x-stainless-runtime",
+  "x-stainless-runtime-version",
+  "x-stainless-retry-count",
+  "x-stainless-timeout",
+  "x-stainless-helper-method",
+]);
+
+// Native Responses may be routed to third-party relays. Only protocol metadata
+// crosses that boundary; provider configuration owns authentication and tenant IDs.
+const RESPONSES_CLIENT_HEADERS = new Set([
+  "accept",
+  "accept-encoding",
+  "accept-language",
+  "content-type",
+  "user-agent",
+  "originator",
+  "version",
+  "openai-beta",
+  "session-id",
+  "session_id",
+  "thread-id",
+  "x-thread-id",
+  "x-session-id",
+  "idempotency-key",
+  "x-idempotency-key",
+  "x-client-request-id",
+  "x-request-id",
+
+  "x-stainless-lang",
+  "x-stainless-package-version",
+  "x-stainless-os",
+  "x-stainless-arch",
+  "x-stainless-runtime",
+  "x-stainless-runtime-version",
+  "x-stainless-retry-count",
+  "x-stainless-timeout",
+  "x-stainless-helper-method",
+]);
+
+const CODEX_CLIENT_HEADERS = new Set([
+  "x-openai-internal-codex-responses-lite",
+  "x-codex-beta-features",
+  "x-codex-installation-id",
+  "x-codex-turn-metadata",
+  "x-codex-turn-state",
+]);
+
+// Other native protocols retain their existing exclusions.
 const DENY_HEADERS = new Set([
   "authorization",
   "proxy-authorization",
@@ -108,6 +174,7 @@ export function prepareNativePassthroughRequest(
   input: NativePassthroughInput,
   providerHeaders: Record<string, string>,
   options: {
+    forwardCodexMetadata?: boolean;
     mergeHeaders?: string[];
     forceAcceptEncodingIdentity?: boolean;
     preserveClientHeaders?: string[];
@@ -123,7 +190,13 @@ export function prepareNativePassthroughRequest(
   if (carrier) {
     for (const [key, value] of Object.entries(carrier.headers)) {
       const lower = key.toLowerCase();
-      if (isUnsafeClientHeader(lower)) {
+      if (
+        isUnsafeClientHeader(lower) ||
+        (carrier.protocol === "anthropic_messages" && !ANTHROPIC_CLIENT_HEADERS.has(lower)) ||
+        (carrier.protocol === "openai_responses" &&
+          !RESPONSES_CLIENT_HEADERS.has(lower) &&
+          !(options.forwardCodexMetadata === true && CODEX_CLIENT_HEADERS.has(lower)))
+      ) {
         dropped.push(lower);
         continue;
       }

@@ -2859,7 +2859,7 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
 
     const h = seen as unknown as Headers;
     expect(sentBody).toBe(rawBody);
-    expect(h.get("x-client-feature")).toBe("keep-me");
+    expect(h.get("x-client-feature")).toBeNull();
     expect(h.get("Authorization")).toContain("Bearer ");
     expect(h.get("Authorization")).not.toContain("client-secret");
     expect(h.get("chatgpt-account-id")).toBe("acct_carrier");
@@ -6293,18 +6293,14 @@ describe("createCodexResponsesClient — responsesCompact", () => {
       await Promise.resolve();
 
       expect(outcome).toBeInstanceOf(UpstreamError);
-      expect(outcome).toMatchObject(
-        method === "nativePassthrough"
-          ? {
-              errorClass: "upstream_error",
-              upstreamStatus: 400,
-              providerRaw: {
-                error: { code: "response_create_outcome_unknown" },
-                http: { lifecycle_phase: "after_response_before_terminal" },
-              },
-            }
-          : { errorClass: "timeout" },
-      );
+      expect(outcome).toMatchObject({
+        errorClass: "upstream_error",
+        upstreamStatus: 400,
+        providerRaw: {
+          error: { code: "response_create_outcome_unknown" },
+          http: { lifecycle_phase: "after_response_before_terminal" },
+        },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -6623,7 +6619,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       expect(body.input[2]).toEqual({ type: "custom_tool_call_output", call_id: "c1", output });
     });
 
-    it("compresses DeepSeek tool images while keeping the caller's originals", async () => {
+    it("preserves DeepSeek tool images during custom-tool translation", async () => {
       const source = await sharp({
         create: { width: 4096, height: 64, channels: 3, background: "red" },
       })
@@ -6655,14 +6651,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       const parts =
         (seen.input as Array<{ output: Array<Record<string, unknown>> }>)[1]?.output ?? [];
       expect(parts[0]).toEqual({ type: "input_text", text: "Screenshot" });
-      expect(parts[1]?.image_url).toMatch(/^data:image\/webp;base64,/);
-      const compressed = Buffer.from(String(parts[1]?.image_url).split(",")[1] ?? "", "base64");
-      expect(compressed.byteLength).toBeLessThan(source.byteLength);
-      expect(await sharp(compressed).metadata()).toMatchObject({
-        width: 2048,
-        height: 32,
-        format: "webp",
-      });
+      expect(parts[1]?.image_url).toBe(image.image_url);
       expect(parts[1]?.detail).toBe("high");
       expect(body.input[1]?.output?.[1]).toBe(image);
       expect(image.image_url).toBe(`data:image/png;base64,${source.toString("base64")}`);
@@ -7618,7 +7607,8 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       }
     };
     await expect(consume()).rejects.toMatchObject({
-      message: "stream closed before response.completed",
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+      cause: { message: "stream closed before response.completed" },
     });
   });
 

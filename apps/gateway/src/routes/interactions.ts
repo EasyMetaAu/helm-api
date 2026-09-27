@@ -109,7 +109,7 @@ function extractCredential(googKey: string | undefined, auth: string | undefined
 
 // interactions `input` (string | typed blocks) → generateContent `contents`. A text
 // block → {text}; an image block → {inlineData:{mimeType,data}} (Gemini's image-input
-// shape, for image editing). Unknown block types are skipped (best-effort v1).
+// shape, for image editing). The route schema rejects unsupported blocks.
 function inputToContents(input: unknown): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [];
   if (typeof input === "string") {

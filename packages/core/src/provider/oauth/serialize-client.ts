@@ -210,6 +210,11 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
       deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();
   }
 
+  for (const method of ["responsesRetrieve", "responsesInputItems"] as const) {
+    const inner = deps.inner[method];
+    if (inner) client[method] = (id, opts) => inner.call(deps.inner, id, opts);
+  }
+
   // Forward the inner member's non-method DATA fields verbatim. The method-by-method
   // decoration above only copies functions, so any plain data property is silently
   // dropped unless listed here. A dropped `nativeProtocolProfile` made a multi-account

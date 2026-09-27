@@ -479,3 +479,27 @@ describe("registerInteractionsRoute", () => {
     expect(nativePassthrough).not.toHaveBeenCalled();
   });
 });
+
+describe("Interactions translation preserves client intent", () => {
+  it.each([
+    {
+      input: [
+        { type: "text", text: "hello" },
+        { type: "video", data: "opaque" },
+      ],
+    },
+    { input: [{ type: "text" }] },
+    { input: [{ type: "image" }] },
+    { previous_interaction_id: "previous" },
+    { tools: [{ type: "google_search" }] },
+  ])("rejects unsupported content before inference: %j", async (over) => {
+    const { app, nativePassthrough } = setup();
+    const response = await post(app, {
+      model: "gemini-3.1-flash-image",
+      input: "draw a cat",
+      ...over,
+    });
+    expect(response.status).toBe(400);
+    expect(nativePassthrough).not.toHaveBeenCalled();
+  });
+});

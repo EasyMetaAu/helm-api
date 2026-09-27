@@ -1,8 +1,14 @@
 import { Buffer } from "node:buffer";
 import { lookup as nodeDnsLookup } from "node:dns/promises";
 import https from "node:https";
+import { BlockList, isIP } from "node:net";
 import { Readable } from "node:stream";
-import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
+import {
+  appendMutationList,
+  isNativePassthroughCarrier,
+  type NativePassthroughInput,
+  nativePassthroughBody,
+} from "@helm/shared";
 import { geminiTransformer } from "../protocol/gemini/gemini-transformer.js";
 import type { GeminiSSEEvent } from "../protocol/gemini/gemini-types.js";
 import { openaiTransformer } from "../protocol/openai.js";
@@ -39,7 +45,7 @@ const defaultDnsLookup: HostnameLookup = async (hostname) => {
 // rebinding window between validation and connection). Injectable for hermetic tests.
 export type GeminiMediaFetch = (
   url: URL,
-  init: { signal?: AbortSignal; pinnedAddress?: string },
+  init: { signal?: AbortSignal; pinnedAddress: string },
 ) => Promise<Response>;
 
 // Default media fetcher: node:https GET pinned to the pre-validated address via a
@@ -55,15 +61,11 @@ const pinnedHttpsMediaFetch: GeminiMediaFetch = (url, init) =>
         method: "GET",
         servername: url.hostname,
         ...(init.signal !== undefined ? { signal: init.signal } : {}),
-        ...(pinned !== undefined
-          ? {
-              lookup: (
-                _hostname: string,
-                _options: unknown,
-                callback: (err: Error | null, address: string, family: number) => void,
-              ) => callback(null, pinned, pinned.includes(":") ? 6 : 4),
-            }
-          : {}),
+        lookup: (
+          _hostname: string,
+          _options: unknown,
+          callback: (err: Error | null, address: string, family: number) => void,
+        ) => callback(null, pinned, pinned.includes(":") ? 6 : 4),
       },
       (res) => {
         const status = res.statusCode ?? 502;
@@ -224,6 +226,18 @@ function bodyAndModel(input: NativePassthroughInput): {
   if (typeof model !== "string" || model.length === 0) {
     throw new UpstreamError("upstream_error", "gemini native request requires model");
   }
+  if (isNativePassthroughCarrier(input)) {
+    appendMutationList(input.mutations, "body_shims_applied", [
+      "gemini_model_moved_to_path",
+      ...(body.stream === undefined ? [] : ["gemini_stream_selected_by_path"]),
+    ]);
+    appendMutationList(
+      input.mutations,
+      "headers_dropped",
+      Object.keys(input.headers).map((name) => name.toLowerCase()),
+    );
+    input.mutations.auth_replaced = true;
+  }
   delete body.model;
   // `stream` is the gateway's InternalRequest switch; Gemini selects streaming by path.
   delete body.stream;
@@ -257,48 +271,34 @@ function remoteMediaSignal(timeoutMs: number, external?: AbortSignal) {
 // reject literal private/reserved IPs AND resolve DNS names to catch a public name
 // that points at a private address (rebinding). Re-checked on every redirect hop.
 
-function parseIpv4Octets(host: string): [number, number, number, number] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (m === null) return null;
-  const octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] as const;
-  if (octets.some((o) => o > 255)) return null;
-  return [octets[0], octets[1], octets[2], octets[3]];
-}
-
-function isBlockedIpv4([a, b]: [number, number, number, number]): boolean {
-  if (a === 0) return true; // 0.0.0.0/8 "this network"
-  if (a === 10) return true; // RFC1918
-  if (a === 127) return true; // loopback
-  if (a === 169 && b === 254) return true; // link-local (incl. 169.254.169.254 metadata)
-  if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-  if (a === 192 && b === 168) return true; // RFC1918
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (RFC6598)
-  if (a === 192 && b === 0) return true; // 192.0.0/24 IETF + 192.0.2/24 TEST-NET-1
-  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
-  if (a >= 224) return true; // multicast (224/4), reserved (240/4), broadcast
-  return false;
-}
-
-function isBlockedIpv6(host: string): boolean {
-  const lower = host.toLowerCase();
-  if (lower === "::1" || lower === "::") return true; // loopback / unspecified
-  if (/^f[cd]/.test(lower)) return true; // fc00::/7 unique-local
-  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-  // IPv4-mapped (::ffff:a.b.c.d) — validate the embedded v4 address.
-  const mapped = /(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(lower);
-  const v4 = mapped?.[1] !== undefined ? parseIpv4Octets(mapped[1]) : null;
-  return v4 !== null && isBlockedIpv4(v4);
-}
-
-function isIpLiteral(host: string): boolean {
-  return parseIpv4Octets(host) !== null || host.includes(":");
-}
+// Node's address parser also checks IPv4-mapped IPv6 against IPv4 subnets.
+const blockedMediaAddresses = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16],
+  ["100.64.0.0", 10],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["198.18.0.0", 15],
+  ["224.0.0.0", 3],
+] as const)
+  blockedMediaAddresses.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [
+  ["::", 128],
+  ["::1", 128],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["ff00::", 8],
+] as const)
+  blockedMediaAddresses.addSubnet(network, prefix, "ipv6");
 
 function isBlockedIp(host: string): boolean {
-  const v4 = parseIpv4Octets(host);
-  if (v4 !== null) return isBlockedIpv4(v4);
-  if (host.includes(":")) return isBlockedIpv6(host);
-  return false; // not an IP literal
+  const family = isIP(host);
+  return family === 0 || blockedMediaAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
 }
 
 function isBlockedHostname(host: string): boolean {
@@ -309,17 +309,13 @@ function isBlockedHostname(host: string): boolean {
 // Validates the target and returns the PINNED address the connection must use. For an
 // IP literal that is the literal itself; for a DNS name it is the first validated
 // resolved address (so the media fetch connects to exactly what we vetted — no second
-// resolution that a rebinding response could redirect to a private host). Returns
-// undefined only when the host is unresolvable (the fetch then fails naturally).
-async function assertPublicHttpsTarget(
-  target: URL,
-  lookup: HostnameLookup,
-): Promise<string | undefined> {
+// resolution that a rebinding response could redirect to a private host).
+async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Promise<string> {
   if (target.protocol !== "https:") {
     throw new UpstreamError("upstream_error", "Gemini remote media fetch only allows https URLs");
   }
   const host = target.hostname.replace(/^\[|\]$/g, ""); // URL keeps IPv6 in brackets
-  if (isIpLiteral(host)) {
+  if (isIP(host) !== 0) {
     if (isBlockedIp(host)) {
       throw new UpstreamError(
         "upstream_error",
@@ -335,8 +331,7 @@ async function assertPublicHttpsTarget(
   try {
     addresses = await lookup(host);
   } catch {
-    // Unresolvable host → the fetch itself cannot reach anything; let it fail naturally.
-    return undefined;
+    throw new UpstreamError("upstream_error", "Gemini remote media DNS lookup failed");
   }
   for (const address of addresses) {
     if (isBlockedIp(address)) {
@@ -346,7 +341,10 @@ async function assertPublicHttpsTarget(
       );
     }
   }
-  return addresses[0];
+  const pinned = addresses[0];
+  if (pinned === undefined)
+    throw new UpstreamError("upstream_error", "Gemini remote media DNS returned no addresses");
+  return pinned;
 }
 
 // Read a response body with a HARD byte cap enforced WHILE streaming (abort once the
@@ -464,6 +462,14 @@ async function materializeGeminiPart(
     const fileData = part.fileData as Record<string, unknown>;
     const fileUri = part.fileData.fileUri;
     if (fileUri.startsWith("https://")) {
+      const target = new URL(fileUri);
+      // Gemini Files are provider-managed handles, not unauthenticated web media.
+      if (
+        target.hostname === "generativelanguage.googleapis.com" &&
+        /^\/v1(?:beta)?\/files\//.test(target.pathname)
+      ) {
+        return { part, changed: false };
+      }
       const inlineData = await fetchRemoteMediaInlineData(
         fileUri,
         typeof fileData.mimeType === "string" ? fileData.mimeType : undefined,
@@ -576,6 +582,11 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         t.signal,
         dnsLookup,
       );
+      if (isNativePassthroughCarrier(input) && materializedBody !== body) {
+        appendMutationList(input.mutations, "body_shims_applied", [
+          "gemini_remote_media_materialized",
+        ]);
+      }
       // The exact Gemini-native bytes POSTed upstream (after remote-media materialization
       // + OpenAI→Gemini translation on the translate path) — surfaced for capture.
       const wireBody = JSON.stringify(materializedBody);

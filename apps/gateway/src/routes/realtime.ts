@@ -142,6 +142,18 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         headers: { "content-type": contentType },
         body: Buffer.from(bytes),
       }).formData();
+      if (
+        [...form.keys()].some((name) => name !== "sdp" && name !== "session") ||
+        form.getAll("sdp").length !== 1 ||
+        form.getAll("session").length !== 1
+      ) {
+        return error(
+          c,
+          400,
+          "realtime call requires exactly one sdp and one session part",
+          "invalid_request",
+        );
+      }
       sdp = await partText(form.get("sdp"));
       const parsed = RealtimeSessionSchema.safeParse(
         JSON.parse(await partText(form.get("session"))),

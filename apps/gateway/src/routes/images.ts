@@ -405,11 +405,36 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         "media_pricing_unavailable",
       );
     }
-    const pricedAliases = new Set(pricedTargets.map((target) => target.alias));
+    // The Gemini adapter only implements these generation options. Keep capable
+    // OpenAI candidates; never spend on a request whose options would be dropped.
+    const unsupportedGeminiOptions =
+      !editing && generationBody !== null
+        ? Object.keys(generationBody).filter(
+            (key) =>
+              key !== "model" &&
+              key !== "prompt" &&
+              !(key === "n" && generationBody?.n === 1) &&
+              !(key === "response_format" && generationBody?.response_format === "b64_json"),
+          )
+        : [];
+    const compatibleTargets =
+      unsupportedGeminiOptions.length === 0
+        ? pricedTargets
+        : pricedTargets.filter((target) => target.kind !== "gemini");
+    if (compatibleTargets.length === 0) {
+      return errorJson(
+        c,
+        400,
+        "invalid_request_error",
+        `Gemini image translation does not support options: ${unsupportedGeminiOptions.join(", ")}`,
+        "unsupported_image_options",
+      );
+    }
+    const pricedAliases = new Set(compatibleTargets.map((target) => target.alias));
     const permittedChain = {
       ...chain,
       candidateChain: permittedCandidateChain.filter((alias) => pricedAliases.has(alias)),
-      targets: pricedTargets,
+      targets: compatibleTargets,
     };
 
     // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face — ONCE, before

@@ -183,3 +183,22 @@ describe("registerRealtimeRoutes", () => {
     expect(options?.signal?.reason).toBe("concurrency_lease_lost");
   });
 });
+
+describe("Realtime multipart fidelity", () => {
+  it.each([
+    "extra",
+    "sdp",
+    "session",
+  ])("rejects an unrepresentable extra %s part", async (field) => {
+    const { app, realtimeCall } = setup();
+    const body = multipart({ model: "gpt-realtime-1.5" });
+    body.append(field, "unexpected");
+    const response = await app.request("/v1/realtime/calls", {
+      method: "POST",
+      headers: { Authorization: "Bearer helm-key" },
+      body,
+    });
+    expect(response.status).toBe(400);
+    expect(realtimeCall).not.toHaveBeenCalled();
+  });
+});

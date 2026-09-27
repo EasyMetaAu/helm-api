@@ -205,6 +205,7 @@ export const IRTokenDetailsSchema = z
 // the streaming state machine, not stored here). ————————————————————————————
 
 export const IRToolCallSchema = z.object({
+  cache_control: z.unknown().optional(),
   id: z.string(), // tool-call ID; synthesized by the transformer when Gemini omits one
   type: z.literal("function"),
   function: z.object({
@@ -239,6 +240,7 @@ export type ProviderRaw = z.infer<typeof ProviderRawSchema>;
 // instruction (see gemini-transformer's collectSystemText). ————————————————————
 
 export const IRMessageSchema = z.object({
+  cache_control: z.unknown().optional(),
   role: z.enum(["system", "developer", "user", "assistant", "tool"]),
   content: z.union([z.string(), z.array(IRContentPartSchema)]).nullable(),
   tool_calls: z.array(IRToolCallSchema).optional(), // assistant initiates

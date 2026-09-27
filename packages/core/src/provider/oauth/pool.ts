@@ -490,6 +490,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         "thread-id",
         "session_id",
         "x-session-id",
+        "x-session-key",
         "prompt_cache_key",
         "conversation_id",
       ]) {
@@ -1355,6 +1356,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   return {
     ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
+    supportsResponsesNativeItems: entries.every(
+      (entry) => entry.member.client.supportsResponsesNativeItems !== false,
+    ),
     disableAccount,
     hasAvailableModel(model: string): boolean {
       const nowMs = now();
@@ -1691,6 +1695,61 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
             }
             await opts?.onAccountSelected?.(entry.member.account);
             return entry.member.client.videoExtension(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.responsesRetrieve === "function")
+      ? {
+          async responsesRetrieve(
+            responseId: string,
+            opts?: ProviderCallOptions & { query?: URLSearchParams },
+          ): Promise<Record<string, unknown>> {
+            const account = opts?.providerAccount ?? opts?.statefulAccount;
+            if (!account)
+              throw new UpstreamError(
+                "upstream_error",
+                "Responses lifecycle requires the owning provider account",
+                null,
+                400,
+              );
+            const stickyKey = `provider_account:${account}`;
+            restorePersistedAffinity(stickyKey, account);
+            return completeWithRetry(stickyKey, null, false, (client, entry) => {
+              if (!client.responsesRetrieve) throw new Error("pool member lacks responsesRetrieve");
+              return client.responsesRetrieve(responseId, {
+                ...callOptionsForEntry(opts, entry),
+                query: opts?.query,
+              });
+            });
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.responsesInputItems === "function")
+      ? {
+          async responsesInputItems(
+            responseId: string,
+            opts?: ProviderCallOptions & { query?: URLSearchParams },
+          ): Promise<Record<string, unknown>> {
+            const account = opts?.providerAccount ?? opts?.statefulAccount;
+            if (!account)
+              throw new UpstreamError(
+                "upstream_error",
+                "Responses lifecycle requires the owning provider account",
+                null,
+                400,
+              );
+            const stickyKey = `provider_account:${account}`;
+            restorePersistedAffinity(stickyKey, account);
+            return completeWithRetry(stickyKey, null, false, (client, entry) => {
+              if (!client.responsesInputItems)
+                throw new Error("pool member lacks responsesInputItems");
+              return client.responsesInputItems(responseId, {
+                ...callOptionsForEntry(opts, entry),
+                query: opts?.query,
+              });
+            });
           },
         }
       : {}),
