@@ -6,9 +6,14 @@
   import {
     isCodexQuotaWindowPlaceholder,
     selectCodexAccountWeeklyQuotaWindows,
+    usableAnthropicResetGrant,
+    type AnthropicResetGrant,
+    type AnthropicResetStatus,
   } from '@helm/shared';
   import {
     consumeCodexResetCredit,
+    consumeAnthropicReset,
+    getAnthropicResetStatus,
     getOAuthOverview,
     logoutOAuth,
     requestOAuthRefresh,
@@ -53,6 +58,7 @@
   let overview = $state<OAuthOverview & { loadError?: string }>(untrack(() => ({ ...data })));
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let showConnect = $state<boolean>(false);
+  let reconnecting = $state<{ providerId: string; account: string } | null>(null);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   // The account whose connectivity-test dialog is open (providers page "Test"
   // button). Carries the row's chat models; media creates are paid, non-streaming
@@ -91,6 +97,15 @@
     creditTitle?: string;
     idempotencyKey: string;
   } | null>(null);
+  let confirmingAnthropicReset = $state<{
+    account: string;
+    status: AnthropicResetStatus;
+    grant: AnthropicResetGrant;
+  } | null>(null);
+  // Cached read-only Claude grant status keeps the reset action informative without
+  // changing the consume boundary: the POST still only runs from the confirmation modal.
+  let anthropicResetStatusByAccount = $state<Record<string, AnthropicResetStatus>>({});
+  const anthropicResetRequests = new Set<string>();
   // True while the confirmed consume is in flight (disables the dialog's buttons).
   let resettingLimit = $state<boolean>(false);
   // Transient success line after a credit reset (e.g. "Reset 2 window(s)"); cleared on
@@ -107,6 +122,27 @@
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
+
+  $effect(() => {
+    const anthropicAccounts = overview.providers
+      .filter((provider) => provider.id === 'anthropic')
+      .flatMap((provider) => provider.accounts.map((account) => account.account));
+    untrack(() => {
+      for (const account of anthropicAccounts) {
+        const key = keyOf('anthropic', account);
+        if (anthropicResetRequests.has(key)) continue;
+        anthropicResetRequests.add(key);
+        void Promise.resolve()
+          .then(() => getAnthropicResetStatus(account))
+          .then((status) => {
+            if (status) anthropicResetStatusByAccount[key] = status;
+          })
+          .catch(() => {
+            anthropicResetRequests.delete(key);
+          });
+      }
+    });
+  });
   const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
   const strategyOptions: Array<{
     value: OAuthSelectionStrategy;
@@ -150,6 +186,22 @@
 
   function providerName(id: string): string {
     return overview.providers.find((p) => p.id === id)?.name ?? id;
+  }
+
+  function anthropicResetGrant(account: string): AnthropicResetGrant | null {
+    const status = anthropicResetStatusByAccount[keyOf('anthropic', account)];
+    if (!status) return null;
+    return (
+      status.grants.find((grant) => grant.id === status.next_grant_id && grant.resets_left > 0) ??
+      status.grants.find((grant) => grant.resets_left > 0) ??
+      null
+    );
+  }
+
+  function anthropicResetButtonMeta(account: string): string {
+    const grant = anthropicResetGrant(account);
+    if (!grant) return '';
+    return `${$t('{n} resets remaining', { n: grant.resets_left })} · ${$t('Expires')}: ${new Date(grant.ends_at).toLocaleDateString()}`;
   }
 
   function mediaBadge(model: string): 'Image' | 'Video' | null {
@@ -481,6 +533,7 @@
 
   function onConnected(): void {
     showConnect = false;
+    reconnecting = null;
     void invalidateAll();
   }
 
@@ -797,6 +850,47 @@
     }
   }
 
+  async function prepareAnthropicReset(account: string): Promise<void> {
+    try {
+      const status = await getAnthropicResetStatus(account);
+      anthropicResetStatusByAccount[keyOf('anthropic', account)] = status;
+      const grant = usableAnthropicResetGrant(status, Date.now());
+      if (!grant)
+        throw new Error(
+          status.pending
+            ? $t('A previous Claude reset is still unconfirmed')
+            : $t('No Claude reset is currently available'),
+        );
+      confirmingAnthropicReset = { account, status, grant };
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to read Claude reset status');
+    }
+  }
+  async function confirmAnthropicReset(): Promise<void> {
+    if (!confirmingAnthropicReset) return;
+    resettingLimit = true;
+    error = null;
+    try {
+      const { account, grant } = confirmingAnthropicReset;
+      const result = await consumeAnthropicReset({
+        account,
+        grantId: grant.id,
+        expectedResetsLeft: grant.resets_left,
+      });
+      confirmingAnthropicReset = null;
+      if (result.status) anthropicResetStatusByAccount[keyOf('anthropic', account)] = result.status;
+      if (result.result === 'unknown')
+        throw new Error($t('Claude reset outcome is unconfirmed; refresh usage before retrying'));
+      await invalidateAll();
+      resetNotice =
+        result.result === 'reset' ? $t('Claude usage reset') : $t('Claude reset was not applied');
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to reset Claude usage');
+    } finally {
+      resettingLimit = false;
+    }
+  }
+
   async function confirmDisconnect(): Promise<void> {
     if (!confirming) return;
     error = null;
@@ -813,7 +907,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Subscription Providers')}</h1>
@@ -832,7 +926,10 @@
         type="button"
         class="btn-primary flex-1 sm:flex-none"
         disabled={!overview.configured}
-        onclick={() => (showConnect = true)}>{$t('Connect')}</button
+        onclick={() => {
+          reconnecting = null;
+          showConnect = true;
+        }}>{$t('Connect')}</button
       >
     </div>
   </header>
@@ -866,8 +963,12 @@
   {#if showConnect}
     <ConnectProviderDialog
       providers={overview.providers}
+      reconnect={reconnecting}
       onconnected={onConnected}
-      onclose={() => (showConnect = false)}
+      onclose={() => {
+        reconnecting = null;
+        showConnect = false;
+      }}
     />
   {/if}
 
@@ -936,15 +1037,11 @@
           <tr>
             <th class="px-3 py-2">{$t('Provider')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
-            <th class="px-3 py-2">{$t('Proxy')}</th>
             <th class="px-3 py-2">{$t('Models')}</th>
             <th class="px-3 py-2">{$t('Today')}</th>
             <th class="px-3 py-2">{$t('Quota')}</th>
-            <th class="px-3 py-2">{$t('Priority')}</th>
-            <th class="px-3 py-2">{$t('Schedulable')}</th>
-            <th class="px-3 py-2">{$t('Fast')}</th>
-            <th class="px-3 py-2">{$t('Expires')}</th>
-            <th class="px-3 py-2"></th>
+            <th class="px-3 py-2">{$t('Scheduling')}</th>
+            <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-white">{$t('Actions')}</th>
           </tr>
         </thead>
         <tbody>
@@ -964,6 +1061,7 @@
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota, isCodex)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
+            {@const needsReconnect = !row.account.healthy}
             {@const credentialFailed = row.account.credentialFailed === true}
             {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
             {@const codexCreditBalance =
@@ -988,7 +1086,7 @@
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge. The name+account is a link into the
                    account usage-detail page (per-reset-period token usage). -->
-              <td data-label={$t('Provider')} class="px-3 py-3">
+              <td data-label={$t('Provider')} class="px-3 py-3 lg:max-w-56 lg:whitespace-normal">
                 <a
                   class="group block"
                   href={accountDetailHref(base, row.provider.id, row.account.account)}
@@ -1005,10 +1103,10 @@
                 </a>
                 {#if hasCodexIdentity}
                   <div
-                    class="mt-1 flex max-w-64 flex-col items-start gap-1 text-xs"
+                    class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs"
                     data-testid="codex-subscription-details"
                   >
-                    {#if row.account.email}
+                    {#if row.account.email && row.account.email !== row.account.account}
                       <span class="break-all text-ink-body">{row.account.email}</span>
                     {/if}
                     {#if codexPlanType || row.account.isFedramp}
@@ -1033,6 +1131,14 @@
                 {/if}
                 <div class="mt-1 flex flex-wrap items-center gap-1">
                   <span class="badge-neutral">{typeBadge(row.provider)}</span>
+                  <!-- Egress proxy (redacted; "Direct" when none) -->
+                  {#if proxyLabel(row.account.proxy)}
+                    <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
+                      >{proxyLabel(row.account.proxy)}</span
+                    >
+                  {:else}
+                    <span class="text-xs text-ink-muted">{$t('Direct')}</span>
+                  {/if}
                   {#if isCodex && row.account.autoReset}
                     <span
                       class="badge-ok"
@@ -1046,7 +1152,7 @@
               </td>
 
               <!-- Status (+ parked pill) -->
-              <td data-label={$t('Status')} class="px-3 py-3">
+              <td data-label={$t('Status')} class="px-3 py-3 lg:whitespace-normal">
                 {#if row.account.healthy}
                   <span class="badge-ok">{$t('connected')}</span>
                 {:else}
@@ -1078,17 +1184,6 @@
                 {/if}
               </td>
 
-              <!-- Egress proxy (redacted; "Direct" when none) -->
-              <td data-label={$t('Proxy')} class="px-3 py-3 text-xs">
-                {#if proxyLabel(row.account.proxy)}
-                  <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
-                    >{proxyLabel(row.account.proxy)}</span
-                  >
-                {:else}
-                  <span class="text-ink-muted">{$t('Direct')}</span>
-                {/if}
-              </td>
-
               <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
               <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
@@ -1100,7 +1195,7 @@
                     .slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
                   <div
-                    class="flex max-w-full flex-wrap gap-1 lg:w-48"
+                    class="flex max-w-full flex-wrap gap-1 lg:w-40"
                     title={row.account.models.join('\n')}
                   >
                     {#each shown as m (m)}
@@ -1135,7 +1230,7 @@
               <!-- Quota / session windows (+ Codex reset-credit count) -->
               <td data-label={$t('Quota')} class="px-3 py-3" data-testid="provider-quota-cell">
                 {#if quota && quota.windows.length > 0}
-                  <div class="flex w-full flex-col gap-1.5 lg:w-40">
+                  <div class="flex w-full flex-col gap-1.5 lg:w-36">
                     {#each quota.windows as w (w.key)}
                       <div>
                         <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
@@ -1233,64 +1328,82 @@
                 {/if}
               </td>
 
-              <!-- Priority (inline, lower = served first) -->
-              <td data-label={$t('Priority')} class="px-3 py-3">
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
-                  value={row.account.priority}
-                  disabled={saving}
-                  aria-label={$t('Priority')}
-                  onchange={(e) =>
-                    savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
-                />
-              </td>
-
-              <!-- Schedulable (inline toggle) -->
-              <td data-label={$t('Schedulable')} class="px-3 py-3">
-                <input
-                  type="checkbox"
-                  class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                  checked={row.account.schedulable}
-                  disabled={saving || credentialFailed}
-                  aria-label={$t('Schedulable')}
-                  title={credentialFailed ? $t('needs reconnect') : undefined}
-                  onchange={(e) =>
-                    toggleSchedulable(
-                      row.provider.id,
-                      row.account.account,
-                      e.currentTarget.checked,
-                    )}
-                />
-              </td>
-
-              <!-- Fast mode (per-account upstream override) -->
-              <td data-label={$t('Fast')} class="px-3 py-3">
-                {#if supportsFast}
+              <!-- Scheduling: priority (lower = served first), schedulable, fast mode,
+                   token expiry — the per-account knobs, grouped in one cell. -->
+              <td
+                data-label={$t('Scheduling')}
+                class="px-3 py-3 text-xs"
+                data-testid="provider-scheduling-cell"
+              >
+                <div class="grid w-36 grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5">
+                  <span class="text-ink-muted">{$t('Priority')}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
+                    value={row.account.priority}
+                    disabled={saving}
+                    aria-label={$t('Priority')}
+                    onchange={(e) =>
+                      savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
+                  />
+                  <span class="text-ink-muted">{$t('Schedulable')}</span>
                   <input
                     type="checkbox"
                     class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                    checked={row.account.fastMode ?? false}
-                    disabled={saving}
-                    aria-label={$t('Fast mode')}
+                    checked={row.account.schedulable}
+                    disabled={saving || credentialFailed}
+                    aria-label={$t('Schedulable')}
+                    title={credentialFailed ? $t('needs reconnect') : undefined}
                     onchange={(e) =>
-                      toggleFastMode(row.provider.id, row.account.account, e.currentTarget.checked)}
+                      toggleSchedulable(
+                        row.provider.id,
+                        row.account.account,
+                        e.currentTarget.checked,
+                      )}
                   />
-                {:else}
-                  <span class="text-xs text-ink-muted">—</span>
-                {/if}
+                  {#if supportsFast}
+                    <span class="text-ink-muted">{$t('Fast')}</span>
+                    <input
+                      type="checkbox"
+                      class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                      checked={row.account.fastMode ?? false}
+                      disabled={saving}
+                      aria-label={$t('Fast mode')}
+                      onchange={(e) =>
+                        toggleFastMode(
+                          row.provider.id,
+                          row.account.account,
+                          e.currentTarget.checked,
+                        )}
+                    />
+                  {/if}
+                  <span class="text-ink-muted">{$t('Expires')}</span>
+                  <span class="text-ink-body">{expiryLabel(row.account)}</span>
+                </div>
               </td>
 
-              <!-- Token expiry -->
-              <td data-label={$t('Expires')} class="px-3 py-3 text-ink-muted"
-                >{expiryLabel(row.account)}</td
-              >
-
               <!-- Actions -->
-              <td data-label={$t('Actions')} class="px-3 py-3 lg:text-right">
-                <div class="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap lg:flex-nowrap">
+              <td
+                data-label={$t('Actions')}
+                class="px-3 py-3 lg:sticky lg:right-0 lg:bg-white lg:text-right"
+              >
+                <div class="flex items-center justify-end gap-2">
+                  {#if needsReconnect}
+                    <button
+                      type="button"
+                      class="btn-primary"
+                      disabled={!overview.configured}
+                      onclick={() => {
+                        reconnecting = {
+                          providerId: row.provider.id,
+                          account: row.account.account,
+                        };
+                        showConnect = true;
+                      }}>{$t('Reconnect')}</button
+                    >
+                  {/if}
                   <button
                     type="button"
                     class="btn-secondary"
@@ -1312,51 +1425,76 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
-                  {#if usageLimit?.retryable && isCodex}
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      disabled={resetting[k] === true}
-                      title={$t('Clear Helm local cooldown and try this account again')}
-                      onclick={() => retryAccount(row.provider.id, row.account.account)}
-                      >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
-                    >
-                  {/if}
-                  {#if isCodex}
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      disabled={!canResetCodexLimit}
-                      title={resetCreditTitle(quota, codexCredits)}
-                      onclick={() =>
-                        (confirmingReset = (() => {
-                          const credit = quota?.resetCreditDetails?.find(
-                            (item) =>
-                              item.status === 'available' && item.resetType === 'codexRateLimits',
-                          );
-                          return {
+                  <details data-testid="provider-actions" class="menu">
+                    <summary class="menu-trigger" title={$t('More actions')}>
+                      <span aria-hidden="true">⋯</span>
+                      <span class="sr-only">{$t('More actions')}</span>
+                    </summary>
+                    <div class="menu-panel w-56">
+                      {#if usageLimit?.retryable && isCodex}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={resetting[k] === true}
+                          title={$t('Clear Helm local cooldown and try this account again')}
+                          onclick={() => retryAccount(row.provider.id, row.account.account)}
+                          >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
+                        >
+                      {/if}
+                      {#if isCodex}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={!canResetCodexLimit}
+                          title={resetCreditTitle(quota, codexCredits)}
+                          onclick={() =>
+                            (confirmingReset = (() => {
+                              const credit = quota?.resetCreditDetails?.find(
+                                (item) =>
+                                  item.status === 'available' &&
+                                  item.resetType === 'codexRateLimits',
+                              );
+                              return {
+                                providerId: row.provider.id,
+                                account: row.account.account,
+                                credits: codexCredits ?? 0,
+                                autoReset: row.account.autoReset ?? false,
+                                ...(credit?.id ? { creditId: credit.id } : {}),
+                                ...(credit?.title ? { creditTitle: credit.title } : {}),
+                                idempotencyKey: resetRequestId(),
+                              };
+                            })())}
+                          >{codexCredits != null && codexCredits > 0
+                            ? $t('Reset limit ({n})', { n: codexCredits })
+                            : $t('Reset limit')}</button
+                        >
+                      {/if}
+                      {#if row.provider.id === 'anthropic'}
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={resettingLimit}
+                          onclick={() => prepareAnthropicReset(row.account.account)}
+                          >{$t(
+                            'Reset Claude usage',
+                          )}{#if anthropicResetButtonMeta(row.account.account)}
+                            <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
+                              >({anthropicResetButtonMeta(row.account.account)})</span
+                            >{/if}</button
+                        >
+                      {/if}
+                      <button
+                        type="button"
+                        class="menu-item-danger"
+                        disabled={disconnecting}
+                        onclick={() =>
+                          (confirming = {
                             providerId: row.provider.id,
                             account: row.account.account,
-                            credits: codexCredits ?? 0,
-                            autoReset: row.account.autoReset ?? false,
-                            ...(credit?.id ? { creditId: credit.id } : {}),
-                            ...(credit?.title ? { creditTitle: credit.title } : {}),
-                            idempotencyKey: resetRequestId(),
-                          };
-                        })())}
-                      >{codexCredits != null && codexCredits > 0
-                        ? $t('Reset limit ({n})', { n: codexCredits })
-                        : $t('Reset limit')}</button
-                    >
-                  {/if}
-                  <button
-                    type="button"
-                    class="btn-danger-outline col-span-2 sm:col-span-1"
-                    disabled={disconnecting}
-                    onclick={() =>
-                      (confirming = { providerId: row.provider.id, account: row.account.account })}
-                    >{$t('Disconnect')}</button
-                  >
+                          })}>{$t('Disconnect')}</button
+                      >
+                    </div>
+                  </details>
                 </div>
               </td>
             </tr>
@@ -1437,6 +1575,53 @@
           disabled={resettingLimit}
           onclick={confirmResetLimit}
           >{resettingLimit ? $t('Resetting…') : $t('Reset limit')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if confirmingAnthropicReset}
+    <Modal
+      label={$t('Confirm Claude usage reset')}
+      dismissible={false}
+      onclose={() => {
+        if (!resettingLimit) confirmingAnthropicReset = null;
+      }}
+    >
+      <h2 class="section-header">{$t('Confirm Claude usage reset')}</h2>
+      <p class="mt-3 text-sm text-ink-body">
+        {$t('Use one Claude reset for')}
+        <code class="font-mono text-ink-strong">{confirmingAnthropicReset.account}</code>?
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {confirmingAnthropicReset.grant.label ?? confirmingAnthropicReset.grant.id}; {$t(
+          '{n} resets remaining',
+          { n: confirmingAnthropicReset.grant.resets_left },
+        )}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t('Scope')}: {confirmingAnthropicReset.grant.clears.join(', ')} · {$t('Expires')}: {new Date(
+          confirmingAnthropicReset.grant.ends_at,
+        ).toLocaleString()}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t('Claude reset affects every connected token in the same Claude organization')}
+      </p>
+      {#if confirmingAnthropicReset.status.cooldown_until}<p class="mt-2 text-sm text-ink-muted">
+          {$t('Claude reset is currently cooling down')}
+        </p>{/if}
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={resettingLimit}
+          onclick={() => (confirmingAnthropicReset = null)}>{$t('Cancel')}</button
+        ><button
+          type="button"
+          class="btn-primary"
+          disabled={resettingLimit}
+          onclick={confirmAnthropicReset}
+          >{resettingLimit ? $t('Resetting…') : $t('Reset Claude usage')}</button
         >
       </div>
     </Modal>

@@ -3,11 +3,11 @@ import {
   type BudgetCaps,
   type DecisionRecord,
   extractBillingHeaderIdentity,
-  normalizeClaudeCodeDateFingerprintInAnthropicRequest,
   type RateLimitProbe,
   type RateLimitResult,
+  UpstreamError,
 } from "@helm/core";
-import { appendMutationList, effectiveMemoryProjectId } from "@helm/shared";
+import { effectiveMemoryProjectId } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -396,7 +396,27 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     if (deps.countTokens !== undefined) {
       try {
         return c.json(await deps.countTokens(obj, identity, requestSignal(c)));
-      } catch {
+      } catch (error) {
+        const status = error instanceof UpstreamError ? error.upstreamStatus : null;
+        if (status !== null && status >= 400 && status < 500 && status !== 429) {
+          return c.json(
+            {
+              type: "error",
+              error: {
+                type:
+                  status === 401
+                    ? "authentication_error"
+                    : status === 403
+                      ? "permission_error"
+                      : status === 404
+                        ? "not_found_error"
+                        : "invalid_request_error",
+                message: (error as UpstreamError).message,
+              },
+            },
+            status as ContentfulStatusCode,
+          );
+        }
         // Token helpers are compatibility helpers, not generation. Fall back to a
         // deterministic estimate instead of making /v1/messages/count_tokens flaky.
       }
@@ -518,27 +538,22 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
-    const normalizedNative = normalizeClaudeCodeDateFingerprintInAnthropicRequest(native);
-    const nativeForPipeline = normalizedNative.body;
     const sessionCaptureScope = {
       accountId: identity.accountId,
       apiKeyId: identity.keyId,
     };
     const sessionCapture = resolveSessionCapture(
       (name) => c.req.header(name),
-      nativeForPipeline,
+      native,
       sessionCaptureScope,
     );
-    const nativeCarrierRawBody = normalizedNative.normalized
-      ? (JSON.stringify(nativeForPipeline) ?? requestJson)
-      : requestJson;
     // The REAL Anthropic transformer Zod-validates and THROWS on a structurally
     // invalid body (e.g. {messages:[]}). Wrap it so that throw becomes a 400 in the
     // ANTHROPIC envelope here, instead of escaping to onError → an OpenAI-shaped
     // 502 (principle 2 fail-closed; mirrors how responses.ts guards its transform).
     let ir: IRLike;
     try {
-      ir = await anthropic.transformRequestOut(nativeForPipeline);
+      ir = await anthropic.transformRequestOut(native);
     } catch (err) {
       const detail = err instanceof Error ? err.message : "invalid Anthropic request";
       return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
@@ -552,7 +567,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // version with a cache-stable cch instead of a pinned spoof (anti-ban). Null/absent
     // for non-CLI traffic → the executor uses its baked fallback version.
     const clientBilling = extractBillingHeaderIdentity(
-      (nativeForPipeline as { system?: unknown } | null)?.system,
+      (native as { system?: unknown } | null)?.system,
     );
     if (clientBilling !== null) ir.metadata.client_billing_header = clientBilling;
 
@@ -575,10 +590,8 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // → off + null (default-safe). The ids are opaque (not credentials) and are
     // never logged here.
     const nativeMetaBag =
-      nativeForPipeline &&
-      typeof nativeForPipeline === "object" &&
-      (nativeForPipeline as Record<string, unknown>).metadata
-        ? ((nativeForPipeline as Record<string, unknown>).metadata as Record<string, unknown>)
+      native && typeof native === "object" && (native as Record<string, unknown>).metadata
+        ? ((native as Record<string, unknown>).metadata as Record<string, unknown>)
         : null;
     const sig = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
     const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId, {
@@ -598,23 +611,17 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
 
     // Native protocol passthrough carrier (#217). Stamp the parsed inbound body onto the
     // IR metadata bag (same HTTP→core hand-off as client_billing_header above). It is
-    // byte-faithful except for pre-provider safety shims such as Claude Code date-marker
-    // normalization; those shims are recorded in the carrier mutation ledger. NEVER
+    // byte-faithful here: arbitrary client text is not a protocol compatibility shim. NEVER
     // logged. Covers BOTH stream and non-stream (Phase 2 added streaming passthrough):
     // the native streaming body already carries stream:true, so the same body is the
     // carrier — the guard + executor decide whether to actually forward it.
     const nativeCarrier = nativeCarrierFromParsedBody({
       protocol: "anthropic_messages",
-      native: nativeForPipeline,
-      rawBody: nativeCarrierRawBody,
+      native,
+      rawBody: requestJson,
       headers: c.req.raw.headers,
     });
     if (nativeCarrier !== null) {
-      if (normalizedNative.normalized) {
-        appendMutationList(nativeCarrier.mutations, "body_shims_applied", [
-          "claude_code_date_fingerprint_normalized",
-        ]);
-      }
       ir.metadata.native_request = nativeCarrier;
     }
     requestBodyMaterialized?.();

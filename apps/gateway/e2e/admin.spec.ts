@@ -88,6 +88,8 @@ test.describe("admin lane editing", () => {
       .getByTestId("lane-card")
       .filter({ has: page.getByRole("heading", { name: "economy", exact: true }) });
     await expect(card).toBeVisible();
+    // Lane cards start collapsed to a one-line summary; expand to edit.
+    await card.getByTestId("lane-summary").click();
 
     const primary = card.locator("input[name='primary']");
     await primary.fill(newPrimary);
@@ -115,6 +117,24 @@ test.describe("admin policy editing", () => {
 
     await saveButton.click();
     await expect(page.getByTestId("policies-saved")).toBeVisible();
+  });
+});
+
+test.describe("admin row action menu", () => {
+  test("the ⋯ menu closes on a click outside it and on Escape", async ({ page }) => {
+    await page.goto(`${BASE}/admin/keys`);
+    const menu = page.getByTestId("key-actions").first();
+    const panel = menu.locator(".menu-panel");
+
+    await menu.locator("summary").click();
+    await expect(panel).toBeVisible();
+    await page.getByRole("heading", { level: 1 }).click();
+    await expect(panel).toBeHidden();
+
+    await menu.locator("summary").click();
+    await expect(panel).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
   });
 });
 

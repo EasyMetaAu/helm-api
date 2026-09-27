@@ -38,4 +38,37 @@ describe("Portal request-detail parity", () => {
     expect(page).toContain("detail.request_id");
     expect(page).toContain("detail.trace_id");
   });
+
+  it("shows throughput, fallback attempts, and a real cost total instead of the admin cost-breakdown component", () => {
+    // The admin CostBreakdown component reads routing_usd/eval_usd, which the
+    // portal never populates (§4.3) — showing it renders two permanently-empty
+    // rows next to a meaningless "Routing — / Eval —". Portal renders a plain
+    // total instead of importing that component.
+    expect(page).not.toContain("CostBreakdown");
+    expect(page).toContain('data-testid="cost-total"');
+    // Throughput (TPS / time-to-first-token / generation time) mirrors admin's
+    // detail page fields, now exposed by toPortalDecisionView.
+    expect(page).toContain('data-testid="throughput"');
+    expect(page).toContain('data-testid="tps"');
+    expect(page).toContain('data-testid="ttfb"');
+    expect(page).toContain('data-testid="generation-ms"');
+    // Fallback attempts: outcome + latency only (never provider/alias/model —
+    // R7, docs/12 §8).
+    expect(page).toContain('data-testid="attempt-row"');
+    expect(page).toContain("detail.attempts");
+    expect(page).not.toContain("attempt.provider");
+    expect(page).not.toContain("attempt.alias");
+    // Requested vs. effective reasoning effort.
+    expect(page).toContain("detail.requested_reasoning_effort");
+    expect(page).toContain("detail.reasoning_effort");
+  });
+
+  it("normalizes attempts/tps/ttfb_ms/generation_ms so an older gateway that omits them can't crash the page", () => {
+    // These fields are new (this change); a not-yet-upgraded gateway simply
+    // omits the keys, which JSON.parse turns into `undefined` — the template's
+    // `!== null` checks and `.length` access don't tolerate that. Guard once
+    // at the load site instead of scattering `?? []` through the template.
+    expect(page).toContain("normalizePortalDetail");
+    expect(page).toContain("detail = normalizePortalDetail(nextDetail)");
+  });
 });

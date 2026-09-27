@@ -59,6 +59,20 @@ const data: AccountDetailData = {
 describe('provider account detail', () => {
   beforeEach(() => invalidateAllMock.mockReset());
 
+  it('hides the window switcher when the account has a single reset window', () => {
+    render(AccountDetailPage, { data });
+    expect(screen.queryByRole('tablist', { name: 'Reset window' })).toBeNull();
+  });
+
+  it('shows the window switcher when there are several reset windows', () => {
+    const second = { ...data.periods.current[0], windowKey: 'secondary' };
+    render(AccountDetailPage, {
+      data: { ...data, periods: { ...data.periods, current: [...data.periods.current, second] } },
+    });
+    const tabs = screen.getByRole('tablist', { name: 'Reset window' });
+    expect(within(tabs).getAllByRole('tab')).toHaveLength(2);
+  });
+
   it('includes the live current period in the period history', () => {
     render(AccountDetailPage, { data });
 

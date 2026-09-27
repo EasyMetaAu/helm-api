@@ -295,6 +295,39 @@ describe('DecisionChain', () => {
     expect(screen.getByTestId('chain-policy')).toHaveTextContent('policy_coding_premium');
   });
 
+  it('shows the first candidates and folds a long chain behind "+N more"', () => {
+    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    render(DecisionChain, { detail: detail({ lane_candidates: many }) });
+    const lanes = screen.getByTestId('chain-lanes');
+    // All candidates stay in the DOM in order (tests, find-in-page)…
+    expect(
+      within(lanes)
+        .getAllByTestId('lane-candidate')
+        .map((n) => n.textContent?.trim()),
+    ).toEqual(many);
+    // …but only the first few are visible until expanded.
+    const more = within(lanes).getByTestId('lane-candidates-more');
+    expect(more.tagName).toBe('DETAILS');
+    expect(more).not.toHaveAttribute('open');
+    expect(within(more).getByText('+3')).toBeInTheDocument();
+  });
+
+  it('does not repeat identical task/complexity badges (passthrough · passthrough)', () => {
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          ...detail().classifier_output,
+          task_type: 'passthrough',
+          complexity: 'passthrough',
+        },
+      }),
+    });
+    const classifier = screen.getByTestId('chain-classifier');
+    expect(
+      within(classifier).getAllByText('passthrough', { selector: '.badge-neutral' }),
+    ).toHaveLength(1);
+  });
+
   it('renders the lane candidate chain in order', () => {
     render(DecisionChain, { detail: detail() });
     const lanes = screen.getByTestId('chain-lanes');

@@ -113,6 +113,11 @@ export function keywordMatcher(kw: string): RegExp {
     const left = needsBoundary(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
     const right = needsBoundary(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
     re = new RegExp(left + escapeRegExp(kw) + right, "iu");
+    // Config reloads can introduce new keywords throughout the process lifetime.
+    if (keywordMatcherCache.size >= 1024) {
+      const oldest = keywordMatcherCache.keys().next().value;
+      if (oldest !== undefined) keywordMatcherCache.delete(oldest);
+    }
     keywordMatcherCache.set(kw, re);
   }
   return re;

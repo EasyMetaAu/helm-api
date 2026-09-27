@@ -1414,6 +1414,22 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 53,
+    run(db) {
+      if (!sqliteTableHasColumns(db, "request_payloads", ["request_id"])) return;
+      db.exec(`ALTER TABLE request_payloads ADD COLUMN response_body_generation TEXT;
+CREATE TABLE request_payload_response_chunks (
+  request_id TEXT NOT NULL REFERENCES request_payloads(request_id) ON DELETE CASCADE,
+  generation TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  codec TEXT NOT NULL,
+  raw_bytes INTEGER NOT NULL,
+  bytes BLOB NOT NULL,
+  PRIMARY KEY (request_id, generation, chunk_index)
+);`);
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

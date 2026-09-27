@@ -1090,6 +1090,7 @@ describe("createExecute — gateway execution adapter", () => {
       chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
       chatCompletionStream: vi.fn(),
       nativeProtocolProfile: "generic_openai_responses",
+      supportsResponsesNativeItems: false,
     } as unknown as ProviderClient;
     const provider = createOAuthPoolClient({
       members: [
@@ -1154,6 +1155,7 @@ describe("createExecute — gateway execution adapter", () => {
       chatCompletionStream: vi.fn(),
       nativePassthrough: vi.fn().mockResolvedValue({ id: "should-not-passthrough" }),
       nativeProtocolProfile: "generic_openai_responses",
+      supportsResponsesNativeItems: false,
     } as unknown as ProviderClient;
     const provider = createOAuthPoolClient({
       members: [
@@ -1401,11 +1403,7 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body?.context_management).toEqual(cm);
   });
 
-  it("strips object-shaped context_management from a generic-Responses native passthrough body", async () => {
-    // Same-protocol openai_responses -> generic xAI can PASSTHROUGH verbatim (no translation),
-    // bypassing the forward allowlist. If the native body carries Anthropic's object-shaped
-    // context_management, xAI still 422s. The passthrough sanitizer must drop it for the
-    // generic profile (mirrors the Codex-official native sanitizer at the same chokepoint).
+  it("preserves native Responses context_management for generic upstreams", async () => {
     const responsesBody = {
       id: "resp_generic",
       object: "response",
@@ -1445,7 +1443,7 @@ describe("createExecute — gateway execution adapter", () => {
           body: {
             model: "grok-4.5",
             input: "hi",
-            context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+            context_management: [{ type: "compaction", compact_threshold: 200000 }],
           },
           headers: {},
           mutations: {},
@@ -1458,7 +1456,9 @@ describe("createExecute — gateway execution adapter", () => {
       body?: Record<string, unknown>;
     } & Record<string, unknown>;
     const forwardedBody = (forwarded?.body ?? forwarded) as Record<string, unknown>;
-    expect(forwardedBody.context_management).toBeUndefined();
+    expect(forwardedBody.context_management).toEqual([
+      { type: "compaction", compact_threshold: 200000 },
+    ]);
     // The rest of the native body is untouched.
     expect(forwardedBody.input).toBe("hi");
   });
@@ -4998,7 +4998,8 @@ describe("createExecute — native protocol passthrough (#217)", () => {
 
     const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as NativePassthroughCarrier;
     expect(forwarded.body.output_config).toBeUndefined();
-    expect((forwarded.body.thinking as { type?: string } | undefined)?.type).toBe("enabled");
+    // Unsupported output effort does not authorize synthesizing unrelated native thinking.
+    expect(forwarded.body.thinking).toBeUndefined();
     expect(forwarded.mutations).toMatchObject({
       body_shims_applied: ["reasoning_effort_stripped_for_model"],
     });
@@ -5057,34 +5058,54 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.passthrough_disable_reason).toBe("provider_requires_compatibility_rewrite");
   });
 
-  it("Opus 4.8 Anthropic native body with a valid trailing system turn stays on passthrough", async () => {
+  it.each([
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-opus-5-5",
+  ])("%s native body preserves the trailing system cache boundary", async (providerModel) => {
     // Regression for request 5191ce2b...: disabling passthrough sent the request through
     // the compatibility rewrite path, which produced an upstream empty-success stream.
-    // Opus 4.8 supports this exact [user, system] mid-conversation system placement, so
+    // Opus 4.8/5/5.5 support this [user, system] placement and its cache boundary, so
     // the same-protocol request should stay byte-faithful.
     const provider = anthropicProvider(NATIVE_RESP);
+    const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
+      `anthropic/${providerModel}`,
+    );
+    if (!modelEntry) throw new Error("missing model catalog entry");
     const execute = createExecute({
       defaultProvider: provider,
       providers: new Map([["anthro", provider]]),
       registry: protocolRegistry({
         a: {
           providerName: "anthro",
-          providerModel: "claude-opus-4-8",
+          providerModel,
           targetProviderProtocol: "anthropic_messages",
         },
       }),
       breaker: breaker(),
-      catalog: new Map(),
+      catalog: new Map([["a", { ...modelEntry, modelKey: "a" }]]),
       now: clock(),
       signal: new AbortController().signal,
       nativeProtocolPassthroughEnabled: () => true,
     });
     const nativeWithTrailingSystem = {
       ...NATIVE,
-      model: "anthropic/claude-opus-4-8",
+      model: `anthropic/${providerModel}`,
+      thinking: { type: "adaptive", display: "omitted" },
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      output_config: { effort: "high" },
       messages: [
         { role: "user", content: "hi" },
-        { role: "system", content: "# MCP Server Instructions\n..." },
+        {
+          role: "system",
+          content: [
+            {
+              type: "text",
+              text: "# MCP Server Instructions\n...",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
       ],
     };
 
@@ -5094,15 +5115,117 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     );
 
     expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]?.passthrough_disable_reason).toBeNull();
     expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
     expect(provider.chatCompletion).not.toHaveBeenCalled();
     expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual({
       ...nativeWithTrailingSystem,
-      model: "claude-opus-4-8",
+      model: providerModel,
     });
     expect(out.nativePassthrough).toBe(true);
     expect(out.attempts[0]?.passthrough_used).toBe(true);
-    expect(out.attempts[0]?.passthrough_disable_reason).toBeNull();
+  });
+
+  it.each([
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+  ])("%s preserves native request bytes and opaque SSE through execution", async (providerModel) => {
+    const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
+      `anthropic/${providerModel}`,
+    );
+    if (!modelEntry) throw new Error("missing model catalog entry");
+    const body = {
+      model: providerModel,
+      stream: true,
+      max_tokens: 64,
+      thinking: { type: "adaptive", display: "omitted" },
+      output_config: { effort: "high" },
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      future_native_field: { keep: "opaque" },
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "signed history", signature: "opaque-signed-history" },
+            { type: "text", text: "hello" },
+          ],
+        },
+        { role: "user", content: "continue" },
+        {
+          role: "system",
+          content: [
+            { type: "text", text: "trailing reminder", cache_control: { type: "ephemeral" } },
+          ],
+        },
+      ],
+    };
+    const rawBody = JSON.stringify(body, null, 2);
+    const frames = [
+      {
+        type: "message_start",
+        message: {
+          id: "m",
+          type: "message",
+          role: "assistant",
+          model: providerModel,
+          content: [],
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "opaque-stream-signature" },
+      },
+      { type: "future_event", opaque: { keep: true } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ]
+      .map((event) => `event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`)
+      .join("");
+    let sentBody = "";
+    const provider = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "test-only" },
+      fetch: (async (_url, init) => {
+        sentBody = String(init?.body);
+        return new Response(frames, { headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch,
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: { providerName: "anthro", providerModel, targetProviderProtocol: "anthropic_messages" },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["a", { ...modelEntry, modelKey: "a" }]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const out = await execute(
+      plan(["a"]),
+      anthropicReq({
+        stream: true,
+        native_request: {
+          protocol: "anthropic_messages",
+          body,
+          raw_body: rawBody,
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+    const chunks: string[] = [];
+    for await (const chunk of out.stream ?? []) chunks.push(chunk);
+    expect(out.nativePassthrough).toBe(true);
+    expect(out.attempts[0]?.passthrough_used).toBe(true);
+    expect(sentBody).toBe(rawBody);
+    expect(chunks.join("")).toBe(frames);
   });
 
   it("Gemini target + native_request sends GenerateContent body to the Gemini client, not OpenAI Chat", async () => {
@@ -5951,6 +6074,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       usage: { input_tokens: 1, output_tokens: 1 },
     };
     const provider = {
+      nativeProtocolProfile: "codex_responses",
       chatCompletion: vi.fn(),
       chatCompletionStream: vi.fn(),
       nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
@@ -9012,5 +9136,324 @@ describe("createExecute — concurrency lease loss", () => {
         reason: "concurrency_lease_lost",
       },
     });
+  });
+});
+
+it.each([
+  { protocol: "openai_chat" as const, forceSse: true, stream: true },
+  { protocol: "openai_responses" as const, forceSse: true, stream: true },
+  { protocol: "openai_chat" as const, forceSse: true },
+  { protocol: "openai_chat" as const, forceSse: false },
+  { protocol: "openai_responses" as const, forceSse: true },
+  { protocol: "openai_responses" as const, forceSse: false },
+])("does not replay accepted $protocol work on local memory exhaustion (SSE=$forceSse, stream=$stream)", async ({
+  protocol,
+  forceSse,
+  stream = false,
+}) => {
+  const admission = runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => 10_000_000 }),
+  );
+  const fetch = vi.fn(async () =>
+    forceSse
+      ? new Response(
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(4_000_000), output_index: 0, content_index: 0 })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      : new Response(
+          JSON.stringify({
+            output: [
+              { type: "message", content: [{ type: "output_text", text: "x".repeat(2_000_000) }] },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+  );
+  const head = createGenericOpenAIResponsesClient({
+    config: { baseUrl: "https://unused.test/v1", apiKey: "test" },
+    requestContract: { forceSse },
+    fetch,
+  });
+  const tail = {
+    chatCompletion: vi.fn().mockResolvedValue({ choices: [{ message: { content: "tail" } }] }),
+    chatCompletionStream: vi.fn(),
+    nativePassthrough: vi.fn().mockResolvedValue({ output: [] }),
+  } as unknown as ProviderClient;
+  const cb = breaker();
+  const recordFailure = vi.spyOn(cb, "recordFailure");
+  const execute = createExecute({
+    defaultProvider: head,
+    providers: new Map([
+      ["head", head],
+      ["tail", tail],
+    ]),
+    registry: protocolRegistry({
+      a: { providerName: "head", providerModel: "m", targetProviderProtocol: "openai_responses" },
+      b: { providerName: "tail", providerModel: "m", targetProviderProtocol: "openai_responses" },
+    }),
+    breaker: cb,
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const out = await execute(
+    plan(["a", "b"]),
+    req({
+      protocol,
+      stream,
+      ...(protocol === "openai_responses"
+        ? {
+            native_request: createNativePassthroughCarrier({
+              protocol,
+              body: { model: "m", input: "hello", stream },
+              headers: {},
+            }),
+          }
+        : {}),
+    }),
+  );
+  expect(out.final.status).toBe("error");
+  expect(out.attempts).toHaveLength(1);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(tail.chatCompletion).not.toHaveBeenCalled();
+  expect(tail.nativePassthrough).not.toHaveBeenCalled();
+  expect(recordFailure).not.toHaveBeenCalled();
+  expect(admission.reservedBytes).toBe(0);
+});
+
+it.each([
+  false,
+  true,
+])("records DeepSeek fallback shims after a Codex 429 (rejected=%s)", async (rejected) => {
+  const head: ProviderClient = {
+    nativeProtocolProfile: "codex_responses",
+    chatCompletion: vi.fn(),
+    chatCompletionStream: vi.fn(),
+    nativePassthrough: vi
+      .fn()
+      .mockRejectedValue(new UpstreamError("upstream_error", "rate limited", null, 429)),
+  };
+  let wire: Record<string, unknown> = {};
+  const tail = createGenericOpenAIResponsesClient({
+    config: { baseUrl: "https://deepseek.test/v1", apiKey: "test" },
+    requestContract: {
+      translateUnsupportedCustomTools: true,
+      disableThinkingOnOpaqueReasoningHistory: true,
+      acceptsResponsesNativeItems: true,
+    },
+    fetch: (async (_url, init) => {
+      wire = JSON.parse(String(init?.body));
+      if (rejected)
+        return Response.json(
+          {
+            error: {
+              message: "The reasoning_text in the thinking mode must be passed back to the API.",
+            },
+          },
+          { status: 400 },
+        );
+      return Response.json({ id: "r", object: "response", status: "completed", output: [] });
+    }) as typeof fetch,
+  });
+  const execute = createExecute({
+    defaultProvider: head,
+    providers: new Map([
+      ["head", head],
+      ["tail", tail],
+    ]),
+    registry: protocolRegistry({
+      a: {
+        providerName: "head",
+        providerModel: "gpt-5.6-terra",
+        targetProviderProtocol: "openai_responses",
+      },
+      b: {
+        providerName: "tail",
+        providerModel: "deepseek-flash",
+        targetProviderProtocol: "openai_responses",
+      },
+    }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const body = {
+    model: "gpt-5.6-terra",
+    store: false,
+    reasoning: { effort: "medium", summary: "detailed", context: "all_turns" },
+    input: [
+      {
+        type: "additional_tools",
+        tools: [{ type: "custom", name: "exec", description: "Execute" }],
+      },
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Check" }],
+        encrypted_content: "gAAAAAopaque",
+      },
+      { type: "custom_tool_call", name: "exec", call_id: "c1", input: "check" },
+      { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+    ],
+  };
+  const out = await execute(
+    plan(["a", "b"]),
+    req({
+      protocol: "openai_responses",
+      reasoning_effort: "medium",
+      native_request: createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        headers: {},
+        body,
+        rawBody: JSON.stringify(body),
+      }),
+    }),
+  );
+  expect(out.final.status).toBe(rejected ? "error" : "ok");
+  expect(wire.reasoning).toMatchObject({ effort: "none" });
+  expect(out.attempts[0]?.status).toBe("error");
+  expect(out.attempts[1]?.status).toBe(rejected ? "error" : "ok");
+  if (rejected) expect(out.attempts[1]?.error_detail?.upstream_status).toBe(400);
+  expect(out.attempts[0]?.passthrough_mutations?.body_shims_applied ?? []).not.toContain(
+    "generic_responses_opaque_reasoning_thinking_disabled",
+  );
+  expect(out.attempts[1]?.passthrough_mutations?.body_shims_applied).toContain(
+    "generic_responses_opaque_reasoning_thinking_disabled",
+  );
+});
+
+describe("generic Responses transport", () => {
+  it("does not execute another provider after ambiguous socket acceptance", async () => {
+    const cause = Object.assign(new Error("socket closed after possible POST"), {
+      code: "UND_ERR_SOCKET",
+    });
+    const failedFetch = vi.fn(async () => {
+      throw new TypeError("fetch failed", { cause });
+    });
+    const first = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://first.example.test", apiKey: "test-only", connectRetries: 0 },
+      fetch: failedFetch as typeof fetch,
+    });
+    const next = {
+      nativeProtocolProfile: "generic_openai_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue({
+        id: "resp_second",
+        object: "response",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: first,
+      providers: new Map([
+        ["first", first],
+        ["next", next],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "first",
+          providerModel: "test-model",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "next",
+          providerModel: "test-model",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "test-model", input: "hello" },
+          headers: {},
+        }),
+      }),
+    );
+    expect(failedFetch).toHaveBeenCalledTimes(1);
+    expect(next.nativePassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe("standard Responses tools", () => {
+  it("retains native standard custom tools on public OpenAI Responses", async () => {
+    // Regression: GPT quota exhausted -> Grok fallback. A plain custom_tool_call folds
+    // losslessly, so instead of a 422 verbatim passthrough (or a hard skip), the xAI
+    // member's chatCompletion translation path runs and produces a clean Responses body.
+    const memberClient = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "grok-translated", usage: {} }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue({ id: "should-not-passthrough" }),
+      nativeProtocolProfile: "generic_openai_responses",
+    } as unknown as ProviderClient;
+    const provider = createOAuthPoolClient({
+      members: [
+        { account: "openai-a", priority: 10, schedulable: true, client: memberClient },
+        { account: "openai-b", priority: 20, schedulable: true, client: memberClient },
+      ],
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["openai", provider]]),
+      registry: {
+        resolve(alias: string) {
+          if (alias !== "openai/gpt-test") {
+            return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+          }
+          return {
+            ok: true as const,
+            value: {
+              alias,
+              providerName: "openai",
+              providerModel: "gpt-test",
+              baseUrl: "https://api.openai.com/v1",
+              apiKeyEnv: "XAI_API_KEY",
+              targetProviderProtocol: "openai_responses" as const,
+              providerRequiresCompatibilityRewrite: false,
+            },
+          };
+        },
+        list: () => ["openai/gpt-test"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const responsesInput = [
+      { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+    ];
+    const out = await execute(
+      plan(["openai/gpt-test"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { responses_input_items: responsesInput },
+        native_request: {
+          protocol: "openai_responses",
+          body: { model: "gpt-5.6-sol", input: responsesInput, stream: true },
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(memberClient.nativePassthrough).toHaveBeenCalled();
+    expect(memberClient.chatCompletion).not.toHaveBeenCalled();
   });
 });

@@ -54,7 +54,7 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="page">
   <header>
     <h1 class="page-title">{$t('Lanes')}</h1>
     <p class="section-desc">
@@ -75,7 +75,7 @@
       {$t('No lanes are configured yet.')}
     </div>
   {:else}
-    <div class="flex flex-col gap-4">
+    <div class="flex flex-col gap-2">
       {#each lanes as lane (lane.name)}
         <LaneEditor
           {lane}

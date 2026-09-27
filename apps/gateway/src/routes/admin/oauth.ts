@@ -9,6 +9,7 @@ import {
   windowsToUsageLimit,
 } from "@helm/core";
 import {
+  AnthropicResetRequestSchema,
   isCodexQuotaWindowPlaceholder,
   type OAuthQuotaWindow,
   type OAuthResetPeriod,
@@ -17,6 +18,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
 import { createOAuthAdminRefreshCoordinator } from "../../oauth/admin-refresh-coordinator.js";
+import { AnthropicResetError } from "../../oauth/anthropic-reset.js";
 import {
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
   canConsumeResetCredit,
@@ -977,13 +979,93 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
+  app.get("/admin/api/oauth/anthropic/reset-grants", async (c) => {
+    const status = seam()?.getAnthropicResetStatus;
+    if (!status) return c.json({ error: "Anthropic reset is not configured" }, 503);
+    const account = c.req.query("account") ?? DEFAULT_ACCOUNT;
+    try {
+      return c.json(await status({ account }));
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 502);
+    }
+  });
+
+  app.post("/admin/api/oauth/anthropic/reset-grants", async (c) => {
+    const s = seam();
+    const consume = s?.consumeAnthropicReset;
+    if (!consume) return c.json({ error: "usage reset is only supported for openai-codex" }, 400);
+    const parsed = AnthropicResetRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      return c.json({ error: "account, grantId, and expectedResetsLeft are required" }, 400);
+    try {
+      const result = await consume(parsed.data);
+      let quotaRefreshed = false;
+      if (result.result === "reset" && deps.oauthQuota && s?.fetchAnthropicQuota) {
+        quotaRefreshed = result.quotaRefreshed;
+        for (const account of result.affectedAccounts) {
+          try {
+            const windows = await s.fetchAnthropicQuota({ account, force: true });
+            if (!windows || windows.length === 0) {
+              quotaRefreshed = false;
+              continue;
+            }
+            const capturedAt = Date.now();
+            await recordObservedQuotaResetPeriods({
+              quotaStore: deps.oauthQuota,
+              periodStore: deps.oauthResetPeriod,
+              providerId: "anthropic",
+              account,
+              windows,
+              observedAtMs: capturedAt,
+            });
+            await deps.oauthQuota.upsert({
+              providerId: "anthropic",
+              account,
+              windows,
+              capturedAt,
+              source: "anthropic",
+            });
+            deps.applyQuotaSnapshot?.("anthropic", account, windows, capturedAt);
+            if (deps.applyUsageLimit) {
+              const current = await deps.oauthQuota.get("anthropic", account);
+              const active = (current?.usageLimitedUntilMs ?? 0) > capturedAt;
+              const until = active
+                ? windowsToActiveUsageRecovery(windows, capturedAt)
+                : windowsToUsageLimit(windows, capturedAt);
+              await deps.applyUsageLimit(
+                "anthropic",
+                account,
+                until,
+                active || until === null ? "replace" : "extend",
+              );
+            }
+          } catch {
+            // The upstream reset is already verified. Keep the success response but
+            // tell the operator that the local quota snapshot still needs refresh.
+            quotaRefreshed = false;
+          }
+        }
+      }
+      return c.json({ result: result.result, status: result.status, quotaRefreshed });
+    } catch (e) {
+      const status = e instanceof AnthropicResetError ? e.status : 502;
+      return c.json({ error: errMessage(e) }, status);
+    }
+  });
+
   // POST /oauth/:provider/manual/start { proxy? } -> { sessionId, authorizeUrl }
   // An optional egress proxy entered in the connect dialog's first step is pinned to
   // the login session so the token exchange never leaves from the real IP (issue #38).
   app.post("/admin/api/oauth/:provider/manual/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as { proxy?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      proxy?: unknown;
+    };
+    if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
+      return c.json({ error: "account must be a non-empty string" }, 400);
+    }
     let proxy: AccountProxyInput | null;
     try {
       proxy = parseProxyInput(body.proxy);
@@ -994,6 +1076,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json(
         await s.startManualPaste({
           providerId: c.req.param("provider"),
+          ...(typeof body.account === "string" && body.account.trim()
+            ? { account: body.account }
+            : {}),
           proxy: proxy ?? undefined,
         }),
       );
@@ -1041,9 +1126,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
       enterprise?: unknown;
       proxy?: unknown;
     };
+    if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
+      return c.json({ error: "account must be a non-empty string" }, 400);
+    }
     let proxy: AccountProxyInput | null;
     try {
       proxy = parseProxyInput(body.proxy);
@@ -1054,6 +1143,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json(
         await s.startDeviceCode({
           providerId: c.req.param("provider"),
+          ...(typeof body.account === "string" && body.account.trim()
+            ? { account: body.account }
+            : {}),
           enterprise: typeof body.enterprise === "string" ? body.enterprise : undefined,
           proxy: proxy ?? undefined,
         }),

@@ -3,15 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ConnectProviderDialog from './ConnectProviderDialog.svelte';
 
 const oauth = vi.hoisted(() => ({
+  completeManualPaste: vi.fn(),
   pollDeviceCode: vi.fn(),
   startDeviceCode: vi.fn(),
+  startManualPaste: vi.fn(),
 }));
 
 vi.mock('$lib/api/oauth.js', () => ({
-  completeManualPaste: vi.fn(),
+  completeManualPaste: (...args: unknown[]) => oauth.completeManualPaste(...args),
   pollDeviceCode: (...args: unknown[]) => oauth.pollDeviceCode(...args),
   startDeviceCode: (...args: unknown[]) => oauth.startDeviceCode(...args),
-  startManualPaste: vi.fn(),
+  startManualPaste: (...args: unknown[]) => oauth.startManualPaste(...args),
 }));
 
 const XAI = {
@@ -27,7 +29,106 @@ describe('ConnectProviderDialog device-code polling', () => {
     vi.setSystemTime(10_000);
     oauth.pollDeviceCode.mockReset();
     oauth.startDeviceCode.mockReset();
+    oauth.startManualPaste.mockReset();
+    oauth.completeManualPaste.mockReset();
     vi.spyOn(window, 'open').mockReturnValue(null);
+  });
+
+  it('starts the selected account flow immediately for reconnect', async () => {
+    oauth.startManualPaste.mockResolvedValue({
+      sessionId: 'reconnect-session',
+      authorizeUrl: 'https://auth.example/reconnect',
+    });
+    const onclose = vi.fn();
+    render(ConnectProviderDialog, {
+      providers: [{ id: 'anthropic', name: 'Claude Max', flow: 'manual_paste', accounts: [] }],
+      reconnect: { providerId: 'anthropic', account: ' work ' },
+      onconnected: vi.fn(),
+      onclose,
+    });
+
+    await vi.waitFor(() =>
+      expect(oauth.startManualPaste).toHaveBeenCalledWith('anthropic', undefined, ' work '),
+    );
+    await vi.waitFor(() =>
+      expect(window.open).toHaveBeenCalledWith(
+        'https://auth.example/reconnect',
+        '_blank',
+        'noopener',
+      ),
+    );
+    expect(
+      screen.getByText('A sign-in page opened in a new tab — approve access there.'),
+    ).toBeInTheDocument();
+    expect(onclose).not.toHaveBeenCalled();
+    await fireEvent.input(screen.getByRole('textbox'), { target: { value: 'CODE' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Finish' }));
+    expect(oauth.completeManualPaste).toHaveBeenCalledWith('anthropic', {
+      sessionId: 'reconnect-session',
+      redirectInput: 'CODE',
+      account: ' work ',
+    });
+  });
+
+  it('keeps reconnect identity fixed after a failed start', async () => {
+    oauth.startManualPaste.mockRejectedValue(new Error('offline'));
+    render(ConnectProviderDialog, {
+      providers: [{ id: 'anthropic', name: 'Claude Max', flow: 'manual_paste', accounts: [] }],
+      reconnect: { providerId: 'anthropic', account: 'work' },
+      onconnected: vi.fn(),
+      onclose: vi.fn(),
+    });
+    await vi.waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('offline'));
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Start sign-in' }));
+    expect(oauth.startManualPaste).toHaveBeenLastCalledWith('anthropic', undefined, 'work');
+  });
+
+  it('does not open a late sign-in response after cancellation', async () => {
+    let resolveStart!: (value: { sessionId: string; authorizeUrl: string }) => void;
+    oauth.startManualPaste.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+    render(ConnectProviderDialog, {
+      providers: [{ id: 'anthropic', name: 'Claude Max', flow: 'manual_paste', accounts: [] }],
+      reconnect: { providerId: 'anthropic', account: 'work' },
+      onconnected: vi.fn(),
+      onclose: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    resolveStart({ sessionId: 'late', authorizeUrl: 'https://auth.example/late' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(window.open).not.toHaveBeenCalledWith('https://auth.example/late', '_blank', 'noopener');
+  });
+
+  it('completes device reconnect on the original account after approval', async () => {
+    oauth.startDeviceCode.mockResolvedValue({
+      sessionId: 'device-reconnect',
+      userCode: 'ABCD',
+      verificationUri: 'https://auth.example/device',
+      intervalMs: 1000,
+      expiresAt: 70000,
+      serverNowMs: 10000,
+    });
+    oauth.pollDeviceCode.mockResolvedValue({ status: 'done' });
+    const onconnected = vi.fn();
+    render(ConnectProviderDialog, {
+      providers: [XAI],
+      reconnect: { providerId: 'xai', account: 'work' },
+      onconnected,
+      onclose: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(oauth.startDeviceCode).toHaveBeenCalledWith('xai', undefined, undefined, 'work');
+    expect(oauth.pollDeviceCode).toHaveBeenCalledWith('xai', {
+      sessionId: 'device-reconnect',
+      account: 'work',
+    });
+    expect(onconnected).toHaveBeenCalledOnce();
   });
 
   afterEach(() => {

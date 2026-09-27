@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRuntimeMemoryCoordinator } from "../../runtime/memory-budget.js";
 import { runtimeResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import { preOutputClassifierFor } from "../failover-guard.js";
@@ -1315,7 +1315,10 @@ describe("createOAuthPoolClient — nativePassthrough", () => {
     expect(r2).toEqual({ served_by: "b", body: NATIVE });
   });
 
-  it("keeps the same native session on the same OAuth account while the sticky TTL is live", async () => {
+  it.each([
+    "session_id",
+    "x-session-key",
+  ])("keeps native %s on the same OAuth account", async (header) => {
     const pt: string[] = [];
     const selected: string[] = [];
     let clock = 1_000;
@@ -1328,13 +1331,13 @@ describe("createOAuthPoolClient — nativePassthrough", () => {
     const firstSession = {
       protocol: "openai_responses" as const,
       body: { model: "gpt-5-codex", input: "hi" },
-      headers: { session_id: "sess-1" },
+      headers: { [header]: "sess-1" },
       mutations: {},
     };
     const secondSession = {
       protocol: "openai_responses" as const,
       body: { model: "gpt-5-codex", input: "hi" },
-      headers: { session_id: "sess-2" },
+      headers: { [header]: "sess-2" },
       mutations: {},
     };
 
@@ -3501,5 +3504,47 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
         }
       })(),
     ).rejects.toThrow(/overloaded/);
+  });
+});
+
+describe("Responses lifecycle owner affinity", () => {
+  it.each([
+    "responsesRetrieve",
+    "responsesInputItems",
+  ] as const)("%s uses the recorded account without sibling fallback", async (method) => {
+    const callA = vi.fn().mockResolvedValue({});
+    const callB = vi
+      .fn()
+      .mockRejectedValue(new UpstreamError("upstream_error", "owner unavailable", null, 503));
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          account: "a",
+          priority: 1,
+          schedulable: true,
+          client: {
+            chatCompletion: vi.fn(),
+            chatCompletionStream: vi.fn(),
+            [method]: callA,
+          } as unknown as ProviderClient,
+        },
+        {
+          account: "b",
+          priority: 2,
+          schedulable: true,
+          client: {
+            chatCompletion: vi.fn(),
+            chatCompletionStream: vi.fn(),
+            [method]: callB,
+          } as unknown as ProviderClient,
+        },
+      ],
+    });
+    expect(pool[method]).toBeTypeOf("function");
+    const query = new URLSearchParams("include=a&include=b");
+    await expect(pool[method]?.("resp_1", { providerAccount: "b", query })).rejects.toThrow();
+    expect(callA).not.toHaveBeenCalled();
+    expect(callB).toHaveBeenCalledTimes(1);
+    expect(callB.mock.calls[0]?.[1]?.query).toBe(query);
   });
 });

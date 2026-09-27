@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { createTrackedBackgroundTasks } from "../../runtime/maintenance-gate.js";
+import {
+  type BodyMemoryAdmission,
+  createBodyMemoryAdmission,
+} from "../../runtime/memory-admission.js";
 import type { McpDeps } from "./deps.js";
 import { registerMcpServer } from "./index.js";
 import {
@@ -355,6 +359,7 @@ function mcpApp(
     void task();
     return true;
   },
+  memoryAdmission?: BodyMemoryAdmission,
 ) {
   const db = createSqliteDb(":memory:");
   let seq = 0;
@@ -369,6 +374,7 @@ function mcpApp(
     authMiddleware({ keyStore: { getByHash: vi.fn().mockResolvedValue(rec) }, log: () => {} }),
   );
   registerMcpServer(app, {
+    memoryAdmission,
     memoryStore: store,
     now: () => NOW,
     estimateTokens: (t) => Math.ceil(t.length / 4),
@@ -497,4 +503,26 @@ describe("POST /mcp JSON-RPC route (docs/13)", () => {
     const body = (await res.json()) as { error?: { code: number } };
     expect(body.error?.code).toBe(-32601);
   });
+});
+
+it("accounts for MCP bodies without adding a wire-size limit", async () => {
+  let capacity = 0;
+  const memoryAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: 1024,
+    capacityBytes: () => capacity,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
+  const app = mcpApp(record(), undefined, memoryAdmission);
+  const request = rpc("ping", { padding: "x".repeat(256 * 1024) });
+  const denied = await app.request("/mcp", request);
+  expect(denied.status).toBe(503);
+  expect(denied.headers.get("retry-after")).toBe("1");
+  expect(await denied.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000 } });
+  expect(memoryAdmission.reservedBytes).toBe(0);
+  capacity = 1024 * 1024;
+  const accepted = await app.request("/mcp", request);
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toMatchObject({ id: 1, result: {} });
+  expect(memoryAdmission.reservedBytes).toBe(0);
 });

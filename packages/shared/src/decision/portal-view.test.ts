@@ -75,6 +75,8 @@ function poisonedRecord(): DecisionRecord {
     },
     stream_outcome: "completed",
     generation_ms: 800,
+    requested_reasoning_effort: "high",
+    reasoning_effort: "medium",
   };
 }
 
@@ -116,6 +118,69 @@ describe("toPortalDecisionView", () => {
       cached_tokens: 0,
       cache_creation_tokens: 0,
     });
+  });
+
+  it("exposes reasoning effort, generation timing, and derived throughput", () => {
+    const view = toPortalDecisionView(poisonedRecord());
+    expect(view.requested_reasoning_effort).toBe("high");
+    expect(view.reasoning_effort).toBe("medium");
+    expect(view.generation_ms).toBe(800);
+    // tps = completion_tokens / (generation_ms / 1000) = 50 / 0.8 = 62.5
+    expect(view.tps).toBeCloseTo(62.5);
+    // ttfb: a generation window was measured (streamed) -> latency_total_ms is the wait to first token
+    expect(view.ttfb_ms).toBe(1200);
+  });
+
+  it("surfaces fallback attempt outcomes/timing only — never alias, provider, or wire model", () => {
+    const rec = poisonedRecord();
+    rec.provider_attempts = [
+      {
+        alias: "SECRET_ALIAS_A",
+        skipped: true,
+        skip_reason: "capability_filtered",
+        status: "error",
+        error_class: null,
+        latency_ms: 0,
+        cost_usd: null,
+        error_detail: null,
+        provider_name: "SECRET_PROVIDER",
+        provider_model: "SECRET_WIRE_MODEL",
+      },
+      {
+        alias: "SECRET_ALIAS_B",
+        skipped: false,
+        skip_reason: null,
+        status: "error",
+        error_class: "timeout",
+        latency_ms: 900,
+        cost_usd: null,
+        error_detail: null,
+        provider_name: "SECRET_PROVIDER",
+        provider_model: "SECRET_WIRE_MODEL",
+      },
+      {
+        alias: "SECRET_ALIAS_A",
+        skipped: false,
+        skip_reason: null,
+        status: "ok",
+        error_class: null,
+        latency_ms: 1200,
+        cost_usd: 0.01,
+        error_detail: null,
+        provider_name: "SECRET_PROVIDER",
+        provider_model: "SECRET_WIRE_MODEL",
+      },
+    ];
+    const view = toPortalDecisionView(rec);
+    expect(view.attempts).toEqual([
+      { outcome: "skipped", latency_ms: 0 },
+      { outcome: "timeout", latency_ms: 900 },
+      { outcome: "success", latency_ms: 1200 },
+    ]);
+    const serialized = JSON.stringify(view);
+    for (const poison of POISON) {
+      expect(serialized).not.toContain(poison);
+    }
   });
 
   it("surfaces a redacted error message but not the internal error_reason topology", () => {

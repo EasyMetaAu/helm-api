@@ -78,7 +78,8 @@ export async function consumeResponseTextWithinBudget<T>(
     };
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
-    const chunks: Uint8Array[] = [];
+    const decoder = new TextDecoder();
+    let text = "";
     let totalBytes = 0;
     try {
       signal?.throwIfAborted();
@@ -96,20 +97,14 @@ export async function consumeResponseTextWithinBudget<T>(
           await reader.cancel().catch(() => {});
           throw new ResponseWorkCapacityError(admission.capacityBytes);
         }
-        chunks.push(value);
+        text += decoder.decode(value, { stream: true });
       }
     } finally {
       signal?.removeEventListener("abort", cancel);
       reader.releaseLock();
     }
 
-    const bytes = new Uint8Array(totalBytes);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return await consume(new TextDecoder().decode(bytes));
+    return await consume(text + decoder.decode());
   } finally {
     lease.release();
   }

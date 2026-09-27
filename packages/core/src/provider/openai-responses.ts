@@ -35,6 +35,7 @@ import {
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
 import {
+  createRetainedResponseWork,
   type ResponseWorkAdmission,
   ResponseWorkCapacityError,
   runtimeResponseWorkAdmission,
@@ -210,11 +211,12 @@ export interface GenericOpenAIResponsesRequestContract {
   // never invent plaintext, never touch a body that already has readable
   // reasoning or has no tool history.
   disableThinkingOnOpaqueReasoningHistory?: boolean;
-  // The upstream PARSES the Codex-private input items (custom_tool_call, echoed
-  // reasoning) instead of rejecting them, so the executor must keep byte passthrough
-  // rather than downgrading to translation. Surfaced on the client as
-  // `supportsResponsesNativeItems`. Off by default (xAI/Grok still downgrades).
+  // Native Responses items (including standard custom tools and opaque reasoning)
+  // are preserved unless a known incompatible provider explicitly opts out.
+  // Surfaced on the client as `supportsResponsesNativeItems`.
   acceptsResponsesNativeItems?: boolean;
+  /** Only trusted Helm relays carry Codex installation/turn metadata onward. */
+  forwardCodexMetadata?: boolean;
   // Account-scoped model metadata discovered from the upstream catalog. The
   // resolver receives the final wire model; no provider-wide defaults are guessed.
   resolveModelRequestDefaults?: (
@@ -345,10 +347,51 @@ function responseBodyTooLargeUpstreamError(error: ResponseBodyTooLargeError): Up
   });
 }
 
+function httpResponseOutcomeUnknown(
+  cause: unknown,
+  lifecyclePhase = "after_send_before_response",
+): UpstreamError {
+  const message =
+    lifecyclePhase === "after_send_before_response"
+      ? "upstream HTTP connection failed after Responses POST; outcome unknown"
+      : "upstream HTTP response ended before a terminal Responses event; outcome unknown";
+  return new UpstreamError(
+    "upstream_error",
+    message,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
+        message,
+      },
+      http: { lifecycle_phase: lifecyclePhase },
+      ...(cause instanceof UpstreamError ? { transport: cause.providerRaw } : {}),
+    },
+    400,
+    null,
+    cause,
+  );
+}
+
 function responseWorkCapacityUpstreamError(error: ResponseWorkCapacityError): UpstreamError {
   return new UpstreamError("upstream_error", error.message, {
     error: { code: "response_work_capacity_exhausted", limit_bytes: error.capacityBytes },
   });
+}
+
+function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
+  if (error instanceof ResponseWorkCapacityError) error = responseWorkCapacityUpstreamError(error);
+  const raw =
+    error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
+  if (
+    signal?.aborted ||
+    raw?.type === "error" ||
+    raw?.type === "response.failed" ||
+    raw?.type === "response.incomplete"
+  ) {
+    throw error;
+  }
+  throw httpResponseOutcomeUnknown(error, "after_response_before_terminal");
 }
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
@@ -546,8 +589,28 @@ export function hoistResponsesInstructions(
     for (const item of input) {
       const role =
         item !== null && typeof item === "object" ? (item as { role?: unknown }).role : undefined;
-      if (role === "system" || role === "developer") {
-        const text = plainText((item as { content?: unknown }).content);
+      // Only a leading, wholly textual instruction item may move. Later or
+      // opaque/multimodal items retain both position and content.
+      const content = isRecord(item) ? item.content : undefined;
+      const textOnly =
+        typeof content === "string" ||
+        (Array.isArray(content) &&
+          content.every(
+            (part) =>
+              isRecord(part) &&
+              ["input_text", "text", "output_text"].includes(String(part.type)) &&
+              typeof part.text === "string" &&
+              Object.keys(part).every((key) => key === "type" || key === "text"),
+          ));
+      if (
+        remaining.length === 0 &&
+        (role === "system" || role === "developer") &&
+        isRecord(item) &&
+        (item.type === undefined || item.type === "message") &&
+        Object.keys(item).every((key) => ["type", "role", "content"].includes(key)) &&
+        textOnly
+      ) {
+        const text = plainText(content);
         if (text.length > 0) {
           // Hoist this item's text into instructions and drop it from input.
           systemParts.push(text);
@@ -1062,8 +1125,9 @@ function hasUsefulReasoningPayload(item: Record<string, unknown>): boolean {
 function isForeignEncryptedContent(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    value.length > 0 &&
-    !value.startsWith(OPENAI_ENCRYPTED_CONTENT_PREFIX)
+    // Known DeepSeek UUID encodings cannot be decrypted by OpenAI. Unknown
+    // encodings are opaque: a future OpenAI format must not lose its history.
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-\d+)?$/i.test(value)
   );
 }
 
@@ -1926,14 +1990,25 @@ function nativeInputUsesResponsesLite(
   return bodyUsesResponsesLite(input);
 }
 
-function stripResponsesLiteImageDetails(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripResponsesLiteImageDetails);
-  if (!isRecord(value)) return value;
-  const next = Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, stripResponsesLiteImageDetails(child)]),
-  );
-  if (next.type === "input_image") delete next.detail;
-  return next;
+function stripResponsesLiteImageDetails(input: unknown[]): unknown[] {
+  return input.map((item) => {
+    if (
+      !isRecord(item) ||
+      (item.type !== undefined && item.type !== "message") ||
+      !["user", "assistant", "system", "developer"].includes(String(item.role)) ||
+      !Array.isArray(item.content)
+    )
+      return item;
+    return {
+      ...item,
+      content: item.content.map((part: unknown) => {
+        if (!isRecord(part) || part.type !== "input_image" || part.detail === undefined)
+          return part;
+        const { detail: _detail, ...image } = part;
+        return image;
+      }),
+    };
+  });
 }
 
 function canonicalizeCodexNativeInput(
@@ -2355,46 +2430,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     turnKey?: string;
   }
 
-  function httpResponseOutcomeUnknown(
-    cause: unknown,
-    lifecyclePhase = "after_send_before_response",
-  ): UpstreamError {
-    const message =
-      lifecyclePhase === "after_send_before_response"
-        ? "upstream HTTP connection failed after Responses POST; outcome unknown"
-        : "upstream HTTP response ended before a terminal Responses event; outcome unknown";
-    return new UpstreamError(
-      "upstream_error",
-      message,
-      {
-        error: {
-          type: "invalid_request_error",
-          code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
-          message,
-        },
-        http: { lifecycle_phase: lifecyclePhase },
-        ...(cause instanceof UpstreamError ? { transport: cause.providerRaw } : {}),
-      },
-      400,
-      null,
-      cause,
-    );
-  }
-
-  function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
-    const raw =
-      error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
-    if (
-      signal?.aborted ||
-      raw?.type === "error" ||
-      raw?.type === "response.failed" ||
-      raw?.type === "response.incomplete"
-    ) {
-      throw error;
-    }
-    throw httpResponseOutcomeUnknown(error, "after_response_before_terminal");
-  }
-
   async function prepareRequest(
     input: NativePassthroughInput,
     modelInfo: CodexModelInfo | undefined,
@@ -2416,6 +2451,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const turnState = explicitTurnState ?? (turnKey ? turnStates.get(turnKey) : undefined);
     if (turnState) providerHeaders[CODEX_TURN_STATE_HEADER] = turnState;
     const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
+      forwardCodexMetadata: true,
       mergeHeaders: ["x-codex-beta-features"],
       preserveClientHeaders: [
         "accept",
@@ -2503,6 +2539,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       // An external abort is client-owned even when fetch happens to surface a
       // transport-shaped TypeError.
       if (init.signal?.aborted) throw error;
+      if (isPreConnectError(error)) throw upstreamTransportError(error, scrub);
       if (
         init.outcomeUnknownOnTransport === true &&
         error instanceof UpstreamError &&
@@ -2612,7 +2649,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       overloadRetry: init.overloadRetry ?? { attempt: 0 },
       capture: init.capture,
       timeoutThroughBody: init.timeoutThroughBody,
-      outcomeUnknownOnTransport: (init.endpoint ?? url) === url,
+      outcomeUnknownOnTransport: true,
     };
     const first = await request(body, modelInfo, requestInit);
     if (first.response.status === 401 && cfg.onUnauthorized !== undefined) {
@@ -3766,7 +3803,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         timeoutThroughBody: true,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
-      return await readUnaryJson(result);
+      try {
+        return await readUnaryJson(result);
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
   };
 }
@@ -3870,7 +3911,6 @@ export function createGenericOpenAIResponsesClient(
 
   async function applyResponsesRequestContract(
     body: NativePassthroughInput,
-    signal?: AbortSignal,
   ): Promise<NativePassthroughInput> {
     const contract = requestContract;
     if (
@@ -4011,12 +4051,6 @@ export function createGenericOpenAIResponsesClient(
         opaqueReasoningThinkingDisabled = true;
       }
     }
-    let optimizedImages = 0;
-    if (contract.translateUnsupportedCustomTools === true) {
-      const optimized = await optimizeCodexInlineImages(next.input, { signal });
-      next.input = optimized.value;
-      optimizedImages = optimized.optimizedImages;
-    }
     const instructionShims: string[] = [];
     if (
       contract.ensureInstructions === true &&
@@ -4027,6 +4061,9 @@ export function createGenericOpenAIResponsesClient(
     }
     if (!isNativePassthroughCarrier(body)) return next;
     const carrier = cloneCarrierWithBody(body, next);
+    // The executor holds this attempt's ledger; keep provider shims and header
+    // changes observable even when the upstream rejects the rewritten body.
+    carrier.mutations = body.mutations;
     appendMutationList(carrier.mutations, "body_shims_applied", [
       ...(contract.forceSse === true ? ["generic_responses_force_stream"] : []),
       ...(contract.forceStoreFalse === true ? ["generic_responses_force_store_false"] : []),
@@ -4035,7 +4072,6 @@ export function createGenericOpenAIResponsesClient(
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
-      ...(optimizedImages > 0 ? ["generic_responses_inline_images_optimized"] : []),
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
       ...(functionCallOutputCallIdFilled
         ? ["generic_responses_function_call_output_call_id_filled"]
@@ -4112,8 +4148,16 @@ export function createGenericOpenAIResponsesClient(
         { signal: external, budget },
       );
     } catch (error) {
-      if (external?.aborted || !isFetchTransportError(error)) throw error;
-      throw upstreamTransportError(error, scrub);
+      if (external?.aborted) throw error;
+      const createsResponse =
+        init.method === "POST" && /\/responses(?:\/compact)?$/.test(new URL(url).pathname);
+      if (createsResponse && error instanceof UpstreamError && error.errorClass === "timeout") {
+        throw httpResponseOutcomeUnknown(error);
+      }
+      if (!isFetchTransportError(error)) throw error;
+      const transport = upstreamTransportError(error, scrub);
+      if (createsResponse && !isPreConnectError(error)) throw httpResponseOutcomeUnknown(transport);
+      throw transport;
     }
   }
 
@@ -4128,21 +4172,31 @@ export function createGenericOpenAIResponsesClient(
     );
   }
 
-  async function readUnaryJson(res: Response): Promise<Record<string, unknown>> {
+  async function readUnaryJson(
+    res: Response,
+    accepted = false,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const timeout = withTimeout(timeoutMs, signal);
     try {
       return await consumeResponseTextWithinBudget(
         res,
         0,
         (text) => JSON.parse(text) as Record<string, unknown>,
+        runtimeResponseWorkAdmission(),
+        timeout.signal,
       );
     } catch (error) {
-      if (error instanceof ResponseBodyTooLargeError) {
-        throw responseBodyTooLargeUpstreamError(error);
-      }
-      if (error instanceof ResponseWorkCapacityError) {
-        throw responseWorkCapacityUpstreamError(error);
-      }
-      throw error;
+      const cause =
+        timeout.isTimeout() && !timeout.isExternalAbort()
+          ? new UpstreamError("timeout", "upstream response body timed out")
+          : error instanceof ResponseBodyTooLargeError
+            ? responseBodyTooLargeUpstreamError(error)
+            : error;
+      if (accepted) throwAcceptedResponseError(cause, signal);
+      throw cause;
+    } finally {
+      timeout.cleanup();
     }
   }
 
@@ -4173,6 +4227,7 @@ export function createGenericOpenAIResponsesClient(
     const prepared = prepareNativePassthroughRequest(
       body,
       await providerHeaders("text/event-stream", source),
+      { forwardCodexMetadata: requestContract?.forwardCodexMetadata },
     );
     const url = new URL(await endpoint("responses"));
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -4280,7 +4335,7 @@ export function createGenericOpenAIResponsesClient(
     init.overloadRetry ??= { attempt: 0 };
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
-        ? await applyResponsesRequestContract(init.body, init.signal)
+        ? await applyResponsesRequestContract(init.body)
         : init.body;
     const finalBody =
       requestBody === undefined
@@ -4293,6 +4348,7 @@ export function createGenericOpenAIResponsesClient(
     let requestHeaders = headers;
     if (requestBody !== undefined) {
       const prepared = prepareNativePassthroughRequest(requestBody, headers, {
+        forwardCodexMetadata: requestContract?.forwardCodexMetadata,
         // A stream-only profile must override a native carrier's stale JSON Accept.
         ...(requestContract?.forceSse === true && init.applyRequestContract === true
           ? {
@@ -4331,6 +4387,7 @@ export function createGenericOpenAIResponsesClient(
       let retryBodyText = bodyText;
       if (requestBody !== undefined) {
         const prepared = prepareNativePassthroughRequest(requestBody, refreshedHeaders, {
+          forwardCodexMetadata: requestContract?.forwardCodexMetadata,
           ...(requestContract?.forceSse === true && init.applyRequestContract === true
             ? {
                 preserveClientHeaders: [
@@ -4365,9 +4422,7 @@ export function createGenericOpenAIResponsesClient(
 
   return {
     nativeProtocolProfile: "generic_openai_responses",
-    ...(requestContract?.acceptsResponsesNativeItems === true
-      ? { supportsResponsesNativeItems: true }
-      : {}),
+    supportsResponsesNativeItems: requestContract?.acceptsResponsesNativeItems !== false,
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
@@ -4382,9 +4437,16 @@ export function createGenericOpenAIResponsesClient(
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
-        return await aggregateResponsesStream(res, model, timeoutMs, { allowIncomplete: true });
+        try {
+          return await aggregateResponsesStream(res, model, timeoutMs, {
+            allowIncomplete: true,
+            signal: opts?.signal,
+          });
+        } catch (error) {
+          throwAcceptedResponseError(error, opts?.signal);
+        }
       }
-      return responsesJsonToChatResponse(await readUnaryJson(res), model);
+      return responsesJsonToChatResponse(await readUnaryJson(res, true, opts?.signal), model);
     },
 
     async *chatCompletionStream(req, opts) {
@@ -4399,9 +4461,14 @@ export function createGenericOpenAIResponsesClient(
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs, {
-        strictTerminal: requestContract?.forceSse === true,
-      });
+      try {
+        yield* translateResponsesSSE(res, model, timeoutMs, {
+          strictTerminal: requestContract?.forceSse === true,
+          signal: opts?.signal,
+        });
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
 
     async nativePassthrough(body, opts) {
@@ -4417,12 +4484,19 @@ export function createGenericOpenAIResponsesClient(
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
-        return untranslateCustomToolResponse(
-          await aggregateNativeResponsesStream(res, timeoutMs),
-          translated,
-        );
+        try {
+          return untranslateCustomToolResponse(
+            await aggregateNativeResponsesStream(res, timeoutMs),
+            translated,
+          );
+        } catch (error) {
+          throwAcceptedResponseError(error, opts?.signal);
+        }
       }
-      return untranslateCustomToolResponse(await readUnaryJson(res), translated);
+      return untranslateCustomToolResponse(
+        await readUnaryJson(res, true, opts?.signal),
+        translated,
+      );
     },
 
     closeResponsesWebSocketSession: closeWebSocketSession,
@@ -4468,21 +4542,29 @@ export function createGenericOpenAIResponsesClient(
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      const frames = readResponsesSSERaw(res, timeoutMs);
-      if (translated.size === 0) {
-        yield* frames;
-        return;
+      try {
+        const frames = readResponsesSSERaw(res, timeoutMs);
+        if (translated.size === 0) {
+          yield* frames;
+          return;
+        }
+        yield* untranslateCustomToolSSE(frames, translated);
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
       }
-      yield* untranslateCustomToolSSE(frames, translated);
     },
 
     async responsesRetrieve(responseId, opts) {
-      const res = await requestJson(`responses/${encodeURIComponent(responseId)}`, {
-        method: "GET",
-        signal: opts?.signal,
-      });
+      const query = opts?.query?.toString();
+      const res = await requestJson(
+        `responses/${encodeURIComponent(responseId)}${query ? `?${query}` : ""}`,
+        {
+          method: "GET",
+          signal: opts?.signal,
+        },
+      );
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesDelete(responseId, opts) {
@@ -4491,7 +4573,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesCancel(responseId, opts) {
@@ -4500,16 +4582,20 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesInputItems(responseId, opts) {
-      const res = await requestJson(`responses/${encodeURIComponent(responseId)}/input_items`, {
-        method: "GET",
-        signal: opts?.signal,
-      });
+      const query = opts?.query?.toString();
+      const res = await requestJson(
+        `responses/${encodeURIComponent(responseId)}/input_items${query ? `?${query}` : ""}`,
+        {
+          method: "GET",
+          signal: opts?.signal,
+        },
+      );
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesCompact(req, opts) {
@@ -4519,7 +4605,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, true, opts?.signal);
     },
 
     async responsesInputTokens(req, opts) {
@@ -4529,7 +4615,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
   };
 }
@@ -4879,75 +4965,61 @@ export async function* translateResponsesSSE(
     signal?: AbortSignal;
   } = {},
 ): AsyncGenerator<string> {
-  const strictTerminal = options.strictTerminal ?? true;
-  let started = false;
-  let hadToolCall = false;
-  let status: unknown = "completed";
-  let currentToolId = "";
-  const tools = new Map<string, ResponsesToolCallState>();
-  const pendingToolArguments = new Map<string, string>();
+  const work = createRetainedResponseWork(options.workAdmission);
+  try {
+    const strictTerminal = options.strictTerminal ?? true;
+    let started = false;
+    let hadToolCall = false;
+    let status: unknown = "completed";
+    let currentToolId = "";
+    const tools = new Map<string, ResponsesToolCallState>();
+    const pendingToolArguments = new Map<string, string>();
 
-  const ensureTool = (item: Record<string, unknown>, fallbackId = ""): ResponsesToolCallState => {
-    const id = responseToolCallId(item, fallbackId || `call_${tools.size}`);
-    const existing = tools.get(id);
-    if (existing) {
-      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
-      return existing;
-    }
-    const state: ResponsesToolCallState = {
-      index: tools.size,
-      id,
-      name: typeof item.name === "string" ? item.name : "",
-      arguments: pendingToolArguments.get(id) ?? "",
-      started: false,
-      streamedArguments: false,
-    };
-    tools.set(id, state);
-    return state;
-  };
-
-  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
-    const type = evt.type;
-    if (type === "error" || type === "response.failed") {
-      throw responseEventError(evt);
-    }
-    if (!started) {
-      started = true;
-      yield openaiChunk(model, { role: "assistant", content: "" }, null);
-    }
-    if (type === "response.output_item.added") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        hadToolCall = true;
-        const tool = ensureTool(item);
-        currentToolId = tool.id;
-        tool.started = true;
-        yield openaiChunk(
-          model,
-          {
-            tool_calls: [
-              {
-                index: tool.index,
-                id: tool.id,
-                type: "function",
-                function: { name: tool.name, arguments: "" },
-              },
-            ],
-          },
-          null,
-        );
+    const ensureTool = (item: Record<string, unknown>, fallbackId = ""): ResponsesToolCallState => {
+      const id = responseToolCallId(item, fallbackId || `call_${tools.size}`);
+      const existing = tools.get(id);
+      if (existing) {
+        if (typeof item.name === "string" && item.name.length > 0) {
+          work.retain(2 * (item.name.length - existing.name.length));
+          existing.name = item.name;
+        }
+        return existing;
       }
-    } else if (type === "response.output_item.done") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        hadToolCall = true;
-        const tool = ensureTool(item, currentToolId);
-        currentToolId = tool.id;
-        const completeArguments =
-          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
-        if (!tool.started) {
+      work.retain(128 + 2 * (id.length + (typeof item.name === "string" ? item.name.length : 0)));
+      const state: ResponsesToolCallState = {
+        index: tools.size,
+        id,
+        name: typeof item.name === "string" ? item.name : "",
+        arguments: pendingToolArguments.get(id) ?? "",
+        started: false,
+        streamedArguments: false,
+      };
+      if (pendingToolArguments.delete(id)) work.retain(-128 - 2 * id.length);
+      tools.set(id, state);
+      return state;
+    };
+
+    for await (const evt of readResponsesEvents(
+      res,
+      idleMs,
+      options.workAdmission,
+      options.signal,
+    )) {
+      const type = evt.type;
+      if (type === "error" || type === "response.failed") {
+        throw responseEventError(evt);
+      }
+      if (!started) {
+        started = true;
+        yield openaiChunk(model, { role: "assistant", content: "" }, null);
+      }
+      if (type === "response.output_item.added") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          hadToolCall = true;
+          const tool = ensureTool(item);
+          currentToolId = tool.id;
           tool.started = true;
-          tool.arguments = completeArguments;
           yield openaiChunk(
             model,
             {
@@ -4956,73 +5028,110 @@ export async function* translateResponsesSSE(
                   index: tool.index,
                   id: tool.id,
                   type: "function",
-                  function: { name: tool.name, arguments: completeArguments },
+                  function: { name: tool.name, arguments: "" },
                 },
               ],
             },
             null,
           );
-        } else if (!tool.streamedArguments && completeArguments.length > 0) {
-          tool.arguments = completeArguments;
-          yield openaiChunk(
-            model,
-            {
-              tool_calls: [{ index: tool.index, function: { arguments: completeArguments } }],
-            },
-            null,
-          );
         }
-      }
-    } else if (type === "response.output_text.delta") {
-      if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
-    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
-      if (typeof evt.delta === "string") {
-        yield openaiChunk(model, { reasoning_content: evt.delta }, null);
-      }
-    } else if (
-      type === "response.function_call_arguments.delta" ||
-      type === "response.custom_tool_call_input.delta"
-    ) {
-      if (typeof evt.delta === "string") {
-        const eventToolId =
-          typeof evt.call_id === "string"
-            ? evt.call_id
-            : typeof evt.item_id === "string"
-              ? evt.item_id
-              : currentToolId;
-        const tool = tools.get(eventToolId);
-        if (tool?.started) {
-          tool.arguments += evt.delta;
-          tool.streamedArguments = true;
-          yield openaiChunk(
-            model,
-            { tool_calls: [{ index: tool.index, function: { arguments: evt.delta } }] },
-            null,
-          );
-        } else if (eventToolId.length > 0) {
-          pendingToolArguments.set(
-            eventToolId,
-            `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
-          );
+      } else if (type === "response.output_item.done") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          hadToolCall = true;
+          const tool = ensureTool(item, currentToolId);
+          currentToolId = tool.id;
+          const completeArguments =
+            responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
+          if (!tool.started) {
+            tool.started = true;
+            work.retain(2 * (completeArguments.length - tool.arguments.length));
+            tool.arguments = completeArguments;
+            yield openaiChunk(
+              model,
+              {
+                tool_calls: [
+                  {
+                    index: tool.index,
+                    id: tool.id,
+                    type: "function",
+                    function: { name: tool.name, arguments: completeArguments },
+                  },
+                ],
+              },
+              null,
+            );
+          } else if (!tool.streamedArguments && completeArguments.length > 0) {
+            work.retain(2 * (completeArguments.length - tool.arguments.length));
+            tool.arguments = completeArguments;
+            yield openaiChunk(
+              model,
+              {
+                tool_calls: [{ index: tool.index, function: { arguments: completeArguments } }],
+              },
+              null,
+            );
+          }
         }
+      } else if (type === "response.output_text.delta") {
+        if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
+      } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+        if (typeof evt.delta === "string") {
+          yield openaiChunk(model, { reasoning_content: evt.delta }, null);
+        }
+      } else if (
+        type === "response.function_call_arguments.delta" ||
+        type === "response.custom_tool_call_input.delta"
+      ) {
+        if (typeof evt.delta === "string") {
+          const eventToolId =
+            typeof evt.call_id === "string"
+              ? evt.call_id
+              : typeof evt.item_id === "string"
+                ? evt.item_id
+                : currentToolId;
+          const tool = tools.get(eventToolId);
+          if (tool?.started) {
+            // Already forwarded arguments are never needed for a terminal fallback.
+            work.retain(-2 * tool.arguments.length);
+            tool.arguments = "";
+            tool.streamedArguments = true;
+            yield openaiChunk(
+              model,
+              { tool_calls: [{ index: tool.index, function: { arguments: evt.delta } }] },
+              null,
+            );
+          } else if (eventToolId.length > 0) {
+            work.retain(
+              2 * evt.delta.length +
+                (pendingToolArguments.has(eventToolId) ? 0 : 128 + 2 * eventToolId.length),
+            );
+            pendingToolArguments.set(
+              eventToolId,
+              `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+            );
+          }
+        }
+      } else if (type === "response.completed" || type === "response.incomplete") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
+        yield openaiChunk(model, {}, finishReason(status, hadToolCall));
+        // include_usage terminal frame before [DONE] (order 14).
+        const usage = (response.usage ?? {}) as Record<string, unknown>;
+        yield openaiUsageChunk(model, usage);
+        yield "data: [DONE]\n\n";
+        return;
       }
-    } else if (type === "response.completed" || type === "response.incomplete") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
-      yield openaiChunk(model, {}, finishReason(status, hadToolCall));
-      // include_usage terminal frame before [DONE] (order 14).
-      const usage = (response.usage ?? {}) as Record<string, unknown>;
-      yield openaiUsageChunk(model, usage);
-      yield "data: [DONE]\n\n";
-      return;
     }
-  }
-  if (strictTerminal) {
-    throw new UpstreamError("upstream_error", "stream closed before response.completed");
-  }
-  if (started) {
-    yield openaiChunk(model, {}, finishReason(status, hadToolCall));
-    yield "data: [DONE]\n\n";
+    if (strictTerminal) {
+      throw new UpstreamError("upstream_error", "stream closed before response.completed");
+    }
+    if (started) {
+      yield openaiChunk(model, {}, finishReason(status, hadToolCall));
+      yield "data: [DONE]\n\n";
+    }
+  } finally {
+    work.release();
   }
 }
 
@@ -5065,152 +5174,189 @@ export async function aggregateResponsesStream(
     signal?: AbortSignal;
   } = {},
 ): Promise<ChatCompletionResponse> {
-  const allowIncomplete = options.allowIncomplete ?? false;
-  let text = "";
-  let id = `chatcmpl-${Date.now()}`;
-  let status: unknown = "completed";
-  let inTok = 0;
-  let outTok = 0;
-  let cacheRead = 0;
-  let cacheCreation = 0;
-  let reasoning = "";
-  let completed = false;
-  // call_id -> accumulated arguments, preserving first-seen order.
-  const toolOrder: string[] = [];
-  const toolById = new Map<string, { id: string; name: string; arguments: string }>();
-  const pendingToolArguments = new Map<string, string>();
-  let currentCallId = "";
+  const work = createRetainedResponseWork(options.workAdmission);
+  try {
+    const allowIncomplete = options.allowIncomplete ?? false;
+    let text = "";
+    let id = `chatcmpl-${Date.now()}`;
+    let status: unknown = "completed";
+    let inTok = 0;
+    let outTok = 0;
+    let cacheRead = 0;
+    let cacheCreation = 0;
+    let reasoning = "";
+    let completed = false;
+    // call_id -> accumulated arguments, preserving first-seen order.
+    const toolOrder: string[] = [];
+    const toolById = new Map<string, { id: string; name: string; arguments: string }>();
+    const pendingToolArguments = new Map<string, string>();
+    let currentCallId = "";
 
-  const ensureTool = (
-    item: Record<string, unknown>,
-    fallbackId = "",
-  ): { id: string; name: string; arguments: string } => {
-    const callId = responseToolCallId(item, fallbackId || `call_${toolOrder.length}`);
-    const existing = toolById.get(callId);
-    if (existing) {
-      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
-      return existing;
-    }
-    const tool = {
-      id: callId,
-      name: typeof item.name === "string" ? item.name : "",
-      arguments: pendingToolArguments.get(callId) ?? "",
+    const ensureTool = (
+      item: Record<string, unknown>,
+      fallbackId = "",
+    ): { id: string; name: string; arguments: string } => {
+      const callId = responseToolCallId(item, fallbackId || `call_${toolOrder.length}`);
+      const existing = toolById.get(callId);
+      if (existing) {
+        if (typeof item.name === "string" && item.name.length > 0) {
+          work.retain(2 * (item.name.length - existing.name.length));
+          existing.name = item.name;
+        }
+        return existing;
+      }
+      work.retain(
+        128 + 2 * (callId.length + (typeof item.name === "string" ? item.name.length : 0)),
+      );
+      const tool = {
+        id: callId,
+        name: typeof item.name === "string" ? item.name : "",
+        arguments: pendingToolArguments.get(callId) ?? "",
+      };
+      if (pendingToolArguments.delete(callId)) work.retain(-128 - 2 * callId.length);
+      toolById.set(callId, tool);
+      toolOrder.push(callId);
+      return tool;
     };
-    toolById.set(callId, tool);
-    toolOrder.push(callId);
-    return tool;
-  };
 
-  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
-    const type = evt.type;
-    if (
-      type === "error" ||
-      type === "response.failed" ||
-      (type === "response.incomplete" && !allowIncomplete)
-    ) {
-      throw responseEventError(evt);
-    }
-    if (type === "response.created") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      if (typeof response.id === "string") id = response.id;
-    } else if (type === "response.output_item.added") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        const tool = ensureTool(item);
-        currentCallId = tool.id;
-        const args = responseToolArguments(item);
-        if (args.length > 0) tool.arguments = args;
+    for await (const evt of readResponsesEvents(
+      res,
+      idleMs,
+      options.workAdmission,
+      options.signal,
+    )) {
+      const type = evt.type;
+      if (
+        type === "error" ||
+        type === "response.failed" ||
+        (type === "response.incomplete" && !allowIncomplete)
+      ) {
+        throw responseEventError(evt);
       }
-    } else if (type === "response.output_item.done") {
-      const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call" || item.type === "custom_tool_call") {
-        const tool = ensureTool(item, currentCallId);
-        currentCallId = tool.id;
-        tool.arguments =
-          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
-      }
-    } else if (type === "response.output_text.delta") {
-      if (typeof evt.delta === "string") text += evt.delta;
-    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
-      if (typeof evt.delta === "string") reasoning += evt.delta;
-    } else if (
-      type === "response.function_call_arguments.delta" ||
-      type === "response.custom_tool_call_input.delta"
-    ) {
-      if (typeof evt.delta !== "string") continue;
-      const eventToolId =
-        typeof evt.call_id === "string"
-          ? evt.call_id
-          : typeof evt.item_id === "string"
-            ? evt.item_id
-            : currentCallId;
-      const tool = toolById.get(eventToolId);
-      if (tool) tool.arguments += evt.delta;
-      else if (eventToolId.length > 0) {
-        pendingToolArguments.set(
-          eventToolId,
-          `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
-        );
-      }
-    } else if (type === "response.function_call_arguments.done") {
-      const eventToolId =
-        typeof evt.call_id === "string"
-          ? evt.call_id
-          : typeof evt.item_id === "string"
-            ? evt.item_id
-            : currentCallId;
-      const tc = toolById.get(eventToolId);
-      if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed" || type === "response.incomplete") {
-      const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
-      const usage = (response.usage ?? {}) as Record<string, unknown>;
-      if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
-      if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
-      const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
-      if (typeof details.cached_tokens === "number") cacheRead = details.cached_tokens;
-      if (typeof details.cache_creation_input_tokens === "number")
-        cacheCreation = details.cache_creation_input_tokens;
-      // Terminal event: stop reading NOW so the idle guard cannot turn a completed
-      // aggregation into a timeout if the upstream delays closing the body.
-      completed = true;
-      break;
-    }
-  }
-
-  if (!completed) {
-    throw new UpstreamError("upstream_error", "stream closed before response.completed");
-  }
-
-  const toolCalls = toolOrder.map((cid) => {
-    const tc = toolById.get(cid) as { id: string; name: string; arguments: string };
-    return {
-      id: tc.id,
-      type: "function",
-      function: { name: tc.name, arguments: tc.arguments || "{}" },
-    };
-  });
-  const message: Record<string, unknown> = { role: "assistant", content: text || null };
-  if (reasoning !== "") message.reasoning_content = reasoning;
-  if (toolCalls.length) message.tool_calls = toolCalls;
-  return {
-    id,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, message, finish_reason: finishReason(status, toolCalls.length > 0) }],
-    usage: {
-      prompt_tokens: inTok,
-      completion_tokens: outTok,
-      total_tokens: inTok + outTok,
-      ...(cacheRead > 0 || cacheCreation > 0
-        ? {
-            prompt_tokens_details: {
-              cached_tokens: cacheRead,
-              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
-            },
+      if (type === "response.created") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        if (typeof response.id === "string") id = response.id;
+      } else if (type === "response.output_item.added") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          const tool = ensureTool(item);
+          currentCallId = tool.id;
+          const args = responseToolArguments(item);
+          if (args.length > 0) {
+            work.retain(2 * (args.length - tool.arguments.length));
+            tool.arguments = args;
           }
-        : {}),
-    },
-  } as ChatCompletionResponse;
+        }
+      } else if (type === "response.output_item.done") {
+        const item = (evt.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+          const tool = ensureTool(item, currentCallId);
+          currentCallId = tool.id;
+          const args =
+            responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
+          work.retain(2 * (args.length - tool.arguments.length));
+          tool.arguments = args;
+        }
+      } else if (type === "response.output_text.delta") {
+        if (typeof evt.delta === "string") {
+          work.retain(2 * evt.delta.length);
+          text += evt.delta;
+        }
+      } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+        if (typeof evt.delta === "string") {
+          work.retain(2 * evt.delta.length);
+          reasoning += evt.delta;
+        }
+      } else if (
+        type === "response.function_call_arguments.delta" ||
+        type === "response.custom_tool_call_input.delta"
+      ) {
+        if (typeof evt.delta !== "string") continue;
+        const eventToolId =
+          typeof evt.call_id === "string"
+            ? evt.call_id
+            : typeof evt.item_id === "string"
+              ? evt.item_id
+              : currentCallId;
+        const tool = toolById.get(eventToolId);
+        if (tool) {
+          work.retain(2 * evt.delta.length);
+          tool.arguments += evt.delta;
+        } else if (eventToolId.length > 0) {
+          work.retain(
+            2 * evt.delta.length +
+              (pendingToolArguments.has(eventToolId) ? 0 : 128 + 2 * eventToolId.length),
+          );
+          pendingToolArguments.set(
+            eventToolId,
+            `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+          );
+        }
+      } else if (type === "response.function_call_arguments.done") {
+        const eventToolId =
+          typeof evt.call_id === "string"
+            ? evt.call_id
+            : typeof evt.item_id === "string"
+              ? evt.item_id
+              : currentCallId;
+        const tc = toolById.get(eventToolId);
+        if (tc && typeof evt.arguments === "string") {
+          work.retain(2 * (evt.arguments.length - tc.arguments.length));
+          tc.arguments = evt.arguments;
+        }
+      } else if (type === "response.completed" || type === "response.incomplete") {
+        const response = (evt.response ?? {}) as Record<string, unknown>;
+        status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
+        const usage = (response.usage ?? {}) as Record<string, unknown>;
+        if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
+        if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
+        const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
+        if (typeof details.cached_tokens === "number") cacheRead = details.cached_tokens;
+        if (typeof details.cache_creation_input_tokens === "number")
+          cacheCreation = details.cache_creation_input_tokens;
+        // Terminal event: stop reading NOW so the idle guard cannot turn a completed
+        // aggregation into a timeout if the upstream delays closing the body.
+        completed = true;
+        break;
+      }
+    }
+
+    if (!completed) {
+      throw new UpstreamError("upstream_error", "stream closed before response.completed");
+    }
+
+    const toolCalls = toolOrder.map((cid) => {
+      const tc = toolById.get(cid) as { id: string; name: string; arguments: string };
+      return {
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.arguments || "{}" },
+      };
+    });
+    const message: Record<string, unknown> = { role: "assistant", content: text || null };
+    if (reasoning !== "") message.reasoning_content = reasoning;
+    if (toolCalls.length) message.tool_calls = toolCalls;
+    return {
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message, finish_reason: finishReason(status, toolCalls.length > 0) }],
+      usage: {
+        prompt_tokens: inTok,
+        completion_tokens: outTok,
+        total_tokens: inTok + outTok,
+        ...(cacheRead > 0 || cacheCreation > 0
+          ? {
+              prompt_tokens_details: {
+                cached_tokens: cacheRead,
+                ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+              },
+            }
+          : {}),
+      },
+    } as ChatCompletionResponse;
+  } finally {
+    work.release();
+  }
 }

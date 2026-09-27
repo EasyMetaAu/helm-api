@@ -1,5 +1,10 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import {
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../../runtime/memory-admission.js";
 import type { McpDeps } from "./deps.js";
 import {
   callMemoryTool,
@@ -98,6 +103,7 @@ export function registerMcpServer(app: Hono<AppEnv>, deps: McpDeps): void {
   const store = deps.memoryStore; // narrowed to MemoryAdminStore by the guard
   const serverVersion = deps.serverVersion ?? "0.1.0";
 
+  app.use("/mcp", memoryAdmissionReleaseGuard());
   app.post("/mcp", async (c) => {
     const identity = c.get("identity");
     const ctx: MemoryToolContext = {
@@ -114,8 +120,18 @@ export function registerMcpServer(app: Hono<AppEnv>, deps: McpDeps): void {
 
     let body: unknown;
     try {
-      body = await c.req.json();
-    } catch {
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      if (admitted) c.set("requestMemoryRelease", admitted.release);
+      body = admitted ? JSON.parse(admitted.text) : await c.req.json();
+      admitted?.materialized();
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) {
+        c.header("retry-after", "1");
+        return c.json(rpcError(null, -32000, error.message), 503);
+      }
       return c.json(rpcError(null, -32700, "parse error"), 200);
     }
 

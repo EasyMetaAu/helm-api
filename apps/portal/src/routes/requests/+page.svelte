@@ -3,11 +3,13 @@
   import { goto } from "$app/navigation";
   import { page as pageStore } from "$app/stores";
   import { t } from "$lib/i18n";
-  import { formatUsd, formatTokens, formatTimestamp } from "$lib/format";
+  import { formatUsd, formatTimestamp, formatDurationMs } from "$lib/format";
   import { paginationItems } from "$lib/pagination";
   import { getRequests, type PortalRequestRow } from "$lib/api/portal";
   import RangeFilter from "$lib/components/RangeFilter.svelte";
   import RefreshControl from "$lib/components/RefreshControl.svelte";
+  import TokensCell from "$lib/components/TokensCell.svelte";
+  import { toTokenUsageView } from "$lib/api/requests";
   import {
     DEFAULT_FILTERS,
     filtersToSearch,
@@ -295,10 +297,12 @@
                       : 'badge-error'}">{row.status}</span
                   >
                 </td>
-                <td class="px-3 py-2 text-right">{row.latency_ms}ms</td>
                 <td class="px-3 py-2 text-right"
-                  >{formatTokens(row.usage?.completion_tokens ?? null)}</td
+                  >{formatDurationMs(row.latency_ms)}</td
                 >
+                <td class="px-3 py-2 text-right">
+                  <TokensCell usage={toTokenUsageView(row.usage)} />
+                </td>
                 <td class="px-3 py-2 text-right">{formatUsd(row.cost_usd)}</td>
               </tr>
             {/each}

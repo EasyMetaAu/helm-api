@@ -2859,7 +2859,7 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
 
     const h = seen as unknown as Headers;
     expect(sentBody).toBe(rawBody);
-    expect(h.get("x-client-feature")).toBe("keep-me");
+    expect(h.get("x-client-feature")).toBeNull();
     expect(h.get("Authorization")).toContain("Bearer ");
     expect(h.get("Authorization")).not.toContain("client-secret");
     expect(h.get("chatgpt-account-id")).toBe("acct_carrier");
@@ -6293,18 +6293,14 @@ describe("createCodexResponsesClient — responsesCompact", () => {
       await Promise.resolve();
 
       expect(outcome).toBeInstanceOf(UpstreamError);
-      expect(outcome).toMatchObject(
-        method === "nativePassthrough"
-          ? {
-              errorClass: "upstream_error",
-              upstreamStatus: 400,
-              providerRaw: {
-                error: { code: "response_create_outcome_unknown" },
-                http: { lifecycle_phase: "after_response_before_terminal" },
-              },
-            }
-          : { errorClass: "timeout" },
-      );
+      expect(outcome).toMatchObject({
+        errorClass: "upstream_error",
+        upstreamStatus: 400,
+        providerRaw: {
+          error: { code: "response_create_outcome_unknown" },
+          http: { lifecycle_phase: "after_response_before_terminal" },
+        },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -6623,7 +6619,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       expect(body.input[2]).toEqual({ type: "custom_tool_call_output", call_id: "c1", output });
     });
 
-    it("compresses DeepSeek tool images while keeping the caller's originals", async () => {
+    it("preserves DeepSeek tool images during custom-tool translation", async () => {
       const source = await sharp({
         create: { width: 4096, height: 64, channels: 3, background: "red" },
       })
@@ -6655,14 +6651,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       const parts =
         (seen.input as Array<{ output: Array<Record<string, unknown>> }>)[1]?.output ?? [];
       expect(parts[0]).toEqual({ type: "input_text", text: "Screenshot" });
-      expect(parts[1]?.image_url).toMatch(/^data:image\/webp;base64,/);
-      const compressed = Buffer.from(String(parts[1]?.image_url).split(",")[1] ?? "", "base64");
-      expect(compressed.byteLength).toBeLessThan(source.byteLength);
-      expect(await sharp(compressed).metadata()).toMatchObject({
-        width: 2048,
-        height: 32,
-        format: "webp",
-      });
+      expect(parts[1]?.image_url).toBe(image.image_url);
       expect(parts[1]?.detail).toBe("high");
       expect(body.input[1]?.output?.[1]).toBe(image);
       expect(image.image_url).toBe(`data:image/png;base64,${source.toString("base64")}`);
@@ -7618,7 +7607,8 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       }
     };
     await expect(consume()).rejects.toMatchObject({
-      message: "stream closed before response.completed",
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+      cause: { message: "stream closed before response.completed" },
     });
   });
 
@@ -7698,7 +7688,11 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       output: [],
     });
     expect(carrier.raw_body).toBe('{"stale":true}');
-    expect(carrier.mutations).toEqual({});
+    expect(carrier.body).toEqual({ model: "grok-native", input: "hi", stream: false, store: true });
+    expect(carrier.mutations).toMatchObject({
+      body_shims_applied: ["generic_responses_force_store_false", "generic_responses_force_stream"],
+      auth_replaced: true,
+    });
   });
 
   it.each([
@@ -8945,4 +8939,53 @@ describe("createGenericOpenAIResponsesClient — scrub via currentSecrets", () =
     expect(JSON.stringify((caught as UpstreamError).providerRaw)).not.toContain("super-secret");
     expect(JSON.stringify((caught as UpstreamError).providerRaw)).toContain("[redacted]");
   });
+});
+
+it.each([
+  "text",
+  "reasoning",
+  "pending-tool",
+])("bounds cumulative Responses %s retained across small SSE frames", async (kind) => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const type =
+    kind === "text"
+      ? "response.output_text.delta"
+      : kind === "reasoning"
+        ? "response.reasoning_summary_text.delta"
+        : "response.function_call_arguments.delta";
+  let sent = 0;
+  const cancel = vi.fn();
+  const response = new Response(
+    new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const event =
+            sent++ < 100
+              ? { type, call_id: "call_a", delta: "x".repeat(64) }
+              : { type: "response.completed", response: {} };
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+          if (sent > 100) controller.close();
+        },
+        cancel,
+      },
+      { highWaterMark: 0 },
+    ),
+  );
+  const operation =
+    kind === "pending-tool"
+      ? (async () => {
+          for await (const _ of translateResponsesSSE(response, "m", 0, {
+            workAdmission: admission,
+          })) {
+            /* drain */
+          }
+        })()
+      : aggregateResponsesStream(response, "m", 0, { workAdmission: admission });
+  await expect(operation).rejects.toThrow("memory capacity");
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(admission.reservedBytes).toBe(0);
 });

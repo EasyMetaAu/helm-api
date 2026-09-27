@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import type { IRRequest, IRResponse } from "../ir.js";
 import { openaiTransformer } from "../openai.js";
 import type { NativeRequest } from "../transformer.js";
@@ -2703,4 +2704,29 @@ describe("Gemini transformer — residual coverage gaps", () => {
     };
     expect(schema?.properties?.ok).toBeDefined();
   });
+});
+
+it("bounds Gemini tool arguments across many small streaming chunks", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  async function* source(): AsyncIterable<IRChunk> {
+    for (let i = 0; i < 100; i++)
+      yield {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { name: "tool", arguments: "x".repeat(64) } }],
+            },
+          },
+        ],
+      };
+  }
+  await expect(collect(geminiTransformer.transformStreamOut(source(), admission))).rejects.toThrow(
+    "memory capacity",
+  );
+  expect(admission.reservedBytes).toBe(0);
 });

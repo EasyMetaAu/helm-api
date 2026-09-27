@@ -1,4 +1,5 @@
 import type { DecisionRecord, TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
+import { UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
@@ -800,5 +801,26 @@ describe("POST /v1beta/models/{model}:streamGenerateContent?alt=sse (Gemini stre
     const text = await res.text();
     expect(text).toContain("error");
     expect(text).toContain("UNAVAILABLE");
+  });
+});
+
+describe("native token-counter errors", () => {
+  it.each([400, 401, 403, 422])("preserves deterministic upstream %s", async (status) => {
+    const { deps } = makeDeps({
+      countTokens: vi
+        .fn()
+        .mockRejectedValue(
+          new UpstreamError("upstream_error", "counter rejected request", null, status),
+        ),
+    });
+    const response = await buildApp(deps).request("/v1beta/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as { estimated?: boolean; error?: unknown };
+    expect(body.estimated).toBeUndefined();
+    expect(body.error).toBeDefined();
   });
 });

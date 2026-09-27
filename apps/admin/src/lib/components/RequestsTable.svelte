@@ -47,7 +47,6 @@
   } = $props();
 
   const visibleKey = $derived(showKey ?? variant !== 'key');
-  const visibleRequestId = $derived(variant === 'full');
   // The dashboard's dense recent view keeps its current columns. Global and
   // key-scoped request history show the body-free session context.
   const visibleSession = $derived(variant !== 'recent');
@@ -134,18 +133,14 @@
 {/snippet}
 
 {#snippet timeCell(r: RequestListItem)}
-  {#if visibleRequestId}
+  <a
+    data-testid="request-detail-link"
+    class="link-inline block max-w-[7.5rem] whitespace-normal text-ink-strong"
+    href={detailHref(r.request_id)}
+    title={r.request_id}
+  >
     {formatTs(r.ts)}
-  {:else}
-    <a
-      data-testid="request-detail-link"
-      class="link-inline font-mono text-ink-strong"
-      href={detailHref(r.request_id)}
-      title={r.request_id}
-    >
-      {formatTs(r.ts)}
-    </a>
-  {/if}
+  </a>
 {/snippet}
 
 {#snippet resultCell(r: RequestListItem)}
@@ -156,7 +151,7 @@
     {:else if r.status === 'error'}
       <span class="badge-error">{$t('error')}</span>
       {#if r.error_class}
-        <div class="mt-1 max-w-[12rem] truncate text-xs text-red-600" title={r.error_class}>
+        <div class="mt-1 max-w-[8rem] whitespace-normal text-xs text-red-600" title={r.error_class}>
           {$t(attemptCodeLabel(r.error_class))}
         </div>
       {/if}
@@ -186,6 +181,7 @@
         {/if}
       </div>
     {/if}
+    {@render servingCell(r)}
   </div>
 {/snippet}
 
@@ -202,7 +198,7 @@
       </span>
     </div>
     <div class="mt-1 text-xs text-ink-muted">
-      {r.task_type || '—'}{#if r.complexity}
+      {r.task_type || '—'}{#if r.complexity && r.complexity !== r.task_type}
         · {r.complexity}{/if}
     </div>
     {#if r.reasoning_effort}
@@ -218,8 +214,9 @@
 {/snippet}
 
 {#snippet servingCell(r: RequestListItem)}
-  <div data-testid="cell-serving" class="leading-tight">
+  <div data-testid="cell-serving" class="mt-1 text-xs leading-tight">
     <div class="flex flex-wrap items-center gap-1.5">
+      <span class="text-ink-faint" aria-hidden="true">via</span>
       <span
         class="max-w-[12rem] truncate font-mono text-ink-body"
         title={accountTitle(r.serving_account) ?? r.served_provider ?? undefined}
@@ -244,7 +241,7 @@
 {/snippet}
 
 {#snippet sessionCell(r: RequestListItem)}
-  <div data-testid="cell-session" class="max-w-[12rem] leading-tight">
+  <div data-testid="cell-session" class="max-w-[10rem] leading-tight">
     {#if r.session}
       {#if onSessionFilter}
         <button
@@ -283,6 +280,9 @@
   <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
     <div>{formatDurationMs(r.latency_ms)}</div>
     <div data-testid="cell-tps" class="text-ink-muted">{formatTps(r.tps)}</div>
+    <div data-testid="cell-request-body" class="text-ink-muted" title={$t('Request body')}>
+      {formatBytes(r.request_body_bytes)}
+    </div>
   </div>
 {/snippet}
 
@@ -296,16 +296,13 @@
           title={$t('Whether the request succeeded, with the final error class when it failed.')}
           >{$t('Result')}</th
         >
-        {#if visibleKey}
+        {#if visibleKey || visibleSession}
           <th
             class="px-3 py-2"
-            title={$t('The API key that authenticated the client, shown by prefix only.')}
-            >{$t('Key')}</th
-          >
-        {/if}
-        {#if visibleSession}
-          <th class="px-3 py-2" title={$t('Body-free session context for this request.')}
-            >{$t('Session')}</th
+            title={visibleKey
+              ? $t('The API key that authenticated the client, shown by prefix only.')
+              : $t('Body-free session context for this request.')}
+            >{visibleKey ? $t('Key') : $t('Session')}</th
           >
         {/if}
         <th
@@ -319,24 +316,15 @@
             'Classification result: lane, decision source, task, complexity, and reasoning effort.',
           )}>{$t('Routing')}</th
         >
-        <th class="px-3 py-2" title={$t('Provider, account, and execution fallback count.')}
-          >{$t('Serving')}</th
+        <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
+          >{$t('Tokens')}</th
         >
         <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
           >{$t('Cost')}</th
         >
-        <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
-          >{$t('Tokens')}</th
-        >
-        <th class="px-3 py-2" title={$t('Request body')}>{$t('Request body')}</th>
         <th class="px-3 py-2" title={$t('End-to-end latency and streamed generation throughput.')}
           >{$t('Performance')}</th
         >
-        {#if visibleRequestId}
-          <th class="px-3 py-2" title={$t('The unique Helm request ID recorded for this request.')}
-            >{$t('Request ID')}</th
-          >
-        {/if}
       </tr>
     </thead>
     <tbody>
@@ -355,38 +343,40 @@
           <td data-label={$t('Result')} class="px-3 py-2">
             {@render resultCell(r)}
           </td>
-          {#if visibleKey}
-            <td data-label={$t('Key')} class="px-3 py-2">
-              {#if r.key_id && onKeyFilter}
-                <!-- In-page filter (the /requests list): a <button> updates the
+          {#if visibleKey || visibleSession}
+            <td data-label={visibleKey ? $t('Key') : $t('Session')} class="px-3 py-2">
+              {#if visibleKey}
+                {#if r.key_id && onKeyFilter}
+                  <!-- In-page filter (the /requests list): a <button> updates the
                      querystring; onRowClick lets it handle the click, not the row. -->
-                <button
-                  type="button"
-                  data-testid="key-filter"
-                  class="block text-left hover:underline"
-                  title={$t('Filter by this key')}
-                  onclick={() => onKeyFilter(r.key_id!)}
-                >
-                  {@render keyLabel(r)}
-                </button>
-              {:else if r.key_id && keyHref}
-                <!-- Cross-page: link to the full requests list filtered by this key
+                  <button
+                    type="button"
+                    data-testid="key-filter"
+                    class="block text-left hover:underline"
+                    title={$t('Filter by this key')}
+                    onclick={() => onKeyFilter(r.key_id!)}
+                  >
+                    {@render keyLabel(r)}
+                  </button>
+                {:else if r.key_id && keyHref}
+                  <!-- Cross-page: link to the full requests list filtered by this key
                      (the dashboard has no in-page filter). A real <a> → open-in-new-tab. -->
-                <a
-                  data-testid="key-filter"
-                  class="block text-left hover:underline"
-                  title={$t('Filter by this key')}
-                  href={keyHref(r.key_id)}
-                >
+                  <a
+                    data-testid="key-filter"
+                    class="block text-left hover:underline"
+                    title={$t('Filter by this key')}
+                    href={keyHref(r.key_id)}
+                  >
+                    {@render keyLabel(r)}
+                  </a>
+                {:else}
                   {@render keyLabel(r)}
-                </a>
-              {:else}
-                {@render keyLabel(r)}
+                {/if}
+              {/if}
+              {#if visibleSession}
+                <div class={visibleKey ? 'mt-1' : ''}>{@render sessionCell(r)}</div>
               {/if}
             </td>
-          {/if}
-          {#if visibleSession}
-            <td data-label="Session" class="px-3 py-2">{@render sessionCell(r)}</td>
           {/if}
           <td data-label={$t('Model')} class="px-3 py-2">
             {@render modelCell(r)}
@@ -394,9 +384,7 @@
           <td data-label={$t('Routing')} class="px-3 py-2">
             {@render routingCell(r)}
           </td>
-          <td data-label={$t('Serving')} class="px-3 py-2">
-            {@render servingCell(r)}
-          </td>
+          <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
           <td
             data-testid="cell-cost"
             data-label={$t('Cost')}
@@ -410,25 +398,9 @@
               <div class="text-[10px] text-ink-muted">{$t('API-equivalent')}</div>
             {/if}
           </td>
-          <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
-          <td
-            data-testid="cell-request-body"
-            data-label={$t('Request body')}
-            class="px-3 py-2 font-mono text-ink-body"
-          >{formatBytes(r.request_body_bytes)}</td>
           <td data-label={$t('Performance')} class="px-3 py-2">
             {@render performanceCell(r)}
           </td>
-          {#if visibleRequestId}
-            <td data-label={$t('Request ID')} class="px-3 py-2">
-              <a
-                data-testid="request-detail-link"
-                class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-                href={detailHref(r.request_id)}
-                title={r.request_id}>{r.request_id}</a
-              >
-            </td>
-          {/if}
         </tr>
       {/each}
     </tbody>

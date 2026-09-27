@@ -156,6 +156,9 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     const scope = statsScopeFromQuery(c, deps);
     const key = memoryStatsCacheKey(scope);
     const nowMs = Date.now();
+    for (const [cachedKey, entry] of statsCache) {
+      if (entry.expiresAt <= nowMs) statsCache.delete(cachedKey);
+    }
     const cached = statsCache.get(key);
     if (cached !== undefined && cached.expiresAt > nowMs) return c.json(cached.body);
     const stats = await store.getMemoryAdminStats({ ...scope, now: new Date() });

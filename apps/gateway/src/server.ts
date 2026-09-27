@@ -125,6 +125,7 @@ import {
   startSignalScheduler,
   type TransportProfile,
   toRegistryProviders,
+  UpstreamError,
   validateModelAliasTargets,
   windowsToUsageLimit,
   XAI_GROK_OAUTH_BASE_URL,
@@ -1830,7 +1831,7 @@ function createProviderClient(
       // A Helm upstream accepts Codex native items and applies its own provider policy.
       ...(p.type === "helm"
         ? {
-            requestContract: { acceptsResponsesNativeItems: true },
+            requestContract: { acceptsResponsesNativeItems: true, forwardCodexMetadata: true },
             responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
               proxy,
               timeoutMs: base.timeoutMs,
@@ -1840,6 +1841,7 @@ function createProviderClient(
       ...(isXaiOAuth
         ? {
             requestContract: {
+              acceptsResponsesNativeItems: false,
               forceSse: true,
               forceStoreFalse: true,
               ensureReasoningEncryptedContent: true,
@@ -1948,12 +1950,31 @@ function createProviderClient(
 // directly into a short-lived client — never written to process.env, config, the
 // Store, or logs. A one-token completion validates both authentication and actual
 // model access (a public /models endpoint would not prove either for every provider).
+// Only an auth-shaped rejection means "bad key": 402 (no balance) and 429 (rate
+// limited) prove the key authenticated, so they pass with a warning instead of
+// blocking setup — a brand-new DeepSeek account answers 402 for a perfectly valid key.
+const MEDIA_ONLY_MODEL = /image|video|tts|audio|embed|whisper|dall-e|imagine/i;
+const KEY_OK_STATUSES = new Set([402, 429]);
+
+function upstreamReason(error: UpstreamError): string {
+  const raw = error.providerRaw as {
+    error?: { message?: unknown } | string;
+    message?: unknown;
+  } | null;
+  const nested = typeof raw?.error === "object" ? raw.error?.message : raw?.error;
+  const reason = typeof nested === "string" ? nested : raw?.message;
+  return typeof reason === "string" ? reason.slice(0, 300) : "";
+}
+
 export async function testStaticProviderKey(
   provider: ProviderConfigShared,
-  apiKey: string,
-): Promise<void> {
+  rawApiKey: string,
+): Promise<{ warning?: string }> {
   if (provider.oauth) throw new Error("only static API-key providers can be tested here");
-  const model = provider.models[0]?.provider_model;
+  const apiKey = rawApiKey.trim();
+  const model = (
+    provider.models.find((m) => !MEDIA_ONLY_MODEL.test(m.provider_model)) ?? provider.models[0]
+  )?.provider_model;
   if (!model) throw new Error(`provider ${provider.name} has no model configured for testing`);
   const client = createProviderClient(
     provider,
@@ -1963,15 +1984,24 @@ export async function testStaticProviderKey(
     },
     { apiKey },
   );
-  await client.chatCompletion(
-    {
-      model,
-      messages: [{ role: "user", content: "Reply with OK." }],
-      max_tokens: 1,
-      stream: false,
-    },
-    { signal: AbortSignal.timeout(15_000) },
-  );
+  try {
+    await client.chatCompletion(
+      {
+        model,
+        messages: [{ role: "user", content: "Reply with OK." }],
+        max_tokens: 1,
+        stream: false,
+      },
+      { signal: AbortSignal.timeout(15_000) },
+    );
+    return {};
+  } catch (error) {
+    if (!(error instanceof UpstreamError) || error.upstreamStatus === null) throw error;
+    const reason = upstreamReason(error);
+    const detail = `upstream returned ${error.upstreamStatus}${reason ? `: ${reason}` : ""}`;
+    if (KEY_OK_STATUSES.has(error.upstreamStatus)) return { warning: detail };
+    throw new Error(detail, { cause: error });
+  }
 }
 
 // Auxiliary classifier/memory calls require a ProviderClient even before any
@@ -3640,6 +3670,7 @@ export async function buildServer(
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
   registerPortalApi(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     keyStore,
     telemetry,
     resolveModelLabel: (wire) => wireToAlias.get(wire) ?? null,
@@ -3683,6 +3714,7 @@ export async function buildServer(
         );
       }
       registerMcpServer(app, {
+        memoryAdmission: requestBodyMemoryAdmission,
         memoryStore: store.memory,
         now: () => new Date(),
         estimateTokens: estimateMemoryTokens,
@@ -4250,10 +4282,14 @@ export async function buildServer(
     () => responsesLifecycleUnsupported("compact"),
   );
   const responsesLifecycle: ResponsesRouteDeps["lifecycle"] = {};
-  responsesLifecycle.retrieve = async (responseId, _identity, signal, record) => {
+  responsesLifecycle.retrieve = async (responseId, _identity, signal, record, query) => {
     const client = responsesClientWith("responsesRetrieve", record?.providerName);
     if (!client?.responsesRetrieve) throw responsesLifecycleUnsupported("retrieve");
-    return await client.responsesRetrieve(responseId, { signal });
+    return await client.responsesRetrieve(responseId, {
+      signal,
+      query,
+      providerAccount: record?.providerAccount ?? undefined,
+    });
   };
   responsesLifecycle.delete = async (responseId, _identity, signal, record) => {
     const client = responsesClientWith("responsesDelete", record?.providerName);
@@ -4265,12 +4301,16 @@ export async function buildServer(
     if (!client?.responsesCancel) throw responsesLifecycleUnsupported("cancel");
     return await client.responsesCancel(responseId, { signal });
   };
-  responsesLifecycle.inputItems = async (responseId, _identity, signal, record) => {
+  responsesLifecycle.inputItems = async (responseId, _identity, signal, record, query) => {
     const client = responsesClientWith("responsesInputItems", record?.providerName);
     if (!client?.responsesInputItems) {
       throw responsesLifecycleUnsupported("input_items");
     }
-    return await client.responsesInputItems(responseId, { signal });
+    return await client.responsesInputItems(responseId, {
+      signal,
+      query,
+      providerAccount: record?.providerAccount ?? undefined,
+    });
   };
   responsesLifecycle.compact = async (body, identity, signal, onResponseMeta, onExecution) => {
     const requestedModel = typeof body.body.model === "string" ? body.body.model : "";

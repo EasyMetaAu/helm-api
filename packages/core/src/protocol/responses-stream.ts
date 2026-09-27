@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  createRetainedResponseWork,
+  type ResponseWorkAdmission,
+  ResponseWorkCapacityError,
+} from "../runtime/response-work-admission.js";
 import { type OpenAIChunk, OpenAIChunkSchema } from "./anthropic/stream.js";
 import type { IRResponse, IRUsage } from "./ir.js";
 import { resolveReasoning } from "./reasoning.js";
@@ -454,6 +459,7 @@ export async function* convertOpenAIStreamToResponses(
   // created/completed matches the non-stream body; live streams pass request model
   // so prelude events never expose an empty model before the first upstream chunk.
   seed?: string | { id?: string; model?: string },
+  workAdmission?: ResponseWorkAdmission,
 ): AsyncIterable<ResponsesSSEEvent> {
   const seedId = typeof seed === "string" ? seed : seed?.id;
   const seedModel =
@@ -475,10 +481,34 @@ export async function* convertOpenAIStreamToResponses(
     response: responseObject(state, { status: "in_progress" }),
   });
 
+  let work: ReturnType<typeof createRetainedResponseWork> | undefined;
   try {
+    work = createRetainedResponseWork(workAdmission);
     for await (const raw of chunks) {
+      const delta = raw.choices?.[0]?.delta;
+      work.retain(
+        2 *
+          ((delta?.content?.length ?? 0) +
+            (delta?.reasoning_content?.length ?? 0) +
+            (delta?.refusal?.length ?? 0)),
+      );
+      for (const annotation of delta?.annotations ?? [])
+        work.retain(128 + 2 * JSON.stringify(annotation).length);
+      for (const tc of delta?.tool_calls ?? []) {
+        const previous = state.toolIndexToSlot.get(tc.index);
+        work.retain(
+          (previous ? 0 : 128) +
+            2 *
+              ((tc.function?.arguments?.length ?? 0) +
+                (tc.id ? Math.max(0, tc.id.length - (previous?.callId.length ?? 0)) : 0) +
+                (tc.function?.name
+                  ? Math.max(0, tc.function.name.length - (previous?.name.length ?? 0))
+                  : 0)),
+        );
+      }
       yield* handleChunk(state, raw);
     }
+    yield* closeStream(state);
   } catch (e) {
     // Mid-stream upstream failure: emit a structured Responses `error` frame instead
     // of tearing the connection down with no envelope. The terminal completed event
@@ -487,12 +517,19 @@ export async function* convertOpenAIStreamToResponses(
     yield ResponsesSSEEventSchema.parse({
       type: "error",
       sequence_number: nextSeq(state),
-      error: { type: "error", code: "upstream_error", message },
+      error: {
+        type: "error",
+        code:
+          e instanceof ResponseWorkCapacityError
+            ? "response_work_capacity_exhausted"
+            : "upstream_error",
+        message,
+      },
     });
     return;
+  } finally {
+    work?.release();
   }
-
-  yield* closeStream(state);
 }
 
 // Lazily open the assistant message item + its output_text content part, recording

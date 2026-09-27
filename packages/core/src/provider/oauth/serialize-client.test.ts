@@ -481,3 +481,16 @@ describe("createSerializingClient", () => {
     expect(client.streamReframed).toBe(true);
   });
 });
+
+it.each([
+  "responsesRetrieve",
+  "responsesInputItems",
+] as const)("forwards %s with owner and query through the serial decorator", async (method) => {
+  const inner = makeInner();
+  const call = vi.fn().mockResolvedValue({ data: [] });
+  inner[method] = call;
+  const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 100 });
+  const opts = { providerAccount: "owner", query: new URLSearchParams("include=a&include=b") };
+  expect(await client[method]?.("resp_1", opts)).toEqual({ data: [] });
+  expect(call).toHaveBeenCalledWith("resp_1", opts);
+});

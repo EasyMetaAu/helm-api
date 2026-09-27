@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nonLatinRatio } from "./signals.js";
+import { keywordMatcher, nonLatinRatio } from "./signals.js";
 
 // nonLatinRatio measures the fraction of *letters* (\p{L}) that are NOT Latin
 // script. It feeds the Layer-1 language-coverage guard (engine.ts): Layer-1 has
@@ -37,4 +37,12 @@ describe("nonLatinRatio", () => {
     // Digits, spaces and punctuation are excluded; only the Han letters count → ~1.
     expect(nonLatinRatio("分析：2024年第三季度报告")).toBeGreaterThan(0.95);
   });
+});
+
+it("evicts old keyword matchers when classifier configurations keep changing", () => {
+  const first = keywordMatcher("audit_first_keyword");
+  for (let i = 0; i < 1024; i++) keywordMatcher(`audit_keyword_${i}`);
+  const rebuilt = keywordMatcher("audit_first_keyword");
+  expect(rebuilt).not.toBe(first);
+  expect(rebuilt.test("audit_first_keyword")).toBe(true);
 });

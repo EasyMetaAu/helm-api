@@ -28,6 +28,29 @@ describe('PolicyRow', () => {
     expect(screen.getByTestId('policy-index')).toHaveTextContent('1');
   });
 
+  it('summarises the rule as one readable sentence instead of repeating the ordering hint', () => {
+    render(PolicyRow, {
+      policy: makePolicy({
+        match: { task_type: 'coding', complexity: 'simple', needs_json: true },
+        use_lane: 'economy',
+        reasoning_effort: 'low',
+      }),
+      index: 1,
+      total: 3,
+      lanes: LANES,
+      onchange: vi.fn(),
+      onremove: vi.fn(),
+      onmove: vi.fn(),
+    });
+    const summary = screen.getByTestId('policy-summary');
+    expect(summary).toHaveTextContent('coding');
+    expect(summary).toHaveTextContent('simple');
+    expect(summary).toHaveTextContent('JSON');
+    expect(summary).toHaveTextContent('economy');
+    expect(summary).toHaveTextContent('low');
+    expect(screen.queryByText(/first match wins/i)).toBeNull();
+  });
+
   it('edits match.task_type and match.complexity into the change payload', async () => {
     const onchange = vi.fn();
     render(PolicyRow, {

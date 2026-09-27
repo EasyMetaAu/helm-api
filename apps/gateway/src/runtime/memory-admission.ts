@@ -223,11 +223,19 @@ export async function readAdmittedRequestBody(
   let bodyBuffer = declaredBuffer;
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const cancel = () => {
+    void reader?.cancel().catch(() => {});
+  };
   try {
-    const reader = request.body?.getReader();
+    reader = request.body?.getReader();
+    request.signal.addEventListener("abort", cancel, { once: true });
+    if (request.signal.aborted) cancel();
+    request.signal.throwIfAborted();
     if (reader) {
       for (;;) {
         const next = await reader.read();
+        request.signal.throwIfAborted();
         if (next.done) break;
         bytes += next.value.byteLength;
         const resized = lease.resize(bytes);
@@ -265,5 +273,8 @@ export async function readAdmittedRequestBody(
   } catch (error) {
     lease.release();
     throw error;
+  } finally {
+    request.signal.removeEventListener("abort", cancel);
+    reader?.releaseLock();
   }
 }

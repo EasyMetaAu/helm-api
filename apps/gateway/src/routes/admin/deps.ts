@@ -15,6 +15,9 @@ import type {
   TelemetryStore,
 } from "@helm/core";
 import type {
+  AnthropicResetRequest,
+  AnthropicResetResult,
+  AnthropicResetStatus,
   ClassifierConfig,
   DecisionRecord,
   InternalRequest,
@@ -163,6 +166,7 @@ export interface OAuthAdminAccess {
   // it from the start, never the operator's real IP (issue #38).
   startManualPaste(input: {
     providerId: string;
+    account?: string;
     proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; authorizeUrl: string }>;
   completeManualPaste(input: {
@@ -176,6 +180,7 @@ export interface OAuthAdminAccess {
   // the first device-code call so step 1 already egresses through it (issue #38).
   startDeviceCode(input: {
     providerId: string;
+    account?: string;
     enterprise?: string;
     proxy?: AccountProxyInput;
   }): Promise<{
@@ -259,6 +264,10 @@ export interface OAuthAdminAccess {
     account: string;
     force?: boolean;
   }): Promise<OAuthQuotaWindow[] | null>;
+  getAnthropicResetStatus?(input: { account: string }): Promise<AnthropicResetStatus>;
+  consumeAnthropicReset?(
+    input: AnthropicResetRequest,
+  ): Promise<AnthropicResetResult & { affectedAccounts: string[] }>;
   // Pull the consumer Grok subscription's weekly usage window from Grok Build's
   // authenticated JSON billing endpoint. The existing xAI OAuth bearer is sufficient;
   // no browser cookie is persisted. Same proxy/refresh/cache/fail-open contract as

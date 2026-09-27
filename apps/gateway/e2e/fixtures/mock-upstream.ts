@@ -53,6 +53,7 @@ export const FAIL_PRIMARY_MODEL = "deepseek/deepseek-v4-flash";
 // outcome_unknown without contacting a fallback provider.
 export const FAIL_IMAGE_PRIMARY_SENTINEL = "__HELM_FAIL_IMAGE_PRIMARY__";
 export const FAIL_IMAGE_PRIMARY_MODEL = "gemini-3.1-flash-image";
+export const COUNT_REJECT_SENTINEL = "__HELM_COUNT_REJECT__";
 
 // Extract the joined text of a Gemini generateContent body's contents[].parts[].text
 // (the images/interactions routes put the prompt there) — for prompt-steered injection.
@@ -469,17 +470,40 @@ export function createMockUpstream() {
     return c.json(echoResponse(model));
   });
 
+  app.post("/v1/messages/count_tokens", async (c) => {
+    const body = await c.req.json();
+    if (messagesText(body).includes(COUNT_REJECT_SENTINEL)) {
+      return c.json(
+        {
+          type: "error",
+          error: { type: "invalid_request_error", message: "mock count rejection" },
+        },
+        400,
+      );
+    }
+    return c.json({ input_tokens: 17 });
+  });
+
   // Gemini generateContent (the images route's gemini branch POSTs here, at
   // `/models/<model>:generateContent`). Returns an inlineData image part so the e2e
   // asserts the Gemini→Images translation (inlineData→b64_json) + cost mapping
   // (candidatesTokenCount = 1120 image output tokens).
-  app.post("/models/:spec", async (c) => {
+  app.post("/models/:spec{.+}", async (c) => {
     const spec = c.req.param("spec");
+    const body = (await c.req.json().catch(() => ({}))) as { contents?: unknown };
+    if (spec.endsWith(":countTokens")) {
+      if (geminiPromptText(body).includes(COUNT_REJECT_SENTINEL)) {
+        return c.json(
+          { error: { code: 400, status: "INVALID_ARGUMENT", message: "mock count rejection" } },
+          400,
+        );
+      }
+      return c.json({ totalTokens: 17 });
+    }
     if (!spec.endsWith(":generateContent")) {
       return c.json({ error: { message: "unsupported gemini operation" } }, 404);
     }
     const model = spec.slice(0, -":generateContent".length);
-    const body = (await c.req.json().catch(() => ({}))) as { contents?: unknown };
     // Fail only the lane primary. A second provider call would violate media
     // single-write semantics, so the e2e expects outcome_unknown.
     if (

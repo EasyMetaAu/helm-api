@@ -1,4 +1,8 @@
-import type { ProviderClient } from "@helm/core";
+import {
+  consumeResponseTextWithinBudget,
+  type ProviderClient,
+  readResponseTextWithinBudget,
+} from "@helm/core";
 
 // Internal self-HTTP client (observability). Internal LLM tasks (memory
 // summarize/merge/extractFacts, Layer-2 eval) normally call a ProviderClient DIRECTLY,
@@ -72,10 +76,21 @@ export function createSelfHttpClient(deps: SelfHttpClientDeps): ProviderClient {
         // Non-2xx → throw so the caller's existing fail-open catch (callJsonModel for
         // memory, the eval invoker for classify) degrades to its deterministic fallback
         // exactly as a direct provider error would.
-        const body = await res.text().catch(() => "");
+        const body = await readResponseTextWithinBudget(
+          res,
+          16 * 1024,
+          undefined,
+          opts?.signal,
+        ).catch(() => "");
         throw new Error(`self-http ${res.status}: ${body.slice(0, 200)}`);
       }
-      return (await res.json()) as Record<string, unknown>;
+      return await consumeResponseTextWithinBudget(
+        res,
+        0,
+        (text) => JSON.parse(text) as Record<string, unknown>,
+        undefined,
+        opts?.signal,
+      );
     },
     // Required by the ProviderClient interface; internal LLM tasks are non-streaming.
     async *chatCompletionStream() {

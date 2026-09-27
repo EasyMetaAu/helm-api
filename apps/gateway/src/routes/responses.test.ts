@@ -4169,3 +4169,41 @@ describe("safety_identifier — non-stream response", () => {
     expect(decision.safety_identifier).toBeUndefined();
   });
 });
+
+describe("Responses lifecycle native query", () => {
+  it.each([
+    "retrieve",
+    "inputItems",
+  ] as const)("%s forwards repeated includes and cursors", async (operation) => {
+    const call = vi.fn().mockResolvedValue({ object: "list", data: [] });
+    const { deps } = makeDeps({ lifecycle: { [operation]: call } });
+    const app = buildApp(deps);
+    const query =
+      "include=reasoning.encrypted_content&include=message.input_image.image_url" +
+      (operation === "inputItems" ? "&after=item%2Fa&before=item%2Fb&limit=17&order=asc" : "");
+    const response = await app.request(
+      `/v1/responses/resp_123${operation === "inputItems" ? "/input_items" : ""}?${query}`,
+      { headers: AUTH },
+    );
+    expect(response.status).toBe(200);
+    expect(call.mock.calls[0]?.[4]?.toString()).toBe(query);
+  });
+});
+
+it.each([
+  "limit=0",
+  "limit=101",
+  "limit=1.5",
+  "order=sideways",
+  "after=a&after=b",
+  "stream=true",
+  "stream=false&stream=true",
+])("rejects invalid lifecycle query %s before provider dispatch", async (query) => {
+  const inputItems = vi.fn();
+  const { deps } = makeDeps({ lifecycle: { inputItems } });
+  const res = await buildApp(deps).request(`/v1/responses/resp_1/input_items?${query}`, {
+    headers: AUTH,
+  });
+  expect(res.status).toBe(400);
+  expect(inputItems).not.toHaveBeenCalled();
+});

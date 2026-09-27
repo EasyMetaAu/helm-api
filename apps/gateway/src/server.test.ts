@@ -3,7 +3,7 @@ import { createCircuitBreaker } from "@helm/core";
 import type { InternalRequest } from "@helm/shared";
 import { RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createExecute } from "./routes/execute.js";
 import {
   buildInternalLlmKeyInput,
@@ -275,6 +275,67 @@ describe("first-run provider availability", () => {
       if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
       else process.env.DEEPSEEK_API_KEY = previous;
     }
+  });
+
+  describe("static key probe outcomes", () => {
+    afterEach(() => vi.restoreAllMocks());
+    const provider = {
+      name: "deepseek",
+      alias: "deepseek",
+      type: "openai" as const,
+      base_url: "https://api.deepseek.com/v1",
+      api_key_env: "DEEPSEEK_API_KEY",
+      models: [
+        { alias: "deepseek/image", provider_model: "openai/gpt-image-2" },
+        { alias: "deepseek/test", provider_model: "deepseek-test" },
+      ],
+      targetProviderProtocol: "openai_chat" as const,
+      map_developer_role_to_system: false,
+      claude_cli_fingerprint_mode: "auto" as const,
+      transport_profile: "default" as const,
+      normalize_reasoning_delta_alias: false,
+      response_model_policy: "provider" as const,
+    };
+    const upstream = (status: number, message: string) =>
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ error: { message, type: "x" } }), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+    it("accepts a valid key with no balance (402) and returns a warning", async () => {
+      upstream(402, "Insufficient Balance");
+      const result = await testStaticProviderKey(provider, "sk-valid");
+      expect(result.warning).toContain("Insufficient Balance");
+    });
+
+    it("accepts a rate-limited key (429) with a warning", async () => {
+      upstream(429, "Rate limit reached");
+      const result = await testStaticProviderKey(provider, "sk-valid");
+      expect(result.warning).toContain("Rate limit reached");
+    });
+
+    it("rejects an invalid key (401) with the upstream reason instead of a bare status", async () => {
+      upstream(401, "Authentication Fails, Your api key: ****abcd is invalid");
+      await expect(testStaticProviderKey(provider, "sk-bad")).rejects.toThrow(
+        /401.*Authentication Fails/,
+      );
+    });
+
+    it("trims pasted whitespace and skips media-only models when probing", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ id: "ok", choices: [{ message: { content: "OK" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const result = await testStaticProviderKey(provider, "  sk-padded\n");
+      expect(result.warning).toBeUndefined();
+      const [, init] = fetchMock.mock.calls[0] ?? [];
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sk-padded");
+      expect(init?.body).toContain('"model":"deepseek-test"');
+    });
   });
 
   it("provides a deterministic fail-open client when no static provider is configured", async () => {

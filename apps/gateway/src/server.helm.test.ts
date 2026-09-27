@@ -59,7 +59,7 @@ it("relays Codex native items and headers only for an explicit Helm upstream", a
     "",
     5000,
   ).get("relay");
-  expect(generic?.supportsResponsesNativeItems).not.toBe(true);
+  expect(generic?.supportsResponsesNativeItems).toBe(true);
 });
 
 it("wires an explicit Helm provider to one persistent upstream WebSocket", async () => {

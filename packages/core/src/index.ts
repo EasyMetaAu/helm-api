@@ -821,6 +821,7 @@ export {
   routeRequest,
 } from "./routing/route-request.js";
 export {
+  consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
   readResponseTextWithinBudget,
 } from "./runtime/bounded-response.js";
@@ -941,6 +942,7 @@ export type {
   OAuthTokenRecord,
   OAuthTokenStore,
   OAuthUsageStore,
+  PayloadResponseWriter,
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,
@@ -948,6 +950,7 @@ export type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  RequestPayloadPartStream,
   ResponsesRegistryRecord,
   ResponsesRegistryStore,
   SessionRecord,

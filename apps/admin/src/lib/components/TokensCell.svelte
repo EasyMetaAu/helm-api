@@ -41,7 +41,7 @@
       {formatTokens(usage.cached)}
     </div>
     {#if usage.measurement === 'estimated_partial'}
-      <div data-testid="usage-measurement" class="text-amber-700">
+      <div data-testid="usage-measurement" class="max-w-[8rem] whitespace-normal text-amber-700">
         ≈ {$t('estimated · partial stream')}
       </div>
     {/if}

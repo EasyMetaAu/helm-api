@@ -9,10 +9,12 @@ import {
   encodePayloadText,
   iteratePayloadTextChunks,
 } from "../payload-codec.js";
+import { createPayloadResponseWriter } from "../payload-response.js";
 import type {
   EncodedRequestPayloadPartRecord,
   InsertPayloadInput,
   InsertTelemetryInput,
+  PayloadResponseWriter,
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
@@ -20,6 +22,7 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  RequestPayloadPartStream,
   SessionContinuationRecord,
   SessionEventHead,
   SessionRecord,
@@ -42,6 +45,7 @@ import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
 import {
+  requestPayloadResponseChunks,
   requestPayloads,
   sessionHeadEventHashes,
   sessionRevisionBodyChunks,
@@ -1036,7 +1040,8 @@ export class SqliteTelemetryStore implements TelemetryStore {
            request_json = excluded.request_json,
            response_json = excluded.response_json,
            upstream_request_json = excluded.upstream_request_json,
-           created_at = excluded.created_at`,
+           created_at = excluded.created_at,
+           response_body_generation = NULL`,
       ),
       putBlob: db.prepare(
         `INSERT INTO payload_blobs (sha256, bytes, mime, size, created_at)
@@ -1044,14 +1049,18 @@ export class SqliteTelemetryStore implements TelemetryStore {
          ON CONFLICT(sha256) DO UPDATE SET created_at = excluded.created_at`,
       ),
       get: db.prepare(
-        `SELECT request_json AS req, response_json AS resp, upstream_request_json AS up, created_at AS ts
+        `SELECT request_json AS req, response_json AS resp, upstream_request_json AS up, response_body_generation AS generation, created_at AS ts
          FROM request_payloads WHERE request_id = ?`,
       ),
       getMeta: db.prepare(
         `SELECT
            request_id AS id,
+           CASE WHEN response_body_generation IS NOT NULL THEN (
+             SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks
+             WHERE request_id = request_payloads.request_id AND generation = request_payloads.response_body_generation
+           ) END AS responseBytes,
            request_json IS NOT NULL AS hasReq,
-           response_json IS NOT NULL AS hasResp,
+           (response_json IS NOT NULL OR response_body_generation IS NOT NULL) AS hasResp,
            upstream_request_json IS NOT NULL AS hasUp,
            created_at AS ts
          FROM request_payloads WHERE request_id = ?`,
@@ -1061,7 +1070,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
          FROM request_payloads WHERE request_id = ?`,
       ),
       getResponsePart: db.prepare(
-        `SELECT request_id AS id, response_json AS value, created_at AS ts
+        `SELECT request_id AS id, response_json AS value, response_body_generation AS generation, created_at AS ts
          FROM request_payloads WHERE request_id = ?`,
       ),
       getUpstreamPart: db.prepare(
@@ -1103,6 +1112,10 @@ export class SqliteTelemetryStore implements TelemetryStore {
     const resp = this.encodeColumn(input.responseJson, blobs);
     const up = this.encodeColumn(input.upstreamRequestJson ?? null, blobs);
     const ts = input.createdAt.getTime();
+    this.db
+      .delete(requestPayloadResponseChunks)
+      .where(eq(requestPayloadResponseChunks.requestId, input.requestId))
+      .run();
     this.stmts().put.run({ id: input.requestId, req, resp, up, ts });
     for (const b of blobs.values()) {
       this.stmts().putBlob.run({
@@ -1130,15 +1143,133 @@ export class SqliteTelemetryStore implements TelemetryStore {
     })();
   }
 
+  async beginPayloadResponse(
+    input: Omit<InsertPayloadInput, "responseJson">,
+  ): Promise<PayloadResponseWriter> {
+    const generation = randomUUID();
+    this.db.$sqlite.transaction(() => {
+      if (this.stmts().get.get(input.requestId)) throw new Error("payload request already exists");
+      this.writePayloadRaw({ ...input, responseJson: null });
+    })();
+    const remove = () =>
+      this.db
+        .delete(requestPayloadResponseChunks)
+        .where(
+          and(
+            eq(requestPayloadResponseChunks.requestId, input.requestId),
+            eq(requestPayloadResponseChunks.generation, generation),
+          ),
+        )
+        .run();
+    return createPayloadResponseWriter({
+      write: async (chunk) => {
+        this.db
+          .insert(requestPayloadResponseChunks)
+          .values({ ...chunk, requestId: input.requestId, generation })
+          .run();
+        await yieldToEventLoop();
+      },
+      commit: async () => {
+        this.db
+          .update(requestPayloads)
+          .set({ responseBodyGeneration: generation })
+          .where(eq(requestPayloads.requestId, input.requestId))
+          .run();
+      },
+      abort: async () => {
+        this.db.$sqlite.transaction(() => {
+          this.db
+            .update(requestPayloads)
+            .set({ responseBodyGeneration: null })
+            .where(
+              and(
+                eq(requestPayloads.requestId, input.requestId),
+                eq(requestPayloads.responseBodyGeneration, generation),
+              ),
+            )
+            .run();
+          remove();
+        })();
+      },
+    });
+  }
+
+  async getPayloadPartStream(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartStream | null> {
+    if (part !== "response") return null;
+    const row = this.db
+      .select({
+        generation: requestPayloads.responseBodyGeneration,
+        createdAt: requestPayloads.createdAt,
+        chunkCount: sql<number>`(SELECT count(*) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
+        byteLength: sql<number>`(SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
+      })
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .get();
+    if (!row?.generation) return null;
+    const db = this.db;
+    const generation = row.generation;
+    return {
+      requestId,
+      part,
+      createdAt: row.createdAt,
+      byteLength: Number(row.byteLength),
+      stream: (async function* () {
+        let deliveredBytes = 0;
+        for (let index = 0; index < Number(row.chunkCount); index++) {
+          const chunk = db
+            .select()
+            .from(requestPayloadResponseChunks)
+            .where(
+              and(
+                eq(requestPayloadResponseChunks.requestId, requestId),
+                eq(requestPayloadResponseChunks.generation, generation),
+                eq(requestPayloadResponseChunks.chunkIndex, index),
+              ),
+            )
+            .get();
+          if (!chunk) throw new Error("missing payload response chunk");
+          const text = decodePayloadTextChunks([{ ...chunk, chunkIndex: 0 }]);
+          if (text === null) throw new Error("invalid payload response chunk");
+          const bytes = Buffer.from(text, "utf8");
+          deliveredBytes += bytes.byteLength;
+          yield bytes;
+        }
+        if (deliveredBytes !== Number(row.byteLength))
+          throw new Error("invalid payload response length");
+      })(),
+    };
+  }
+
+  private readPayloadResponse(requestId: string, generation: string): string | null {
+    const chunks = this.db
+      .select()
+      .from(requestPayloadResponseChunks)
+      .where(
+        and(
+          eq(requestPayloadResponseChunks.requestId, requestId),
+          eq(requestPayloadResponseChunks.generation, generation),
+        ),
+      )
+      .orderBy(asc(requestPayloadResponseChunks.chunkIndex))
+      .all();
+    return decodePayloadTextChunks(chunks);
+  }
+
   async getPayload(requestId: string): Promise<RequestPayload | null> {
     const row = this.stmts().get.get(requestId) as
-      | { req: unknown; resp: unknown; up: unknown; ts: number }
+      | { req: unknown; resp: unknown; up: unknown; generation: string | null; ts: number }
       | undefined;
     if (!row) return null;
     return {
       requestId,
       requestJson: this.decodeColumn(row.req) ?? "",
-      responseJson: this.decodeColumn(row.resp),
+      responseJson: row.generation
+        ? this.readPayloadResponse(requestId, row.generation)
+        : this.decodeColumn(row.resp),
       upstreamRequestJson: this.decodeColumn(row.up),
       createdAt: new Date(row.ts),
     };
@@ -1146,11 +1277,19 @@ export class SqliteTelemetryStore implements TelemetryStore {
 
   async getPayloadMeta(requestId: string): Promise<RequestPayloadMeta | null> {
     const row = this.stmts().getMeta.get(requestId) as
-      | { id: string; hasReq: number; hasResp: number; hasUp: number; ts: number }
+      | {
+          id: string;
+          hasReq: number;
+          hasResp: number;
+          hasUp: number;
+          responseBytes: number | null;
+          ts: number;
+        }
       | undefined;
     if (!row) return null;
     return {
       requestId: row.id,
+      ...(row.responseBytes === null ? {} : { responseBytes: row.responseBytes }),
       createdAt: new Date(row.ts),
       parts: {
         request: row.hasReq === 1,
@@ -1170,12 +1309,16 @@ export class SqliteTelemetryStore implements TelemetryStore {
         : part === "response"
           ? this.stmts().getResponsePart
           : this.stmts().getUpstreamPart;
-    const row = stmt.get(requestId) as { id: string; value: unknown; ts: number } | undefined;
+    const row = stmt.get(requestId) as
+      | { id: string; value: unknown; generation?: string | null; ts: number }
+      | undefined;
     if (!row) return null;
     return {
       requestId: row.id,
       part,
-      json: this.decodeColumn(row.value),
+      json: row.generation
+        ? this.readPayloadResponse(requestId, row.generation)
+        : this.decodeColumn(row.value),
       createdAt: new Date(row.ts),
     };
   }
@@ -1190,7 +1333,10 @@ export class SqliteTelemetryStore implements TelemetryStore {
         : part === "response"
           ? this.stmts().getResponsePart
           : this.stmts().getUpstreamPart;
-    const row = stmt.get(requestId) as { id: string; value: unknown; ts: number } | undefined;
+    const row = stmt.get(requestId) as
+      | { id: string; value: unknown; generation?: string | null; ts: number }
+      | undefined;
+    if (row?.generation) row.value = this.readPayloadResponse(requestId, row.generation);
     if (!row || row.value === null || row.value === undefined) return null;
     const bytes =
       typeof row.value === "string"
@@ -1305,7 +1451,9 @@ export class SqliteTelemetryStore implements TelemetryStore {
         // Columns may be gzip BLOBs with externalized images (new rows) or verbatim
         // TEXT (legacy) — decode both back to the original body for the archive.
         requestJson: this.decodeColumn(r.requestJson) ?? "",
-        responseJson: this.decodeColumn(r.responseJson),
+        responseJson: r.responseBodyGeneration
+          ? this.readPayloadResponse(r.requestId, r.responseBodyGeneration)
+          : this.decodeColumn(r.responseJson),
         upstreamRequestJson: this.decodeColumn(r.upstreamRequestJson ?? null),
         createdAt: r.createdAt.getTime(),
       }));

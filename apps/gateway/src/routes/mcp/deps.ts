@@ -1,10 +1,12 @@
 import type { Embedder, MemoryStore, ScoreConfig } from "@helm/core";
+import type { BodyMemoryAdmission } from "../../runtime/memory-admission.js";
 
 // docs/13 — dependencies for the Memory MCP server (mirrors the admin/route DI
 // pattern). The composition root (server.ts) wires store.memory + the same
 // chars/4 token estimator the rest of memory uses. Only mounted when
 // config.memory.mcp.enabled AND the store implements the management surface.
 export interface McpDeps {
+  memoryAdmission?: BodyMemoryAdmission;
   memoryStore: MemoryStore;
   now: () => Date;
   estimateTokens: (text: string) => number;

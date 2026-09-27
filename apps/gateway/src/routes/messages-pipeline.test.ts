@@ -1,3 +1,4 @@
+import * as core from "@helm/core";
 import {
   createResponseWorkAdmission,
   type ExecutionResult,
@@ -2599,4 +2600,52 @@ describe("createMessagesPipeline — streamIR with usage tracking + costOf (line
     expect(oauthCalls.length).toBe(1);
     expect(oauthCalls[0]?.tokens).toBe(12); // 8 + 4
   });
+});
+
+it("drops oversized optional Memory reconstruction while forwarding translated text", async () => {
+  const budget = core.runtimeMemoryBudget();
+  const spy = vi
+    .spyOn(core, "runtimeMemoryBudget")
+    .mockReturnValue({ ...budget, responseCaptureBytes: 1 });
+  try {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      async () => streamOkResult(sseTextStream()),
+      "anthropic_messages",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "thread", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    const types = await drain(run.streamIR());
+    expect(types).toContain("message_stop");
+    expect(persisted.filter((message) => message.role === "assistant")).toEqual([]);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it("measures only new UTF-8 fragments while reconstructing assistant text", () => {
+  const measure = vi.spyOn(Buffer, "byteLength");
+  const accumulator = createAssistantTextAccumulator(300);
+  let scannedChars = 0;
+  try {
+    for (let i = 0; i < 100; i++) accumulator.push("你");
+    scannedChars = measure.mock.calls.reduce(
+      (sum, [value]) => sum + (typeof value === "string" ? value.length : 0),
+      0,
+    );
+  } finally {
+    measure.mockRestore();
+  }
+  expect(scannedChars).toBeLessThanOrEqual(100);
+  expect(accumulator.text).toBe("你".repeat(100));
+  accumulator.push("😀");
+  expect(accumulator.limited).toBe(true);
+  expect(accumulator.text).toBe("");
 });

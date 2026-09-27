@@ -994,5 +994,11 @@
   "Your new API key": "新しい API キー",
   "Your requests, filtered by time, status, model, or lane.": "あなたのリクエストを、時間、ステータス、モデル、レーンで絞り込めます。",
   "Zoom in": "拡大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Reasoning effort": "Reasoning effort",
+  "Attempt": "Attempt",
+  "Fallback attempts": "Fallback attempts",
+  "Share": "Share",
+  "Date": "Date",
+  "Daily usage": "Daily usage"
 }

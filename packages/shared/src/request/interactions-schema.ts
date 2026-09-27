@@ -10,17 +10,18 @@ import { z } from "zod";
 // Helm's upstream (ZenMux Vertex) speaks `generateContent`, NOT `/v1beta/interactions`,
 // so the route TRANSLATES this request to a generateContent call (responseModalities
 // IMAGE) and maps the inlineData response back to the interactions `steps` shape. Only
-// `model` + `input` are required; the object is LOOSE so unknown/future fields ride
-// through — Helm never strips a client field it doesn't model.
+// `model` + `input` are required. Fields without a translation are rejected.
 
-// One block of structured `input` (text or inline image). Loose: future block types
-// (video, audio) and fields pass through to the translator untouched.
-export const InteractionInputBlockSchema = z.looseObject({
-  type: z.string(),
-  text: z.string().optional(),
-  data: z.string().optional(), // base64 (image/video block)
-  mime_type: z.string().optional(),
-});
+// This endpoint translates to generateContent; unrepresentable blocks must be
+// rejected before inference rather than silently discarded.
+export const InteractionInputBlockSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("text"), text: z.string().min(1) }),
+  z.strictObject({
+    type: z.literal("image"),
+    data: z.string().min(1),
+    mime_type: z.string().optional(),
+  }),
+]);
 
 // `input` is EITHER a bare prompt string OR an ordered array of typed blocks.
 export const InteractionInputSchema = z.union([
@@ -28,16 +29,15 @@ export const InteractionInputSchema = z.union([
   z.array(InteractionInputBlockSchema).min(1),
 ]);
 
-// Desired output format (image generation). Loose — aspect_ratio / image_size are
-// best-effort mapped to generateContent's imageConfig; unknown keys pass through.
-export const InteractionResponseFormatSchema = z.looseObject({
-  type: z.string(), // "image"
-  mime_type: z.string().optional(),
+// Supported output format (image generation): aspect_ratio / image_size are
+// mapped to generateContent's imageConfig; unsupported options are rejected.
+export const InteractionResponseFormatSchema = z.strictObject({
+  type: z.literal("image"),
   aspect_ratio: z.string().optional(),
   image_size: z.string().optional(),
 });
 
-export const InteractionsRequestSchema = z.looseObject({
+export const InteractionsRequestSchema = z.strictObject({
   model: z.string().min(1),
   input: InteractionInputSchema,
   response_format: InteractionResponseFormatSchema.optional(),

@@ -2105,6 +2105,31 @@ describe("admin OAuth routes — reset credit", () => {
 });
 
 describe("admin OAuth routes — connect flows", () => {
+  it.each([
+    "manual",
+    "device",
+  ])("%s/start passes the reconnect account and rejects invalid labels", async (flow) => {
+    const seam = fullSeam();
+    const endpoint = `/admin/api/oauth/anthropic/${flow}/start`;
+    const ok = await app({ oauth: seam }).request(endpoint, {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(flow === "manual" ? seam.startManualPaste : seam.startDeviceCode).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "anthropic", account: "work" }),
+    );
+    for (const account of [42, "", " "]) {
+      const bad = await app({ oauth: seam }).request(endpoint, {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account }),
+      });
+      expect(bad.status).toBe(400);
+    }
+  });
+
   it("POST manual/start returns the authorize URL; a bad proxy is 400", async () => {
     const ok = await app({ oauth: fullSeam() }).request("/admin/api/oauth/anthropic/manual/start", {
       method: "POST",
@@ -2658,5 +2683,167 @@ describe("admin OAuth routes — POST /oauth/:provider/reset (Reset usage)", () 
     );
     expect(res.status).toBe(400);
     expect((await res.json()) as { error: string }).toMatchObject({ error: "boom" });
+  });
+});
+
+describe("admin OAuth routes — Anthropic reset grants", () => {
+  const status = {
+    eligible: true,
+    at_limit: true,
+    exhausted: [],
+    cooldown_until: null,
+    next_grant_id: "grant_1",
+    pending: false,
+    grants: [
+      {
+        id: "grant_1",
+        label: "Claude",
+        resets_total: 2,
+        resets_left: 1,
+        starts_at: "2026-09-01T00:00:00Z",
+        ends_at: "2026-10-01T00:00:00Z",
+        clears: ["five_hour"],
+        paused: false,
+        usable_now: true,
+        use_requires_limit: false,
+        blocking: [],
+      },
+    ],
+  };
+
+  it("reads status without invoking the consume seam", async () => {
+    const get = vi.fn(async () => status);
+    const consume = vi.fn();
+    const res = await app({
+      oauth: fullSeam({ getAnthropicResetStatus: get, consumeAnthropicReset: consume }),
+    }).request("/admin/api/oauth/anthropic/reset-grants?account=work");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ next_grant_id: "grant_1" });
+    expect(get).toHaveBeenCalledWith({ account: "work" });
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid strict request before the consume seam", async () => {
+    const consume = vi.fn();
+    const res = await app({ oauth: fullSeam({ consumeAnthropicReset: consume }) }).request(
+      "/admin/api/oauth/anthropic/reset-grants",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({
+          account: "work",
+          grantId: "grant_1",
+          expectedResetsLeft: 1,
+          extra: true,
+        }),
+      },
+    );
+    expect(res.status).toBe(400);
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a no-op outcome reset or write quota", async () => {
+    const consume = vi.fn(async () => ({
+      result: "cooldown" as const,
+      status,
+      quotaRefreshed: false,
+      affectedAccounts: ["work"],
+    }));
+    const upsert = vi.fn();
+    const res = await app({
+      oauth: fullSeam({ consumeAnthropicReset: consume }),
+      oauthQuota: { upsert } as never,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ result: "cooldown", quotaRefreshed: false });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("refreshes and persists every verified same-organization account after reset", async () => {
+    const consume = vi.fn(async () => ({
+      result: "reset" as const,
+      status,
+      quotaRefreshed: true,
+      affectedAccounts: ["work", "sibling"],
+    }));
+    const fetchAnthropicQuota = vi.fn(async () => [
+      { key: "5h", usedPercent: 0, resetsAtMs: Date.now() + 3_600_000, windowMinutes: null },
+    ]);
+    const upsert = vi.fn(async () => {});
+    const applyQuotaSnapshot = vi.fn();
+    const res = await app({
+      oauth: fullSeam({ consumeAnthropicReset: consume, fetchAnthropicQuota }),
+      oauthQuota: { upsert } as never,
+      applyQuotaSnapshot,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ result: "reset", quotaRefreshed: true });
+    expect(fetchAnthropicQuota).toHaveBeenCalledTimes(2);
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(applyQuotaSnapshot).toHaveBeenCalledTimes(2);
+  });
+  it("preserves an active cooldown when a partial reset leaves 7d at 98 percent", async () => {
+    const now = Date.now();
+    const weeklyReset = now + 86_400_000;
+    const windows = [
+      { key: "5h", usedPercent: 0, resetsAtMs: now + 3_600_000, windowMinutes: null },
+      { key: "7d", usedPercent: 98, resetsAtMs: weeklyReset, windowMinutes: null },
+    ];
+    const applyUsageLimit = vi.fn(async () => {});
+    const res = await app({
+      oauth: fullSeam({
+        consumeAnthropicReset: vi.fn(async () => ({
+          result: "reset" as const,
+          status,
+          quotaRefreshed: true,
+          affectedAccounts: ["work"],
+        })),
+        fetchAnthropicQuota: vi.fn(async () => windows),
+      }),
+      oauthQuota: {
+        get: vi.fn(async () => ({ usageLimitedUntilMs: now + 60_000 })),
+        upsert: vi.fn(async () => {}),
+      } as never,
+      applyUsageLimit,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "work", weeklyReset, "replace");
+  });
+
+  it("reports incomplete identity or quota refresh without hiding confirmed success", async () => {
+    const fetchAnthropicQuota = vi.fn(async ({ account }: { account: string }) => {
+      if (account === "sibling") throw new Error("temporary failure");
+      return [{ key: "5h", usedPercent: 0, resetsAtMs: null, windowMinutes: null }];
+    });
+    const res = await app({
+      oauth: fullSeam({
+        consumeAnthropicReset: vi.fn(async () => ({
+          result: "reset" as const,
+          status,
+          quotaRefreshed: false,
+          affectedAccounts: ["work", "sibling"],
+        })),
+        fetchAnthropicQuota,
+      }),
+      oauthQuota: { upsert: vi.fn(async () => {}) } as never,
+    }).request("/admin/api/oauth/anthropic/reset-grants", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work", grantId: "grant_1", expectedResetsLeft: 1 }),
+    });
+    expect(await res.json()).toMatchObject({ result: "reset", quotaRefreshed: false });
+    expect(fetchAnthropicQuota).toHaveBeenCalledWith({ account: "sibling", force: true });
   });
 });

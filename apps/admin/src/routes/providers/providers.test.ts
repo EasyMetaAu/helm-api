@@ -21,10 +21,15 @@ const setAccountSchedule = vi.fn();
 const setSelectionStrategy = vi.fn();
 const streamAccountTest = vi.fn();
 const consumeCodexResetCredit = vi.fn();
+const getAnthropicResetStatus = vi.fn();
+const consumeAnthropicReset = vi.fn();
 const getOAuthOverview = vi.fn();
 const requestOAuthRefresh = vi.fn();
+const startManualPaste = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
+  getAnthropicResetStatus: (...args: unknown[]) => getAnthropicResetStatus(...args),
+  consumeAnthropicReset: (...args: unknown[]) => consumeAnthropicReset(...args),
   consumeCodexResetCredit: (...args: unknown[]) => consumeCodexResetCredit(...args),
   getAccountModels: (...args: unknown[]) => getAccountModels(...args),
   getAccountProxy: (...args: unknown[]) => getAccountProxy(...args),
@@ -39,7 +44,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
   setSelectionStrategy: (...args: unknown[]) => setSelectionStrategy(...args),
   startDeviceCode: vi.fn(),
-  startManualPaste: vi.fn(),
+  startManualPaste: (...args: unknown[]) => startManualPaste(...args),
   streamAccountTest: (...args: unknown[]) => streamAccountTest(...args),
 }));
 
@@ -131,6 +136,8 @@ function renderPage(
 describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
+    getAnthropicResetStatus.mockReset();
+    consumeAnthropicReset.mockReset();
     getAccountModels.mockReset();
     getAccountProxy.mockReset();
     getAccountSchedule.mockReset();
@@ -141,6 +148,7 @@ describe('providers page', () => {
     consumeCodexResetCredit.mockReset();
     getOAuthOverview.mockReset();
     requestOAuthRefresh.mockReset();
+    startManualPaste.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     getAccountModels.mockResolvedValue({
@@ -174,6 +182,58 @@ describe('providers page', () => {
       retryAfterMs: 0,
       status: { ...idleRefresh, state: 'queued', jobId: 'refresh-1', requestedAt: Date.now() },
     });
+    startManualPaste.mockResolvedValue({
+      sessionId: 'reconnect-session',
+      authorizeUrl: 'https://auth.example/reconnect',
+    });
+  });
+
+  it('requires the explicit Claude confirmation and cannot dismiss by backdrop or Escape', async () => {
+    getAnthropicResetStatus.mockResolvedValue({
+      eligible: true,
+      at_limit: false,
+      pending: false,
+      next_grant_id: 'launch',
+      grants: [
+        {
+          id: 'launch',
+          label: 'Launch reset',
+          resets_total: 1,
+          resets_left: 1,
+          ends_at: new Date(Date.now() + 86_400_000).toISOString(),
+          clears: ['five_hour', 'seven_day'],
+          paused: false,
+          usable_now: true,
+          use_requires_limit: false,
+          blocking: [],
+        },
+      ],
+    });
+    consumeAnthropicReset.mockResolvedValue({
+      result: 'reset',
+      status: null,
+      quotaRefreshed: true,
+    });
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: 'Reset Claude usage' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
+    expect(consumeAnthropicReset).not.toHaveBeenCalled();
+    expect(within(dialog).getByText(/1 resets remaining/)).toBeInTheDocument();
+    expect(screen.queryByTestId('modal-scrim')).not.toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: 'Confirm Claude usage reset' })).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(consumeAnthropicReset).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    const resetButton = await within(row).findByRole('button', { name: /Reset Claude usage/ });
+    expect(within(resetButton).getByTestId('anthropic-reset-meta')).toHaveTextContent(
+      '1 resets remaining',
+    );
+    await fireEvent.click(resetButton);
+    const confirmation = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
+    await fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset Claude usage' }));
+    await waitFor(() => expect(consumeAnthropicReset).toHaveBeenCalledTimes(1));
   });
 
   it('accepts refreshed route data without entering a reactive update loop', async () => {
@@ -901,6 +961,38 @@ describe('providers page', () => {
     expect(resetUsageLimit).not.toHaveBeenCalled();
   });
 
+  it('keeps the account table to seven columns and tucks rare actions into a row menu', () => {
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-copilot',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['m1'],
+            },
+          ],
+        }),
+      ],
+    });
+    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByRole('button', { name: 'Test' })).toBeVisible();
+    expect(within(row).getByRole('button', { name: 'Manage' })).toBeVisible();
+    const menu = within(row).getByTestId('provider-actions');
+    expect(menu.tagName).toBe('DETAILS');
+    expect(within(menu).getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+    // Scheduling controls stay inline, grouped in one cell.
+    const scheduling = within(row).getByTestId('provider-scheduling-cell');
+    expect(within(scheduling).getByLabelText('Priority')).toBeInTheDocument();
+    expect(within(scheduling).getByLabelText('Schedulable')).toBeInTheDocument();
+  });
+
   it('renders "Direct" and caps the models list with a +N pill', () => {
     renderPage({
       providers: [
@@ -1004,6 +1096,36 @@ describe('providers page', () => {
     expect(checkbox).toBeDisabled();
 
     expect(setAccountSchedule).not.toHaveBeenCalled();
+  });
+
+  it('offers reconnect for unhealthy accounts and starts that account flow', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-claude',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: false,
+              priority: 10,
+              schedulable: false,
+              proxy: null,
+              models: ['claude-opus-4-6'],
+            },
+          ],
+        }),
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^reconnect$/i }));
+
+    await waitFor(() =>
+      expect(startManualPaste).toHaveBeenCalledWith('anthropic', undefined, 'acct-claude'),
+    );
+    expect(screen.getByRole('heading', { name: 'Reconnect subscription' })).toBeInTheDocument();
   });
 
   it('toggles per-account Fast mode through the scheduling endpoint', async () => {

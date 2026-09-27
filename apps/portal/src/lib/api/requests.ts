@@ -1,9 +1,8 @@
-// Type-only shim so the reused admin detail viewers (TokenUsage/CostBreakdown)
-// compile in the portal. These components import their prop types from
-// `$lib/api/requests.js`; the portal doesn't reuse the admin requests parser, so
-// we re-declare ONLY the two view types they read. Kept structurally identical to
-// the admin originals (apps/admin/src/lib/api/requests.ts) so the components need
-// no edits.
+// Type-only shim so the reused admin detail viewer (TokenUsage) compiles in the
+// portal. That component imports its prop type from `$lib/api/requests.js`; the
+// portal doesn't reuse the admin requests parser, so we re-declare ONLY that view
+// type. Kept structurally identical to the admin original
+// (apps/admin/src/lib/api/requests.ts) so the component needs no edits.
 
 export interface TokenUsageView {
   input: number | null;
@@ -12,18 +11,6 @@ export interface TokenUsageView {
   cacheCreation: number | null;
   nonCached: number | null;
   total: number | null;
-}
-
-// CostBreakdown reads `RequestDetail['cost_breakdown']`; only that member is used.
-// The portal never exposes eval/routing self-cost (§4.3) so those read null — but
-// the shape must match the component's field access.
-export interface RequestDetail {
-  cost_breakdown: {
-    routing_usd: number | null;
-    eval_usd: number | null;
-    completion_usd: number | null;
-    total_usd: number | null;
-  };
 }
 
 // Map the portal's flat usage counts to the viewer's TokenUsageView (derives the

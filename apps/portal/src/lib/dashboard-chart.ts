@@ -62,3 +62,13 @@ export function formatTrendTick(
     ? date.toLocaleDateString(locale, options)
     : date.toLocaleTimeString(locale, options);
 }
+
+// Share % for the Overview "by model" table: each model's slice of the total
+// tokens across the whole `by_model` list (the SAME denominator the donut chart
+// slices by), rounded to a whole percent. Pure/testable — the page only maps the
+// result onto table rows. Empty input or an all-zero total → every row gets 0
+// (never NaN/Infinity from a 0/0 division).
+export function tokenSharePct(totalTokens: number, allTokens: number): number {
+  if (allTokens <= 0) return 0;
+  return Math.round((totalTokens / allTokens) * 100);
+}

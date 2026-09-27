@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import type { IRChunk } from "../gemini/gemini-types.js";
 import type { IRResponse } from "../ir.js";
 import {
@@ -1196,4 +1197,36 @@ describe("synthesizeSSEFromJSON — reasoning_content surfaces a thinking block 
       expect(thinkingDelta.delta.thinking).toBe("2 + 2 = 4");
     }
   });
+});
+
+it("bounds retained Anthropic tool slots while streaming arguments without accumulation", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  async function* tools(unique: boolean) {
+    for (let i = 0; i < 100; i++)
+      yield {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: unique ? i : 0, function: { arguments: "x".repeat(128) } }],
+            },
+          },
+        ],
+      };
+  }
+  let deltas = 0;
+  for await (const event of convertOpenAIStreamToAnthropic(tools(false), {
+    workAdmission: admission,
+  })) {
+    if (event.type === "content_block_delta") deltas++;
+  }
+  expect(deltas).toBe(100);
+  await expect(
+    collect(convertOpenAIStreamToAnthropic(tools(true), { workAdmission: admission })),
+  ).rejects.toThrow("memory capacity");
+  expect(admission.reservedBytes).toBe(0);
 });

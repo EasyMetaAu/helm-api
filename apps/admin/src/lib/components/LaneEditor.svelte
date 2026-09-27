@@ -23,6 +23,7 @@
     models = [],
     laneNames = [],
     canDelete = true,
+    open = false,
     onchange,
     ondelete = () => {},
   }: {
@@ -30,6 +31,7 @@
     models?: ModelOption[];
     laneNames?: string[];
     canDelete?: boolean;
+    open?: boolean;
     onchange: (lane: Lane) => void;
     ondelete?: (name: string) => void;
   } = $props();
@@ -178,185 +180,221 @@
   }
 </script>
 
-<section class="card flex flex-col gap-3" data-testid="lane-card">
-  <header class="flex items-center justify-between gap-3">
-    <h2 class="section-header">{lane.name}</h2>
-    <div class="flex items-center gap-2">
+<!-- Collapsed by default: a long lane list reads as a scannable table of
+     "name · primary → +N fallbacks · effort"; expanding a row reveals the full
+     editor. Native <details> keeps every field in the DOM (tests, find-in-page),
+     and an invalid lane forces itself open so its error is never hidden. -->
+<details
+  class="group rounded-lg border border-slate-200 bg-white"
+  data-testid="lane-card"
+  open={open || primaryEmpty}
+>
+  <summary
+    data-testid="lane-summary"
+    class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-slate-50 [&::-webkit-details-marker]:hidden"
+  >
+    <svg
+      viewBox="0 0 20 20"
+      class="h-4 w-4 shrink-0 text-ink-faint transition-transform group-open:rotate-90"
+      fill="currentColor"
+      aria-hidden="true"
+      ><path
+        d="M7.2 4.2a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06L8.26 15.8a.75.75 0 1 1-1.06-1.06L11.94 10 7.2 5.26a.75.75 0 0 1 0-1.06Z"
+      /></svg
+    >
+    <div class="min-w-0 flex-1">
+      <h2 class="text-sm font-semibold text-ink">{lane.name}</h2>
       {#if lane.purpose}
-        <span class="badge-neutral">{lane.purpose}</span>
+        <p class="truncate text-xs text-ink-muted">{lane.purpose}</p>
       {/if}
+    </div>
+    <div class="hidden min-w-0 items-center gap-2 text-xs sm:flex">
+      <code class="max-w-[16rem] truncate font-mono text-ink-body">{trimmedPrimary || '—'}</code>
+      {#if fallback.length > 0}
+        <span class="text-ink-muted" title={fallback.join(' → ')}>→ +{fallback.length}</span>
+      {/if}
+      {#if reasoningEffort}
+        <span class="badge-neutral" title={$t('Forced reasoning effort')}>{reasoningEffort}</span>
+      {/if}
+    </div>
+  </summary>
+
+  <div class="flex flex-col gap-3 border-t border-slate-100 px-4 pt-3 pb-4">
+    <label class="flex flex-col gap-1">
+      <span class="field-label">{$t('Primary')}</span>
+      <input
+        name="primary"
+        class="input"
+        list={modelsListId}
+        value={primary}
+        oninput={(event) => {
+          primary = event.currentTarget.value;
+          emit();
+        }}
+      />
+      <span class="field-help">
+        {$t('The model this lane uses first. Tried before any fallback.')}
+      </span>
+    </label>
+
+    <!-- Shared suggestion list for the primary + fallback comboboxes: other lanes
+       (labelled, so they read as tiers) followed by the model-alias catalog.
+       Empty when neither is loaded → the inputs behave as plain text fields. -->
+    <datalist id={modelsListId}>
+      {#each laneOptions as ln (ln)}
+        <option value={ln} label={$t('lane')}></option>
+      {/each}
+      {#each models as { alias, accounts } (alias)}
+        <!-- label = the subscription account(s) backing this model (e.g. "default" /
+           "default, mylukin"); for configured providers with no account it falls
+           back to the provider name, so every option shows a source hint. -->
+        <option value={alias} label={modelLabel(alias, accounts)}></option>
+      {/each}
+    </datalist>
+
+    <fieldset class="flex flex-col gap-1">
+      <legend class="field-label">{$t('Fallback (ordered)')}</legend>
+      <span class="field-help">
+        {$t('Tried top to bottom when the primary fails. Order is the try order.')}
+      </span>
+      <ul class="flex flex-col gap-1" bind:this={fallbackList}>
+        {#each fallback as f, i (i + ':' + f)}
+          <li
+            class={`flex items-center gap-2 rounded bg-slate-50 px-2 py-1 text-sm ${draggingIndex === i ? 'opacity-60 ring-2 ring-slate-300' : ''}`}
+            data-testid="fallback-item"
+            ondragover={(event) => event.preventDefault()}
+            ondrop={(event) => handleDrop(i, event)}
+          >
+            <button
+              type="button"
+              class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
+              aria-label={$t('drag to reorder fallback')}
+              title={$t('drag to reorder fallback')}
+              disabled={fallback.length < 2}
+              draggable={fallback.length > 1}
+              ondragstart={(event) => handleDragStart(i, event)}
+              ondragend={finishDrag}
+              onpointerdown={(event) => handlePointerStart(i, event)}
+              onkeydown={(event) => handleDragKeydown(i, event)}
+            >
+              <svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M7 5.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0 4.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm-1.25 6a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm9.75-10.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM14.25 11.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm1.25 3.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z"
+                />
+              </svg>
+            </button>
+            <span class="badge-fallback">{i + 1}</span>
+            <span class="flex-1">{f}</span>
+            <button
+              type="button"
+              class="btn-icon"
+              aria-label={`remove ${f}`}
+              onclick={() => removeFallback(i)}>✕</button
+            >
+          </li>
+        {/each}
+        {#if fallback.length === 0}
+          <li class="text-sm text-ink-muted">
+            {$t('No fallback models yet. Add one below.')}
+          </li>
+        {/if}
+      </ul>
+      <div class="flex gap-2">
+        <input
+          class="input flex-1"
+          placeholder={$t('model or lane')}
+          list={modelsListId}
+          data-testid="fallback-add-input"
+          bind:value={newFallback}
+        />
+        <button type="button" class="btn-secondary" onclick={addFallback}
+          >{$t('Add fallback')}</button
+        >
+      </div>
+    </fieldset>
+
+    <div class="flex flex-col gap-2">
+      <span class="field-label">{$t('Constraints')}</span>
+      <span class="field-help">
+        {$t('Optional requirements a model must meet for this lane to use it.')}
+      </span>
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <label class="checkbox-field">
+          <input
+            type="checkbox"
+            class="checkbox"
+            checked={requireTools}
+            onchange={(event) => {
+              requireTools = event.currentTarget.checked;
+              emit();
+            }}
+          />
+          <span>{$t('Require tools')}</span>
+        </label>
+        <label class="checkbox-field">
+          <input
+            type="checkbox"
+            class="checkbox"
+            checked={requireJson}
+            onchange={(event) => {
+              requireJson = event.currentTarget.checked;
+              emit();
+            }}
+          />
+          <span>{$t('Require JSON')}</span>
+        </label>
+      </div>
+      <label class="field">
+        <span class="field-label">{$t('Max latency (ms)')}</span>
+        <input
+          type="number"
+          min="1"
+          class="input-sm w-32"
+          value={maxLatency ?? ''}
+          oninput={(e) => {
+            const v = (e.currentTarget as HTMLInputElement).value;
+            maxLatency = v === '' ? null : Number(v);
+            emit();
+          }}
+        />
+      </label>
+    </div>
+
+    <label class="field flex flex-col gap-1">
+      <span class="field-label">{$t('Forced reasoning effort')}</span>
+      <select
+        class="input-sm w-44"
+        data-testid="reasoning-effort"
+        value={reasoningEffort}
+        onchange={(event) => {
+          reasoningEffort = event.currentTarget.value as ReasoningEffort | '';
+          emit();
+        }}
+      >
+        <option value="">{$t('Unset (client decides)')}</option>
+        {#each REASONING_EFFORTS as eff (eff)}
+          <option value={eff}>{eff}</option>
+        {/each}
+      </select>
+      <span class="field-help">
+        {$t('When set, overrides the client reasoning effort for every request on this lane.')}
+      </span>
+    </label>
+
+    {#if primaryEmpty}
+      <p class="alert-error" role="alert">
+        {$t('Primary is required and cannot be empty.')}
+      </p>
+    {/if}
+
+    <div class="flex justify-end border-t border-slate-100 pt-3">
       <button
         type="button"
         class="btn-danger-outline"
         disabled={!canDelete}
+        title={canDelete ? undefined : $t('The default lane cannot be deleted.')}
         onclick={() => ondelete(initial.name)}>{$t('Delete')}</button
       >
     </div>
-  </header>
-
-  <label class="flex flex-col gap-1">
-    <span class="field-label">{$t('Primary')}</span>
-    <input
-      name="primary"
-      class="input"
-      list={modelsListId}
-      value={primary}
-      oninput={(event) => {
-        primary = event.currentTarget.value;
-        emit();
-      }}
-    />
-    <span class="field-help">
-      {$t('The model this lane uses first. Tried before any fallback.')}
-    </span>
-  </label>
-
-  <!-- Shared suggestion list for the primary + fallback comboboxes: other lanes
-       (labelled, so they read as tiers) followed by the model-alias catalog.
-       Empty when neither is loaded → the inputs behave as plain text fields. -->
-  <datalist id={modelsListId}>
-    {#each laneOptions as ln (ln)}
-      <option value={ln} label={$t('lane')}></option>
-    {/each}
-    {#each models as { alias, accounts } (alias)}
-      <!-- label = the subscription account(s) backing this model (e.g. "default" /
-           "default, mylukin"); for configured providers with no account it falls
-           back to the provider name, so every option shows a source hint. -->
-      <option value={alias} label={modelLabel(alias, accounts)}></option>
-    {/each}
-  </datalist>
-
-  <fieldset class="flex flex-col gap-1">
-    <legend class="field-label">{$t('Fallback (ordered)')}</legend>
-    <span class="field-help">
-      {$t('Tried top to bottom when the primary fails. Order is the try order.')}
-    </span>
-    <ul class="flex flex-col gap-1" bind:this={fallbackList}>
-      {#each fallback as f, i (i + ':' + f)}
-        <li
-          class={`flex items-center gap-2 rounded bg-slate-50 px-2 py-1 text-sm ${draggingIndex === i ? 'opacity-60 ring-2 ring-slate-300' : ''}`}
-          data-testid="fallback-item"
-          ondragover={(event) => event.preventDefault()}
-          ondrop={(event) => handleDrop(i, event)}
-        >
-          <button
-            type="button"
-            class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
-            aria-label={$t('drag to reorder fallback')}
-            title={$t('drag to reorder fallback')}
-            disabled={fallback.length < 2}
-            draggable={fallback.length > 1}
-            ondragstart={(event) => handleDragStart(i, event)}
-            ondragend={finishDrag}
-            onpointerdown={(event) => handlePointerStart(i, event)}
-            onkeydown={(event) => handleDragKeydown(i, event)}
-          >
-            <svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor" aria-hidden="true">
-              <path
-                d="M7 5.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0 4.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm-1.25 6a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm9.75-10.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM14.25 11.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm1.25 3.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z"
-              />
-            </svg>
-          </button>
-          <span class="badge-fallback">{i + 1}</span>
-          <span class="flex-1">{f}</span>
-          <button
-            type="button"
-            class="btn-icon"
-            aria-label={`remove ${f}`}
-            onclick={() => removeFallback(i)}>✕</button
-          >
-        </li>
-      {/each}
-      {#if fallback.length === 0}
-        <li class="text-sm text-ink-muted">
-          {$t('No fallback models yet. Add one below.')}
-        </li>
-      {/if}
-    </ul>
-    <div class="flex gap-2">
-      <input
-        class="input flex-1"
-        placeholder={$t('model or lane')}
-        list={modelsListId}
-        data-testid="fallback-add-input"
-        bind:value={newFallback}
-      />
-      <button type="button" class="btn-secondary" onclick={addFallback}>{$t('Add fallback')}</button
-      >
-    </div>
-  </fieldset>
-
-  <div class="flex flex-col gap-2">
-    <span class="field-label">{$t('Constraints')}</span>
-    <span class="field-help">
-      {$t('Optional requirements a model must meet for this lane to use it.')}
-    </span>
-    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-      <label class="checkbox-field">
-        <input
-          type="checkbox"
-          class="checkbox"
-          checked={requireTools}
-          onchange={(event) => {
-            requireTools = event.currentTarget.checked;
-            emit();
-          }}
-        />
-        <span>{$t('Require tools')}</span>
-      </label>
-      <label class="checkbox-field">
-        <input
-          type="checkbox"
-          class="checkbox"
-          checked={requireJson}
-          onchange={(event) => {
-            requireJson = event.currentTarget.checked;
-            emit();
-          }}
-        />
-        <span>{$t('Require JSON')}</span>
-      </label>
-    </div>
-    <label class="field">
-      <span class="field-label">{$t('Max latency (ms)')}</span>
-      <input
-        type="number"
-        min="1"
-        class="input-sm w-32"
-        value={maxLatency ?? ''}
-        oninput={(e) => {
-          const v = (e.currentTarget as HTMLInputElement).value;
-          maxLatency = v === '' ? null : Number(v);
-          emit();
-        }}
-      />
-    </label>
   </div>
-
-  <label class="field flex flex-col gap-1">
-    <span class="field-label">{$t('Forced reasoning effort')}</span>
-    <select
-      class="input-sm w-44"
-      data-testid="reasoning-effort"
-      value={reasoningEffort}
-      onchange={(event) => {
-        reasoningEffort = event.currentTarget.value as ReasoningEffort | '';
-        emit();
-      }}
-    >
-      <option value="">{$t('Unset (client decides)')}</option>
-      {#each REASONING_EFFORTS as eff (eff)}
-        <option value={eff}>{eff}</option>
-      {/each}
-    </select>
-    <span class="field-help">
-      {$t('When set, overrides the client reasoning effort for every request on this lane.')}
-    </span>
-  </label>
-
-  {#if primaryEmpty}
-    <p class="alert-error" role="alert">
-      {$t('Primary is required and cannot be empty.')}
-    </p>
-  {/if}
-</section>
+</details>

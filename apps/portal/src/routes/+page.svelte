@@ -8,6 +8,7 @@
   import {
     formatTrendTick,
     pctDelta,
+    tokenSharePct,
     trendAxisTicks,
   } from "$lib/dashboard-chart";
   import RangeFilter from "$lib/components/RangeFilter.svelte";
@@ -126,6 +127,51 @@
         tokens: m.total_tokens,
         cost: m.cost_usd,
       })),
+  );
+
+  // "By model" table: the SAME by_model list the donut chart slices, with the
+  // per-model request count added and a share% computed against the total
+  // tokens across every model (matches the donut's proportions exactly).
+  type ModelRow = {
+    model: string;
+    requests: number;
+    tokens: number;
+    cost: number | null;
+    sharePct: number;
+  };
+  const modelTotalTokens = $derived(
+    byModel.reduce((sum, m) => sum + m.tokens, 0),
+  );
+  const modelRows = $derived<ModelRow[]>(
+    (stats?.by_model ?? [])
+      .filter((m) => m.total_tokens > 0)
+      .map((m) => ({
+        model: m.model ?? $t("unknown"),
+        requests: m.requests,
+        tokens: m.total_tokens,
+        cost: m.cost_usd,
+        sharePct: tokenSharePct(m.total_tokens, modelTotalTokens),
+      })),
+  );
+
+  // Daily usage table: only meaningful once the range is wide enough that the
+  // series is bucketed by day (7d / 30d / all) — for today/yesterday the hourly
+  // series belongs in the trend chart above, not a second redundant table.
+  type DayRow = {
+    date: Date;
+    requests: number;
+    tokens: number;
+    cost: number | null;
+  };
+  const dailyRows = $derived<DayRow[]>(
+    bucket === "day"
+      ? (stats?.series ?? []).map((b) => ({
+          date: new Date(b.bucket_start_ms),
+          requests: b.requests,
+          tokens: b.prompt_tokens + b.completion_tokens,
+          cost: b.cost_usd,
+        }))
+      : [],
   );
   const SLICE_COLORS = [
     "hsl(var(--color-primary))",
@@ -387,6 +433,85 @@
       {/if}
     </section>
   </div>
+
+  <!-- "By model" table: same data the donut slices, with request count + share%. -->
+  {#if modelRows.length > 0}
+    <section class="card mt-4">
+      <h2 class="section-header mb-3">{$t("By model")}</h2>
+      <div class="table-wrap">
+        <table class="table-base">
+          <thead class="table-head">
+            <tr>
+              <th class="px-3 py-2 text-left">{$t("Model")}</th>
+              <th class="px-3 py-2 text-right">{$t("Requests")}</th>
+              <th class="px-3 py-2 text-right">{$t("Tokens")}</th>
+              <th class="px-3 py-2 text-right">{$t("Cost")}</th>
+              <th class="px-3 py-2 text-right">{$t("Share")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each modelRows as row, i (row.model)}
+              <tr class="table-row">
+                <td class="px-3 py-2">
+                  <span
+                    class="mr-1.5 inline-block size-2.5 rounded-full align-middle"
+                    style:background-color={SLICE_COLORS[
+                      i % SLICE_COLORS.length
+                    ]}
+                  ></span>
+                  <span class="align-middle">{row.model}</span>
+                </td>
+                <td class="px-3 py-2 text-right">
+                  {formatTokens(row.requests)}
+                </td>
+                <td class="px-3 py-2 text-right">
+                  {formatTokens(row.tokens)}
+                </td>
+                <td class="px-3 py-2 text-right">{formatUsd(row.cost)}</td>
+                <td class="px-3 py-2 text-right">{row.sharePct}%</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {/if}
+
+  <!-- Daily usage: only shown once the series is day-bucketed (7d/30d/all) — the
+       hourly today/yesterday series already has the trend chart above. -->
+  {#if dailyRows.length > 0}
+    <section class="card mt-4">
+      <h2 class="section-header mb-3">{$t("Daily usage")}</h2>
+      <div class="table-wrap">
+        <table class="table-base">
+          <thead class="table-head">
+            <tr>
+              <th class="px-3 py-2 text-left">{$t("Date")}</th>
+              <th class="px-3 py-2 text-right">{$t("Requests")}</th>
+              <th class="px-3 py-2 text-right">{$t("Tokens")}</th>
+              <th class="px-3 py-2 text-right">{$t("Cost")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each dailyRows as row (row.date.getTime())}
+              <tr class="table-row">
+                <td class="px-3 py-2">
+                  {formatTrendTick(row.date, "day")}
+                </td>
+                <td class="px-3 py-2 text-right">
+                  {formatTokens(row.requests)}
+                </td>
+                <td class="px-3 py-2 text-right">
+                  {formatTokens(row.tokens)}
+                </td>
+                <td class="px-3 py-2 text-right">{formatUsd(row.cost)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {/if}
 
   <!-- Recent requests -->
   <section class="card mt-4">

@@ -11,6 +11,12 @@ import {
   type OAuthUsagePeriod as SharedOAuthUsagePeriod,
   type OAuthUsagePeriods as SharedOAuthUsagePeriods,
   OAuthUsagePeriodsSchema,
+  AnthropicResetRequestSchema,
+  AnthropicResetResultSchema,
+  AnthropicResetStatusSchema,
+  type AnthropicResetRequest,
+  type AnthropicResetResult,
+  type AnthropicResetStatus,
 } from '@helm/shared';
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
@@ -63,6 +69,22 @@ export interface OAuthProviderStatus {
 }
 
 const BASE = '/admin/api/oauth';
+
+export async function getAnthropicResetStatus(account: string): Promise<AnthropicResetStatus> {
+  const res = await fetch(`${BASE}/anthropic/reset-grants?account=${encodeURIComponent(account)}`);
+  return AnthropicResetStatusSchema.parse(await asJson<unknown>(res));
+}
+export async function consumeAnthropicReset(
+  input: AnthropicResetRequest,
+): Promise<AnthropicResetResult> {
+  const body = AnthropicResetRequestSchema.parse(input);
+  const res = await fetch(`${BASE}/anthropic/reset-grants`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return AnthropicResetResultSchema.parse(await asJson<unknown>(res));
+}
 
 export type OAuthApiErrorCode =
   | 'device_authorization_denied'
@@ -282,11 +304,12 @@ export async function getOAuthUsagePeriods(
 export async function startManualPaste(
   provider: string,
   proxy?: AccountProxyInput,
+  account?: string,
 ): Promise<{ sessionId: string; authorizeUrl: string }> {
   const res = await fetch(`${BASE}/${provider}/manual/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ proxy }),
+    body: JSON.stringify({ proxy, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }
@@ -310,6 +333,7 @@ export async function startDeviceCode(
   provider: string,
   enterprise?: string,
   proxy?: AccountProxyInput,
+  account?: string,
 ): Promise<{
   sessionId: string;
   userCode: string;
@@ -321,7 +345,7 @@ export async function startDeviceCode(
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enterprise, proxy }),
+    body: JSON.stringify({ enterprise, proxy, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }

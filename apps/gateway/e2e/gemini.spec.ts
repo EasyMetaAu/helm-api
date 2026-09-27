@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import {
   CAPTURE_PATH,
+  COUNT_REJECT_SENTINEL,
   TOOL_CALL_SENTINEL,
   type UpstreamCapture,
 } from "./fixtures/mock-upstream.js";
@@ -168,14 +169,14 @@ test.describe("Gemini auth + error envelopes", () => {
     expect(body.error.code).toBe(401);
   });
 
-  test("countTokens returns a deterministic local estimate", async ({ request }) => {
+  test("countTokens returns the native upstream count", async ({ request }) => {
     const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
       headers: GEMINI_AUTH,
       data: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
     });
     expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ totalTokens: 14, estimated: true });
+    expect(body).toEqual({ totalTokens: 17 });
   });
 
   test("countTokens accepts publisher model paths", async ({ request }) => {
@@ -188,7 +189,16 @@ test.describe("Gemini auth + error envelopes", () => {
     );
     expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ totalTokens: 14, estimated: true });
+    expect(body).toEqual({ totalTokens: 17 });
+  });
+
+  test("countTokens preserves an upstream rejection instead of estimating", async ({ request }) => {
+    const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
+      headers: GEMINI_AUTH,
+      data: { contents: [{ role: "user", parts: [{ text: COUNT_REJECT_SENTINEL }] }] },
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error.status).toBe("INVALID_ARGUMENT");
   });
 
   test("malformed countTokens body returns 400 INVALID_ARGUMENT", async ({ request }) => {

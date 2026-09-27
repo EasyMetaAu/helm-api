@@ -266,6 +266,31 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
     ).toBe(false);
   });
 
+  it.each([
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "anthropic/claude-opus-5-5",
+    "claude-opus-5-5-20260923",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
+  ])("preserves inline system cache boundaries for %s", (providerModel) => {
+    expect(anthropicNativeBodyRequiresSystemFold(claudeCodeBody, { providerModel })).toBe(false);
+  });
+
+  it.each([
+    "claude-sonnet-5",
+    "claude-opus-5-6",
+    "claude-opus-50",
+    "claude-opus-5-unknown",
+    "claude-opus-4-8-unknown",
+    "claude-fable-5-2",
+    "claude-mythos-5-2",
+  ])("keeps unsupported or unknown %s on the fold path", (providerModel) => {
+    expect(anthropicNativeBodyRequiresSystemFold(claudeCodeBody, { providerModel })).toBe(true);
+  });
+
   it("keeps older or unknown Anthropic models on the fold path", () => {
     expect(
       anthropicNativeBodyRequiresSystemFold(claudeCodeBody, {
@@ -291,7 +316,7 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
     ).toBe(true);
   });
 
-  it("flags a leading system turn at messages[0] even on Opus 4.8", () => {
+  it("leaves leading native system validation to Opus 4.8", () => {
     expect(
       anthropicNativeBodyRequiresSystemFold(
         {
@@ -302,10 +327,10 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
         },
         { providerModel: "claude-opus-4-8" },
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("flags consecutive inline system turns even on Opus 4.8", () => {
+  it("preserves consecutive native system turns on Opus 4.8", () => {
     expect(
       anthropicNativeBodyRequiresSystemFold(
         {
@@ -317,10 +342,10 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
         },
         { providerModel: "claude-opus-4-8" },
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("flags non-text inline system content even on Opus 4.8", () => {
+  it("does not reinterpret unknown native system content on Opus 4.8", () => {
     expect(
       anthropicNativeBodyRequiresSystemFold(
         {
@@ -337,7 +362,7 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
         },
         { providerModel: "claude-opus-4-8" },
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("does NOT flag a canonical body (top-level system, only user/assistant in messages[])", () => {

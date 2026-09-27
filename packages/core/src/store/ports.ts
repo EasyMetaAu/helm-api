@@ -329,6 +329,23 @@ export interface InsertPayloadInput {
   createdAt: Date;
 }
 
+// Streaming capture is for a fresh, server-owned request id. The request is visible
+// immediately; the response becomes visible only after commit. Abort retains the
+// request and removes staged chunks. Callers await append for backpressure.
+export interface PayloadResponseWriter {
+  append(chunk: string): Promise<void>;
+  commit(): Promise<void>;
+  abort(): Promise<void>;
+}
+
+export interface RequestPayloadPartStream {
+  requestId: string;
+  part: RequestPayloadPart;
+  stream: AsyncIterable<Uint8Array>;
+  byteLength: number;
+  createdAt: Date;
+}
+
 export interface RequestPayload {
   requestId: string;
   requestJson: string;
@@ -340,6 +357,8 @@ export interface RequestPayload {
 export type RequestPayloadPart = "request" | "response" | "upstream_request";
 
 export interface RequestPayloadMeta {
+  /** Present for chunked responses; preflight materializing reads before allocation. */
+  responseBytes?: number;
   requestId: string;
   createdAt: Date;
   parts: {
@@ -713,6 +732,13 @@ export interface TelemetryStore {
   // by request_id (idempotent: the stream path may write the request first, then
   // backfill the assembled response). Stores verbatim bodies — never redacted.
   insertPayload(input: InsertPayloadInput): Promise<void>;
+  beginPayloadResponse?(
+    input: Omit<InsertPayloadInput, "responseJson">,
+  ): Promise<PayloadResponseWriter>;
+  getPayloadPartStream?(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartStream | null>;
   getPayload(requestId: string): Promise<RequestPayload | null>;
   // Lightweight admin detail reads. These are optional so older test doubles and
   // custom adapters can fall back to getPayload(), but real adapters implement them

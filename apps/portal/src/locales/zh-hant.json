@@ -994,5 +994,11 @@
   "Your new API key": "你的新 API 金鑰",
   "Your requests, filtered by time, status, model, or lane.": "你的請求，可依時間、狀態、模型或通道篩選。",
   "Zoom in": "放大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Reasoning effort": "Reasoning effort",
+  "Attempt": "Attempt",
+  "Fallback attempts": "Fallback attempts",
+  "Share": "Share",
+  "Date": "Date",
+  "Daily usage": "Daily usage"
 }

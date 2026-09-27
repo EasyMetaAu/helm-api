@@ -123,3 +123,25 @@ it("cancels a stalled body and releases admission on abort", async () => {
   expect(cancelled).toBe(true);
   expect(admission.reservedBytes).toBe(0);
 });
+
+it("decodes UTF-8 incrementally without retaining previously consumed byte chunks", async () => {
+  const original = new TextEncoder().encode("你好😀");
+  const chunk = new Uint8Array(1);
+  let index = 0;
+  const response = new Response(
+    new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (index === original.length) {
+            controller.close();
+            return;
+          }
+          chunk[0] = original[index++] ?? 0;
+          controller.enqueue(chunk);
+        },
+      },
+      { highWaterMark: 0 },
+    ),
+  );
+  await expect(readResponseTextWithinBudget(response, original.length)).resolves.toBe("你好😀");
+});

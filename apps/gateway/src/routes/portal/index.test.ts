@@ -8,6 +8,10 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../../app.js";
 import { authMiddleware } from "../../middleware/auth.js";
+import {
+  type BodyMemoryAdmission,
+  createBodyMemoryAdmission,
+} from "../../runtime/memory-admission.js";
 import { registerPortalApi } from "./index.js";
 
 const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
@@ -123,6 +127,7 @@ type PortalTelemetry = Pick<
   | "queryPage"
   | "getByRequestId"
   | "getApiKeyId"
+  | "getCreatedAt"
   | "getPayload"
   | "getPayloadMeta"
   | "getPayloadPart"
@@ -181,6 +186,9 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
     async getApiKeyId() {
       return "k1";
     },
+    async getCreatedAt() {
+      return new Date(1000);
+    },
     async getPayload() {
       return {
         requestId: "trace_1",
@@ -213,11 +221,17 @@ function buildApp(
   rec: ApiKeyRecord | null,
   tel: PortalTelemetry = telemetry(),
   updateKey: (keyId: string, patch: MemoryPatch) => Promise<void> = vi.fn(async () => {}),
+  memoryAdmission?: BodyMemoryAdmission,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
-  registerPortalApi(app, { telemetry: tel, keyStore: { updateKey }, now: () => 10_000 });
+  registerPortalApi(app, {
+    telemetry: tel,
+    keyStore: { updateKey },
+    now: () => 10_000,
+    memoryAdmission,
+  });
   return app;
 }
 
@@ -579,9 +593,79 @@ describe("portal API", () => {
         request_id: "req_internal_1",
         trace_id: "client_trace_1",
         served_model: "gpt-5.5",
+        created_at: 1000,
       });
       expect(body).not.toContain("SECRET_ALIAS");
       expect(body).not.toContain("SECRET_WIRE");
+      expect(body).not.toContain("SECRET_PROVIDER");
+      expect(body).not.toContain("SECRET_PID");
+      expect(body).not.toContain("SECRET_ACCT");
+    });
+
+    it("surfaces fallback attempt outcomes/timing but never alias or provider identity (R7)", async () => {
+      const tel = telemetry({
+        async getByRequestId() {
+          return decision({
+            provider_attempts: [
+              {
+                alias: "SECRET_ALIAS",
+                skipped: false,
+                skip_reason: null,
+                status: "error",
+                error_class: "timeout",
+                latency_ms: 800,
+                cost_usd: null,
+                error_detail: null,
+                provider_name: "SECRET_PROVIDER",
+                provider_model: "SECRET_WIRE",
+              },
+              {
+                alias: "SECRET_ALIAS",
+                skipped: false,
+                skip_reason: null,
+                status: "ok",
+                error_class: null,
+                latency_ms: 500,
+                cost_usd: 0.02,
+                error_detail: null,
+                provider_name: "SECRET_PROVIDER",
+                provider_model: "SECRET_WIRE",
+              },
+            ],
+          });
+        },
+      });
+      const res = await buildApp(record(), tel).request("/portal/api/requests/trace_1", {
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { attempts: unknown };
+      expect(body.attempts).toEqual([
+        { outcome: "timeout", latency_ms: 800 },
+        { outcome: "success", latency_ms: 500 },
+      ]);
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain("SECRET_ALIAS");
+      expect(serialized).not.toContain("SECRET_PROVIDER");
+      expect(serialized).not.toContain("SECRET_WIRE");
+    });
+
+    it("never returns another key's data even when both records share a request_id shape (cross-key isolation)", async () => {
+      const tel = telemetry({
+        async getApiKeyId() {
+          return "some_other_key";
+        },
+        async getByRequestId() {
+          return decision({ request_id: "trace_1" });
+        },
+      });
+      const res = await buildApp(record(), tel).request("/portal/api/requests/trace_1", {
+        headers: AUTH,
+      });
+      expect(res.status).toBe(404);
+      const body = await res.text();
+      expect(body).not.toContain("gpt-5.5");
+      expect(body).not.toContain("coding");
     });
   });
 
@@ -678,4 +762,31 @@ describe("portal API", () => {
       expect(readParts).toEqual([]);
     });
   });
+});
+
+it("accounts for portal bodies without adding a wire-size limit", async () => {
+  let capacity = 0;
+  const memoryAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: 1024,
+    capacityBytes: () => capacity,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
+  const updateKey = vi.fn(async () => {});
+  const app = buildApp(record(), undefined, updateKey, memoryAdmission);
+  const request = {
+    method: "PATCH",
+    headers: AUTH,
+    body: " ".repeat(256 * 1024) + JSON.stringify({ memory_mode: "off", memory_project_id: null }),
+  };
+  const denied = await app.request("/portal/api/memory-settings", request);
+  expect(denied.status).toBe(503);
+  expect(denied.headers.get("retry-after")).toBe("1");
+  expect(updateKey).not.toHaveBeenCalled();
+  expect(memoryAdmission.reservedBytes).toBe(0);
+  capacity = 1024 * 1024;
+  const accepted = await app.request("/portal/api/memory-settings", request);
+  expect(accepted.status).toBe(200);
+  expect(updateKey).toHaveBeenCalledTimes(1);
+  expect(memoryAdmission.reservedBytes).toBe(0);
 });

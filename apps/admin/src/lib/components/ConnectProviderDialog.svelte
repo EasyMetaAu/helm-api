@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import {
     type AccountProxyInput,
     completeManualPaste,
@@ -19,16 +19,18 @@
   // connect several accounts per provider; each is keyed by its label.
   let {
     providers,
+    reconnect,
     onconnected,
     onclose,
   }: {
     providers: OAuthProviderStatus[];
+    reconnect?: { providerId: string; account: string } | null;
     onconnected: () => void;
     onclose: () => void;
   } = $props();
 
-  let providerId = $state<string>(untrack(() => providers[0]?.id ?? ''));
-  let account = $state<string>('');
+  let providerId = $state<string>(untrack(() => reconnect?.providerId ?? providers[0]?.id ?? ''));
+  let account = $state<string>(untrack(() => reconnect?.account ?? ''));
   let enterprise = $state<string>('');
   let error = $state<string | null>(null);
   let busy = $state<boolean>(false);
@@ -51,6 +53,33 @@
   let proxyPort = $state<string>('');
   let proxyUser = $state<string>('');
   let proxyPass = $state<string>('');
+
+  let closed = false;
+  let pendingWindow: Window | null = null;
+
+  function closePendingWindow(): void {
+    pendingWindow?.close();
+    pendingWindow = null;
+  }
+
+  function openSignIn(url: string): void {
+    if (pendingWindow && !pendingWindow.closed) {
+      pendingWindow.location.replace(url);
+      pendingWindow = null;
+    } else {
+      window.open(url, '_blank', 'noopener');
+    }
+  }
+
+  onDestroy(() => {
+    closed = true;
+    closePendingWindow();
+    sessionId = '';
+  });
+
+  onMount(() => {
+    if (reconnect) void start();
+  });
 
   // Build the AccountProxyInput from the form, or null when proxy is off. Returns
   // `false` when ON but the host/port are invalid (caller surfaces an error and
@@ -105,11 +134,14 @@
   }
 
   function close(): void {
+    closed = true;
+    closePendingWindow();
     sessionId = '';
     onclose();
   }
 
   async function start(): Promise<void> {
+    if (busy || closed) return;
     error = null;
     const proxy = buildProxy();
     if (proxy === false) {
@@ -117,35 +149,44 @@
       return;
     }
     busy = true;
-    const acct = account.trim() || suggestion;
+    // Reserve the tab before awaiting the gateway, while the click still has activation.
+    if (reconnect) {
+      pendingWindow = window.open('about:blank', '_blank');
+      if (pendingWindow) pendingWindow.opener = null;
+    }
+    const acct = reconnect?.account ?? (account.trim() || suggestion);
     try {
       if (selected?.flow === 'manual_paste') {
-        const s = await startManualPaste(providerId, proxy ?? undefined);
+        const s = await startManualPaste(providerId, proxy ?? undefined, reconnect?.account);
+        if (closed) return;
         sessionId = s.sessionId;
         authorizeUrl = s.authorizeUrl;
         account = acct;
         step = 'manual';
-        window.open(s.authorizeUrl, '_blank', 'noopener');
+        openSignIn(s.authorizeUrl);
       } else {
         const s = await startDeviceCode(
           providerId,
           enterprise.trim() || undefined,
           proxy ?? undefined,
+          reconnect?.account,
         );
+        if (closed) return;
         sessionId = s.sessionId;
         userCode = s.userCode;
         verificationUri = s.verificationUri;
         account = acct;
         step = 'device';
         deviceStatus = 'waiting';
-        window.open(s.verificationUri, '_blank', 'noopener');
+        openSignIn(s.verificationUri);
         // Convert the server-clock absolute expiry into a browser-clock deadline.
         // This remains correct when the browser and gateway clocks differ.
         const ttlMs = Math.max(0, s.expiresAt - s.serverNowMs);
         void poll(s.sessionId, s.intervalMs, Date.now() + ttlMs);
       }
     } catch (e) {
-      error = msg(e);
+      closePendingWindow();
+      if (!closed) error = msg(e);
     } finally {
       busy = false;
     }
@@ -175,6 +216,7 @@
       if (Date.now() >= expiresAt) break;
       try {
         const { status } = await pollDeviceCode(providerId, { sessionId: sid, account });
+        if (closed || sessionId !== sid) return;
         if (status === 'done') {
           onconnected();
           close();
@@ -203,116 +245,128 @@
   }
 </script>
 
-<Modal label={$t('Connect a subscription')} onclose={close}>
-  <h2 class="section-header">{$t('Connect a subscription')}</h2>
+<Modal
+  label={reconnect ? $t('Reconnect subscription') : $t('Connect a subscription')}
+  onclose={close}
+>
+  <h2 class="section-header">
+    {reconnect ? $t('Reconnect subscription') : $t('Connect a subscription')}
+  </h2>
 
   {#if error}
     <p class="alert-error mt-2" role="alert">{error}</p>
   {/if}
 
+  {#if reconnect}
+    <p class="mt-2 text-sm text-ink-body">{selected?.name} · <code>{account}</code></p>
+  {/if}
+
   {#if step === 'form'}
-    <div class="mt-3 flex flex-col gap-3">
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Provider')}</span>
-        <select bind:value={providerId} class="select" aria-label={$t('Provider')}>
-          {#each providers as p (p.id)}
-            <option value={p.id}>{p.name}</option>
-          {/each}
-        </select>
-        <span class="field-help">
-          {#if selected?.flow !== 'manual_paste'}
-            {isXai
-              ? $t('Authorize xAI with a one-time device code.')
-              : $t('Enter a one-time device code on GitHub to authorize.')}
-          {:else if isAnthropic}
-            {$t('Sign in in your browser, then paste the authorization code back here.')}
-          {:else}
-            {$t('Sign in in your browser, then paste the redirect URL back here.')}
-          {/if}
-        </span>
-      </label>
-
-      {#if isXai}
-        <p
-          class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900"
-          role="note"
-        >
-          {$t(
-            'Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.',
-          )}
-        </p>
-      {/if}
-
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Account label')}</span>
-        <input class="input" bind:value={account} placeholder={suggestion} autocomplete="off" />
-        <span class="field-help">
-          {$t('A name to tell multiple accounts of the same provider apart (e.g. work, personal).')}
-        </span>
-      </label>
-
-      {#if selected?.flow === 'device_code' && providerId === 'github-copilot'}
+    {#if !reconnect}
+      <div class="mt-3 flex flex-col gap-3">
         <label class="flex flex-col gap-1 text-sm">
-          <span class="field-label">{$t('GitHub Enterprise domain (optional)')}</span>
-          <input
-            class="input"
-            bind:value={enterprise}
-            placeholder="github.com"
-            autocomplete="off"
-          />
+          <span class="field-label">{$t('Provider')}</span>
+          <select bind:value={providerId} class="select" aria-label={$t('Provider')}>
+            {#each providers as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+          <span class="field-help">
+            {#if selected?.flow !== 'manual_paste'}
+              {isXai
+                ? $t('Authorize xAI with a one-time device code.')
+                : $t('Enter a one-time device code on GitHub to authorize.')}
+            {:else if isAnthropic}
+              {$t('Sign in in your browser, then paste the authorization code back here.')}
+            {:else}
+              {$t('Sign in in your browser, then paste the redirect URL back here.')}
+            {/if}
+          </span>
         </label>
-      {/if}
 
-      <!-- Egress proxy (issue #38): collected up-front so the FIRST sign-in call
-           already tunnels through it — the operator's real IP is never exposed. -->
-      <div class="flex flex-col gap-2">
-        <label class="flex items-center gap-2 text-sm">
-          <input type="checkbox" class="checkbox" bind:checked={useProxy} />
-          <span class="field-label">{$t('Use a proxy (optional)')}</span>
-        </label>
-        {#if useProxy}
+        {#if isXai}
+          <p
+            class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900"
+            role="note"
+          >
+            {$t(
+              'Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.',
+            )}
+          </p>
+        {/if}
+
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Account label')}</span>
+          <input class="input" bind:value={account} placeholder={suggestion} autocomplete="off" />
           <span class="field-help">
             {$t(
-              "Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.",
+              'A name to tell multiple accounts of the same provider apart (e.g. work, personal).',
             )}
           </span>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="field-label">{$t('Type')}</span>
-              <select class="select" bind:value={proxyType}>
-                <option value="http">HTTP</option>
-                <option value="https">HTTPS</option>
-                <option value="socks5">SOCKS5</option>
-              </select>
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="field-label">{$t('Host')}</span>
-              <input class="input" type="text" placeholder="10.0.0.1" bind:value={proxyHost} />
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="field-label">{$t('Port')}</span>
-              <input
-                class="input"
-                type="number"
-                min="1"
-                max="65535"
-                placeholder="1080"
-                bind:value={proxyPort}
-              />
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="field-label">{$t('Username (optional)')}</span>
-              <input class="input" type="text" autocomplete="off" bind:value={proxyUser} />
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="field-label">{$t('Password (optional)')}</span>
-              <input class="input" type="password" autocomplete="off" bind:value={proxyPass} />
-            </label>
-          </div>
-        {/if}
-      </div>
-    </div>
+        </label>
 
+        {#if selected?.flow === 'device_code' && providerId === 'github-copilot'}
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="field-label">{$t('GitHub Enterprise domain (optional)')}</span>
+            <input
+              class="input"
+              bind:value={enterprise}
+              placeholder="github.com"
+              autocomplete="off"
+            />
+          </label>
+        {/if}
+
+        <!-- Egress proxy (issue #38): collected up-front so the FIRST sign-in call
+           already tunnels through it — the operator's real IP is never exposed. -->
+        <div class="flex flex-col gap-2">
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" class="checkbox" bind:checked={useProxy} />
+            <span class="field-label">{$t('Use a proxy (optional)')}</span>
+          </label>
+          {#if useProxy}
+            <span class="field-help">
+              {$t(
+                "Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.",
+              )}
+            </span>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="field-label">{$t('Type')}</span>
+                <select class="select" bind:value={proxyType}>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks5">SOCKS5</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="field-label">{$t('Host')}</span>
+                <input class="input" type="text" placeholder="10.0.0.1" bind:value={proxyHost} />
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="field-label">{$t('Port')}</span>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  placeholder="1080"
+                  bind:value={proxyPort}
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="field-label">{$t('Username (optional)')}</span>
+                <input class="input" type="text" autocomplete="off" bind:value={proxyUser} />
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="field-label">{$t('Password (optional)')}</span>
+                <input class="input" type="password" autocomplete="off" bind:value={proxyPass} />
+              </label>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
     <div class="mt-4 flex justify-end gap-2">
       <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
       <button type="button" class="btn-primary" disabled={busy || !providerId} onclick={start}>
