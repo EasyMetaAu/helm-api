@@ -56,7 +56,12 @@ import {
   UpstreamError,
   upstreamTransportError,
 } from "./openai.js";
-import { isFetchTransportError, withConnectionRetry, withOverloadRetry } from "./retry.js";
+import {
+  isFetchTransportError,
+  isPreConnectError,
+  withConnectionRetry,
+  withOverloadRetry,
+} from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface AnthropicClientConfig {
@@ -247,7 +252,6 @@ const STRICT_TOOL_RENAME_MAP: Record<string, string> = {
   lsp: "Lsp",
 };
 const STRICT_BUILTIN_TOOL_NAMES = new Set(Object.values(STRICT_TOOL_RENAME_MAP));
-const MAX_CACHE_CONTROL_BLOCKS = 4;
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
 
@@ -537,29 +541,6 @@ function applyStrictToolPipeline(body: Record<string, unknown>): ToolNameReverse
   return cloaker.hasMappings() ? cloaker : undefined;
 }
 
-function countAndLimitCacheControl(value: unknown, state: { remaining: number }): void {
-  if (!Array.isArray(value)) return;
-  for (const block of value as Array<Record<string, unknown>>) {
-    if (!isRecord(block) || block.cache_control === undefined) continue;
-    if (state.remaining > 0) {
-      state.remaining -= 1;
-    } else {
-      delete block.cache_control;
-    }
-  }
-}
-
-function enforceStrictCacheControlLimit(body: Record<string, unknown>): void {
-  const state = { remaining: MAX_CACHE_CONTROL_BLOCKS };
-  countAndLimitCacheControl(body.system, state);
-  if (Array.isArray(body.messages)) {
-    for (const message of body.messages) {
-      if (isRecord(message)) countAndLimitCacheControl(message.content, state);
-    }
-  }
-  countAndLimitCacheControl(body.tools, state);
-}
-
 function enforceStrictThinkingConstraints(body: Record<string, unknown>): void {
   const toolChoice = body.tool_choice;
   const forcedToolChoice =
@@ -584,7 +565,6 @@ function prepareStrictClaudeCliBody(body: Record<string, unknown>): {
 } {
   const toolNameMap = applyStrictToolPipeline(body);
   enforceStrictThinkingConstraints(body);
-  enforceStrictCacheControlLimit(body);
   return toolNameMap ? { body, toolNameMap } : { body };
 }
 
@@ -1128,12 +1108,13 @@ function buildSystem(
   messages: Array<Record<string, unknown>>,
   model: string,
   clientIdentity?: string | null,
+  cacheAgentPrompt = true,
 ): AnthropicBlock[] {
   const spoof: AnthropicBlock = { type: "text", text: SYSTEM_SPOOF };
   let agentPrompt: AnthropicBlock = {
     type: "text",
     text: buildClaudeCodeAgentPrompt(model),
-    cache_control: { type: "ephemeral" },
+    ...(cacheAgentPrompt ? { cache_control: { type: "ephemeral" } } : {}),
   };
   const foldedSystem: AnthropicBlock[] = [];
   const seenClaudeCodeBoilerplate = new Set<string>();
@@ -1152,7 +1133,9 @@ function buildSystem(
         agentPrompt = {
           ...b,
           text,
-          ...(b.cache_control === undefined ? { cache_control: { type: "ephemeral" } } : {}),
+          ...(b.cache_control === undefined && cacheAgentPrompt
+            ? { cache_control: { type: "ephemeral" } }
+            : {}),
         };
         continue;
       }
@@ -1170,6 +1153,34 @@ function buildSystem(
   // Derive the billing block from the (stable) text it precedes, then put it first.
   const systemText = sys.map((b) => String(b.text ?? "")).join("\n");
   return [billingHeaderBlock(systemText, clientIdentity), ...sys];
+}
+
+function hasClientCacheControl(req: Record<string, unknown>): boolean {
+  if (req.cache_control !== undefined) return true;
+
+  const messages = Array.isArray(req.messages) ? req.messages : [];
+  for (const value of messages) {
+    if (!isRecord(value)) continue;
+    if (value.cache_control !== undefined) return true;
+    if (Array.isArray(value.content)) {
+      for (const block of value.content) {
+        if (isRecord(block) && block.cache_control !== undefined) return true;
+      }
+    }
+    if (Array.isArray(value.tool_calls)) {
+      for (const call of value.tool_calls) {
+        if (isRecord(call) && call.cache_control !== undefined) return true;
+      }
+    }
+  }
+
+  const tools = Array.isArray(req.tools) ? req.tools : [];
+  for (const value of tools) {
+    if (!isRecord(value)) continue;
+    if (value.cache_control !== undefined) return true;
+    if (isRecord(value.function) && value.function.cache_control !== undefined) return true;
+  }
+  return false;
 }
 
 // Build the `claude-cli/<version> (external, <entrypoint>)` user-agent from the billing
@@ -1259,6 +1270,7 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
           id: String(tc.id ?? ""),
           name: String(fn.name ?? ""),
           input: args,
+          ...(tc.cache_control !== undefined ? { cache_control: tc.cache_control } : {}),
         });
       }
       push({
@@ -1288,7 +1300,12 @@ export function openaiToAnthropicRequest(
       : null;
   const body: Record<string, unknown> = {
     model: r.model,
-    system: buildSystem(messages, String(r.model ?? "claude-3-5-sonnet-20241022"), clientIdentity),
+    system: buildSystem(
+      messages,
+      String(r.model ?? "claude-3-5-sonnet-20241022"),
+      clientIdentity,
+      !hasClientCacheControl(r),
+    ),
     messages: toAnthropicMessages(messages),
     max_tokens:
       typeof r.max_completion_tokens === "number"
@@ -1359,10 +1376,9 @@ export function openaiToAnthropicRequest(
   }
   const toolChoice = anthropicToolChoice(r.tool_choice, r.parallel_tool_calls);
   if (toolChoice !== undefined) body.tool_choice = toolChoice;
-  // A request-level top-level `cache_control` is intentionally not forwarded here: the emulated
-  // Claude Code body always owns the cache breakpoint (ephemeral on the agent-prompt block) and
-  // top-level `cache_control` is not an Anthropic Messages field. Genuine passthrough for
-  // non-emulated targets lives in execute.ts (generic) and protocol/anthropic/request.ts (native).
+  // Automatic and explicit caching may coexist. Keep client-owned breakpoints;
+  // invalid combinations remain the provider's structured validation error.
+  if (r.cache_control !== undefined) body.cache_control = r.cache_control;
   return nativePassthroughBody(normalizeAnthropicModelParameters(body));
 }
 
@@ -1676,7 +1692,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // the OpenAI→Anthropic re-serialization, for native passthrough the verbatim body
     // (model patched). Surfaced before the first fetch so the gateway captures it.
     capture?.(wireBody);
-    // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
+    // Retry only failures proving the POST was not sent; no response bytes alone
+    // does not prove the provider has not accepted and billed the request.
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     // The overload wrapper sits OUTSIDE: a 529 answer is a valid Response (no throw), so
     // it re-issues the whole connection-retried attempt after a pause. Anthropic's 529 is
@@ -1704,7 +1721,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
                 t.cleanup();
               }
             },
-            { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+            {
+              retries: cfg.connectRetries,
+              backoffMs: cfg.connectRetryBackoffMs,
+              signal: external,
+              shouldRetry: isPreConnectError,
+            },
           ),
         { signal: external },
       );

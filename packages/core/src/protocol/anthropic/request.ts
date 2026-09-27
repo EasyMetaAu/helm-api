@@ -435,6 +435,7 @@ function toToolCall(block: z.infer<typeof AnthropicToolUseBlockSchema>): IRToolC
     id: block.id,
     type: "function",
     function: { name: block.name, arguments: args },
+    ...(block.cache_control !== undefined ? { cache_control: block.cache_control } : {}),
   };
 }
 
@@ -668,6 +669,7 @@ export function transformRequestOut(req: unknown): IRRequest {
             role: "tool",
             content: normalizeToolResultContent(b.content),
             tool_call_id: b.tool_use_id,
+            ...(cacheControl !== undefined ? { cache_control: cacheControl } : {}),
           });
           break;
         }
@@ -815,12 +817,14 @@ type AnthropicToolResultContentBlockOut =
   | AnthropicImageBlockOut
   | AnthropicDocumentBlockOut;
 export interface AnthropicToolUseBlockOut {
+  cache_control?: unknown;
   type: "tool_use";
   id: string;
   name: string;
   input: unknown;
 }
 export interface AnthropicToolResultBlockOut {
+  cache_control?: unknown;
   type: "tool_result";
   tool_use_id: string;
   content: string | AnthropicToolResultContentBlockOut[];
@@ -1051,22 +1055,8 @@ function thinkingBlocksFromMessage(message: IRMessage): AnthropicRequestBlock[] 
   });
 }
 
-function hasExplicitCacheControl(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(hasExplicitCacheControl);
-  if (value === null || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
-  if (Object.hasOwn(obj, "cache_control")) return true;
-  return Object.values(obj).some(hasExplicitCacheControl);
-}
-
-// POLICY (review H10): Anthropic has no system message role, so EVERY system/developer
-// turn — regardless of its position in the conversation — is folded, IN ORDER, into the
-// top-level `system` param. A mid-conversation system turn (e.g. a Claude Code injected
-// <system-reminder>) therefore joins the global system prompt rather than staying inline.
-// This is intentional and matches LiteLLM. If position-sensitive system content ever
-// needs to remain in place, fold it into the adjacent user turn instead — a deliberate
-// future change, not today's contract. The message loop (role check above) drops these
-// turns so they never reach messages[] as user/assistant turns.
+// Compatibility translation folds system/developer turns into top-level system.
+// Supported native inline-system requests bypass this lossy IR rendering path.
 function systemFromMessages(
   messages: readonly IRMessage[],
 ): string | AnthropicTextBlockOut[] | undefined {
@@ -1165,6 +1155,7 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
             type: "tool_result",
             tool_use_id: m.tool_call_id ?? "",
             content: toolResultContentFromIR(m.content),
+            ...(m.cache_control !== undefined ? { cache_control: m.cache_control } : {}),
           },
         ],
       });
@@ -1178,6 +1169,7 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
           id: call.id,
           name: toolNameMap.toAnthropic(call.function.name),
           input: parseToolInput(call.function.arguments),
+          ...(call.cache_control !== undefined ? { cache_control: call.cache_control } : {}),
         });
       }
       messages.push({ role: "assistant", content: blocks });
@@ -1253,9 +1245,7 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
-    ...(parsed.cache_control !== undefined && !hasExplicitCacheControl([system, merged, tools])
-      ? { cache_control: parsed.cache_control }
-      : {}),
+    ...(parsed.cache_control !== undefined ? { cache_control: parsed.cache_control } : {}),
     // metadata (Anthropic user-attribution) was stashed in provider_raw inbound; re-emit it.
     ...(parsed.provider_raw?.metadata !== undefined
       ? { metadata: parsed.provider_raw.metadata }

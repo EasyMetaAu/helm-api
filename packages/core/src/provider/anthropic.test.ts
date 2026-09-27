@@ -488,19 +488,19 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.container).toEqual({ id: "container_1" });
   });
 
-  it("drops top-level automatic cache_control because the Claude Code agent prompt owns the breakpoint", () => {
+  it("preserves client automatic caching without an extra gateway breakpoint", () => {
     const body = openaiToAnthropicRequest({
       model: "m",
       cache_control: { type: "ephemeral" },
       messages: [{ role: "user", content: "long context" }],
     });
 
-    expect(body.cache_control).toBeUndefined();
+    expect(body.cache_control).toEqual({ type: "ephemeral" });
     const system = body.system as Array<Record<string, unknown>>;
-    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(system[2]?.cache_control).toBeUndefined();
   });
 
-  it("drops top-level automatic cache_control when explicit block/tool cache controls exist", () => {
+  it("preserves automatic caching alongside explicit client breakpoints", () => {
     const body = openaiToAnthropicRequest({
       model: "m",
       cache_control: { type: "ephemeral" },
@@ -528,15 +528,61 @@ describe("openaiToAnthropicRequest", () => {
       ],
     });
 
-    expect(body.cache_control).toBeUndefined();
+    expect(body.cache_control).toEqual({ type: "ephemeral" });
     const system = body.system as Array<Record<string, unknown>>;
     // [0]=billing, [1]=spoof, [2]=Claude Code agent prompt, [3]=client system.
-    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(system[2]?.cache_control).toBeUndefined();
     expect(system[3]?.cache_control).toEqual({ type: "ephemeral" });
     const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
     expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     const tools = body.tools as Array<Record<string, unknown>>;
     expect(tools[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("keeps client tool-call cache controls on compatibility output", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-5-5",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "t1",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+    expect((body.messages as Array<{ content: unknown[] }>)[0]?.content[0]).toMatchObject({
+      type: "tool_use",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("does not mistake a tool schema property named cache_control for a cache marker", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-5-5",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "configure",
+            parameters: {
+              type: "object",
+              properties: { cache_control: { type: "string" } },
+            },
+          },
+        },
+      ],
+    });
+
+    const system = body.system as Array<Record<string, unknown>>;
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("folds the `developer` role into system (after spoof, in message order), never a user turn (issue #50)", () => {
@@ -2038,7 +2084,11 @@ describe("createAnthropicClient", () => {
     });
 
     const parsed = JSON.parse(sentBody) as Record<string, unknown> & {
-      tools: Array<{ name: string; input_schema: Record<string, unknown> }>;
+      tools: Array<{
+        name: string;
+        input_schema: Record<string, unknown>;
+        cache_control?: unknown;
+      }>;
       tool_choice: Record<string, unknown>;
     };
     expect(Object.keys(parsed)).toEqual(STRICT_CLAUDE_CLI_TOOL_GOLDEN.bodyKeys);
@@ -2053,7 +2103,14 @@ describe("createAnthropicClient", () => {
     expect(parsed.tool_choice).toEqual({ type: "tool", name: "Read" });
     expect(parsed.thinking).toBeUndefined();
     expect(parsed.context_management).toBeUndefined();
-    expect(countCacheControlBlocks(parsed)).toBeLessThanOrEqual(
+    const system = parsed.system as Array<Record<string, unknown>>;
+    const messages = parsed.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(system[2]?.cache_control).toBeUndefined();
+    expect(system[3]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(parsed.tools[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.tools[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(countCacheControlBlocks(parsed)).toBe(
       STRICT_CLAUDE_CLI_TOOL_GOLDEN.maxCacheControlBlocks,
     );
     const narrowedResponse = response as {
@@ -2062,6 +2119,42 @@ describe("createAnthropicClient", () => {
       }>;
     };
     expect(narrowedResponse.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("read_file");
+  });
+
+  it("leaves excessive client cache markers for the upstream validation error", async () => {
+    let sent: Record<string, unknown> = {};
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer test-only",
+        claudeCliFingerprintMode: "strict",
+      },
+      fetch: (async (_url, init) => {
+        sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            error: { type: "invalid_request_error", message: "too many cache breakpoints" },
+          }),
+          { status: 400 },
+        );
+      }) as typeof fetch,
+    });
+    await expect(
+      client.chatCompletion({
+        model: "claude-opus-5",
+        messages: [
+          {
+            role: "user",
+            content: Array.from({ length: 5 }, (_, i) => ({
+              type: "text",
+              text: `section ${i}`,
+              cache_control: { type: "ephemeral" },
+            })),
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ upstreamStatus: 400 });
+    expect(countCacheControlBlocks(sent)).toBe(5);
   });
 
   it("strict Claude CLI tool pipeline preserves the reverse map across a 401 retry", async () => {
@@ -2390,12 +2483,14 @@ describe("createAnthropicClient", () => {
     }
   });
 
-  it("retries a transient network error then preserves its credential-safe cause", async () => {
+  it("retries a proven pre-connect timeout then preserves its credential-safe cause", async () => {
     // The non-timeout catch arm: fetch rejects for a reason OTHER than the internal
-    // abort. ECONNREFUSED is a transient connection error, so it is retried at the
+    // abort. UND_ERR_CONNECT_TIMEOUT is a transient connection error, so it is retried at the
     // fetch boundary ([0,0] backoff keeps the test instant); once the budget is
     // exhausted the ORIGINAL error propagates (executor treats it as a provider failure).
-    const boom = Object.assign(new Error("ECONNREFUSED sk-static"), { code: "ECONNREFUSED" });
+    const boom = Object.assign(new Error("UND_ERR_CONNECT_TIMEOUT sk-static"), {
+      code: "UND_ERR_CONNECT_TIMEOUT",
+    });
     const fetch = vi.fn(async () => {
       throw boom;
     });
@@ -2415,8 +2510,34 @@ describe("createAnthropicClient", () => {
     }
     expect(caught).toBeInstanceOf(UpstreamError);
     expect(JSON.stringify(caught)).not.toContain("sk-static");
-    expect(JSON.stringify(caught)).toContain("ECONNREFUSED");
+    expect(JSON.stringify(caught)).toContain("UND_ERR_CONNECT_TIMEOUT");
     expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+  });
+
+  it.each([
+    "ECONNRESET",
+    "EPIPE",
+    "UND_ERR_SOCKET",
+  ])("does not replay a possibly accepted native POST after %s", async (code) => {
+    const fetch = vi.fn(async () => {
+      throw Object.assign(new Error("socket failure"), { code });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        apiKey: "sk-static",
+        connectRetryBackoffMs: [0, 0],
+      },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await expect(
+      client.nativePassthrough?.({
+        model: "claude-opus-5-5",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 16,
+      }),
+    ).rejects.toBeInstanceOf(UpstreamError);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   // Anthropic 529 "Overloaded" is the loudest source of transient capacity failures.
@@ -2847,6 +2968,13 @@ describe("createAnthropicClient — nativePassthrough", () => {
         "x-client-feature": "keep-me",
         authorization: "Bearer client-secret",
         "x-api-key": "client-key",
+        "x-functions-key": "unrelated-credential",
+        password: "unrelated-password",
+        "x-access-code": "unrelated-code",
+        "x-client-cert": "unrelated-cert",
+        "x-stainless-lang": "js",
+        "idempotency-key": "request-once",
+        "x-session-key": "client-session",
         connection: "keep-alive",
         "content-length": "999",
         "x-helm-trace": "internal",
@@ -2872,14 +3000,20 @@ describe("createAnthropicClient — nativePassthrough", () => {
 
     const h = seen as unknown as Headers;
     expect(sentBody).toBe(rawBody);
-    expect(h.get("x-client-feature")).toBe("keep-me");
+    expect(h.get("x-client-feature")).toBeNull();
+    expect(h.get("password")).toBeNull();
+    expect(h.get("x-access-code")).toBeNull();
+    expect(h.get("x-client-cert")).toBeNull();
     expect(h.get("Authorization")).toBe("Bearer ATX");
     expect(h.get("x-api-key")).toBeNull();
     expect(h.get("connection")).toBeNull();
+    expect(h.get("x-functions-key")).toBeNull();
+    expect(h.get("idempotency-key")).toBe("request-once");
+    expect(h.get("x-session-key")).toBe("client-session");
     expect(h.get("content-length")).toBeNull();
     expect(h.get("x-helm-trace")).toBeNull();
     expect(h.get("user-agent")).toBe("client-claude/9.9.9");
-    expect(h.get("x-stainless-lang")).toBeNull();
+    expect(h.get("x-stainless-lang")).toBe("js");
     expect(h.get("x-client-request-id")).toBeNull();
     expect(h.get("x-claude-code-session-id")).toBeNull();
     const beta = h.get("anthropic-beta") ?? "";

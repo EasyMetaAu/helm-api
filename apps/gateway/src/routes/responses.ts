@@ -115,6 +115,7 @@ export interface ResponsesLifecyclePort {
     identity: MessagesIdentity,
     signal: AbortSignal,
     record?: ResponsesRegistryRecord,
+    query?: URLSearchParams,
   ): Promise<unknown>;
   delete?(
     responseId: string,
@@ -133,6 +134,7 @@ export interface ResponsesLifecyclePort {
     identity: MessagesIdentity,
     signal: AbortSignal,
     record?: ResponsesRegistryRecord,
+    query?: URLSearchParams,
   ): Promise<unknown>;
   compact?(
     body: NativePassthroughCarrier,
@@ -1041,6 +1043,36 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         !isUsableRegistryRecord(registryRecord)
       ) {
         return responseNotFound(c, responseId, traceId);
+      }
+      if (operation === "retrieve" || operation === "inputItems") {
+        const query = new URL(c.req.url).searchParams;
+        for (const key of ["after", "before", "limit", "order"]) {
+          const values = query.getAll(key);
+          if (values.length > 1 || values.some((value) => value.length === 0)) {
+            throw helmError("invalid_request", `invalid ${key} query parameter`, traceId);
+          }
+        }
+        const limit = query.get("limit");
+        const order = query.get("order");
+        if (
+          (limit !== null && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) ||
+          (order !== null && order !== "asc" && order !== "desc") ||
+          query.getAll("stream").some((value) => value !== "false") ||
+          query.has("starting_after")
+        ) {
+          throw helmError("invalid_request", "unsupported Responses lifecycle query", traceId);
+        }
+        if (query.size > 0) {
+          return c.json(
+            (await method(
+              responseId,
+              identity,
+              requestSignal(c),
+              registryRecord ?? undefined,
+              query,
+            )) as Record<string, unknown>,
+          );
+        }
       }
       const body =
         deps.registry !== undefined

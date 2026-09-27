@@ -1,3 +1,4 @@
+import { createNativePassthroughCarrier } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createGeminiClient } from "./gemini.js";
 import { UpstreamError } from "./openai.js";
@@ -448,12 +449,6 @@ describe("createGeminiClient — SSRF guard IPv6 branches", () => {
     expect(mediaFetchCalled).toBe(true);
   });
 
-  // NOTE: IPv4-mapped IPv6 addresses like ::ffff:10.0.0.1 are normalized by Node.js
-  // URL parser to hex form (::ffff:a00:1), so the decimal-dotted regex in isBlockedIpv6
-  // does NOT match the normalized form. This is a source limitation: the mapped-v4 branch
-  // only covers literal decimal notation in the raw IPv6 string. Skipped — not testable
-  // from the public API without modifying source.
-
   it("blocks a redirect to a non-https URL (http:// redirect target)", async () => {
     // assertPublicHttpsTarget checks protocol on every hop including redirects.
     // fileUri must start with https:// (materializeGeminiPart guards it), so we
@@ -479,9 +474,7 @@ describe("createGeminiClient — SSRF guard IPv6 branches", () => {
     ).rejects.toThrow(/redirect must stay https/);
   });
 
-  it("returns undefined (no throw) for an unresolvable hostname — let fetch fail naturally", async () => {
-    // dnsLookup throws → assertPublicHttpsTarget catches and returns undefined → no pinned addr
-    // The actual mediaFetch then fails with a network error that propagates.
+  it("rejects an unresolvable hostname before media fetch", async () => {
     const mediaFetch = vi.fn(async () => {
       throw new Error("ENOTFOUND");
     });
@@ -499,7 +492,8 @@ describe("createGeminiClient — SSRF guard IPv6 branches", () => {
     });
     await expect(
       client.nativePassthrough?.(fileUriReq("https://no-such-host.example/x.png")),
-    ).rejects.toThrow(/ENOTFOUND/);
+    ).rejects.toThrow(/DNS lookup failed/);
+    expect(mediaFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -1687,4 +1681,119 @@ describe("createGeminiClient — translated OpenAI<->Gemini path", () => {
       .join("");
     expect(text).toBe("Hello");
   });
+});
+
+describe("optional Gemini media boundary", () => {
+  it.each([
+    "mapped-private",
+    "dns-mapped-private",
+    "dns-error",
+    "dns-empty",
+  ] as const)("%s fails before media fetch", async (scenario) => {
+    const mediaFetch = vi.fn(
+      async () => new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } }),
+    );
+    const apiFetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ candidates: [] }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://api.example.test",
+        apiKey: "test-only",
+        remoteMediaFetch: { enabled: true },
+      },
+      fetch: apiFetch as typeof fetch,
+      mediaFetch,
+      dnsLookup: async () => {
+        if (scenario === "dns-error") throw new Error("DNS lookup unavailable");
+        return scenario === "dns-mapped-private" ? ["::ffff:a00:1"] : [];
+      },
+    });
+    const uri =
+      scenario === "mapped-private"
+        ? "https://[::ffff:10.0.0.1]/x.png"
+        : "https://unresolved.example.test/x.png";
+    await expect(
+      client.nativePassthrough?.({
+        model: "gemini-test",
+        contents: [
+          { role: "user", parts: [{ fileData: { mimeType: "image/png", fileUri: uri } }] },
+        ],
+      }),
+    ).rejects.toThrow(/private|DNS/);
+    expect(mediaFetch).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+});
+
+it("preserves provider-managed Gemini Files references when web media fetching is enabled", async () => {
+  const part = {
+    fileData: {
+      mimeType: "image/png",
+      fileUri: "https://generativelanguage.googleapis.com/v1beta/files/abc",
+    },
+  };
+  const mediaFetch = vi.fn(
+    async () => new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } }),
+  );
+  let sent: Record<string, unknown> = {};
+  const client = createGeminiClient({
+    config: {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "test-only",
+      remoteMediaFetch: { enabled: true },
+    },
+    dnsLookup: async () => ["8.8.8.8"],
+    mediaFetch,
+    fetch: async (_url, init) => {
+      sent = JSON.parse(String(init?.body));
+      return jsonResponse({ candidates: [] });
+    },
+  });
+  const contents = [{ role: "user", parts: [part] }];
+  await client.nativePassthrough?.({ model: "gemini-test", contents });
+  expect(sent.contents).toEqual(contents);
+  expect(mediaFetch).not.toHaveBeenCalled();
+});
+
+it("records Gemini path, header, and media mutations without retaining their values", async () => {
+  const carrier = createNativePassthroughCarrier({
+    protocol: "gemini",
+    body: {
+      model: "gemini-test",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { fileData: { mimeType: "image/png", fileUri: "https://cdn.example.test/a.png" } },
+          ],
+        },
+      ],
+    },
+    headers: { authorization: "Bearer client-secret", "x-functions-key": "other-secret" },
+  });
+  const client = createGeminiClient({
+    config: {
+      baseUrl: "https://api.example.test",
+      apiKey: "test-only",
+      remoteMediaFetch: { enabled: true },
+    },
+    dnsLookup: async () => ["8.8.8.8"],
+    mediaFetch: async () =>
+      new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } }),
+    fetch: async () => jsonResponse({ candidates: [] }),
+  });
+  await client.nativePassthrough?.(carrier);
+  expect(carrier.mutations).toMatchObject({
+    auth_replaced: true,
+    headers_dropped: ["authorization", "x-functions-key"],
+    body_shims_applied: expect.arrayContaining([
+      "gemini_model_moved_to_path",
+      "gemini_remote_media_materialized",
+    ]),
+  });
+  expect(JSON.stringify(carrier.mutations)).not.toContain("secret");
 });

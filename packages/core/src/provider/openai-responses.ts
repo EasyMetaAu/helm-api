@@ -211,11 +211,12 @@ export interface GenericOpenAIResponsesRequestContract {
   // never invent plaintext, never touch a body that already has readable
   // reasoning or has no tool history.
   disableThinkingOnOpaqueReasoningHistory?: boolean;
-  // The upstream PARSES the Codex-private input items (custom_tool_call, echoed
-  // reasoning) instead of rejecting them, so the executor must keep byte passthrough
-  // rather than downgrading to translation. Surfaced on the client as
-  // `supportsResponsesNativeItems`. Off by default (xAI/Grok still downgrades).
+  // Native Responses items (including standard custom tools and opaque reasoning)
+  // are preserved unless a known incompatible provider explicitly opts out.
+  // Surfaced on the client as `supportsResponsesNativeItems`.
   acceptsResponsesNativeItems?: boolean;
+  /** Only trusted Helm relays carry Codex installation/turn metadata onward. */
+  forwardCodexMetadata?: boolean;
   // Account-scoped model metadata discovered from the upstream catalog. The
   // resolver receives the final wire model; no provider-wide defaults are guessed.
   resolveModelRequestDefaults?: (
@@ -378,17 +379,19 @@ function responseWorkCapacityUpstreamError(error: ResponseWorkCapacityError): Up
   });
 }
 
-// Local allocation failure says nothing about an accepted Responses request's
-// outcome. Preserve the capacity cause while using the existing no-replay seam.
-function throwAcceptedResponseCapacityError(error: unknown): never {
-  const cause =
-    error instanceof ResponseWorkCapacityError ? responseWorkCapacityUpstreamError(error) : error;
+function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
+  if (error instanceof ResponseWorkCapacityError) error = responseWorkCapacityUpstreamError(error);
   const raw =
-    cause instanceof UpstreamError && isRecord(cause.providerRaw) ? cause.providerRaw : null;
-  if (isRecord(raw?.error) && raw.error.code === "response_work_capacity_exhausted") {
-    throw httpResponseOutcomeUnknown(cause, "after_response_before_terminal");
+    error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
+  if (
+    signal?.aborted ||
+    raw?.type === "error" ||
+    raw?.type === "response.failed" ||
+    raw?.type === "response.incomplete"
+  ) {
+    throw error;
   }
-  throw error;
+  throw httpResponseOutcomeUnknown(error, "after_response_before_terminal");
 }
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
@@ -586,8 +589,28 @@ export function hoistResponsesInstructions(
     for (const item of input) {
       const role =
         item !== null && typeof item === "object" ? (item as { role?: unknown }).role : undefined;
-      if (role === "system" || role === "developer") {
-        const text = plainText((item as { content?: unknown }).content);
+      // Only a leading, wholly textual instruction item may move. Later or
+      // opaque/multimodal items retain both position and content.
+      const content = isRecord(item) ? item.content : undefined;
+      const textOnly =
+        typeof content === "string" ||
+        (Array.isArray(content) &&
+          content.every(
+            (part) =>
+              isRecord(part) &&
+              ["input_text", "text", "output_text"].includes(String(part.type)) &&
+              typeof part.text === "string" &&
+              Object.keys(part).every((key) => key === "type" || key === "text"),
+          ));
+      if (
+        remaining.length === 0 &&
+        (role === "system" || role === "developer") &&
+        isRecord(item) &&
+        (item.type === undefined || item.type === "message") &&
+        Object.keys(item).every((key) => ["type", "role", "content"].includes(key)) &&
+        textOnly
+      ) {
+        const text = plainText(content);
         if (text.length > 0) {
           // Hoist this item's text into instructions and drop it from input.
           systemParts.push(text);
@@ -1102,8 +1125,9 @@ function hasUsefulReasoningPayload(item: Record<string, unknown>): boolean {
 function isForeignEncryptedContent(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    value.length > 0 &&
-    !value.startsWith(OPENAI_ENCRYPTED_CONTENT_PREFIX)
+    // Known DeepSeek UUID encodings cannot be decrypted by OpenAI. Unknown
+    // encodings are opaque: a future OpenAI format must not lose its history.
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-\d+)?$/i.test(value)
   );
 }
 
@@ -1966,14 +1990,25 @@ function nativeInputUsesResponsesLite(
   return bodyUsesResponsesLite(input);
 }
 
-function stripResponsesLiteImageDetails(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripResponsesLiteImageDetails);
-  if (!isRecord(value)) return value;
-  const next = Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, stripResponsesLiteImageDetails(child)]),
-  );
-  if (next.type === "input_image") delete next.detail;
-  return next;
+function stripResponsesLiteImageDetails(input: unknown[]): unknown[] {
+  return input.map((item) => {
+    if (
+      !isRecord(item) ||
+      (item.type !== undefined && item.type !== "message") ||
+      !["user", "assistant", "system", "developer"].includes(String(item.role)) ||
+      !Array.isArray(item.content)
+    )
+      return item;
+    return {
+      ...item,
+      content: item.content.map((part: unknown) => {
+        if (!isRecord(part) || part.type !== "input_image" || part.detail === undefined)
+          return part;
+        const { detail: _detail, ...image } = part;
+        return image;
+      }),
+    };
+  });
 }
 
 function canonicalizeCodexNativeInput(
@@ -2395,22 +2430,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     turnKey?: string;
   }
 
-  function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
-    if (error instanceof ResponseWorkCapacityError)
-      error = responseWorkCapacityUpstreamError(error);
-    const raw =
-      error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
-    if (
-      signal?.aborted ||
-      raw?.type === "error" ||
-      raw?.type === "response.failed" ||
-      raw?.type === "response.incomplete"
-    ) {
-      throw error;
-    }
-    throw httpResponseOutcomeUnknown(error, "after_response_before_terminal");
-  }
-
   async function prepareRequest(
     input: NativePassthroughInput,
     modelInfo: CodexModelInfo | undefined,
@@ -2432,6 +2451,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const turnState = explicitTurnState ?? (turnKey ? turnStates.get(turnKey) : undefined);
     if (turnState) providerHeaders[CODEX_TURN_STATE_HEADER] = turnState;
     const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
+      forwardCodexMetadata: true,
       mergeHeaders: ["x-codex-beta-features"],
       preserveClientHeaders: [
         "accept",
@@ -2519,6 +2539,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       // An external abort is client-owned even when fetch happens to surface a
       // transport-shaped TypeError.
       if (init.signal?.aborted) throw error;
+      if (isPreConnectError(error)) throw upstreamTransportError(error, scrub);
       if (
         init.outcomeUnknownOnTransport === true &&
         error instanceof UpstreamError &&
@@ -2628,7 +2649,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       overloadRetry: init.overloadRetry ?? { attempt: 0 },
       capture: init.capture,
       timeoutThroughBody: init.timeoutThroughBody,
-      outcomeUnknownOnTransport: (init.endpoint ?? url) === url,
+      outcomeUnknownOnTransport: true,
     };
     const first = await request(body, modelInfo, requestInit);
     if (first.response.status === 401 && cfg.onUnauthorized !== undefined) {
@@ -3782,7 +3803,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         timeoutThroughBody: true,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
-      return await readUnaryJson(result);
+      try {
+        return await readUnaryJson(result);
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
   };
 }
@@ -3886,7 +3911,6 @@ export function createGenericOpenAIResponsesClient(
 
   async function applyResponsesRequestContract(
     body: NativePassthroughInput,
-    signal?: AbortSignal,
   ): Promise<NativePassthroughInput> {
     const contract = requestContract;
     if (
@@ -4027,12 +4051,6 @@ export function createGenericOpenAIResponsesClient(
         opaqueReasoningThinkingDisabled = true;
       }
     }
-    let optimizedImages = 0;
-    if (contract.translateUnsupportedCustomTools === true) {
-      const optimized = await optimizeCodexInlineImages(next.input, { signal });
-      next.input = optimized.value;
-      optimizedImages = optimized.optimizedImages;
-    }
     const instructionShims: string[] = [];
     if (
       contract.ensureInstructions === true &&
@@ -4054,7 +4072,6 @@ export function createGenericOpenAIResponsesClient(
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
-      ...(optimizedImages > 0 ? ["generic_responses_inline_images_optimized"] : []),
       ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
       ...(functionCallOutputCallIdFilled
         ? ["generic_responses_function_call_output_call_id_filled"]
@@ -4131,8 +4148,16 @@ export function createGenericOpenAIResponsesClient(
         { signal: external, budget },
       );
     } catch (error) {
-      if (external?.aborted || !isFetchTransportError(error)) throw error;
-      throw upstreamTransportError(error, scrub);
+      if (external?.aborted) throw error;
+      const createsResponse =
+        init.method === "POST" && /\/responses(?:\/compact)?$/.test(new URL(url).pathname);
+      if (createsResponse && error instanceof UpstreamError && error.errorClass === "timeout") {
+        throw httpResponseOutcomeUnknown(error);
+      }
+      if (!isFetchTransportError(error)) throw error;
+      const transport = upstreamTransportError(error, scrub);
+      if (createsResponse && !isPreConnectError(error)) throw httpResponseOutcomeUnknown(transport);
+      throw transport;
     }
   }
 
@@ -4147,18 +4172,31 @@ export function createGenericOpenAIResponsesClient(
     );
   }
 
-  async function readUnaryJson(res: Response): Promise<Record<string, unknown>> {
+  async function readUnaryJson(
+    res: Response,
+    accepted = false,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const timeout = withTimeout(timeoutMs, signal);
     try {
       return await consumeResponseTextWithinBudget(
         res,
         0,
         (text) => JSON.parse(text) as Record<string, unknown>,
+        runtimeResponseWorkAdmission(),
+        timeout.signal,
       );
     } catch (error) {
-      if (error instanceof ResponseBodyTooLargeError) {
-        throw responseBodyTooLargeUpstreamError(error);
-      }
-      throwAcceptedResponseCapacityError(error);
+      const cause =
+        timeout.isTimeout() && !timeout.isExternalAbort()
+          ? new UpstreamError("timeout", "upstream response body timed out")
+          : error instanceof ResponseBodyTooLargeError
+            ? responseBodyTooLargeUpstreamError(error)
+            : error;
+      if (accepted) throwAcceptedResponseError(cause, signal);
+      throw cause;
+    } finally {
+      timeout.cleanup();
     }
   }
 
@@ -4189,6 +4227,7 @@ export function createGenericOpenAIResponsesClient(
     const prepared = prepareNativePassthroughRequest(
       body,
       await providerHeaders("text/event-stream", source),
+      { forwardCodexMetadata: requestContract?.forwardCodexMetadata },
     );
     const url = new URL(await endpoint("responses"));
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -4296,7 +4335,7 @@ export function createGenericOpenAIResponsesClient(
     init.overloadRetry ??= { attempt: 0 };
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
-        ? await applyResponsesRequestContract(init.body, init.signal)
+        ? await applyResponsesRequestContract(init.body)
         : init.body;
     const finalBody =
       requestBody === undefined
@@ -4309,6 +4348,7 @@ export function createGenericOpenAIResponsesClient(
     let requestHeaders = headers;
     if (requestBody !== undefined) {
       const prepared = prepareNativePassthroughRequest(requestBody, headers, {
+        forwardCodexMetadata: requestContract?.forwardCodexMetadata,
         // A stream-only profile must override a native carrier's stale JSON Accept.
         ...(requestContract?.forceSse === true && init.applyRequestContract === true
           ? {
@@ -4347,6 +4387,7 @@ export function createGenericOpenAIResponsesClient(
       let retryBodyText = bodyText;
       if (requestBody !== undefined) {
         const prepared = prepareNativePassthroughRequest(requestBody, refreshedHeaders, {
+          forwardCodexMetadata: requestContract?.forwardCodexMetadata,
           ...(requestContract?.forceSse === true && init.applyRequestContract === true
             ? {
                 preserveClientHeaders: [
@@ -4381,9 +4422,7 @@ export function createGenericOpenAIResponsesClient(
 
   return {
     nativeProtocolProfile: "generic_openai_responses",
-    ...(requestContract?.acceptsResponsesNativeItems === true
-      ? { supportsResponsesNativeItems: true }
-      : {}),
+    supportsResponsesNativeItems: requestContract?.acceptsResponsesNativeItems !== false,
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
@@ -4404,10 +4443,10 @@ export function createGenericOpenAIResponsesClient(
             signal: opts?.signal,
           });
         } catch (error) {
-          throwAcceptedResponseCapacityError(error);
+          throwAcceptedResponseError(error, opts?.signal);
         }
       }
-      return responsesJsonToChatResponse(await readUnaryJson(res), model);
+      return responsesJsonToChatResponse(await readUnaryJson(res, true, opts?.signal), model);
     },
 
     async *chatCompletionStream(req, opts) {
@@ -4428,7 +4467,7 @@ export function createGenericOpenAIResponsesClient(
           signal: opts?.signal,
         });
       } catch (error) {
-        throwAcceptedResponseCapacityError(error);
+        throwAcceptedResponseError(error, opts?.signal);
       }
     },
 
@@ -4451,10 +4490,13 @@ export function createGenericOpenAIResponsesClient(
             translated,
           );
         } catch (error) {
-          throwAcceptedResponseCapacityError(error);
+          throwAcceptedResponseError(error, opts?.signal);
         }
       }
-      return untranslateCustomToolResponse(await readUnaryJson(res), translated);
+      return untranslateCustomToolResponse(
+        await readUnaryJson(res, true, opts?.signal),
+        translated,
+      );
     },
 
     closeResponsesWebSocketSession: closeWebSocketSession,
@@ -4508,17 +4550,21 @@ export function createGenericOpenAIResponsesClient(
         }
         yield* untranslateCustomToolSSE(frames, translated);
       } catch (error) {
-        throwAcceptedResponseCapacityError(error);
+        throwAcceptedResponseError(error, opts?.signal);
       }
     },
 
     async responsesRetrieve(responseId, opts) {
-      const res = await requestJson(`responses/${encodeURIComponent(responseId)}`, {
-        method: "GET",
-        signal: opts?.signal,
-      });
+      const query = opts?.query?.toString();
+      const res = await requestJson(
+        `responses/${encodeURIComponent(responseId)}${query ? `?${query}` : ""}`,
+        {
+          method: "GET",
+          signal: opts?.signal,
+        },
+      );
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesDelete(responseId, opts) {
@@ -4527,7 +4573,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesCancel(responseId, opts) {
@@ -4536,16 +4582,20 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesInputItems(responseId, opts) {
-      const res = await requestJson(`responses/${encodeURIComponent(responseId)}/input_items`, {
-        method: "GET",
-        signal: opts?.signal,
-      });
+      const query = opts?.query?.toString();
+      const res = await requestJson(
+        `responses/${encodeURIComponent(responseId)}/input_items${query ? `?${query}` : ""}`,
+        {
+          method: "GET",
+          signal: opts?.signal,
+        },
+      );
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
 
     async responsesCompact(req, opts) {
@@ -4555,7 +4605,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, true, opts?.signal);
     },
 
     async responsesInputTokens(req, opts) {
@@ -4565,7 +4615,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return await readUnaryJson(res);
+      return await readUnaryJson(res, false, opts?.signal);
     },
   };
 }

@@ -675,3 +675,35 @@ describe("registerImagesRoute", () => {
     expect(decision.provider_attempts[0].cost_usd).toBe(0.0672);
   });
 });
+
+describe("Images Gemini translation fidelity", () => {
+  it.each([
+    { n: 2 },
+    { size: "1024x1024" },
+    { quality: "high" },
+    { response_format: "url" },
+    { background: "transparent" },
+    { output_format: "jpeg" },
+    { future_image_option: true },
+  ])("rejects unsupported generation options before inference: %j", async (options) => {
+    const nativePassthrough = vi.fn();
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "image",
+        candidateChain: ["gemini-image"],
+        targets: [
+          {
+            kind: "gemini",
+            alias: "gemini-image",
+            providerModel: "gemini-image",
+            client: { nativePassthrough } as unknown as ProviderClient,
+          },
+        ],
+      }),
+    });
+    const response = await post(app, { model: "gemini-image", prompt: "a cat", ...options });
+    expect(response.status).toBe(400);
+    expect(nativePassthrough).not.toHaveBeenCalled();
+  });
+});

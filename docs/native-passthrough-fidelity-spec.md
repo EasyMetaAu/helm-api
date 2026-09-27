@@ -1,7 +1,7 @@
 # Native Passthrough Fidelity Spec
 
 Status: implemented as a best-effort same-protocol path; source-checked on
-2026-07-16.
+2026-09-27 for native request/header boundaries and translated helper inputs.
 
 Native passthrough avoids an unnecessary cross-protocol round-trip when a client
 request and the selected provider speak the same non-Chat protocol. It preserves
@@ -90,11 +90,11 @@ use native passthrough; if it fails before client-visible output, a later
 same-protocol candidate can also use passthrough, while a later cross-protocol
 candidate uses translation.
 
-For Anthropic targets, an inline `developer` turn or an unsupported inline
-`system` placement counts as a required compatibility rewrite. The guard has one
-model-aware exception for the validated Claude Opus 4.8 mid-conversation system
-shape; older, unknown, or differently placed shapes stay fail-closed onto the
-rewrite path.
+For Anthropic targets, inline `developer` turns and inline `system` turns on
+unsupported/unknown models require compatibility translation. Documented Opus
+4.8/5/5.5, Fable 5/5.1 and Mythos 5/5.1 (including eight-digit snapshots) preserve
+native system shapes and positions; Anthropic validates them. See the official
+[mid-conversation system documentation](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages).
 
 ## Native carrier
 
@@ -129,7 +129,7 @@ Native passthrough deliberately allows the following current mutations.
 |---|---|
 | Model resolution | Rewrites `body.model` from the Helm alias/lane name to the selected provider model and records `model_rewritten`. |
 | Memory | Appends one trailing protocol-native user reminder and records `memory_appended`. Existing system/instructions/history/tools stay in place. |
-| Reasoning policy | Lane-forced effort and model capability policy can map, strip, disable, or skip a forced reasoning change; applied shims are recorded. |
+| Reasoning policy | Explicit lane/key policy and generic effort mapping remain enforced. Native thinking/context controls are preserved without a generic or forced override; an unchanged supported output effort does not invalidate raw JSON. |
 | Optional visual compression | Anthropic attempts can run the configured visual-context compressor before token preflight/dispatch; the mutation is attached to attempt telemetry. |
 | Stream transport | Streaming passthrough records `stream_reframed` because the gateway/framework boundary may reframe SSE even when native event payloads are retained. |
 
@@ -155,6 +155,29 @@ The system-equivalent fields (`system`, `instructions`, and
 
 Fast-mode and reasoning behavior is capability- and key-aware at the executor and
 provider layers. The native path does not mean “client values always win.”
+
+### Native preservation and bounded compatibility
+
+- Generic Responses preserves native `context_management` and standard custom
+  tools. Known incompatible providers explicitly opt out; the xAI subscription
+  contract does so. Codex-only shims require the positive Codex profile.
+- Codex instruction hoisting handles only leading, wholly textual instruction
+  items. Mid-history and opaque content stay in place. Unknown encrypted reasoning
+  encodings survive; only the known foreign UUID form is removed.
+- Lite image-detail cleanup touches message image parts only, never tool schemas
+  or arbitrary nested data. Custom-tool translation does not recompress images.
+- Codex and generic Responses generation/compact stop on outcome-unknown transport
+  or accepted-body failures. Proven pre-connect failures and explicit upstream
+  rejections retain their existing handling. Unary bodies have a bounded read phase.
+- Gemini media fetching requires a validated pinned public address, including
+  IPv4-mapped IPv6 checks; DNS failure/empty results stop before fetch. Native
+  Gemini Files handles are retained rather than fetched without their provider auth.
+- Responses retrieve/input_items retain query parameters and the recorded account
+  through OAuth wrappers. Stream retrieval is rejected by the unary helper.
+- Token counters preserve deterministic upstream 4xx instead of returning an
+  estimate. Translation-only Images/Interactions reject unsupported options or
+  content before inference; mixed image chains retain capable OpenAI targets.
+  Realtime rejects extra/duplicate multipart parts rather than dropping them.
 
 ## Mutation ledger
 
@@ -185,18 +208,17 @@ The ledger is broad enough for implementation-specific fields such as stripped
 Anthropic block counts, Responses continuation markers, reasoning-policy shims,
 and visual compression metadata.
 
-Current limitation: not every provider-layer change passes through the shared
-preparation helper. Gemini remote-media materialization and its strict
-provider-header construction are not fully enumerated in the shared carrier
-ledger. The ledger is therefore an important audit trail, but not a
-cryptographically complete diff of every byte.
+Gemini records path-model removal, stream-path selection, discarded client header
+names, authentication replacement, and actual remote-media materialization. The
+ledger records semantic operations, not a cryptographically complete byte diff.
 
 ## Header behavior
 
 ### Anthropic and Responses profiles
 
-`prepareNativePassthroughRequest` is forward-by-default for client headers and
-then removes unsafe shapes. The deny rules cover:
+`prepareNativePassthroughRequest` uses an exact allowlist for Claude protocol,
+SDK, session, and idempotency headers. Responses uses its own exact metadata
+allowlist. Unknown headers are dropped and recorded. Both profiles remove unsafe shapes. The deny rules cover:
 
 - Helm and provider credentials (`authorization`, `proxy-authorization`,
   `x-api-key`, `x-cr-api-key`, and secret/token/auth/credential-shaped names);
@@ -210,11 +232,11 @@ OAuth account. Selected provider/client headers can be merged or preserved by
 profile, including accepted content types, user agent, Anthropic beta,
 Codex beta/session/turn state, client request IDs, and model metadata.
 
-This filter is shape-based, not a complete secret-header allowlist. A generic
-secret with an unusual name such as `x-functions-key` can pass to an Anthropic
-or Responses upstream because it matches no current deny shape. These
-passthrough upstreams are expected to be trusted first-party/provider endpoints;
-do not treat the helper as safe for arbitrary third-party proxy destinations.
+New headers require a reviewed protocol purpose. Codex installation/turn metadata
+and the Lite dialect header are retained only by Codex and explicitly configured
+Helm relays, not generic third-party Responses providers. Client tenant/account
+headers and FedRAMP identity are replaced by provider-owned configuration. The
+Responses x-session-key is consumed for local affinity but not forwarded.
 
 ### Gemini profile
 

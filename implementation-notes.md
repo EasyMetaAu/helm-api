@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-09-27 · 原生协议、缓存与重放边界修复（docs/04、05、07）
+
+- **Claude**：更新已公布模型的 inline system 支持，删除默认日期改写，保留原生 thinking/context、缓存标记及未变化请求的 raw JSON；缓存超限交给上游拒绝，不静默裁剪。保留鉴权、路由、明确治理和有实际依据的兼容处理。
+- **Responses**：保留原生 context_management 和标准 custom tools；xAI 订阅端显式声明不兼容。Codex shim 只匹配 Codex profile；指令只提升前导纯文本，密文只识别已知外来 UUID 形状，Lite 图片清理不递归修改工具数据。移除工具转换附带的图片重编码。
+- **安全与成本**：Claude/Responses 按协议白名单转发头；只有 Codex 和显式 Helm relay 可转发 Codex 元数据。生成/compact 的发送结果不明或 HTTP 200 后正文失败均禁止自动换账户重发；非流式正文读取有超时。Gemini 媒体抓取复用 Node BlockList 验证映射 IPv6，DNS 失败或空结果拒绝，连接必须固定到已验证地址；保留 provider-managed Files 引用并记录实际变换。
+- **辅助入口**：Responses 查询参数沿 registry 所属账户传递；计数接口保留确定性 4xx。Images→Gemini 不能表达的选项、Interactions 未支持字段/输入块、Realtime 多余 multipart 块在调用上游前拒绝；这修正了过去接受后静默忽略的行为，调用方须移除不支持字段或选择支持的原生接口。
+- **保留的显式策略**：账户 installation ID 隔离、Codex 超大历史优化、可选 Memory/视觉压缩/XML 恢复仍有各自用途，不因“透传”取消安全与治理。passthrough_used 表示绕过 IR，不代表完全没有已记录的策略或传输适配。
+- **验证边界**：三角色审查，核心/辅助接口先红后绿，mock 覆盖实际执行器、provider、OAuth 包装和原生 SSE；本机类型检查及定向测试不代表 CI、合并、部署或线上缓存改善。没有重放用户长会话或执行真实付费调用。私有请求审计只保留本地，不进入公共 PR。
+
 ## 2026-09-26 · Admin UI 走查整改 + 首次安装 key 验证修复（docs/11、12；方案见 docs/ui-audit-2026-09-26.md）
 
 - **安装向导 key 验证（用户反馈"DeepSeek key 一直验证不过"，确认为 bug）**：`testStaticProviderKey` 过去只要非 2xx 就判失败，而 DeepSeek 对**余额为 0 的有效 key** 返回 402，向导又要求测试通过才允许完成，结果有效 key 根本存不进去；错误信息只有 `upstream returned 402`。现改为：401/403 等才判无效；402/429 视为"key 已通过鉴权"，放行并返回 warning；错误与警告都带上脱敏后的上游 `error.message`；服务端与页面都会 trim 粘贴的 key；探测模型跳过图像/视频/TTS/embedding 类（ZenMux 的 `models[0]` 曾是 `gpt-image-2`）；修复错误显示成 `[object Object]` 的问题。未做：代理环境（`HTTPS_PROXY`）下的出站连接，egress 仍是直连 undici Agent。
@@ -79,14 +88,9 @@
 - **资源**：帧与快照复用共享响应内存租约；所有账号的快照总计最多占同一准入预算的四分之一，每账号最多 128 个会话。会话关闭、替换、淘汰释放快照，容量不足时不缓存/不恢复，不挤掉必要的输入校验。无持久化历史或数据库迁移。
 - **验证**：失败尝试包含文本和工具调用的真实 ws 断线测试、实际 OAuth pool 同账号测试、续轮重建、重试上限、HTTP 降级禁入、解析/容量/超时/取消及 live 设置回归均先红后绿。真实上游另有 `codex.response.metadata` 与 `responsesapi.websocket_timing` 两种非输出事件，明确允许并保留；未知事件仍拒绝重放。发布验收还须完成线上同 socket 续轮和真实上游受控断流验证。
 
-## 2026-09-23 · WebSocket 断线时保留已接收响应（Provider / 流式协议，docs/05，原则 8）
-
-- **问题**：上游 close/error 回调清空待消费队列，包括已到达的 `response.completed`；慢消费者会把已完成请求误报为 `response_create_outcome_unknown`。真实网络断流与本地丢帧原先共用同一错误，线上历史记录无法区分二者。
-- **处理**：传输断开只标记终止，消费者按顺序读完有界队列后才收到 EOF/error；显式关闭、取消和容量溢出仍释放所有待消费租约。完成帧正常交付，不合成成功、不重复创建推理。
-- **恢复边界**：发送前安全重连与 HTTP 降级继续使用既有逻辑。Codex 使用 `store:false`，没有可依赖的 GET 取回契约，Remote 的只读接口探测也未成功（403），因此不新增取回轮询。真正丢失上游输出后，透明重放仍可能重复工具或计费，保留结果不明错误；本修复不能承诺所有网络断线都无感。
-- **验证**：真实 ws connector 覆盖正常关闭、1006 reset、协议错误下的已收创建/文本/完成帧顺序，以及关闭后的租约释放；保持容量保护与安全重试回归。
-
 ## 更早历史总览
+
+2026-09-23 · WebSocket 断线时保留已接收响应：先消费已到达的文本、工具和完成帧再报告断流；不自动重放已接收请求，保留容量和取消保护。完整记录见 git history。
 
 2026-09-23 · 远端 Helm 建连重试与 WebSocket 降级：`UND_ERR_CONNECT_TIMEOUT` 加入严格连接错误白名单并复用两次短退避；首轮发送前 WebSocket 失败改走 HTTP/SSE（401/403/429、增量续接、发送后结果不明不重放）；保留带 continuation ID 的单条 `function_call_output`；自产错误移除与 `status` 冲突的 `status_code`。完整记录见 git history。
 

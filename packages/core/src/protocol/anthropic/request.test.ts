@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { openaiToAnthropicRequest } from "../../provider/anthropic.js";
 import { type IRRequest, IRRequestSchema } from "../ir.js";
+import { openaiTransformer } from "../openai.js";
 import { guardRequestFor, readWarnings } from "../protocol-guards.js";
 import {
   extractBillingHeaderIdentity,
@@ -647,7 +649,7 @@ describe("anthropic transformRequestOut", () => {
     expect(out.cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("drops top-level automatic cache_control when explicit block/tool cache controls exist", () => {
+  it("preserves top-level automatic cache_control when explicit block/tool cache controls exist", () => {
     const ir = transformRequestOut({
       model: "claude-3-5-sonnet",
       max_tokens: 64,
@@ -668,10 +670,55 @@ describe("anthropic transformRequestOut", () => {
     });
 
     const out = transformRequestIn(ir);
-    expect(out.cache_control).toBeUndefined();
+    expect(out.cache_control).toEqual({ type: "ephemeral" });
     const block = out.messages[0]?.content[0] as { cache_control?: unknown };
     expect(block.cache_control).toEqual({ type: "ephemeral" });
     expect(out.tools?.[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("preserves tool-use and tool-result cache boundaries through IR", () => {
+    const control = { type: "ephemeral", ttl: "1h" };
+    const ir = transformRequestOut({
+      model: "claude-opus-5-5",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "t1", name: "lookup", input: {}, cache_control: control },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "found", cache_control: control },
+          ],
+        },
+      ],
+    });
+    expect(ir.messages[0]?.tool_calls?.[0]?.cache_control).toEqual(control);
+    expect(ir.messages[1]?.cache_control).toEqual(control);
+    const viaProvider = openaiToAnthropicRequest(
+      openaiTransformer.transformRequestIn(ir) as Parameters<typeof openaiToAnthropicRequest>[0],
+    );
+    expect(viaProvider.messages).toMatchObject([
+      { content: [{ type: "tool_use", cache_control: control }] },
+      { content: [{ type: "tool_result", cache_control: control }] },
+    ]);
+    const out = transformRequestIn(ir);
+    expect(out.messages[0]?.content[0]).toEqual({
+      type: "tool_use",
+      id: "t1",
+      name: "lookup",
+      input: {},
+      cache_control: control,
+    });
+    expect(out.messages[1]?.content[0]).toEqual({
+      type: "tool_result",
+      tool_use_id: "t1",
+      content: "found",
+      cache_control: control,
+    });
   });
 
   it("preserves tool cache_control through Anthropic tool mapping", () => {

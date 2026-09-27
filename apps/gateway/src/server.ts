@@ -1831,7 +1831,7 @@ function createProviderClient(
       // A Helm upstream accepts Codex native items and applies its own provider policy.
       ...(p.type === "helm"
         ? {
-            requestContract: { acceptsResponsesNativeItems: true },
+            requestContract: { acceptsResponsesNativeItems: true, forwardCodexMetadata: true },
             responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
               proxy,
               timeoutMs: base.timeoutMs,
@@ -1841,6 +1841,7 @@ function createProviderClient(
       ...(isXaiOAuth
         ? {
             requestContract: {
+              acceptsResponsesNativeItems: false,
               forceSse: true,
               forceStoreFalse: true,
               ensureReasoningEncryptedContent: true,
@@ -4281,10 +4282,14 @@ export async function buildServer(
     () => responsesLifecycleUnsupported("compact"),
   );
   const responsesLifecycle: ResponsesRouteDeps["lifecycle"] = {};
-  responsesLifecycle.retrieve = async (responseId, _identity, signal, record) => {
+  responsesLifecycle.retrieve = async (responseId, _identity, signal, record, query) => {
     const client = responsesClientWith("responsesRetrieve", record?.providerName);
     if (!client?.responsesRetrieve) throw responsesLifecycleUnsupported("retrieve");
-    return await client.responsesRetrieve(responseId, { signal });
+    return await client.responsesRetrieve(responseId, {
+      signal,
+      query,
+      providerAccount: record?.providerAccount ?? undefined,
+    });
   };
   responsesLifecycle.delete = async (responseId, _identity, signal, record) => {
     const client = responsesClientWith("responsesDelete", record?.providerName);
@@ -4296,12 +4301,16 @@ export async function buildServer(
     if (!client?.responsesCancel) throw responsesLifecycleUnsupported("cancel");
     return await client.responsesCancel(responseId, { signal });
   };
-  responsesLifecycle.inputItems = async (responseId, _identity, signal, record) => {
+  responsesLifecycle.inputItems = async (responseId, _identity, signal, record, query) => {
     const client = responsesClientWith("responsesInputItems", record?.providerName);
     if (!client?.responsesInputItems) {
       throw responsesLifecycleUnsupported("input_items");
     }
-    return await client.responsesInputItems(responseId, { signal });
+    return await client.responsesInputItems(responseId, {
+      signal,
+      query,
+      providerAccount: record?.providerAccount ?? undefined,
+    });
   };
   responsesLifecycle.compact = async (body, identity, signal, onResponseMeta, onExecution) => {
     const requestedModel = typeof body.body.model === "string" ? body.body.model : "";

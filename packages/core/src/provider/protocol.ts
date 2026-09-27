@@ -76,12 +76,8 @@ export function canUseNativePassthrough(
   if (input.request.protocol !== input.targetProviderProtocol) {
     return { ok: false, reason: "protocol_mismatch" };
   }
-  // Same wire protocol, but a CROSS-ORIGIN Responses body: the inbound carries Codex
-  // ChatGPT-private items (custom_tool_call / additional_tools / encrypted reasoning)
-  // and the target is a GENERIC Responses provider (e.g. xAI/Grok) that cannot parse
-  // them — forwarding verbatim 422s. Disable passthrough so the executor translates the
-  // body into a clean standard Responses request. Codex->Codex (non-generic profile)
-  // and native-item-free bodies keep byte-faithful passthrough.
+  // Known incompatible providers explicitly opt out of native item forwarding.
+  // Standard Responses supports custom tools; generic is not itself incompatible.
   if (
     input.request.protocol === "openai_responses" &&
     input.targetIsGenericResponsesProfile &&
@@ -113,9 +109,9 @@ export function canUseNativePassthrough(
 
 // Anthropic historically carried `system` at the TOP LEVEL only, so an inline
 // `system`/`developer` turn inside `messages[]` required the compatibility rewrite.
-// Claude Opus 4.8 now accepts carefully-placed mid-conversation `system` turns, so the
+// Documented Opus, Fable, and Mythos models accept native `system` turns, so the
 // passthrough guard must be model-aware: keep older/unknown models fail-closed, but do
-// not disable byte-faithful passthrough for the exact valid Opus 4.8 shape Claude Code
+// not disable byte-faithful passthrough for the valid shape Claude Code
 // emits (e.g. `[user, system]` trailing MCP instructions).
 //
 // Scope the CALL to anthropic_messages targets — OpenAI/Gemini accept inline
@@ -133,34 +129,7 @@ function anthropicModelSupportsMidConversationSystem(providerModel: string | nul
   const model = providerModel.toLowerCase();
   const slash = model.lastIndexOf("/");
   const unprefixed = slash >= 0 ? model.slice(slash + 1) : model;
-  return unprefixed === "claude-opus-4-8" || unprefixed.startsWith("claude-opus-4-8-");
-}
-
-function isValidOpus48MidConversationSystemPlacement(
-  messages: Array<unknown>,
-  index: number,
-): boolean {
-  if (index <= 0) return false;
-  const previous = messages[index - 1];
-  if (previous === null || typeof previous !== "object") return false;
-  const previousRole = (previous as { role?: unknown }).role;
-  // Opus 4.8 currently documents mid-conversation system insertion after a user turn.
-  // Other shapes stay on the rewrite path until explicitly proven accepted.
-  if (previousRole !== "user") return false;
-  const next = messages[index + 1];
-  if (next === undefined) return true;
-  if (next === null || typeof next !== "object") return false;
-  return (next as { role?: unknown }).role === "assistant";
-}
-
-function isAnthropicSystemContentTextOnly(content: unknown): boolean {
-  if (typeof content === "string") return true;
-  if (!Array.isArray(content)) return false;
-  return content.every((block) => {
-    if (block === null || typeof block !== "object") return false;
-    const textBlock = block as { type?: unknown; text?: unknown };
-    return textBlock.type === "text" && typeof textBlock.text === "string";
-  });
+  return /^claude-(?:opus-(?:4-8|5(?:-5)?)|(?:fable|mythos)-5(?:-1)?)(?:-\d{8})?$/.test(unprefixed);
 }
 
 export function anthropicNativeBodyRequiresSystemFold(
@@ -176,15 +145,13 @@ export function anthropicNativeBodyRequiresSystemFold(
   const supportsMidConversationSystem = anthropicModelSupportsMidConversationSystem(
     options.providerModel,
   );
-  return messages.some((m, index) => {
+  return messages.some((m) => {
     if (m === null || typeof m !== "object") return false;
     const role = (m as { role?: unknown }).role;
     if (role === "developer") return true;
     if (role !== "system") return false;
-    return (
-      !supportsMidConversationSystem ||
-      !isAnthropicSystemContentTextOnly((m as { content?: unknown }).content) ||
-      !isValidOpus48MidConversationSystemPlacement(messages, index)
-    );
+    // Native blocks and placement evolve upstream. Never "repair" them by moving
+    // instructions; the provider owns validation and its native 400 response.
+    return !supportsMidConversationSystem;
   });
 }
