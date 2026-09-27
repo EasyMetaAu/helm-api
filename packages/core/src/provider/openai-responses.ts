@@ -1992,16 +1992,19 @@ function nativeInputUsesResponsesLite(
 
 function stripResponsesLiteImageDetails(input: unknown[]): unknown[] {
   return input.map((item) => {
-    if (
-      !isRecord(item) ||
-      (item.type !== undefined && item.type !== "message") ||
-      !["user", "assistant", "system", "developer"].includes(String(item.role)) ||
-      !Array.isArray(item.content)
-    )
-      return item;
+    if (!isRecord(item)) return item;
+    const field =
+      (item.type === undefined || item.type === "message") &&
+      ["user", "assistant", "system", "developer"].includes(String(item.role))
+        ? "content"
+        : item.type === "function_call_output" || item.type === "custom_tool_call_output"
+          ? "output"
+          : null;
+    const parts = field === null ? null : item[field];
+    if (field === null || !Array.isArray(parts)) return item;
     return {
       ...item,
-      content: item.content.map((part: unknown) => {
+      [field]: parts.map((part: unknown) => {
         if (!isRecord(part) || part.type !== "input_image" || part.detail === undefined)
           return part;
         const { detail: _detail, ...image } = part;

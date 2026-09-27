@@ -398,7 +398,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         return c.json(await deps.countTokens(obj, identity, requestSignal(c)));
       } catch (error) {
         const status = error instanceof UpstreamError ? error.upstreamStatus : null;
-        if (status !== null && status >= 400 && status < 500 && status !== 429) {
+        if (status !== null && status >= 400 && status < 500 && ![404, 405, 429].includes(status)) {
           return c.json(
             {
               type: "error",
@@ -417,8 +417,8 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             status as ContentfulStatusCode,
           );
         }
-        // Token helpers are compatibility helpers, not generation. Fall back to a
-        // deterministic estimate instead of making /v1/messages/count_tokens flaky.
+        // Missing/unsupported counters (404/405), throttling and outages retain
+        // the estimate; request/authentication/permission errors above stay errors.
       }
     }
     return c.json({ input_tokens: estimateAnthropicInputTokens(native), estimated: true });

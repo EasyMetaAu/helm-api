@@ -805,6 +805,24 @@ describe("POST /v1beta/models/{model}:streamGenerateContent?alt=sse (Gemini stre
 });
 
 describe("native token-counter errors", () => {
+  it.each([
+    404, 405, 501,
+  ])("estimates when the upstream counter is unavailable (%s)", async (status) => {
+    const { deps } = makeDeps({
+      countTokens: vi
+        .fn()
+        .mockRejectedValue(
+          new UpstreamError("upstream_error", "counter unavailable", null, status),
+        ),
+    });
+    const response = await buildApp(deps).request("/v1beta/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ estimated: true });
+  });
   it.each([400, 401, 403, 422])("preserves deterministic upstream %s", async (status) => {
     const { deps } = makeDeps({
       countTokens: vi

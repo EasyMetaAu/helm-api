@@ -33,6 +33,7 @@ export const InteractionInputSchema = z.union([
 // mapped to generateContent's imageConfig; unsupported options are rejected.
 export const InteractionResponseFormatSchema = z.strictObject({
   type: z.literal("image"),
+  delivery: z.literal("inline").optional(),
   aspect_ratio: z.string().optional(),
   image_size: z.string().optional(),
 });

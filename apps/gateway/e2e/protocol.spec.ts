@@ -411,9 +411,9 @@ test.describe("bidirectional isomorphism", () => {
 
   test("Anthropic count_tokens preserves upstream validation errors", async ({ request }) => {
     const res = await request.post("/v1/messages/count_tokens", {
-      headers: ANTHROPIC_AUTH,
+      headers: { ...ANTHROPIC_AUTH, "x-api-key": "helm_live_e2e_custom" },
       data: {
-        model: "claude-3-5-sonnet",
+        model: "zenmux-anthropic/claude-opus-4.8",
         messages: [{ role: "user", content: COUNT_REJECT_SENTINEL }],
       },
     });

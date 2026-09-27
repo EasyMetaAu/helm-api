@@ -1,3 +1,4 @@
+import { createServer } from "node:net";
 import { createNativePassthroughCarrier } from "@helm/shared";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
@@ -8,6 +9,46 @@ import {
 } from "./openai-responses.js";
 
 describe("Native Responses protocol fidelity", () => {
+  it.each([
+    "function_call_output",
+    "custom_tool_call_output",
+  ])("adapts Lite image parts inside %s without touching opaque data", async (type) => {
+    let sent: Record<string, unknown> = {};
+    const image = { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "high" };
+    const opaque = { type: "input_image", detail: "application-data" };
+    const input = [
+      { type: "additional_tools", role: "developer", tools: [] },
+      {
+        type,
+        call_id: "call_1",
+        output: [image, { type: "input_text", text: "Screenshot", extra: opaque }],
+      },
+      { type: "future_item", output: [opaque] },
+    ];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://codex.example.test",
+        getAuthHeader: async () => "Bearer test-only",
+      },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return Response.json({ id: "resp", status: "completed", output: [] });
+      },
+    });
+    await client.nativePassthrough?.({ model: "test-model", input, store: false });
+    expect(sent.input).toEqual([
+      input[0],
+      {
+        ...input[1],
+        output: [
+          { type: "input_image", image_url: image.image_url },
+          { type: "input_text", text: "Screenshot", extra: opaque },
+        ],
+      },
+      input[2],
+    ]);
+    expect(image.detail).toBe("high");
+  });
   it("preserves opaque nested tool schema examples in Responses Lite", async () => {
     let sent: Record<string, unknown> = {};
     const client = createCodexResponsesClient({
@@ -93,6 +134,26 @@ describe("Native Responses protocol fidelity", () => {
 });
 
 describe("Responses accepted-work boundary", () => {
+  it("keeps a real refused TCP connection eligible for provider fallback", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (address === null || typeof address === "string") throw new Error("missing port");
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        apiKey: "test-only",
+        connectRetries: 0,
+      },
+    });
+    await expect(
+      client.nativePassthrough?.({ model: "test-model", input: "hi" }),
+    ).rejects.toMatchObject({
+      upstreamStatus: null,
+      providerRaw: { error: { cause: { code: "ECONNREFUSED" } } },
+    });
+  });
   it.each([
     "codex",
     "generic",
