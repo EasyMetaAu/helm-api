@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import {
   CAPTURE_PATH,
+  COUNT_REJECT_SENTINEL,
   TOOL_CALL_SENTINEL,
   type UpstreamCapture,
 } from "./fixtures/mock-upstream.js";
@@ -406,5 +407,17 @@ test.describe("bidirectional isomorphism", () => {
     const body = (await count.json()) as { input_tokens?: number };
     expect(typeof body.input_tokens).toBe("number");
     expect(body.input_tokens).toBeGreaterThan(0);
+  });
+
+  test("Anthropic count_tokens preserves upstream validation errors", async ({ request }) => {
+    const res = await request.post("/v1/messages/count_tokens", {
+      headers: ANTHROPIC_AUTH,
+      data: {
+        model: "claude-3-5-sonnet",
+        messages: [{ role: "user", content: COUNT_REJECT_SENTINEL }],
+      },
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error.type).toBe("invalid_request_error");
   });
 });

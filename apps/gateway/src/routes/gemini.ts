@@ -294,9 +294,9 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       c.set("concurrencyRelease", acquired.release);
     }
 
-    // 2) countTokens is a local deterministic estimate. It shares auth / rate /
-    //    concurrency with generation, but it must never enter the generation
-    //    transformer or provider pipeline.
+    // 2) countTokens uses native counting with a local fallback for unavailable
+    //    counters. It shares auth / rate / concurrency with generation, but
+    //    never enters the generation transformer or provider pipeline.
     if (route.operation === "countTokens") {
       let requestJson = "";
       let native: unknown;
