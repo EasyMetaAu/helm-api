@@ -98,6 +98,32 @@ describe('lanes page', () => {
     ]);
   });
 
+  it('keeps a manually expanded lane open while editing and correcting its primary', async () => {
+    renderPage(
+      [lane('balanced', { primary: 'gpt-5.6-luna' })],
+      [{ alias: 'gpt-5.6-luna', accounts: [] }],
+    );
+    const card = screen.getByTestId('lane-card');
+    const summary = within(card).getByTestId('lane-summary');
+    const primary = within(card).getByLabelText(/primary/i);
+    await fireEvent.click(summary);
+    await fireEvent(card, new Event('toggle'));
+    expect(card).toHaveAttribute('open');
+
+    for (const value of ['gpt-5.6-lun', '', 'gpt-5.6-luna']) {
+      await fireEvent.input(primary, { target: { value } });
+      expect(card).toHaveAttribute('open');
+      expect(primary).toHaveValue(value);
+    }
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    await fireEvent.click(summary);
+    await fireEvent(card, new Event('toggle'));
+    expect(card).not.toHaveAttribute('open');
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(saveLanes).toHaveBeenCalledTimes(1));
+    expect(saveLanes.mock.calls[0][0][0].primary).toBe('gpt-5.6-luna');
+  });
+
   it('on save failure shows an error and keeps the original value (fail-closed)', async () => {
     saveLanes.mockRejectedValue(new Error('400 invalid lanes'));
     renderPage([lane('balanced', { primary: 'old_model' })]);

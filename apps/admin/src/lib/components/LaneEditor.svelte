@@ -71,6 +71,11 @@
   // Every lane needs a non-empty primary to be coherent; no lane name is special.
   const trimmedPrimary = $derived(primary.trim());
   const primaryEmpty = $derived(trimmedPrimary.length === 0);
+  let expanded = $state(false);
+  // Keep native summary toggles across edits; validation only forces expansion.
+  $effect(() => {
+    if (open || primaryEmpty) expanded = true;
+  });
 
   function emit(): void {
     const next: Lane = {
@@ -187,7 +192,7 @@
 <details
   class="group rounded-lg border border-slate-200 bg-white"
   data-testid="lane-card"
-  open={open || primaryEmpty}
+  bind:open={expanded}
 >
   <summary
     data-testid="lane-summary"
