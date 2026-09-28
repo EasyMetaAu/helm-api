@@ -347,7 +347,7 @@ function normalizeMessageContentToNative(message: IRMessage): IRMessage {
 }
 
 function requiresMaxCompletionTokens(model: string): boolean {
-  return /^(?:gpt-5\.6|gpt-6-astra)(?:$|-)/.test(model);
+  return /^(?:gpt-5\.6|gpt-6-(?:astra|sol|luna))(?:$|-)/.test(model);
 }
 
 // —— Request: OpenAI native -> IR. Identity for everything EXCEPT multimodal content

@@ -83,6 +83,29 @@ gpt-6-astra:
     require_json: false
     require_vision: false
 
+# GPT-6 Sol/Luna follow the existing subscription-first model lanes.
+gpt-6-sol:
+  purpose: OpenAI gpt-6-sol — complex coding and agentic workflows
+  primary: openai-codex/gpt-6-sol
+  fallback:
+    - deepseek-responses/deepseek-flash
+    - premium
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+gpt-6-luna:
+  purpose: OpenAI gpt-6-luna — efficient high-volume tasks
+  primary: openai-codex/gpt-6-luna
+  fallback:
+    - deepseek-responses/deepseek-flash
+    - economy
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
 # —— task lanes (named after detected task_type; the lane resolver maps a
 #    classified task_type onto a same-named lane — docs/04) ——
 coding:

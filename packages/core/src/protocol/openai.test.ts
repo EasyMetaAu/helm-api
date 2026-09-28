@@ -754,9 +754,13 @@ describe("openaiTransformer — max_completion_tokens (o-series, order 4)", () =
     expect(native.max_tokens).toBeUndefined();
   });
 
-  it("renders GPT-6 Astra output caps as max_completion_tokens", async () => {
+  it.each([
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+  ])("renders %s output caps as max_completion_tokens", async (model) => {
     const native = (await openaiTransformer.transformRequestIn({
-      model: "gpt-6-astra",
+      model,
       messages: [{ role: "user", content: "x" }],
       max_tokens: 32000,
     })) as { max_tokens?: number; max_completion_tokens?: number };

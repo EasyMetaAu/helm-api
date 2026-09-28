@@ -1018,8 +1018,8 @@ function hasOpenAIChatTools(body: Record<string, unknown>): boolean {
   return Array.isArray(body.functions) && body.functions.length > 0;
 }
 
-function isGpt56FamilyModel(model: unknown): boolean {
-  return typeof model === "string" && /^(?:gpt-5\.6|gpt-6-astra)(?:$|-)/.test(model);
+function requiresOpenAIChatToolReasoningNone(model: unknown): boolean {
+  return typeof model === "string" && /^(?:gpt-5\.6|gpt-6-(?:astra|sol|luna))(?:$|-)/.test(model);
 }
 
 function openAIReasoningEffort(body: Record<string, unknown>): string | null {
@@ -1069,7 +1069,7 @@ function applyOpenAIChatToolReasoningPolicy(
   body: Record<string, unknown>,
   mutations: NativePassthroughCarrier["mutations"],
 ): Record<string, unknown> {
-  if (!isGpt56FamilyModel(body.model)) return body;
+  if (!requiresOpenAIChatToolReasoningNone(body.model)) return body;
   if (!hasOpenAIChatTools(body)) return body;
 
   const withoutTopLevel =

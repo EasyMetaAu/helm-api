@@ -367,7 +367,11 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body).not.toHaveProperty("max_tokens");
   });
 
-  it("sets GPT-5.6 chat reasoning_effort none when function tools are present", async () => {
+  it.each([
+    "gpt-5.6-luna",
+    "gpt-6-sol",
+    "gpt-6-luna",
+  ])("sets %s chat reasoning_effort none when function tools are present", async (model) => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
       chatCompletionStream: vi.fn(),
@@ -376,17 +380,17 @@ describe("createExecute — gateway execution adapter", () => {
       defaultProvider: provider,
       providers: new Map([["mock", provider]]),
       registry: protocolRegistry({
-        "openai/gpt-5.6-luna": {
+        [`openai/${model}`]: {
           providerName: "mock",
-          providerModel: "gpt-5.6-luna",
+          providerModel: model,
           targetProviderProtocol: "openai_chat",
         },
       }),
       breaker: breaker(),
       catalog: new Map([
         [
-          "openai/gpt-5.6-luna",
-          entry("openai/gpt-5.6-luna", {
+          `openai/${model}`,
+          entry(`openai/${model}`, {
             reasoningEffort: {
               openaiReasoning: {
                 supported: true,
@@ -409,7 +413,7 @@ describe("createExecute — gateway execution adapter", () => {
       },
     };
     const out = await execute(
-      plan(["openai/gpt-5.6-luna"]),
+      plan([`openai/${model}`]),
       req({
         protocol: "anthropic_messages",
         reasoning_effort: "medium",
@@ -422,7 +426,7 @@ describe("createExecute — gateway execution adapter", () => {
       string,
       unknown
     >;
-    expect(body.model).toBe("gpt-5.6-luna");
+    expect(body.model).toBe(model);
     expect(body.tools).toEqual([tool]);
     expect(body.reasoning_effort).toBe("none");
     expect(out.attempts[0]?.request_mutations).toMatchObject({

@@ -6,7 +6,13 @@ describe("loadBundledCodexModels", () => {
     const models = loadBundledCodexModels();
 
     expect(models.map((model) => model.slug)).toEqual(
-      expect.arrayContaining(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
+      expect.arrayContaining([
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+      ]),
     );
     expect(models.find((model) => model.slug === "gpt-5.6-sol")).toMatchObject({
       use_responses_lite: true,

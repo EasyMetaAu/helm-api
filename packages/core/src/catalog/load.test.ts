@@ -372,6 +372,54 @@ describe("loadRuntimeCatalog", () => {
     expect(catalog.get("xai/grok-4.7-build-fast")?.pricing.serviceTiers).toBeUndefined();
   });
 
+  it.each([
+    ["gpt-6-sol", 2, 10],
+    ["gpt-6-luna", 0.1, 0.5],
+  ] as const)("loads %s capabilities and official context/service prices", (model, input, output) => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    for (const provider of ["openai", "openai-codex"]) {
+      const entry = catalog.get(`${provider}/${model}`);
+      expect(entry?.capabilities).toMatchObject({
+        supportsTools: true,
+        jsonOutput: "schema",
+        supportsVision: true,
+        supportsStreaming: true,
+        maxContextTokens: 1_050_000,
+        maxOutputTokens: 128_000,
+        reasoningEffort: {
+          openaiReasoning: {
+            supported: true,
+            levels: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        },
+      });
+      for (const [serviceTier, multiplier] of [
+        ["default", 1],
+        ["flex", 0.5],
+        ["priority", 2],
+        ["fast", 2],
+      ] as const) {
+        for (const prompt of [272_000, 272_001]) {
+          const i = input * multiplier * (prompt > 272_000 ? 2 : 1);
+          const o = output * multiplier * (prompt > 272_000 ? 1.5 : 1);
+          expect(
+            resolveCostUsd(entry?.pricing, {
+              service_tier: serviceTier,
+              usage: {
+                prompt_tokens: prompt,
+                completion_tokens: 50,
+                prompt_tokens_details: { cached_tokens: 200, cache_write_tokens: 100 },
+              },
+            }),
+          ).toBeCloseTo(
+            ((prompt - 300) * i + 200 * i * 0.1 + 100 * i * 1.25 + 50 * o) / 1_000_000,
+            12,
+          );
+        }
+      }
+    }
+  });
+
   it("loads current official cache and context-tier prices for routed models", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
 
