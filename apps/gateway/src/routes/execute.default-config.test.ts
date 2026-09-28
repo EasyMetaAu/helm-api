@@ -169,9 +169,9 @@ function providerClients(client: ProviderClient): Map<string, ProviderClient> {
 
 describe("default config activates capability filter + cost (alias-namespace alignment)", () => {
   it.each([
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
   ])("the shipped %s model lane preserves the Codex client's reasoning effort", (lane) => {
     expect(lanes[lane]?.reasoning_effort).toBeUndefined();
   });
@@ -503,20 +503,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Expand the REAL shipped `json` lane: primary openai-codex/gpt-5.6-terra, then
+    // Expand the REAL shipped `json` lane: primary openai-codex/gpt-6-sol, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
-    expect(chain).toContain("openai-codex/gpt-5.6-terra");
+    expect(chain).toContain("openai-codex/gpt-6-sol");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // The json primary openai-codex/gpt-5.6-terra is json-capable AND serves
+    // The json primary openai-codex/gpt-6-sol is json-capable AND serves
     // non-stream requests, so it lands FIRST — the json-incapable */auto tails
     // (which WOULD be pruned, proven head-on by the previous test) are never
     // reached. The upstream `model` is the bare provider_model.
-    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-codex/gpt-5.6-terra");
-    expect(calls).toEqual(["openai-codex/gpt-5.6-terra"]);
+    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-codex/gpt-6-sol");
+    expect(calls).toEqual(["openai-codex/gpt-6-sol"]);
   });
 
   it("a chain of ONLY json-incapable candidates → capability_unsatisfiable (422 class)", async () => {
