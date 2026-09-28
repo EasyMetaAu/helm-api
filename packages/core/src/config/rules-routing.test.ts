@@ -101,7 +101,7 @@ describe("shipped config rules drive routing", () => {
     expect(config.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
     expect(config.lanes?.vision).toMatchObject({
-      primary: "gpt-5.6-terra",
+      primary: "gpt-6-sol",
       fallback: ["grok", "claude-sonnet", "claude-opus"],
     });
     expect(config.lanes?.tool_use).toBeDefined();
@@ -123,7 +123,7 @@ describe("shipped config rules drive routing", () => {
     expect(lane).toBe("json");
   });
 
-  it("keeps the exact gpt-5.6 lane while leading with the subscription Sol model", async () => {
+  it("routes the legacy gpt-5.6 id to the subscription Astra lane", async () => {
     const config = loadConfig({ configDir, env: {} });
     if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
 
@@ -141,8 +141,8 @@ describe("shipped config rules drive routing", () => {
       { allowCustomModel: true },
     );
 
-    expect(result.decision.lane.selected_lane).toBe("gpt-5.6");
-    expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-5.6-sol");
+    expect(result.decision.lane.selected_lane).toBe("gpt-6-astra");
+    expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-6-astra");
     expect(result.decision.lane.candidate_chain).not.toContain("openai/gpt-5.6");
     expect(result.decision.requested_model).toBe("gpt-5.6");
   });
@@ -193,11 +193,11 @@ describe("shipped config rules drive routing", () => {
     const chain = result.decision.lane.candidate_chain;
     expect(result.decision.lane.selected_lane).toBe("premium");
     expect(chain.slice(0, 6)).toEqual([
-      "openai-codex/gpt-5.6-sol",
+      "openai-codex/gpt-6-astra",
       // The static same-protocol rung sits between the subscription model and the
       // generic chain, so a subscription outage degrades without a lossy translate.
       "deepseek-responses/deepseek-flash",
-      "xai/grok-4.7",
+      "xai/grok-4.6",
       "anthropic/claude-opus-5-5",
       "anthropic/claude-opus-5",
       "anthropic/claude-opus-4-8",

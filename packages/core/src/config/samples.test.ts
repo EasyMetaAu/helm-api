@@ -17,6 +17,38 @@ function readYaml(file: string): unknown {
 }
 
 describe("checked-in config samples", () => {
+  it("replaces retired GPT lanes with ordered GPT-6 tiers and preserves client aliases", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes ?? {};
+    const aliases = cfg.model_aliases ?? {};
+    const replacements = {
+      "gpt-5.6": "gpt-6-astra",
+      "gpt-5.6-sol": "gpt-6-astra",
+      "gpt-5.6-terra": "gpt-6-sol",
+      "gpt-5.6-luna": "gpt-6-luna",
+      "gpt-5.4-mini": "gpt-6-luna",
+    };
+    expect(Object.keys(lanes).filter((name) => name.startsWith("gpt-6-"))).toEqual([
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+    ]);
+    for (const [old, current] of Object.entries(replacements)) {
+      expect(lanes).not.toHaveProperty(old);
+      expect(resolveModelAlias(old, aliases)).toBe(current);
+      expect(resolveModelAlias(`${old}-20260101`, aliases)).toBe(current);
+      expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${current}`);
+    }
+    expect(lanes).not.toHaveProperty("gpt-5.4");
+    expect(resolveModelAlias("gpt-5.4", aliases)).toBe("premium");
+    for (const name of Object.keys(lanes)) {
+      const chain = expandLaneChain(name, lanes);
+      expect(chain.some((model) => /gpt-5\.(4|6)/.test(model))).toBe(false);
+      expect(new Set(chain).size).toBe(chain.length);
+    }
+    expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
+  });
+
   it("parse and merge into a valid HelmConfig", () => {
     const merged = {
       server: readYaml("server.yaml"),
@@ -74,7 +106,7 @@ describe("checked-in config samples", () => {
     expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-opus-4.8");
     expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
     expect(JSON.stringify(lanes)).not.toContain("openai/gpt-5");
-    expect(lanes.economy?.primary).toBe("gpt-5.6-luna");
+    expect(lanes.economy?.primary).toBe("gpt-6-luna");
     expect(lanes.economy?.fallback.slice(0, 5)).toEqual([
       "claude-haiku",
       "grok",
@@ -82,7 +114,7 @@ describe("checked-in config samples", () => {
       "openrouter/auto",
       "zenmux/auto",
     ]);
-    expect(lanes.balanced?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.balanced?.primary).toBe("gpt-6-sol");
     expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
       "claude-sonnet",
       "grok",
@@ -91,9 +123,9 @@ describe("checked-in config samples", () => {
       "openrouter/auto",
     ]);
     expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
-    expect(lanes.premium?.primary).toBe("gpt-5.6-sol");
+    expect(lanes.premium?.primary).toBe("gpt-6-astra");
     expect(lanes.premium?.fallback).toEqual(["grok", "claude-opus", "balanced"]);
-    expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.7", fallback: [] });
+    expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.6", fallback: [] });
     expect(lanes["grok-fast"]).toMatchObject({ primary: "xai/grok-4.7-build-fast", fallback: [] });
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
@@ -101,14 +133,14 @@ describe("checked-in config samples", () => {
     // json lane: official deepseek (cheap json_object) → cheap native-schema openrouter
     // mirror (where a strict json_schema request lands after the filter prunes official
     // deepseek) → balanced. Locks the json_schema routing fix into the shipped config.
-    expect(lanes.json?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.json?.primary).toBe("gpt-6-sol");
     expect(lanes.json?.fallback).toEqual([
       "claude-sonnet",
       "openrouter/deepseek-v4-flash",
       "balanced",
     ]);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
-    expect(lanes.vision?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.vision?.primary).toBe("gpt-6-sol");
     expect(lanes.vision?.fallback).toEqual(["grok", "claude-sonnet", "claude-opus"]);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });
@@ -128,26 +160,26 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("claude-3-5-haiku-20241022", aliases)).toBe("claude-haiku");
     // GPT families route to their dedicated vendor-family lanes. The cheap mini must
     // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
-    // wins): a dated mini id still lands on the cheap gpt-5.4-mini lane.
-    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
-    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-5.6-terra");
-    expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
-    expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-5.6-luna");
-    expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
-    expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
-    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-5.6-sol");
-    expect(resolveModelAlias("gpt-5.4", aliases)).toBe("gpt-5.4");
+    // wins): a dated mini id still lands on the cheap GPT-6 Luna lane.
+    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-6-sol");
+    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-6-sol");
+    expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
+    expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-6-luna");
+    expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-6-sol");
+    expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
+    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("gpt-5.4", aliases)).toBe("premium");
     // RETIRED gpt-5.5 has no mapping of its own, so a client still pinning it falls
     // through `gpt-5*` onto premium — degraded, never a 400 unknown model.
     expect(resolveModelAlias("gpt-5.5", aliases)).toBe("premium");
-    expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-5.4-mini");
-    expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-5.4-mini");
+    expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-6-luna");
+    expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-6-luna");
     // The shipped aliases must validate against the SHIPPED lanes (no drift): every
     // target is a configured lane or "auto", or the gateway would refuse to boot.
     expect(validateModelAliasTargets(aliases, laneNames)).toEqual([]);
@@ -157,8 +189,6 @@ describe("checked-in config samples", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
-    expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6"]?.fallback).toEqual(["gpt-5.6-sol"]);
     // The `deepseek-responses` rung is the only STATIC same-protocol fallback these
     // Codex-serving lanes have. It was pulled on 2026-09-17 after production leaked
     // raw DSML markers, then restored the same day once the real cause was isolated:
@@ -168,12 +198,10 @@ describe("checked-in config samples", () => {
     // and types the call out in its own notation. The fix is the provider's
     // `translateUnsupportedCustomTools` contract, not removing the rung.
     const deepseek = "deepseek-responses/deepseek-flash";
-    expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual([deepseek, "premium"]);
-    expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual([deepseek, "balanced"]);
-    expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual([deepseek, "economy"]);
+    expect(lanes["gpt-6-sol"]?.primary).toBe("openai-codex/gpt-6-sol");
+    expect(lanes["gpt-6-sol"]?.fallback).toEqual([deepseek, "balanced"]);
+    expect(lanes["gpt-6-luna"]?.primary).toBe("openai-codex/gpt-6-luna");
+    expect(lanes["gpt-6-luna"]?.fallback).toEqual([deepseek, "economy"]);
     expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
     expect(lanes["gpt-6-astra"]?.fallback).toEqual([deepseek, "premium"]);
     // Always `deepseek-flash`: `deepseek-v4-pro` has no image input, so a vision
@@ -195,14 +223,6 @@ describe("checked-in config samples", () => {
     // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
     // entries deliberately survive for historical cost reprice (see load.test.ts).
     expect(lanes).not.toHaveProperty("gpt-5.5");
-    expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", deepseek, "premium"]);
-    expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual([
-      "openai-codex/gpt-5.4-mini",
-      deepseek,
-      "economy",
-    ]);
   });
 
   it("ships Codex GPT-5.6 fallback capabilities matching the Codex model catalog", () => {
