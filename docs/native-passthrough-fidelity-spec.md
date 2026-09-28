@@ -90,11 +90,45 @@ use native passthrough; if it fails before client-visible output, a later
 same-protocol candidate can also use passthrough, while a later cross-protocol
 candidate uses translation.
 
-For Anthropic targets, inline `developer` turns and inline `system` turns on
-unsupported/unknown models require compatibility translation. Documented Opus
-4.8/5/5.5, Fable 5/5.1 and Mythos 5/5.1 (including eight-digit snapshots) preserve
-native system shapes and positions; Anthropic validates them. See the official
-[mid-conversation system documentation](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages).
+Same-protocol Anthropic requests keep native `system`/`developer` turns and cache
+boundaries for every model, including Sonnet 5, custom aliases and future models.
+Helm does not maintain a model allowlist for passthrough. The upstream validates
+native roles and placement; a native 400 is not a reason to retry through translation.
+Explicit runtime/provider opt-outs and cross-protocol safety guards still apply.
+
+Model-specific wire exceptions live in `config/capabilities.yaml`, keyed by the
+**routing alias**, under `requestCompatibility`. Missing policy preserves fields;
+unknown keys/values fail configuration validation. These narrow exceptions never
+disable native passthrough or move message/cache boundaries:
+
+```yaml
+anthropic/claude-sonnet-5:
+  requestCompatibility:
+    anthropic:
+      unsupportedSamplingParameters: [temperature]
+# For an explicitly verified model that accepts only adaptive thinking:
+#   requestCompatibility:
+#     anthropic:
+#       unsupportedSamplingParameters: [temperature, top_p, top_k]
+#       unsupportedThinkingTypes: [enabled, disabled]
+openai/gpt-6-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
+```
+
+Anthropic policies reach the final provider serialization boundary, including
+streaming, translation, token counting and auth retries. Signed message history and
+adaptive display settings remain intact. OpenAI Chat policies do not apply to
+Responses; an explicit `max_completion_tokens` takes precedence. Context limits
+come from `maxContextTokens`, with exact Anthropic counting retained when a limit
+is configured. Missing limits defer model validation to the upstream.
+
+Operators with custom routing aliases must put verified exceptions under those
+aliases; Helm no longer guesses them from the wire model name. Upgrades using a
+mounted config directory must merge the new capability fields into that directory
+and reload/restart the gateway; publishing an image alone does not update it.
 
 ## Native carrier
 

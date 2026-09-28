@@ -4180,7 +4180,13 @@ export async function buildServer(
       throw new Error("native token counter requires unrestricted model selection");
     const client = providerClients.get(target.providerName);
     if (!client?.countTokens) throw new Error("native token counter unavailable");
-    return await client.countTokens({ ...body, model: target.providerModel }, { signal });
+    return await client.countTokens(
+      { ...body, model: target.providerModel },
+      {
+        signal,
+        requestCompatibility: catalog.get(target.alias)?.capabilities.requestCompatibility,
+      },
+    );
   };
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes

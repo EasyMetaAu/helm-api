@@ -36,6 +36,11 @@
 # is hard request context, not a cache-affinity hint, so fallback chains skip every
 # candidate that does not advertise it.
 
+# `requestCompatibility` contains explicit, narrow wire exceptions by routing alias.
+# Omitted => preserve fields, including on future models. It never disables native
+# passthrough. See docs/native-passthrough-fidelity-spec.md for supported fields.
+# Keep custom aliases here; adapters do not infer these rules from wire model names.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SUBSCRIPTION / AGGREGATOR MODELS (drop-openai-crs-relay 2026-06-03). These live
 # HERE (the manual override layer), NOT in the generated catalog: they are
@@ -179,6 +184,10 @@ xai/grok-imagine-video:
 # authenticated `/models` response is authoritative per account; these entries are
 # only the last-resort fallback when no fresh or last-known-good remote catalog exists.
 openai-codex/gpt-6-astra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -192,6 +201,10 @@ openai-codex/gpt-6-astra:
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
 openai-codex/gpt-6-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -203,6 +216,10 @@ openai-codex/gpt-6-sol:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai-codex/gpt-6-luna:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -214,6 +231,10 @@ openai-codex/gpt-6-luna:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -225,6 +246,10 @@ openai-codex/gpt-5.6:
   maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -236,6 +261,10 @@ openai-codex/gpt-5.6-sol:
   maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-terra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -247,6 +276,10 @@ openai-codex/gpt-5.6-terra:
   maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-luna:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -371,6 +404,10 @@ openrouter/deepseek-v4-flash:
 # It supports reasoning levels low..max (not none), streaming, tools and strict
 # structured outputs. Keep this separate from the GPT-5.6 subscription aliases.
 openai/gpt-6-astra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -384,6 +421,10 @@ openai/gpt-6-astra:
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
 openai/gpt-6-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -395,6 +436,10 @@ openai/gpt-6-sol:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai/gpt-6-luna:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -406,6 +451,10 @@ openai/gpt-6-luna:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai/gpt-5.6:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -417,6 +466,10 @@ openai/gpt-5.6:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai/gpt-5.6-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -428,6 +481,10 @@ openai/gpt-5.6-sol:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai/gpt-5.6-terra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -439,6 +496,10 @@ openai/gpt-5.6-terra:
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai/gpt-5.6-luna:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+      toolReasoningEffort: none
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -648,6 +709,10 @@ zenmux-anthropic/claude-haiku-4.5:
 # adaptive display settings, so no manual-budget policy is installed here.
 # https://platform.claude.com/docs/en/models/opus-5-5/overview
 anthropic/claude-opus-5-5:
+  requestCompatibility:
+    anthropic:
+      unsupportedSamplingParameters: [temperature, top_p, top_k]
+      unsupportedThinkingTypes: [enabled, disabled]
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -721,6 +786,9 @@ anthropic/claude-sonnet-4-6:
 # https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5
 # https://platform.claude.com/docs/en/build-with-claude/effort
 anthropic/claude-sonnet-5:
+  requestCompatibility:
+    anthropic:
+      unsupportedSamplingParameters: [temperature]
   supportsTools: true
   jsonOutput: schema
   supportsVision: true

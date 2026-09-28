@@ -12,7 +12,6 @@ import type {
   XaiOAuthModel,
 } from "@helm/core";
 import {
-  anthropicNativeBodyRequiresSystemFold,
   applyForcedAnthropicThinking,
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
@@ -438,22 +437,12 @@ function decideNativePassthroughForAttempt(input: {
 }): PassthroughTelemetry {
   const { req, target } = input;
 
-  // A native Anthropic body with a system/developer turn INSIDE messages[] may need a
-  // model-aware compatibility rewrite. Older/unknown Anthropic models still fold; Opus
-  // 4.8 can keep byte-faithful passthrough for its documented valid placement.
-  const requiresCompatibilityRewrite =
-    target.providerRequiresCompatibilityRewrite ||
-    (target.targetProviderProtocol === "anthropic_messages" &&
-      anthropicNativeBodyRequiresSystemFold(req.native_request, {
-        providerModel: target.providerModel,
-      }));
-
   const decision = canUseNativePassthrough({
     enabled: input.enabled,
     hasNativeRequest: req.native_request !== undefined,
     request: req,
     targetProviderProtocol: target.targetProviderProtocol,
-    providerRequiresCompatibilityRewrite: requiresCompatibilityRewrite,
+    providerRequiresCompatibilityRewrite: target.providerRequiresCompatibilityRewrite,
     // Stream-aware feature detection: a stream request needs the streaming sibling
     // (nativePassthroughStream); a non-stream request needs nativePassthrough. A
     // provider that implements only one is `provider_lacks_passthrough` for the other.
@@ -904,34 +893,9 @@ export function errorClassOf(err: unknown): string {
   return "upstream_error";
 }
 
-const ANTHROPIC_NATIVE_CONTEXT_LIMITS = [
-  { pattern: /^claude-opus-4[-.]8(?:-|$)/, maxContextTokens: 1_000_000 },
-  { pattern: /^claude-sonnet-4[-.]6(?:-|$)/, maxContextTokens: 1_000_000 },
-  { pattern: /^claude-haiku-4[-.]5(?:-|$)/, maxContextTokens: 1_000_000 },
-] as const;
-
-function bareAnthropicModelId(model: string): string {
-  const slash = model.lastIndexOf("/");
-  return (slash >= 0 ? model.slice(slash + 1) : model).toLowerCase();
-}
-
-function hardAnthropicContextLimit(providerModel: string): number | null {
-  const bare = bareAnthropicModelId(providerModel);
-  for (const row of ANTHROPIC_NATIVE_CONTEXT_LIMITS) {
-    if (row.pattern.test(bare)) return row.maxContextTokens;
-  }
-  return null;
-}
-
-function effectiveContextLimit(catalogEntry: CatalogEntry | undefined, providerModel: string) {
-  const catalogLimit = catalogEntry?.capabilities.maxContextTokens;
-  const normalizedCatalogLimit =
-    typeof catalogLimit === "number" && catalogLimit > 0 ? catalogLimit : null;
-  const hardLimit = hardAnthropicContextLimit(providerModel);
-  if (normalizedCatalogLimit !== null && hardLimit !== null) {
-    return Math.min(normalizedCatalogLimit, hardLimit);
-  }
-  return normalizedCatalogLimit ?? hardLimit;
+function effectiveContextLimit(catalogEntry: CatalogEntry | undefined) {
+  const limit = catalogEntry?.capabilities.maxContextTokens;
+  return typeof limit === "number" && limit > 0 ? limit : null;
 }
 
 function outputConfigEffort(value: unknown): string | null {
@@ -1018,10 +982,6 @@ function hasOpenAIChatTools(body: Record<string, unknown>): boolean {
   return Array.isArray(body.functions) && body.functions.length > 0;
 }
 
-function requiresOpenAIChatToolReasoningNone(model: unknown): boolean {
-  return typeof model === "string" && /^(?:gpt-5\.6|gpt-6-(?:astra|sol|luna))(?:$|-)/.test(model);
-}
-
 function openAIReasoningEffort(body: Record<string, unknown>): string | null {
   if (!isPlainRecord(body.reasoning)) return null;
   return nonEmptyString(body.reasoning.effort);
@@ -1067,9 +1027,10 @@ function applyOpenAIReasoningPolicy(
 
 function applyOpenAIChatToolReasoningPolicy(
   body: Record<string, unknown>,
+  policy: NonNullable<Capabilities["requestCompatibility"]>["openaiChat"],
   mutations: NativePassthroughCarrier["mutations"],
 ): Record<string, unknown> {
-  if (!requiresOpenAIChatToolReasoningNone(body.model)) return body;
+  if (policy?.toolReasoningEffort !== "none") return body;
   if (!hasOpenAIChatTools(body)) return body;
 
   const withoutTopLevel =
@@ -1190,7 +1151,16 @@ function applyReasoningEffortPolicy(
           (caps !== undefined && crossProtocol ? STRIP_REASONING_EFFORT_POLICY : undefined),
         mutations,
       );
-      return applyOpenAIChatToolReasoningPolicy(next, mutations);
+      const compatibility = caps?.requestCompatibility?.openaiChat;
+      const rendered = applyOpenAIChatToolReasoningPolicy(next, compatibility, mutations);
+      if (
+        compatibility?.maxTokensField !== "max_completion_tokens" ||
+        rendered.max_tokens === undefined
+      )
+        return rendered;
+      const { max_tokens, ...rest } = rendered;
+      appendReasoningPolicyShim(mutations, "max_tokens_mapped_to_max_completion_tokens");
+      return { ...rest, max_completion_tokens: rendered.max_completion_tokens ?? max_tokens };
     }
     case "openai_responses":
       return applyOpenAIReasoningPolicy(
@@ -1740,7 +1710,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // cached context handle, not an optional affinity hint.
         const catalogEntry = xaiCatalogEntry(alias, providerModel);
         const caps = catalogEntry?.capabilities;
-        const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
+        const exactContextLimit = effectiveContextLimit(catalogEntry);
         const canUseExactContextPreflight =
           target.targetProviderProtocol === "anthropic_messages" &&
           req.native_request !== undefined &&
@@ -1894,7 +1864,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
             const countBody = { ...nativePassthroughBody(optimizedCountInput) };
             delete countBody.stream;
-            const tokenCount = await provider.countTokens(countBody, { signal });
+            const tokenCount = await provider.countTokens(countBody, {
+              signal,
+              requestCompatibility: caps?.requestCompatibility,
+            });
             const inputTokens = countTokensInputTokens(tokenCount);
             if (inputTokens !== null && inputTokens > exactContextLimit) {
               capabilityPruned = true;
@@ -2013,6 +1986,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
+                      requestCompatibility: caps?.requestCompatibility,
                       captureUpstream,
                       onResponseMeta,
                       codexBufferedStreamRecovery,
@@ -2113,6 +2087,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
+                      requestCompatibility: caps?.requestCompatibility,
                       captureUpstream,
                       onResponseMeta,
                       optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
@@ -2194,6 +2169,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   ...(req.metadata.stateful_provider_account
                     ? { statefulAccount: req.metadata.stateful_provider_account }
                     : {}),
+                  requestCompatibility: caps?.requestCompatibility,
                   captureUpstream,
                   onResponseMeta,
                   toolCallXmlRecovery:
@@ -2236,6 +2212,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               ...(req.metadata.stateful_provider_account
                 ? { statefulAccount: req.metadata.stateful_provider_account }
                 : {}),
+              requestCompatibility: caps?.requestCompatibility,
               captureUpstream,
               onResponseMeta,
               optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,

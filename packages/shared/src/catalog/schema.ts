@@ -90,6 +90,26 @@ export const CapabilitiesSchema = z.object({
   // Absent means false so video routes fail closed for every existing model card.
   outputVideo: z.boolean().optional(),
   reasoningEffort: ReasoningEffortCapabilitySchema.optional(),
+  // Explicit wire exceptions, keyed by routing alias in capabilities.yaml.
+  // Omitted means preserve the request; model names never imply a rewrite.
+  requestCompatibility: z
+    .strictObject({
+      anthropic: z
+        .strictObject({
+          unsupportedSamplingParameters: z
+            .array(z.enum(["temperature", "top_p", "top_k"]))
+            .optional(),
+          unsupportedThinkingTypes: z.array(z.enum(["enabled", "disabled"])).optional(),
+        })
+        .optional(),
+      openaiChat: z
+        .strictObject({
+          maxTokensField: z.literal("max_completion_tokens").optional(),
+          toolReasoningEffort: z.literal("none").optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });

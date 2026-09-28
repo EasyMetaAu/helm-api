@@ -27,6 +27,26 @@ function enoent(): never {
 }
 
 describe("loadRuntimeCatalog", () => {
+  it("rejects unknown or unsafe wire compatibility configuration", () => {
+    for (const policy of [
+      { anthropic: { unsupportedSamplingParameters: ["messages"] } },
+      { anthropic: { unsupportedThinkingTypes: ["adaptive"] } },
+      { openaiChat: { maxTokensField: "typo" } },
+      { openaiChat: { toolReasoningEffot: "none" } },
+    ]) {
+      expect(() =>
+        loadRuntimeCatalog({
+          configDir: "/cfg",
+          readFile: reader((path) => {
+            if (path.endsWith("capabilities.yaml"))
+              return JSON.stringify({ "local/new-model": { requestCompatibility: policy } });
+            enoent();
+          }),
+        }),
+      ).toThrow();
+    }
+  });
+
   it("loads the checked-in generated catalog with no overrides (absent yamls)", () => {
     // readFile that throws for every override file → both treated as absent.
     const catalog = loadRuntimeCatalog({

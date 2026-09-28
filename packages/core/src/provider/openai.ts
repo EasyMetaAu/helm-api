@@ -5,6 +5,7 @@
 
 import { Buffer } from "node:buffer";
 import {
+  type Capabilities,
   type NativePassthroughInput,
   VideoGenerationResponseSchema,
   VideoRetrieveResponseSchema,
@@ -132,6 +133,8 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Resolved alias policy; never inferred from the upstream model name. */
+  requestCompatibility?: Capabilities["requestCompatibility"];
   /** Opt-in atomic Codex delivery; may repeat inference once, never hosted tools. */
   codexBufferedStreamRecovery?: boolean;
   onStreamRecoveryEligibility?: (event: { eligible: boolean; reason?: string }) => void;
@@ -206,7 +209,7 @@ export interface ProviderClient {
   ): AsyncIterable<string>;
   countTokens?(
     req: ChatCompletionRequest,
-    opts?: { signal?: AbortSignal },
+    opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   // OpenAI Images API (POST /v1/images/generations). OPTIONAL — feature-detected by
   // the images route; only the OpenAI-compat provider implements it. Forwards the
