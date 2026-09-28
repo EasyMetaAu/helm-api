@@ -13,6 +13,7 @@ import {
   loadConfig,
   loadRuntimeCatalog,
   parseLanesConfig,
+  resolveModelAlias,
   toRegistryProviders,
 } from "@helm/core";
 import type { CatalogEntry, InternalRequest } from "@helm/shared";
@@ -173,6 +174,27 @@ describe("default config activates capability filter + cost (alias-namespace ali
     "gpt-5.6-luna",
   ])("the shipped %s model lane preserves the Codex client's reasoning effort", (lane) => {
     expect(lanes[lane]?.reasoning_effort).toBeUndefined();
+  });
+
+  it.each([
+    "gpt-6-sol",
+    "gpt-6-luna",
+  ])("routes shipped %s aliases and registers its official upstream", (model) => {
+    expect(lanes[model]?.primary).toBe(`openai-codex/${model}`);
+    expect(lanes[model]?.reasoning_effort).toBeUndefined();
+    expect(expandChain(model)[1]).toBe("deepseek-responses/deepseek-flash");
+    for (const alias of [
+      model,
+      `${model}-2026-09-25`,
+      `openai.${model}`,
+      `openai.${model}-2026-09-25`,
+    ]) {
+      expect(resolveModelAlias(alias, config.model_aliases)).toBe(model);
+    }
+    expect(config.providers.find((provider) => provider.name === "openai")?.models).toContainEqual({
+      alias: `openai/${model}`,
+      provider_model: model,
+    });
   });
 
   it("sanity: the shipped catalog is keyed by the SAME provider/model aliases the lanes use", () => {

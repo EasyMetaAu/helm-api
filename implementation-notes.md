@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-28 · GPT-6 Sol / Luna 模型接入（docs/04、05、07、10）
+
+- **路由决定**：新增 `gpt-6-sol` / `gpt-6-luna`、日期后缀和 `openai.` 兼容别名；沿用 Codex 订阅优先 → DeepSeek Responses → premium/economy 的链路，保持现有质量档默认模型。付费 `openai/*` 仅供显式指定。
+- **官方依据**：[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol)、[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)、[价格](https://developers.openai.com/api/docs/pricing)，核对日期 2026-09-28。API 上下文 1,050,000、最大输出 128,000；推理 none/low/medium/high/xhigh/max。Chat 工具调用复用现有 `reasoning_effort: none` 适配，输出上限用 `max_completion_tokens`；Responses 保留推理档位。
+- **成本**：每百万 token 的输入/缓存读取/缓存写入/输出为 Sol $2/$0.20/$2.50/$10，Luna $0.10/$0.01/$0.125/$0.50。输入超过 272K 时整单输入及缓存 ×2、输出 ×1.5；Flex ×0.5，priority/fast ×2。订阅遥测沿用 API 等价价格，不表示订阅实际扣款。
+- **订阅边界**：通过现有同步脚本更新至官方 Codex `rust-v0.157.1`，两款模型要求最低客户端 0.155.0；不手写或伪造 bundled metadata。Codex 账号的实时模型列表与上下文限制仍优先于 API 静态能力；新增目录不代表所有账号都已获授权。未执行真实付费调用或生产配置变更。
+
 ## 2026-09-27 · 原生辅助接口兼容性补修（docs/04、05、07）
 
 - **重放边界**：真实连接拒绝与 DNS 解析失败可继续安全 fallback；发送结果不明、断管和响应正文失败仍禁止重放。
@@ -78,15 +85,9 @@
 - **生命周期**：客户端取消时主动终止请求体读取并释放 reader/租约。管理 API 与 Memory/eval 内部 HTTP 读取复用共享预算，预算覆盖 JSON 解析；超大可选 Memory 文本沿用既有 fail-open 丢弃策略，字节计数改为逐片累计。关键词正则缓存限制为 1024 项，避免多次配置热更新长期积累。
 - **限制与验证**：JSON 路由校验、完整终止事件及显式开启的 Codex 整轮恢复仍需要有界暂存；不为降低内存删除这些契约。详见 `docs/memory-safety-audit-2026-09-24.md`。本条记录源码与本机验收边界；提交、CI、发布及生产回读须分别验证，不能将局部压力验证解释为任意负载下永不 OOM。
 
-## 2026-09-24 · Responses 内存准入与 Codex 恢复诊断（Runtime / Provider，docs/04、05）
-
-- **决定**：新增运行时 `global_concurrency_limit`（0 关闭，默认 0），并由现有 `concurrency_queue_enabled` 作为总开关；Remote 保持 0，只有运维明确在设置中启用后才生效。复用本地有界 FIFO semaphore 控制当前进程的执行并发。该上限独立于 per-key limit，共用 queue min-size 与 wait-timeout 设置；全局队列不访问分布式 key 租约表。先取得 key 租约，避免 key 等待者占用全局名额；全局等待失败会释放 key 租约。排队满或超时返回既有 429。
-- **生命周期**：全局名额随真实请求/流结束释放，不使用会提前释放长请求的 watchdog。WebSocket 每轮经 Responses 路由取得名额，结束时释放。上限在线调整作用于之后的准入；既有排队者与持有者按原生命周期退出，不中断运行中的请求。
-- **诊断**：记录 `codex_stream_recovery_eligible` 与无正文的 `codex_stream_recovery_skip_reason`，区分 disabled、HTTP、hosted tools、缺少历史、parent mismatch、unsupported input/event、capacity、不可重试 close/error 和 retry exhausted；保留 attempts/cost-unknown 字段。诊断失败不影响执行。
-- **限制**：并发 cap 降低峰值但不保证单个大响应永不触发内存准入，既有内存保护仍生效；初始 4 是保守运维值，需结合线上等待/失败率调整。长回答在 buffered 模式下仍延迟首字；上游断线并非全部可安全重放。
-- **验证**：定向回归覆盖进程/分布式隔离、key 等待公平性、取消释放、配置回读及恢复拒绝原因；发布须等待完整 CI 和确切 SHA 的 Publish，并回读 Remote 的版本、digest、配置与真实请求 telemetry。
-
 ## 更早历史总览
+
+2026-09-24 · Responses 内存准入与 Codex 恢复诊断：进程级并发上限默认关闭，保留 key 租约、公平排队、取消与预算边界，并增加无正文恢复诊断；生产启用须单独验收。完整记录见 git history。
 
 2026-09-23 · Codex 整轮暂存与同账号恢复：可选缓冲整轮，严格限定同账号重放一次，保留取消/预算/容量和结果不明保护；上游可能重复计费，需独立线上验收。完整记录见 git history。
 
