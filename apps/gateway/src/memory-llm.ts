@@ -1,5 +1,11 @@
 import type { ExtractedFact, ObserverDeps, ProviderClient, ReflectorDeps } from "@helm/core";
-import type { MemoryLlmConfig, Observation, RawMessage, Reflection } from "@helm/shared";
+import type {
+  Capabilities,
+  MemoryLlmConfig,
+  Observation,
+  RawMessage,
+  Reflection,
+} from "@helm/shared";
 import { z } from "zod";
 import { xmlJsonBlock } from "./prompt-boundary.js";
 
@@ -67,6 +73,7 @@ type RawFactsOutput = z.infer<typeof RawFactsOutputSchema>;
 export interface MemoryModelResolution {
   client: ProviderClient;
   providerModel: string;
+  requestCompatibility?: Capabilities["requestCompatibility"];
 }
 
 export interface CreateMemoryLlmRuntimeDeps {
@@ -233,7 +240,7 @@ async function callJsonModel<T>(args: {
         max_tokens: maxTokens,
         response_format: { type: "json_object" },
       },
-      { signal: controller.signal },
+      { signal: controller.signal, requestCompatibility: resolved.requestCompatibility },
     );
     const text = assistantTextFromCompletion(response);
     const parsed = schema.parse(parseJsonObject(text));

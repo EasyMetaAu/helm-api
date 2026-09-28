@@ -332,7 +332,10 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.store).toBe(false);
   });
 
-  it("renders Responses output caps as max_completion_tokens for GPT-5.6 OpenAI-chat targets", async () => {
+  it.each([
+    undefined,
+    32,
+  ])("applies configured Chat output caps, preserving explicit max_completion_tokens=%s", async (explicit) => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
       chatCompletionStream: vi.fn(),
@@ -348,14 +351,18 @@ describe("createExecute — gateway execution adapter", () => {
         },
       }),
       breaker: breaker(),
-      catalog: new Map(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
       now: clock(),
       signal: new AbortController().signal,
     });
 
     const out = await execute(
       plan(["openai/gpt-5.6-luna"]),
-      req({ protocol: "openai_responses", max_tokens: 16 }),
+      req({
+        protocol: "openai_responses",
+        max_tokens: 16,
+        ...(explicit === undefined ? {} : { max_completion_tokens: explicit }),
+      }),
     );
 
     expect(out.final.status).toBe("ok");
@@ -363,7 +370,7 @@ describe("createExecute — gateway execution adapter", () => {
       string,
       unknown
     >;
-    expect(body.max_completion_tokens).toBe(16);
+    expect(body.max_completion_tokens).toBe(explicit ?? 16);
     expect(body).not.toHaveProperty("max_tokens");
   });
 
@@ -371,6 +378,7 @@ describe("createExecute — gateway execution adapter", () => {
     "gpt-5.6-luna",
     "gpt-6-sol",
     "gpt-6-luna",
+    "custom-future-model",
   ])("sets %s chat reasoning_effort none when function tools are present", async (model) => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
@@ -391,6 +399,7 @@ describe("createExecute — gateway execution adapter", () => {
         [
           `openai/${model}`,
           entry(`openai/${model}`, {
+            requestCompatibility: { openaiChat: { toolReasoningEffort: "none" } },
             reasoningEffort: {
               openaiReasoning: {
                 supported: true,
@@ -434,7 +443,7 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
-  it("sets GPT-5.6 chat reasoning_effort none for Anthropic-shaped tools without catalog data", async () => {
+  it("preserves chat reasoning effort without an explicit compatibility policy", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
       chatCompletionStream: vi.fn(),
@@ -476,10 +485,8 @@ describe("createExecute — gateway execution adapter", () => {
     >;
     expect(body.model).toBe("gpt-5.6-luna");
     expect(body.tools).toEqual([tool]);
-    expect(body.reasoning_effort).toBe("none");
-    expect(out.attempts[0]?.request_mutations).toMatchObject({
-      body_shims_applied: ["reasoning_effort_none_for_chat_tools"],
-    });
+    expect(body.reasoning_effort).toBe("medium");
+    expect(out.attempts[0]?.request_mutations).toBeUndefined();
   });
 
   it("sets GPT-5.6 chat reasoning_effort none for tools even when the client omits reasoning", async () => {
@@ -498,7 +505,7 @@ describe("createExecute — gateway execution adapter", () => {
         },
       }),
       breaker: breaker(),
-      catalog: new Map(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -1741,7 +1748,7 @@ describe("createExecute — gateway execution adapter", () => {
         },
       }),
       breaker: cb,
-      catalog: new Map(),
+      catalog: new Map([["opus", entry("opus", { maxContextTokens: 1_000_000 })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -1795,7 +1802,7 @@ describe("createExecute — gateway execution adapter", () => {
         },
       }),
       breaker: cb,
-      catalog: new Map(),
+      catalog: new Map([["opus", entry("opus", { maxContextTokens: 1_000_000 })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -4871,6 +4878,49 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.provider_model).toBe("claude-x");
   });
 
+  it("preserves a native role rejection instead of retrying through translation", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const upstreamError = { error: { type: "invalid_request_error", message: "unsupported role" } };
+    provider.nativePassthrough.mockRejectedValue(
+      new UpstreamError("upstream_error", "upstream returned 400", upstreamError, 400),
+    );
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-sonnet-5",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const out = await execute(
+      plan(["a"]),
+      anthropicReq({
+        native_request: {
+          ...NATIVE,
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "system", content: "reminder" },
+          ],
+        },
+      }),
+    );
+    expect(out.final.status).toBe("error");
+    expect(provider.nativePassthrough).toHaveBeenCalledOnce();
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.attempts[0]).toMatchObject({
+      passthrough_used: true,
+      error_detail: { upstream_status: 400 },
+    });
+  });
+
   it("stabilizes Claude Code billing cch on Anthropic native passthrough so prompt cache survives turns", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({
@@ -5014,68 +5064,22 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
   });
 
-  it("anthropic native body with an inline system turn DISABLES passthrough (folds via chatCompletion)", async () => {
-    // Regression for request 81f3fa9e... on older/unknown models: Claude Code 2.1.175
-    // emits the MCP-server instructions as a TRAILING system message ([user, system]).
-    // If the resolved model is not known to support that shape, passthrough must be
-    // disabled so the request folds system into top-level `system`.
-    const provider = anthropicProvider(NATIVE_RESP);
-    const execute = createExecute({
-      defaultProvider: provider,
-      providers: new Map([["anthro", provider]]),
-      registry: protocolRegistry({
-        a: {
-          providerName: "anthro",
-          providerModel: "claude-x",
-          targetProviderProtocol: "anthropic_messages",
-        },
-      }),
-      breaker: breaker(),
-      catalog: new Map(),
-      now: clock(),
-      signal: new AbortController().signal,
-      nativeProtocolPassthroughEnabled: () => true,
-    });
-
-    const out = await execute(
-      plan(["a"]),
-      anthropicReq({
-        native_request: {
-          ...NATIVE,
-          messages: [
-            { role: "user", content: "hi" },
-            { role: "system", content: "# MCP Server Instructions\n..." },
-          ],
-        },
-      }),
-    );
-
-    expect(out.final.status).toBe("ok");
-    // Folded via the translating path, NOT forwarded verbatim.
-    expect(provider.nativePassthrough).not.toHaveBeenCalled();
-    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
-    expect(out.nativePassthrough).toBeFalsy();
-    const okRow = out.attempts[0];
-    expect(okRow?.status).toBe("ok");
-    expect(okRow?.passthrough_considered).toBe(true);
-    expect(okRow?.passthrough_used).toBe(false);
-    expect(okRow?.passthrough_disable_reason).toBe("provider_requires_compatibility_rewrite");
-  });
-
   it.each([
-    "claude-opus-4-8",
-    "claude-opus-5",
-    "claude-opus-5-5",
-  ])("%s native body preserves the trailing system cache boundary", async (providerModel) => {
+    ["claude-opus-4-8", "system"],
+    ["claude-opus-5", "system"],
+    ["claude-opus-5-5", "system"],
+    ["claude-sonnet-5", "system"],
+    ["custom-future-model", "system"],
+    ["custom-future-model", "developer"],
+  ])("%s native body preserves the trailing %s cache boundary", async (providerModel, role) => {
     // Regression for request 5191ce2b...: disabling passthrough sent the request through
     // the compatibility rewrite path, which produced an upstream empty-success stream.
-    // Opus 4.8/5/5.5 support this [user, system] placement and its cache boundary, so
-    // the cache boundary must survive model-specific effort cleanup.
+    // Same-protocol forwarding must preserve this cache boundary for any model;
+    // the upstream owns role/placement validation, including future models.
     const provider = anthropicProvider(NATIVE_RESP);
     const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
       `anthropic/${providerModel}`,
     );
-    if (!modelEntry) throw new Error("missing model catalog entry");
     const execute = createExecute({
       defaultProvider: provider,
       providers: new Map([["anthro", provider]]),
@@ -5087,7 +5091,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
         },
       }),
       breaker: breaker(),
-      catalog: new Map([["a", { ...modelEntry, modelKey: "a" }]]),
+      catalog: new Map(modelEntry ? [["a", { ...modelEntry, modelKey: "a" }]] : []),
       now: clock(),
       signal: new AbortController().signal,
       nativeProtocolPassthroughEnabled: () => true,
@@ -5101,7 +5105,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       messages: [
         { role: "user", content: "hi" },
         {
-          role: "system",
+          role,
           content: [
             {
               type: "text",
@@ -5128,6 +5132,9 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       output_config:
         providerModel === "claude-opus-4-8" ? undefined : nativeWithTrailingSystem.output_config,
     });
+    expect(provider.nativePassthrough.mock.calls[0]?.[1]).toMatchObject({
+      requestCompatibility: modelEntry?.capabilities.requestCompatibility,
+    });
     expect(out.nativePassthrough).toBe(true);
     expect(out.attempts[0]?.passthrough_used).toBe(true);
   });
@@ -5136,6 +5143,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     "claude-opus-5",
     "claude-opus-5-5",
     "claude-fable-5-1",
+    "claude-sonnet-5",
   ])("%s preserves native request bytes and opaque SSE through execution", async (providerModel) => {
     const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
       `anthropic/${providerModel}`,
@@ -8812,7 +8820,7 @@ describe("createExecute — user message queue timeout", () => {
   });
 });
 
-describe("createExecute — effectiveContextLimit Math.min branch", () => {
+describe("createExecute — configured context limit", () => {
   function mkEntry(
     modelKey: string,
     caps: Partial<CatalogEntry["capabilities"]> = {},
@@ -8838,12 +8846,11 @@ describe("createExecute — effectiveContextLimit Math.min branch", () => {
     };
   }
 
-  it("uses Math.min of catalog and hard Anthropic limit when both are present", async () => {
-    // claude-opus-4-8 has hardAnthropicContextLimit = 1_000_000.
-    // If catalog says maxContextTokens = 500_000, the effective limit is 500_000 (Math.min).
-    // count_tokens returns 600_000 > 500_000 → context_too_small skip.
+  it.each([
+    500_000, 2_000_000,
+  ])("uses configured context limit %s without a model-name ceiling", async (limit) => {
     const provider = {
-      countTokens: vi.fn().mockResolvedValue({ input_tokens: 600_000 }),
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_100_000 }),
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient;
@@ -8858,8 +8865,7 @@ describe("createExecute — effectiveContextLimit Math.min branch", () => {
         },
       }),
       breaker: breaker(),
-      // catalog caps at 500_000; hard limit is 1_000_000; Math.min → 500_000
-      catalog: new Map([["opus", mkEntry("opus", { maxContextTokens: 500_000 })]]),
+      catalog: new Map([["opus", mkEntry("opus", { maxContextTokens: limit })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -8878,8 +8884,10 @@ describe("createExecute — effectiveContextLimit Math.min branch", () => {
         }),
       }),
     );
-    // count_tokens returned 600_000 > 500_000 (Math.min limit) → context_too_small, all failed
-    expect(out.attempts[0]).toMatchObject({ skip_reason: "context_too_small" });
+    expect(provider.countTokens).toHaveBeenCalledOnce();
+    if (limit < 1_100_000)
+      expect(out.attempts[0]).toMatchObject({ skip_reason: "context_too_small" });
+    else expect(out.final.status).toBe("ok");
   });
 });
 

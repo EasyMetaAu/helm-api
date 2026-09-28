@@ -3394,6 +3394,10 @@ export async function buildServer(
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
     momentum: { store: momentumStore },
     catalog,
+    requestCompatibilityForModel: (model) =>
+      catalog.get(model)?.capabilities.requestCompatibility ??
+      catalog.get(first.models.find((candidate) => candidate.provider_model === model)?.alias ?? "")
+        ?.capabilities.requestCompatibility,
   });
   const registry = buildRegistry(
     routableProviders,
@@ -3411,26 +3415,35 @@ export async function buildServer(
     if (selfHttpClient) {
       return { client: selfHttpClient, providerModel: alias };
     }
+    const requestCompatibility = catalog.get(alias)?.capabilities.requestCompatibility;
     const slash = alias.indexOf("/");
     const prefix = slash > 0 ? alias.slice(0, slash) : "";
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
       if (!isOAuthAliasAvailable(alias)) return null;
       const client = providerClients.get(prefix);
       return client
-        ? { client, providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1) }
+        ? {
+            client,
+            requestCompatibility,
+            providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1),
+          }
         : null;
     }
 
     const resolved = registry.resolve(alias);
     if (resolved.ok) {
       const client = providerClients.get(resolved.value.providerName);
-      return client ? { client, providerModel: resolved.value.providerModel } : null;
+      return client
+        ? { client, requestCompatibility, providerModel: resolved.value.providerModel }
+        : null;
     }
     if (prefix && providerClients.has(prefix)) {
       const client = providerClients.get(prefix);
-      return client ? { client, providerModel: alias.slice(slash + 1) } : null;
+      return client
+        ? { client, requestCompatibility, providerModel: alias.slice(slash + 1) }
+        : null;
     }
-    return { client: provider, providerModel: alias };
+    return { client: provider, providerModel: alias, requestCompatibility };
   };
   const memoryLlm = createMemoryLlmRuntime({
     config: config.memory.llm,
@@ -4180,7 +4193,13 @@ export async function buildServer(
       throw new Error("native token counter requires unrestricted model selection");
     const client = providerClients.get(target.providerName);
     if (!client?.countTokens) throw new Error("native token counter unavailable");
-    return await client.countTokens({ ...body, model: target.providerModel }, { signal });
+    return await client.countTokens(
+      { ...body, model: target.providerModel },
+      {
+        signal,
+        requestCompatibility: catalog.get(target.alias)?.capabilities.requestCompatibility,
+      },
+    );
   };
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes

@@ -276,8 +276,12 @@ describe("classify adapter — admin classifier hot-apply", () => {
     };
 
     let captured: Record<string, unknown> | null = null;
+    const compatibility = {
+      anthropic: { unsupportedSamplingParameters: ["temperature" as const] },
+    };
     const provider: ProviderForEval = {
-      chatCompletion: async (body) => {
+      chatCompletion: async (body, opts) => {
+        expect(opts?.requestCompatibility).toEqual(compatibility);
         captured = body;
         return {
           choices: [
@@ -295,6 +299,7 @@ describe("classify adapter — admin classifier hot-apply", () => {
       getClassifierConfig: () => cfg,
       lanes: LANES,
       provider,
+      requestCompatibilityForModel: (model) => (model === "eval-model" ? compatibility : undefined),
       now: () => Date.now(),
       log: () => {},
     });

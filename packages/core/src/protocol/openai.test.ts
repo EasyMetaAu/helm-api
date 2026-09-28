@@ -742,31 +742,18 @@ describe("openaiTransformer — max_completion_tokens (o-series, order 4)", () =
     expect(back.max_completion_tokens).toBe(1000);
   });
 
-  it("renders GPT-5.6 output caps as max_completion_tokens, not max_tokens", async () => {
-    const native = (await openaiTransformer.transformRequestIn({
-      model: "gpt-5.6-luna",
-      messages: [{ role: "user", content: "x" }],
-      max_tokens: 32000,
-    })) as { max_tokens?: number; max_completion_tokens?: number };
-
-    expect(native.max_completion_tokens).toBe(32000);
-    expect(native).not.toHaveProperty("max_tokens");
-    expect(native.max_tokens).toBeUndefined();
-  });
-
   it.each([
+    "gpt-5.6-luna",
     "gpt-6-astra",
-    "gpt-6-sol",
-    "gpt-6-luna",
-  ])("renders %s output caps as max_completion_tokens", async (model) => {
-    const native = (await openaiTransformer.transformRequestIn({
+    "custom-future-model",
+  ])("preserves %s token fields without model-name inference", async (model) => {
+    const native = await openaiTransformer.transformRequestIn({
       model,
       messages: [{ role: "user", content: "x" }],
       max_tokens: 32000,
-    })) as { max_tokens?: number; max_completion_tokens?: number };
-
-    expect(native.max_completion_tokens).toBe(32000);
-    expect(native).not.toHaveProperty("max_tokens");
+    });
+    expect(native).toMatchObject({ max_tokens: 32000 });
+    expect(native).not.toHaveProperty("max_completion_tokens");
   });
 
   it("leaves max_tokens unchanged for legacy OpenAI-compatible chat models", async () => {

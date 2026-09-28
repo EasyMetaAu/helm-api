@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-28 · 原生透传取消模型准入名单，兼容规则归入配置（docs/04、05、10）
+
+- **根因修复**：同协议 Anthropic 不再因 Sonnet、未知模型或 inline system/developer 进入整包转换。上游负责原生角色校验；原始缓存边界与 native 400 保留。显式开关、跨协议/continuation 校验和不可重放保护保留。
+- **配置归一**：Anthropic 采样字段/旧 thinking 模式、OpenAI Chat token 字段/工具 reasoning 规则归入 `capabilities.yaml` 的 `requestCompatibility`，按路由 alias 解析并传至最终序列化。未配置即保留；非法字段 fail-closed。上下文上限复用 `maxContextTokens`，删除重复源码名单。
+- **迁移边界**：自定义 alias 需自行声明经验证的兼容例外；挂载配置的部署需合并字段并重载，单独升级镜像不更新配置。模型目录/别名/价格仍按既有配置与同步流程维护，本次未宣称新增模型无需提供这些业务数据。
+
 ## 2026-09-28 · GPT lane 换代与线上配置回收（docs/04、11）
 
 - **配置基线**：先读取用户指定的 Remote 当前配置，再合并默认配置；保留线上 Grok 4.6 及其他未要求修改的通道。GPT 模型 lane 按 Astra → Sol → Luna 排列，质量与任务 lane 沿用线上已切换的 GPT-6 主通道。
@@ -77,14 +83,9 @@
 - **读回校验**：仅对重置前可观测的 scope 要求恢复，nullable overage 不阻止确认；已观测窗口消失仍拒绝确认。部分重置复用既有 95% 活跃限额恢复判定，保留未清除周窗的 cooldown。同组织身份核实后即纳入刷新集合，暂时读取失败标记刷新不完整；结果不明时关闭确认框并提示可能已扣次数，需人工核查。
 - **供应商差异**：Claude 的 early-use grant 不套 Codex 的 90% 阈值；未知 scope 不授权消费。上游接口若变化，管理端点 fail-closed，普通 Anthropic quota PULL 保持原 schema。
 
-## 2026-09-25 · 内存复查：Replay 分块落盘与已接收请求防重放（Runtime / Provider / Store，docs/04、05、07、08）
-
-- **修复**：generic Responses 已收到 HTTP 成功响应后遇到本机内存准入失败，沿用结果不明的禁止重放边界；保留原始容量错误，不惩罚 provider 熔断。MCP 与 Portal 请求体接入现有共享预算，没有新增正文大小、输出长度或批量数量上限。
-- **Replay**：关闭 capture 时只留有界 usage 尾部；开启时 SQLite/Postgres 使用现有 codec 分块写入并等待存储，完整保留输出。SQLite v53 / Postgres v52 为增量迁移；旧行保持可读。新 writer 仅接受新的服务端 request_id，先保存请求，提交时发布 response generation；失败清理暂存分块，保留请求。FK 让暂存及正式分块跟随 payload retention 清理，包括进程崩溃后的未提交分块。
-- **读取与边界**：管理界面按原下载契约流式读取分块，校验初始分块数和字节数；清理/替换导致缺块时终止流，不能把前缀当作完整正文。完整物化接口仍保留，管理路由先用大小元数据执行既有准入检查。自定义 Store 若未实现可选 streaming port，仍沿用原 insertPayload 行为；archive 的旧全量行契约没有在此变更。
-- **引用释放**：Responses 有界 delta 前缀使用独立 UTF-16 副本；Memory stats 每次访问回收过期 scope，不增加条目上限。定向测试及 heap probe 验证引用释放；不能据此承诺任意负载下永不 OOM。数据库备份、完整 CI、确切 SHA 镜像和生产回读须分别验收。
-
 ## 更早历史总览
+
+2026-09-25：Replay 分块落盘、已接收请求防重放与响应内存边界，详见 Git 历史。
 
 2026-09-24 · 流式累计内存与读取生命周期：累计预算覆盖协议/管理读取、完整终止语义及取消释放，保留原生 usage 与 key 隔离。完整记录见 git history。
 

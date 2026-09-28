@@ -1,4 +1,6 @@
+import { createNativePassthroughCarrier } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
+import { loadRuntimeCatalog } from "../catalog/load.js";
 import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import {
   anthropicToOpenAIResponse,
@@ -11,16 +13,26 @@ import { STRICT_CLAUDE_CLI_TOOL_GOLDEN } from "./fixtures/claude-cli-strict-tool
 import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 import { UpstreamError } from "./openai.js";
 
+const opusCompatibility = loadRuntimeCatalog({ configDir: "config" }).get(
+  "anthropic/claude-opus-5-5",
+)?.capabilities.requestCompatibility;
+const sonnetCompatibility = loadRuntimeCatalog({ configDir: "config" }).get(
+  "anthropic/claude-sonnet-5",
+)?.capabilities.requestCompatibility;
+
 describe("openaiToAnthropicRequest", () => {
   it("uses Opus 5.5 effort without manual thinking budgets or sampling parameters", () => {
-    const body = openaiToAnthropicRequest({
-      model: "claude-opus-5-5",
-      messages: [{ role: "user", content: "Hi" }],
-      reasoning_effort: "high",
-      max_tokens: 1024,
-      temperature: 0.2,
-      top_p: 0.9,
-    });
+    const body = openaiToAnthropicRequest(
+      {
+        model: "custom-future-opus",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        max_tokens: 1024,
+        temperature: 0.2,
+        top_p: 0.9,
+      },
+      { compatibility: opusCompatibility?.anthropic },
+    );
     expect(body.output_config).toEqual({ effort: "high" });
     expect(body.max_tokens).toBe(1024);
     expect(body).not.toHaveProperty("thinking");
@@ -29,11 +41,14 @@ describe("openaiToAnthropicRequest", () => {
   });
 
   it("omits deprecated temperature for Claude Sonnet 5", () => {
-    const body = openaiToAnthropicRequest({
-      model: "claude-sonnet-5",
-      messages: [{ role: "user", content: "Hi" }],
-      temperature: 0.2,
-    });
+    const body = openaiToAnthropicRequest(
+      {
+        model: "custom-future-sonnet",
+        messages: [{ role: "user", content: "Hi" }],
+        temperature: 0.2,
+      },
+      { compatibility: sonnetCompatibility?.anthropic },
+    );
     expect(body.temperature).toBeUndefined();
   });
 
@@ -1410,6 +1425,50 @@ describe("translateAnthropicSSE", () => {
   });
 });
 
+describe("unconfigured Anthropic native parameters", () => {
+  it("records configured native mutations on the attempt carrier", async () => {
+    const input = createNativePassthroughCarrier({
+      protocol: "anthropic_messages",
+      headers: {},
+      body: {
+        model: "custom-future-sonnet",
+        temperature: 0.4,
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "test" },
+      fetch: async () => jsonResponse({ id: "m", content: [] }),
+    });
+    await client.nativePassthrough?.(input, { requestCompatibility: sonnetCompatibility });
+    expect(input.mutations.body_shims_applied).toContain("temperature_removed_for_model");
+    expect(input.body.temperature).toBe(0.4);
+  });
+
+  it("preserves known model fields and the native upstream rejection", async () => {
+    const body = {
+      model: "claude-opus-5-5",
+      temperature: 0.4,
+      top_p: 0.9,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      messages: [{ role: "developer", content: "opaque instruction" }],
+    };
+    let wire: unknown;
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "test" },
+      fetch: async (_url, init) => {
+        wire = JSON.parse(String(init?.body));
+        return jsonResponse(
+          { error: { type: "invalid_request_error", message: "unsupported role" } },
+          400,
+        );
+      },
+    });
+    await expect(client.nativePassthrough?.(body)).rejects.toMatchObject({ upstreamStatus: 400 });
+    expect(wire).toEqual(body);
+  });
+});
+
 describe("Opus 5.5 wire compatibility", () => {
   it.each([
     "native",
@@ -1442,7 +1501,7 @@ describe("Opus 5.5 wire compatibility", () => {
     });
     const signed = { type: "thinking", thinking: "", signature: "opaque-signed-history" };
     const body = {
-      model: "claude-opus-5-5",
+      model: "custom-future-opus",
       max_tokens: 1024,
       temperature: 0.2,
       top_p: 0.9,
@@ -1455,15 +1514,23 @@ describe("Opus 5.5 wire compatibility", () => {
         { role: "user", content: "continue" },
       ],
     };
-    if (path === "native") await client.nativePassthrough?.(body);
-    else if (path === "count") await client.countTokens?.(body);
-    else if (path === "translated") await client.chatCompletion(body);
+    if (path === "native")
+      await client.nativePassthrough?.(body, { requestCompatibility: opusCompatibility });
+    else if (path === "count")
+      await client.countTokens?.(body, { requestCompatibility: opusCompatibility });
+    else if (path === "translated")
+      await client.chatCompletion(body, { requestCompatibility: opusCompatibility });
     else if (path === "native-stream") {
-      for await (const _ of client.nativePassthroughStream?.({ ...body, stream: true }) ?? []) {
+      for await (const _ of client.nativePassthroughStream?.(
+        { ...body, stream: true },
+        { requestCompatibility: opusCompatibility },
+      ) ?? []) {
         /* consume */
       }
     } else {
-      for await (const _ of client.chatCompletionStream(body)) {
+      for await (const _ of client.chatCompletionStream(body, {
+        requestCompatibility: opusCompatibility,
+      })) {
         /* consume */
       }
     }
@@ -1490,12 +1557,14 @@ describe("Opus 5.5 wire compatibility", () => {
       },
     });
     const body = {
-      model: "claude-opus-5-5",
+      model: "custom-future-opus",
       thinking: { type: "adaptive", display: "summarized" },
       tool_choice: { type: "any" },
       messages: [{ role: "user", content: "hi" }],
     };
-    await expect(client.nativePassthrough?.(body)).rejects.toBeInstanceOf(UpstreamError);
+    await expect(
+      client.nativePassthrough?.(body, { requestCompatibility: opusCompatibility }),
+    ).rejects.toBeInstanceOf(UpstreamError);
     expect(sent.thinking).toEqual(body.thinking);
     expect(sent.tool_choice).toEqual(body.tool_choice);
   });
@@ -1521,14 +1590,15 @@ describe("Sonnet 5 temperature at the wire boundary", () => {
       },
     });
     const body = {
-      model: "claude-sonnet-5",
+      model: "custom-future-sonnet",
       messages: [{ role: "user", content: "hello" }],
       temperature: 0.2,
       thinking: { type: "adaptive" },
       max_tokens: 64,
     };
-    if (path === "translated") await client.chatCompletion(body);
-    else await client.nativePassthrough?.(body);
+    if (path === "translated")
+      await client.chatCompletion(body, { requestCompatibility: sonnetCompatibility });
+    else await client.nativePassthrough?.(body, { requestCompatibility: sonnetCompatibility });
     expect(sent).not.toHaveProperty("temperature");
     expect(sent.thinking).toEqual({ type: "adaptive" });
     expect(body.temperature).toBe(0.2);

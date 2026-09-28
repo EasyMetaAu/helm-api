@@ -19,6 +19,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, type as osType } from "node:os";
 import {
   appendMutationList,
+  type Capabilities,
   cloneCarrierWithBody,
   isNativePassthroughCarrier,
   type NativePassthroughInput,
@@ -1287,7 +1288,10 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
 
 export function openaiToAnthropicRequest(
   req: ChatCompletionRequest,
-  opts?: { metadataUserId?: string },
+  opts?: {
+    metadataUserId?: string;
+    compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"];
+  },
 ): Record<string, unknown> {
   const r = req as Record<string, unknown>;
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
@@ -1318,8 +1322,7 @@ export function openaiToAnthropicRequest(
   // user_id verbatim. Anthropic's metadata.user_id is an opaque ≤256-char string;
   // we carry {device_id, account_uuid, session_id} like the official client.
   if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
-  const model = String(r.model ?? "");
-  if (typeof r.temperature === "number" && model !== "claude-sonnet-5") {
+  if (typeof r.temperature === "number") {
     body.temperature = r.temperature;
   }
   if (typeof r.top_p === "number") body.top_p = r.top_p;
@@ -1327,7 +1330,7 @@ export function openaiToAnthropicRequest(
   if (r.thinking && typeof r.thinking === "object") {
     body.thinking = r.thinking;
   } else if (
-    model !== "claude-opus-5-5" &&
+    !opts?.compatibility?.unsupportedThinkingTypes?.includes("enabled") &&
     typeof r.reasoning_effort === "string" &&
     reasoningEffortToAnthropicThinking(r.reasoning_effort) !== undefined
   ) {
@@ -1338,7 +1341,7 @@ export function openaiToAnthropicRequest(
     const adjusted = applyForcedAnthropicThinking(body, r.reasoning_effort);
     body.thinking = adjusted.thinking;
     body.max_tokens = adjusted.max_tokens;
-    if (model !== "claude-sonnet-5") body.temperature = adjusted.temperature;
+    body.temperature = adjusted.temperature;
     delete body.top_p;
     delete body.top_k;
   }
@@ -1379,7 +1382,7 @@ export function openaiToAnthropicRequest(
   // Automatic and explicit caching may coexist. Keep client-owned breakpoints;
   // invalid combinations remain the provider's structured validation error.
   if (r.cache_control !== undefined) body.cache_control = r.cache_control;
-  return nativePassthroughBody(normalizeAnthropicModelParameters(body));
+  return nativePassthroughBody(normalizeAnthropicModelParameters(body, opts?.compatibility));
 }
 
 function anthropicToolChoice(
@@ -1520,21 +1523,15 @@ function forceAnthropicFastMode(input: NativePassthroughInput): NativePassthroug
   return carrier;
 }
 
-function normalizeAnthropicModelParameters(input: NativePassthroughInput): NativePassthroughInput {
+function normalizeAnthropicModelParameters(
+  input: NativePassthroughInput,
+  policy?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
+): NativePassthroughInput {
   const body = nativePassthroughBody(input);
-  const opus55 = body.model === "claude-opus-5-5";
-  const unsupported = opus55
-    ? ["temperature", "top_p", "top_k"]
-    : body.model === "claude-sonnet-5"
-      ? ["temperature"]
-      : [];
-  // Opus 5.5 always thinks adaptively. Keep valid adaptive display settings and
-  // signed history intact; only remove the legacy request-level modes.
-  if (
-    opus55 &&
-    isRecord(body.thinking) &&
-    (body.thinking.type === "enabled" || body.thinking.type === "disabled")
-  ) {
+  const unsupported: string[] = [...(policy?.unsupportedSamplingParameters ?? [])];
+  // Only explicitly configured request-level modes; never touch signed history.
+  const thinkingType = isRecord(body.thinking) ? body.thinking.type : undefined;
+  if (policy?.unsupportedThinkingTypes?.some((type) => type === thinkingType)) {
     unsupported.push("thinking");
   }
   const removed = unsupported.filter((key) => key in body);
@@ -1542,13 +1539,12 @@ function normalizeAnthropicModelParameters(input: NativePassthroughInput): Nativ
   const next = { ...body };
   for (const key of removed) delete next[key];
   if (!isNativePassthroughCarrier(input)) return next;
-  const carrier = cloneCarrierWithBody(input, next);
   appendMutationList(
-    carrier.mutations,
+    input.mutations,
     "body_shims_applied",
     removed.map((key) => `${key}_removed_for_model`),
   );
-  return carrier;
+  return cloneCarrierWithBody(input, next);
 }
 
 export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient {
@@ -1640,9 +1636,11 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
+    compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
   ): Promise<AnthropicRequestResult> {
     const wireInput = normalizeAnthropicModelParameters(
       cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
+      compatibility,
     );
     const body = nativePassthroughBody(wireInput);
     const prepared = prepareNativePassthroughRequest(
@@ -1678,7 +1676,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     }
     // Strict thinking normalization can re-add temperature; apply the model gate last.
     const finalBody = nativePassthroughBody(
-      normalizeAnthropicModelParameters(normalizedBody ?? strictPrepared.body),
+      normalizeAnthropicModelParameters(normalizedBody ?? strictPrepared.body, compatibility),
     );
     const wireBody = strictClaudeCliFingerprint
       ? serializeAnthropicBody(finalBody, { strictClaudeCliFingerprint: true })
@@ -1745,6 +1743,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
+    compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
   ): Promise<AnthropicRequestResult> {
     const result = await request(
       body,
@@ -1754,6 +1753,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       capture,
       includeClaudeCliRuntimeHeaders,
       normalizeToolNames,
+      compatibility,
     );
     if (result.res.status === 401 && cfg.onUnauthorized !== undefined) {
       await result.res.body?.cancel().catch(() => {});
@@ -1766,6 +1766,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         capture,
         includeClaudeCliRuntimeHeaders,
         normalizeToolNames,
+        compatibility,
       );
     }
     return result;
@@ -1787,7 +1788,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const translatedBody = openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId });
+      const translatedBody = openaiToAnthropicRequest(req, {
+        metadataUserId: cfg.metadataUserId,
+        compatibility: opts?.requestCompatibility?.anthropic,
+      });
       const body = opts?.optimizeAnthropicBody
         ? await opts.optimizeAnthropicBody(translatedBody)
         : translatedBody;
@@ -1799,6 +1803,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         opts?.captureUpstream,
         true,
         true,
+        opts?.requestCompatibility?.anthropic,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1808,7 +1813,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     async *chatCompletionStream(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
       const translatedBody = {
-        ...openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
+        ...openaiToAnthropicRequest(req, {
+          metadataUserId: cfg.metadataUserId,
+          compatibility: opts?.requestCompatibility?.anthropic,
+        }),
         stream: true,
       };
       const body = opts?.optimizeAnthropicBody
@@ -1822,6 +1830,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         opts?.captureUpstream,
         true,
         true,
+        opts?.requestCompatibility?.anthropic,
       );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs, toolNameMap);
@@ -1844,6 +1853,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         [],
         opts?.captureUpstream,
         false,
+        false,
+        opts?.requestCompatibility?.anthropic,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const nativeResponse = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1853,9 +1864,16 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     },
 
     async countTokens(req, opts) {
-      const { res } = await requestWithRetry(req, opts?.signal, countTokensUrl, [
-        TOKEN_COUNTING_BETA,
-      ]);
+      const { res } = await requestWithRetry(
+        req,
+        opts?.signal,
+        countTokensUrl,
+        [TOKEN_COUNTING_BETA],
+        undefined,
+        true,
+        false,
+        opts?.requestCompatibility?.anthropic,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
@@ -1875,6 +1893,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         [],
         opts?.captureUpstream,
         false,
+        false,
+        opts?.requestCompatibility?.anthropic,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const raw = readAnthropicSSERaw(res, timeoutMs);

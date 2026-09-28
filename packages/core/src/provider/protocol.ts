@@ -1,8 +1,4 @@
-import {
-  type InternalRequest,
-  isNativePassthroughCarrier,
-  type TargetProviderProtocol,
-} from "@helm/shared";
+import type { InternalRequest, TargetProviderProtocol } from "@helm/shared";
 
 // Native protocol passthrough guard (issue #217, Phase 1). Decides whether the
 // executor may forward the client's VERBATIM native request body to the upstream
@@ -105,53 +101,4 @@ export function canUseNativePassthrough(
     return { ok: false, reason: "provider_lacks_passthrough" };
   }
   return { ok: true };
-}
-
-// Anthropic historically carried `system` at the TOP LEVEL only, so an inline
-// `system`/`developer` turn inside `messages[]` required the compatibility rewrite.
-// Documented Opus, Fable, and Mythos models accept native `system` turns, so the
-// passthrough guard must be model-aware: keep older/unknown models fail-closed, but do
-// not disable byte-faithful passthrough for the valid shape Claude Code
-// emits (e.g. `[user, system]` trailing MCP instructions).
-//
-// Scope the CALL to anthropic_messages targets — OpenAI/Gemini accept inline
-// system/developer turns, so they neither need nor want this fold. `nativeRequest` is the
-// `InternalRequest.native_request` carrier (or a bare body); a non-Anthropic / message-less
-// body returns false (passthrough stays eligible). Pure + framework-agnostic
-// (CLAUDE.md principle 1), single-unit-testable (principle 4).
-export interface AnthropicSystemFoldOptions {
-  /** Resolved upstream model for this attempt. Missing/unknown stays conservative. */
-  providerModel?: string | null;
-}
-
-function anthropicModelSupportsMidConversationSystem(providerModel: string | null | undefined) {
-  if (providerModel === null || providerModel === undefined) return false;
-  const model = providerModel.toLowerCase();
-  const slash = model.lastIndexOf("/");
-  const unprefixed = slash >= 0 ? model.slice(slash + 1) : model;
-  return /^claude-(?:opus-(?:4-8|5(?:-5)?)|(?:fable|mythos)-5(?:-1)?)(?:-\d{8})?$/.test(unprefixed);
-}
-
-export function anthropicNativeBodyRequiresSystemFold(
-  nativeRequest: unknown,
-  options: AnthropicSystemFoldOptions = {},
-): boolean {
-  if (nativeRequest === null || typeof nativeRequest !== "object") return false;
-  const body = isNativePassthroughCarrier(nativeRequest)
-    ? nativeRequest.body
-    : (nativeRequest as Record<string, unknown>);
-  const messages = body.messages;
-  if (!Array.isArray(messages)) return false;
-  const supportsMidConversationSystem = anthropicModelSupportsMidConversationSystem(
-    options.providerModel,
-  );
-  return messages.some((m) => {
-    if (m === null || typeof m !== "object") return false;
-    const role = (m as { role?: unknown }).role;
-    if (role === "developer") return true;
-    if (role !== "system") return false;
-    // Native blocks and placement evolve upstream. Never "repair" them by moving
-    // instructions; the provider owns validation and its native 400 response.
-    return !supportsMidConversationSystem;
-  });
 }
