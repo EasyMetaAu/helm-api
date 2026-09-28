@@ -204,6 +204,7 @@ describe('LaneEditor', () => {
 
     const alert = screen.getByRole('alert');
     expect(alert).toHaveTextContent(/cannot be empty|required/i);
+    expect(screen.getByTestId('lane-card')).toHaveAttribute('open');
     expect(onchange.mock.lastCall?.[0].primary).toBe('');
   });
 
