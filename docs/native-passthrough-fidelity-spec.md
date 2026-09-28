@@ -119,7 +119,7 @@ openai/gpt-6-sol:
 ```
 
 Anthropic policies reach the final provider serialization boundary, including
-streaming, translation, token counting and auth retries. Signed message history and
+streaming, translation, token counting, direct Memory/eval calls and auth retries. Signed message history and
 adaptive display settings remain intact. OpenAI Chat policies do not apply to
 Responses; an explicit `max_completion_tokens` takes precedence. Context limits
 come from `maxContextTokens`, with exact Anthropic counting retained when a limit

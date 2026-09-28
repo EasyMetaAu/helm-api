@@ -125,7 +125,11 @@ function buildEvalPrompt(req: InternalRequest): EvalModelRequest["messages"] {
 export interface ProviderForEval {
   chatCompletion(
     req: Record<string, unknown>,
-    opts?: { signal?: AbortSignal; attemptTimeoutMs?: number },
+    opts?: {
+      signal?: AbortSignal;
+      attemptTimeoutMs?: number;
+      requestCompatibility?: CatalogEntry["capabilities"]["requestCompatibility"];
+    },
   ): Promise<Record<string, unknown>>;
 }
 
@@ -167,6 +171,9 @@ export interface ClassifyAdapterDeps {
    *  fail-open (principle 3): absent entry / missing pricing → eval_usd null (not
    *  measured, distinct from a measured 0), NEVER a crash. */
   catalog?: Map<string, CatalogEntry>;
+  requestCompatibilityForModel?: (
+    model: string,
+  ) => CatalogEntry["capabilities"]["requestCompatibility"];
 }
 
 // Per-request classify overrides (composition-root concern; defaults come from
@@ -259,7 +266,13 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       // head model and falls back to the next candidate (instead of the eval aborting
       // the whole loopback as a client_abort). A direct provider (no self-HTTP) ignores
       // it and relies on the outer guard, byte-identical to before.
-      { signal, attemptTimeoutMs },
+      {
+        signal,
+        attemptTimeoutMs,
+        requestCompatibility:
+          deps.requestCompatibilityForModel?.(modelReq.model) ??
+          catalog?.get(modelReq.model)?.capabilities.requestCompatibility,
+      },
     );
     // Extract the assistant text and actual evaluator model from an OpenAI-shaped completion (defensive).
     const responseModel = (res as { model?: unknown }).model;

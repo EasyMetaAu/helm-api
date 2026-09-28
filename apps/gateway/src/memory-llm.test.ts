@@ -1,5 +1,5 @@
 import type { ProviderClient } from "@helm/core";
-import type { Observation, RawMessage, Reflection } from "@helm/shared";
+import type { Capabilities, Observation, RawMessage, Reflection } from "@helm/shared";
 import { MemoryLlmSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -71,12 +71,17 @@ function runtimeArgs(overrides: {
   response: unknown;
   resolveAlias?: string;
   providerModel?: string;
+  requestCompatibility?: Capabilities["requestCompatibility"];
 }) {
   const client = providerWithJson(overrides.response);
   const logs: Array<{ line: string; meta?: object }> = [];
   const resolveModel = vi.fn((alias: string) =>
     alias === (overrides.resolveAlias ?? "deepseek/memory-small")
-      ? { client, providerModel: overrides.providerModel ?? "memory-small" }
+      ? {
+          client,
+          providerModel: overrides.providerModel ?? "memory-small",
+          requestCompatibility: overrides.requestCompatibility,
+        }
       : null,
   );
   const runtime = createMemoryLlmRuntime({
@@ -159,6 +164,7 @@ describe("createMemoryLlmRuntime", () => {
       },
       resolveAlias: "openai/observer",
       providerModel: "gpt-observer",
+      requestCompatibility: { anthropic: { unsupportedSamplingParameters: ["temperature"] } },
     });
 
     const result = await runtime.summarize({
@@ -175,7 +181,10 @@ describe("createMemoryLlmRuntime", () => {
         max_tokens: 321,
         response_format: { type: "json_object" },
       }),
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        requestCompatibility: { anthropic: { unsupportedSamplingParameters: ["temperature"] } },
+      }),
     );
     expect(result).toEqual({
       observationText: "Invoices for Project Alpha require PO #123.",

@@ -3394,6 +3394,10 @@ export async function buildServer(
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
     momentum: { store: momentumStore },
     catalog,
+    requestCompatibilityForModel: (model) =>
+      catalog.get(model)?.capabilities.requestCompatibility ??
+      catalog.get(first.models.find((candidate) => candidate.provider_model === model)?.alias ?? "")
+        ?.capabilities.requestCompatibility,
   });
   const registry = buildRegistry(
     routableProviders,
@@ -3411,26 +3415,35 @@ export async function buildServer(
     if (selfHttpClient) {
       return { client: selfHttpClient, providerModel: alias };
     }
+    const requestCompatibility = catalog.get(alias)?.capabilities.requestCompatibility;
     const slash = alias.indexOf("/");
     const prefix = slash > 0 ? alias.slice(0, slash) : "";
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
       if (!isOAuthAliasAvailable(alias)) return null;
       const client = providerClients.get(prefix);
       return client
-        ? { client, providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1) }
+        ? {
+            client,
+            requestCompatibility,
+            providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1),
+          }
         : null;
     }
 
     const resolved = registry.resolve(alias);
     if (resolved.ok) {
       const client = providerClients.get(resolved.value.providerName);
-      return client ? { client, providerModel: resolved.value.providerModel } : null;
+      return client
+        ? { client, requestCompatibility, providerModel: resolved.value.providerModel }
+        : null;
     }
     if (prefix && providerClients.has(prefix)) {
       const client = providerClients.get(prefix);
-      return client ? { client, providerModel: alias.slice(slash + 1) } : null;
+      return client
+        ? { client, requestCompatibility, providerModel: alias.slice(slash + 1) }
+        : null;
     }
-    return { client: provider, providerModel: alias };
+    return { client: provider, providerModel: alias, requestCompatibility };
   };
   const memoryLlm = createMemoryLlmRuntime({
     config: config.memory.llm,
