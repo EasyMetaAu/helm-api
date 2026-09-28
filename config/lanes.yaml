@@ -9,13 +9,12 @@
 # gateway refuses to boot (fail-closed, principle 2). `balanced` is REQUIRED: it
 # is the terminal of the classification fallback.
 #
-# PROVIDER MIX (2026-07-10, GPT-5.6): quality lanes lead with verified
+# PROVIDER MIX (2026-09-28, GPT-6): quality lanes lead with verified
 # `openai-codex` SUBSCRIPTION slugs where the ChatGPT/Codex backend accepts them
 # (connect it in admin → Providers). Official OpenAI GPT API aliases are deliberately
 # absent from every shipped lane because their per-token cost is too high. They remain
-# defined in providers/capabilities/pricing for explicit custom-model use. `gpt-5.6` routes
-# to Sol, but the subscription backend rejects the bare alias, so Helm routes to
-# the concrete Sol/Terra/Luna subscription slugs instead. DeepSeek/OpenRouter/ZenMux
+# defined in providers/capabilities/pricing for explicit custom-model use. Helm routes
+# Astra/Sol/Luna lanes to their concrete subscription slugs. DeepSeek/OpenRouter/ZenMux
 # remain static lower fallbacks so lanes degrade gracefully when subscriptions
 # are unavailable. An unconnected candidate
 # fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each
@@ -28,7 +27,7 @@
 economy:
   purpose: Cheap and fast for simple tasks
   reasoning_effort: medium
-  primary: gpt-5.6-luna
+  primary: gpt-6-luna
   fallback:
     - claude-haiku
     - grok
@@ -43,7 +42,7 @@ economy:
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   reasoning_effort: medium
-  primary: gpt-5.6-terra
+  primary: gpt-6-sol
   fallback:
     - claude-sonnet
     - grok
@@ -58,7 +57,7 @@ balanced:
 premium:
   purpose: Strong reasoning and high quality
   reasoning_effort: high
-  primary: gpt-5.6-sol
+  primary: gpt-6-astra
   fallback:
     - grok
     - claude-opus
@@ -68,12 +67,10 @@ premium:
     require_json: false
     require_vision: false
 
-# —— GPT-6 Astra (official OpenAI, PAID) ——
-# Leads with the paid official alias, then degrades to the subscription-backed
-# `premium` lane so the chain stays healthy when OPENAI_API_KEY is absent or the
-# model errors. Reachable via the `gpt-6-astra` client alias (custom-model key).
+# —— GPT-6 model lanes: Astra → Sol → Luna ——
+# Subscription first, then DeepSeek Responses and the matching quality tier.
 gpt-6-astra:
-  purpose: Official GPT-6 Astra (paid OpenAI), degrades to premium
+  purpose: OpenAI GPT-6 Astra — flagship reasoning/coding
   primary: openai-codex/gpt-6-astra
   fallback:
     - deepseek-responses/deepseek-flash
@@ -83,13 +80,12 @@ gpt-6-astra:
     require_json: false
     require_vision: false
 
-# GPT-6 Sol/Luna follow the existing subscription-first model lanes.
 gpt-6-sol:
   purpose: OpenAI gpt-6-sol — complex coding and agentic workflows
   primary: openai-codex/gpt-6-sol
   fallback:
     - deepseek-responses/deepseek-flash
-    - premium
+    - balanced
   constraints:
     require_tools: false
     require_json: false
@@ -110,10 +106,10 @@ gpt-6-luna:
 #    classified task_type onto a same-named lane — docs/04) ——
 coding:
   purpose: Coding-capable models for code generation / editing
-  # GPT-5.6 Sol is the flagship coding/reasoning model. The legacy `*-codex` slugs
+  # GPT-6 Astra is the flagship coding/reasoning model. The legacy `*-codex` slugs
   # are not used here because the ChatGPT-account backend historically rejected them.
   reasoning_effort: high
-  primary: gpt-5.6-sol
+  primary: gpt-6-astra
   fallback:
     - premium
     - balanced
@@ -130,7 +126,7 @@ json:
   # PRUNES that primary (no_response_schema_support) and lands on the cheap, natively
   # schema-capable openrouter mirror (jsonOutput:schema), only then dropping through
   # balanced whose `*/auto` tail (jsonOutput:none) is pruned for any JSON request.
-  primary: gpt-5.6-terra
+  primary: gpt-6-sol
   fallback:
     - claude-sonnet
     - openrouter/deepseek-v4-flash
@@ -142,10 +138,10 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  # Subscription-first: Terra has the best everyday quality/quota balance; Grok
+  # Subscription-first: Sol has the best everyday quality/quota balance; Grok
   # image input has also been verified live. Claude subscriptions cover structured
   # and long-context vision without automatically invoking a paid ZenMux model.
-  primary: gpt-5.6-terra
+  primary: gpt-6-sol
   fallback:
     - grok
     - claude-sonnet
@@ -158,7 +154,7 @@ vision:
 tool_use:
   purpose: Reliable function / tool calling
   reasoning_effort: medium
-  primary: gpt-5.6-sol
+  primary: gpt-6-astra
   fallback:
     - premium
   constraints:
@@ -280,88 +276,8 @@ claude-haiku:
 # a real transcript — a single-turn text probe would have missed this in both
 # directions (it showed a clean `function_call`, which is why the rung shipped, and
 # it would never have shown the leak, which is why the diagnosis went wrong).
-# GPT-5.6 family. The unsuffixed `gpt-5.6` alias routes to Sol upstream; Helm keeps
-# an explicit lane so pinned clients get a GPT-5.6-led chain before generic premium.
-"gpt-5.6":
-  purpose: OpenAI GPT-5.6 alias — routes to Sol upstream
-  primary: openai-codex/gpt-5.6-sol
-  fallback:
-    - gpt-5.6-sol
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-
-"gpt-5.6-sol":
-  purpose: OpenAI GPT-5.6 Sol tier — flagship reasoning/coding
-  primary: openai-codex/gpt-5.6-sol
-  fallback:
-    - deepseek-responses/deepseek-flash
-    - premium
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-
-"gpt-5.6-terra":
-  purpose: OpenAI GPT-5.6 Terra tier — balanced intelligence/cost
-  primary: openai-codex/gpt-5.6-terra
-  fallback:
-    - deepseek-responses/deepseek-flash
-    - balanced
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-
-"gpt-5.6-luna":
-  purpose: OpenAI GPT-5.6 Luna tier — efficient/high-volume
-  primary: openai-codex/gpt-5.6-luna
-  fallback:
-    - deepseek-responses/deepseek-flash
-    - economy
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-
-# GPT-5.5 is RETIRED (2026-09-16) — no lane, and no `gpt-5.5` entry in
-# model-aliases.yaml. A client still pinning that id falls through the `gpt-5*`
-# glob onto `premium`, so it degrades gracefully instead of 400ing. The pricing
-# and capabilities entries deliberately remain so the served history stays
-# repriceable (`pnpm pricing:reprice`).
-
-# GPT-5.4 — strong reasoning one tier below 5.5 ($2.5/$15 vs 5.5's $5/$30). Leads
-# with the Codex subscription's real gpt-5.4. ZenMux exposes NO 5.4 static key, so
-# it degrades to the subscription-led `premium` lane rather than dropping straight
-# to the cheap tier on the first hiccup.
-"gpt-5.4":
-  purpose: OpenAI GPT-5.4 tier — strong reasoning
-  primary: openai-codex/gpt-5.6-terra
-  fallback:
-    - openai-codex/gpt-5.4
-    - deepseek-responses/deepseek-flash
-    - premium
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-
-# GPT-5.4-mini — the cheap/fast GPT tier ($0.75/$4.5). Leads with the Codex
-# subscription's real gpt-5.4-mini, then degrades to `economy` (where this SAME
-# model already sits as a fallback), keeping a mini request cheap instead of
-# bumping it onto a premium model.
-"gpt-5.4-mini":
-  purpose: OpenAI GPT-5.4 mini tier — cheap/fast
-  primary: openai-codex/gpt-5.6-luna
-  fallback:
-    - openai-codex/gpt-5.4-mini
-    - deepseek-responses/deepseek-flash
-    - economy
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
+# Retired GPT-5.6 and GPT-5.4 lanes are removed. Legacy client ids map to
+# GPT-6 tiers in model-aliases.yaml; historical pricing/capabilities remain.
 
 # Google Gemini via ZenMux. Both tiers now LEAD with the NATIVE Gemini wire
 # (`zenmux-vertex/*`, type: gemini) so a Gemini-CLI request (gemini inbound) is
@@ -394,7 +310,7 @@ gemini-flash:
 
 grok:
   purpose: Stable Grok channel; update only this primary when Grok changes version
-  primary: xai/grok-4.7
+  primary: xai/grok-4.6
   fallback: []
   constraints:
     require_tools: false
@@ -409,6 +325,7 @@ grok-fast:
     require_tools: false
     require_json: false
     require_vision: false
+
 
 # —— image-generation lanes (failover across image providers) ——
 # Image gen (POST /v1/images/generations, POST /v1beta/interactions, and Gemini
