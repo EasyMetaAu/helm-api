@@ -172,8 +172,8 @@ hyphenated version ids match; the **earliest** in-chain match wins (preserving
 operator provider preference). The payoff: Claude Code pinning
 `claude-sonnet-5` on a key with `allow_custom_model` now serves the requested
 Sonnet instead of the lane's Sonnet 5.5 primary. The shipped `claude-sonnet`
-lane keeps Sonnet 5 behind Sonnet 5.5, followed by `balanced`; both versions
-remain addressable.
+lane uses Sonnet 5.5 followed by `balanced`; Sonnet 5 remains addressable
+only when explicitly pinned.
 
 Promotion is **suppressed** wherever the routing brain deliberately overrode the
 client's choice: an over-budget `degrade` (the downgrade must not be bypassable by
