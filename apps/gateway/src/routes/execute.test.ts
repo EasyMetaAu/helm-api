@@ -5144,7 +5144,6 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     "claude-opus-5",
     "claude-opus-5-5",
     "claude-fable-5-1",
-    "claude-sonnet-5",
     "claude-sonnet-5-5",
   ])("%s preserves native request bytes and opaque SSE through execution", async (providerModel) => {
     const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(

@@ -192,7 +192,6 @@ describe("loadRuntimeCatalog", () => {
   });
 
   it.each([
-    "claude-sonnet-5",
     "claude-sonnet-5-5",
   ])("loads complete native %s pricing and capabilities from real config", (model) => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
@@ -223,15 +222,11 @@ describe("loadRuntimeCatalog", () => {
       maxContextTokens: 1_000_000,
       maxOutputTokens: 128_000,
     });
-    if (model === "claude-sonnet-5-5") {
-      expect(sonnet?.capabilities.requestCompatibility?.anthropic).toEqual({
-        unsupportedSamplingParameters: ["temperature", "top_p", "top_k"],
-        unsupportedThinkingTypes: ["enabled", "disabled"],
-      });
-      expect(sonnet?.capabilities.reasoningEffort?.anthropicThinking).toBeUndefined();
-    } else {
-      expect(sonnet?.capabilities.reasoningEffort?.anthropicThinking?.supported).toBe(false);
-    }
+    expect(sonnet?.capabilities.requestCompatibility?.anthropic).toEqual({
+      unsupportedSamplingParameters: ["temperature", "top_p", "top_k"],
+      unsupportedThinkingTypes: ["enabled", "disabled"],
+    });
+    expect(sonnet?.capabilities.reasoningEffort?.anthropicThinking).toBeUndefined();
     expect(
       resolveCostUsd(sonnet?.pricing, {
         usage: {
@@ -549,7 +544,7 @@ describe("loadRuntimeCatalog", () => {
     for (const alias of [
       "anthropic/claude-opus-4-8",
       "anthropic/claude-sonnet-4-6",
-      "anthropic/claude-sonnet-5",
+      "anthropic/claude-sonnet-5-5",
       "anthropic/claude-fable-5",
     ]) {
       expect(catalog.get(alias)?.pricing.inferenceGeoMultipliers).toEqual({ global: 1, us: 1.1 });

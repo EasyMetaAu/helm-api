@@ -14,7 +14,7 @@ import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.genera
 import { UpstreamError } from "./openai.js";
 
 const sonnetCompatibility = loadRuntimeCatalog({ configDir: "config" }).get(
-  "anthropic/claude-sonnet-5",
+  "anthropic/claude-sonnet-5-5",
 )?.capabilities.requestCompatibility;
 
 describe("openaiToAnthropicRequest", () => {
@@ -43,7 +43,7 @@ describe("openaiToAnthropicRequest", () => {
     expect(body).not.toHaveProperty("top_p");
   });
 
-  it("omits deprecated temperature for Claude Sonnet 5", () => {
+  it("omits deprecated temperature for Claude Sonnet 5.5", () => {
     const body = openaiToAnthropicRequest(
       {
         model: "custom-future-sonnet",
@@ -1613,7 +1613,7 @@ describe.each(["claude-opus-5-5", "claude-sonnet-5-5"])("%s wire compatibility",
   });
 });
 
-describe("Sonnet 5 temperature at the wire boundary", () => {
+describe("Sonnet 5.5 temperature at the wire boundary", () => {
   it.each(["translated", "native"] as const)("omits temperature on %s requests", async (path) => {
     let sent: Record<string, unknown> = {};
     const client = createAnthropicClient({
