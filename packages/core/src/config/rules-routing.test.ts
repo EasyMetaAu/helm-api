@@ -147,6 +147,32 @@ describe("shipped config rules drive routing", () => {
     expect(result.decision.requested_model).toBe("gpt-5.6");
   });
 
+  it.each([
+    ["claude-sonnet", "claude-sonnet-5-5"],
+    ["claude-sonnet-5-5", "claude-sonnet-5-5"],
+    ["claude-sonnet-5.5", "claude-sonnet-5-5"],
+    ["claude-sonnet-5", "claude-sonnet-5"],
+  ])("routes %s to %s while preserving the previous Sonnet", async (requested, expected) => {
+    const config = loadConfig({ configDir, env: {} });
+    if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
+    const result = await routeRequest(
+      req({ requested_model: requested }),
+      {
+        classify: async () => classification(),
+        policies: config.policies,
+        lanes: config.lanes,
+        modelAliases: config.model_aliases,
+        execute: async (plan) => okExecute(plan),
+        now: () => new Date(0),
+        log: () => {},
+      },
+      { allowCustomModel: true },
+    );
+    expect(result.decision.lane.selected_lane).toBe("claude-sonnet");
+    expect(result.decision.lane.candidate_chain[0]).toBe(`anthropic/${expected}`);
+    expect(result.decision.lane.candidate_chain).toContain("anthropic/claude-sonnet-5");
+  });
+
   it("keeps every exact shipped lane ahead of compatibility aliases and wildcards", async () => {
     const config = loadConfig({ configDir, env: {} });
     if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");

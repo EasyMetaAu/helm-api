@@ -191,9 +191,12 @@ describe("loadRuntimeCatalog", () => {
     expect(fable?.capabilities.supportsStreaming).toBe(true);
   });
 
-  it("loads complete native Claude Sonnet 5 pricing and capabilities from real config", () => {
+  it.each([
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+  ])("loads complete native %s pricing and capabilities from real config", (model) => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
-    const sonnet = catalog.get("anthropic/claude-sonnet-5");
+    const sonnet = catalog.get(`anthropic/${model}`);
 
     expect(sonnet?.source).toBe("override");
     expect(sonnet?.pricing).toEqual({
@@ -215,14 +218,20 @@ describe("loadRuntimeCatalog", () => {
           levels: ["low", "medium", "high", "xhigh", "max"],
           map: { minimal: "low" },
         },
-        anthropicThinking: {
-          supported: false,
-        },
       },
       modalities: ["document"],
       maxContextTokens: 1_000_000,
       maxOutputTokens: 128_000,
     });
+    if (model === "claude-sonnet-5-5") {
+      expect(sonnet?.capabilities.requestCompatibility?.anthropic).toEqual({
+        unsupportedSamplingParameters: ["temperature", "top_p", "top_k"],
+        unsupportedThinkingTypes: ["enabled", "disabled"],
+      });
+      expect(sonnet?.capabilities.reasoningEffort?.anthropicThinking).toBeUndefined();
+    } else {
+      expect(sonnet?.capabilities.reasoningEffort?.anthropicThinking?.supported).toBe(false);
+    }
     expect(
       resolveCostUsd(sonnet?.pricing, {
         usage: {

@@ -209,8 +209,9 @@ claude-fable:
 
 claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
-  primary: anthropic/claude-sonnet-5
+  primary: anthropic/claude-sonnet-5-5
   fallback:
+    - anthropic/claude-sonnet-5
     - balanced
   constraints:
     require_tools: false

@@ -926,10 +926,18 @@ anthropic/claude-sonnet-4-6:
     global: 1.0
     us: 1.1
 # Official Claude API-equivalent estimate for Pro/Max subscription traffic.
-# Introductory pricing is effective through 2026-08-31; Anthropic lists the
-# standard price from 2026-09-01 as $3 input / $15 output / $0.30 cache read /
-# $3.75 5-minute cache write per MTok.
+# Sonnet 5 and 5.5 standard pricing (checked 2026-09-29); the planned Sonnet 5
+# September price increase was cancelled. No long-context surcharge or Fast tier.
 # https://platform.claude.com/docs/en/about-claude/pricing
+anthropic/claude-sonnet-5-5:
+  inputPerMTokUsd: 2.0
+  outputPerMTokUsd: 10.0
+  cacheReadPerMTokUsd: 0.2
+  cacheWritePerMTokUsd: 2.5
+  cacheWrite1hPerMTokUsd: 4.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
 anthropic/claude-sonnet-5:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 10.0

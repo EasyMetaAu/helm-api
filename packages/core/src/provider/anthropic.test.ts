@@ -13,25 +13,28 @@ import { STRICT_CLAUDE_CLI_TOOL_GOLDEN } from "./fixtures/claude-cli-strict-tool
 import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 import { UpstreamError } from "./openai.js";
 
-const opusCompatibility = loadRuntimeCatalog({ configDir: "config" }).get(
-  "anthropic/claude-opus-5-5",
-)?.capabilities.requestCompatibility;
 const sonnetCompatibility = loadRuntimeCatalog({ configDir: "config" }).get(
   "anthropic/claude-sonnet-5",
 )?.capabilities.requestCompatibility;
 
 describe("openaiToAnthropicRequest", () => {
-  it("uses Opus 5.5 effort without manual thinking budgets or sampling parameters", () => {
+  it.each([
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+  ])("uses %s effort without manual thinking budgets or sampling parameters", (model) => {
     const body = openaiToAnthropicRequest(
       {
-        model: "custom-future-opus",
+        model,
         messages: [{ role: "user", content: "Hi" }],
         reasoning_effort: "high",
         max_tokens: 1024,
         temperature: 0.2,
         top_p: 0.9,
       },
-      { compatibility: opusCompatibility?.anthropic },
+      {
+        compatibility: loadRuntimeCatalog({ configDir: "config" }).get(`anthropic/${model}`)
+          ?.capabilities.requestCompatibility?.anthropic,
+      },
     );
     expect(body.output_config).toEqual({ effort: "high" });
     expect(body.max_tokens).toBe(1024);
@@ -1469,7 +1472,9 @@ describe("unconfigured Anthropic native parameters", () => {
   });
 });
 
-describe("Opus 5.5 wire compatibility", () => {
+describe.each(["claude-opus-5-5", "claude-sonnet-5-5"])("%s wire compatibility", (model) => {
+  const compatibility = loadRuntimeCatalog({ configDir: "config" }).get(`anthropic/${model}`)
+    ?.capabilities.requestCompatibility;
   it.each([
     "native",
     "translated",
@@ -1501,7 +1506,7 @@ describe("Opus 5.5 wire compatibility", () => {
     });
     const signed = { type: "thinking", thinking: "", signature: "opaque-signed-history" };
     const body = {
-      model: "custom-future-opus",
+      model,
       max_tokens: 1024,
       temperature: 0.2,
       top_p: 0.9,
@@ -1515,21 +1520,21 @@ describe("Opus 5.5 wire compatibility", () => {
       ],
     };
     if (path === "native")
-      await client.nativePassthrough?.(body, { requestCompatibility: opusCompatibility });
+      await client.nativePassthrough?.(body, { requestCompatibility: compatibility });
     else if (path === "count")
-      await client.countTokens?.(body, { requestCompatibility: opusCompatibility });
+      await client.countTokens?.(body, { requestCompatibility: compatibility });
     else if (path === "translated")
-      await client.chatCompletion(body, { requestCompatibility: opusCompatibility });
+      await client.chatCompletion(body, { requestCompatibility: compatibility });
     else if (path === "native-stream") {
       for await (const _ of client.nativePassthroughStream?.(
         { ...body, stream: true },
-        { requestCompatibility: opusCompatibility },
+        { requestCompatibility: compatibility },
       ) ?? []) {
         /* consume */
       }
     } else {
       for await (const _ of client.chatCompletionStream(body, {
-        requestCompatibility: opusCompatibility,
+        requestCompatibility: compatibility,
       })) {
         /* consume */
       }
@@ -1542,6 +1547,44 @@ describe("Opus 5.5 wire compatibility", () => {
       expect(sent.messages).toEqual(body.messages);
     }
     expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it.each([
+    { type: "adaptive", display: "summarized" },
+    { type: "between_tools" },
+  ])("preserves native thinking %j and signed history", async (thinking) => {
+    let sent: Record<string, unknown> = {};
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "test" },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: "m",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const body = {
+      model,
+      max_tokens: 128000,
+      thinking,
+      output_config: { effort: "medium" },
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "opaque" },
+            { type: "text", text: "hello" },
+          ],
+        },
+        { role: "user", content: "continue", output_config: { effort: "medium" } },
+      ],
+    };
+    await client.nativePassthrough?.(body, { requestCompatibility: compatibility });
+    expect(sent).toMatchObject(body);
   });
 
   it("preserves adaptive display and forced-tool rejection instead of weakening the request", async () => {
@@ -1557,13 +1600,13 @@ describe("Opus 5.5 wire compatibility", () => {
       },
     });
     const body = {
-      model: "custom-future-opus",
+      model,
       thinking: { type: "adaptive", display: "summarized" },
       tool_choice: { type: "any" },
       messages: [{ role: "user", content: "hi" }],
     };
     await expect(
-      client.nativePassthrough?.(body, { requestCompatibility: opusCompatibility }),
+      client.nativePassthrough?.(body, { requestCompatibility: compatibility }),
     ).rejects.toBeInstanceOf(UpstreamError);
     expect(sent.thinking).toEqual(body.thinking);
     expect(sent.tool_choice).toEqual(body.tool_choice);

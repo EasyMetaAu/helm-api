@@ -26,6 +26,7 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
     "claude-opus-5-5",
     "claude-opus-5",
     "claude-fable-5-1",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-haiku-4-5",
   ],

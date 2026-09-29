@@ -153,7 +153,14 @@ describe("checked-in config samples", () => {
     const laneNames = Object.keys(cfg.lanes ?? {});
     const opusTarget = resolveModelAlias("claude-opus-4-8", aliases);
     expect(opusTarget && laneNames.includes(opusTarget)).toBe(true);
-    expect(resolveModelAlias("claude-sonnet-5", aliases)).toBe("claude-sonnet");
+    for (const model of [
+      "claude-sonnet-5",
+      "claude-sonnet-5-5",
+      "claude-sonnet-5.5",
+      "claude-sonnet-5-5-20260928",
+    ]) {
+      expect(resolveModelAlias(model, aliases)).toBe("claude-sonnet");
+    }
     // The small/fast background model maps to the dedicated claude-haiku lane even
     // with a date suffix (the common dated Haiku id shape) — the haiku-specific glob
     // wins over the broad claude-* catch-all (which still falls through to balanced).
@@ -218,7 +225,8 @@ describe("checked-in config samples", () => {
       provider_model: "openai/gpt-image-2",
     });
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
-    expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5");
+    expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5-5");
+    expect(lanes["claude-sonnet"]?.fallback).toEqual(["anthropic/claude-sonnet-5", "balanced"]);
     // gpt-5.5 is RETIRED: no lane, no alias — a pinned `gpt-5.5` falls through the
     // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
     // entries deliberately survive for historical cost reprice (see load.test.ts).
