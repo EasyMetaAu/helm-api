@@ -227,6 +227,15 @@ describe("checked-in config samples", () => {
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
     expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5-5");
     expect(lanes["claude-sonnet"]?.fallback).toEqual(["balanced"]);
+    for (const file of [
+      "lanes.yaml",
+      "capabilities.yaml",
+      "pricing.yaml",
+      "providers.yaml",
+      "model-aliases.yaml",
+    ]) {
+      expect(JSON.stringify(readYaml(file))).not.toMatch(/claude-sonnet-5(?![-.\d])/);
+    }
     // gpt-5.5 is RETIRED: no lane, no alias — a pinned `gpt-5.5` falls through the
     // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
     // entries deliberately survive for historical cost reprice (see load.test.ts).

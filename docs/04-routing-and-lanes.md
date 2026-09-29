@@ -169,11 +169,9 @@ attempt (a promoted head that cannot serve is skipped and the chain falls throug
 — never worse than the un-promoted order). Matching normalizes both sides to the
 official form (lowercase, `.`→`-` version separators), so equivalent dotted and
 hyphenated version ids match; the **earliest** in-chain match wins (preserving
-operator provider preference). The payoff: Claude Code pinning
-`claude-sonnet-5` on a key with `allow_custom_model` now serves the requested
-Sonnet instead of the lane's Sonnet 5.5 primary. The shipped `claude-sonnet`
-lane uses Sonnet 5.5 followed by `balanced`; Sonnet 5 remains addressable
-only when explicitly pinned.
+operator provider preference). The shipped `claude-sonnet` lane contains Sonnet
+5.5 followed by `balanced`. Legacy `claude-sonnet-5` requests also resolve to
+this lane's Sonnet 5.5 primary; promotion never reinserts the retired candidate.
 
 Promotion is **suppressed** wherever the routing brain deliberately overrode the
 client's choice: an over-budget `degrade` (the downgrade must not be bypassable by

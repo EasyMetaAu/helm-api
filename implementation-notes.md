@@ -9,8 +9,8 @@
 
 ## 2026-09-29 · Claude Sonnet 5.5 模型接入（docs/04、05、07、10）
 
-- **官方依据**：[模型](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)、[迁移](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)、[推理档位](https://platform.claude.com/docs/en/build-with-claude/effort)。1M 上下文、128K 输出，支持 low/medium/high/xhigh/max，默认 high；输入/输出每百万 token $2/$10，缓存读取/5 分钟写入/1 小时写入 $0.20/$2.50/$4，美国区域 ×1.1。Sonnet 5 取消涨价，保留原价格；不添加未公布的 Fast 价格。
-- **配置与路由**：补齐能力、价格、OAuth 发现失败时的候选及转换路径模型提示；`claude-sonnet` 首选 5.5 并回退到 `balanced`；Sonnet 5 仍可显式指定。复用现有通配别名，不增加重复 provider。账号实时发现优先，静态目录不代表订阅授权。
+- **官方依据**：[模型](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)、[迁移](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)、[推理档位](https://platform.claude.com/docs/en/build-with-claude/effort)。1M 上下文、128K 输出，支持 low/medium/high/xhigh/max，默认 high；输入/输出每百万 token $2/$10，缓存读取/5 分钟写入/1 小时写入 $0.20/$2.50/$4，美国区域 ×1.1。不添加未公布的 Fast 价格。
+- **配置与路由**：补齐能力、价格、OAuth 发现失败时的候选及转换路径模型提示；`claude-sonnet` 首选 5.5 并回退到 `balanced`；旧 Sonnet 5 请求随通配别名进入 5.5；活动 YAML 删除旧能力和价格键，保留数据库历史记录和独立历史计费测试。复用现有通配别名，不增加重复 provider。账号实时发现优先，静态目录不代表订阅授权。
 - **兼容边界**：复用已配置的采样字段和旧 thinking 模式移除策略，enabled/disabled 被移除后采用上游默认 adaptive；不将 disabled 擅自改写为 between_tools。原生 between_tools、adaptive/display、签名历史和逐消息 effort 保留；between_tools 仅支持 low/medium/high，不能携带其他 thinking 字段或在会话中改变 effort。强制工具调用、旧 computer 工具及不支持的 advisor 组合交给上游拒绝，不静默降级工具语义；无新协议分支。
 - **运维限制**：挂载配置须同步能力、价格及 lane，单独更新镜像不足以启用完整配置。自动化验收使用合成请求，不执行真实付费推理；发布后须核对运行时版本、目录和路由。
 
