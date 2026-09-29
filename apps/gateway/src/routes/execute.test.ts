@@ -5069,6 +5069,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     ["claude-opus-5", "system"],
     ["claude-opus-5-5", "system"],
     ["claude-sonnet-5", "system"],
+    ["claude-sonnet-5-5", "system"],
     ["custom-future-model", "system"],
     ["custom-future-model", "developer"],
   ])("%s native body preserves the trailing %s cache boundary", async (providerModel, role) => {
@@ -5144,6 +5145,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     "claude-opus-5-5",
     "claude-fable-5-1",
     "claude-sonnet-5",
+    "claude-sonnet-5-5",
   ])("%s preserves native request bytes and opaque SSE through execution", async (providerModel) => {
     const modelEntry = loadRuntimeCatalog({ configDir: "config" }).get(
       `anthropic/${providerModel}`,

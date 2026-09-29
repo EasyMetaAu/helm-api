@@ -779,6 +779,29 @@ anthropic/claude-sonnet-4-6:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
+# Claude Sonnet 5.5 (2026-09-28): adaptive by default; between_tools is preserved
+# and supported at low/medium/high effort. Reuse the explicit legacy-mode shim;
+# forced tools remain unchanged so upstream validation is authoritative.
+# https://platform.claude.com/docs/en/models/sonnet-5-5/overview
+# https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
+anthropic/claude-sonnet-5-5:
+  requestCompatibility:
+    anthropic:
+      unsupportedSamplingParameters: [temperature, top_p, top_k]
+      unsupportedThinkingTypes: [enabled, disabled]
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 # Claude Sonnet 5: 1M context, 128K synchronous output, adaptive thinking
 # enabled by default, and no manual budget_tokens mode. It supports the full
 # low/medium/high/xhigh/max effort set, structured outputs, tools, vision,

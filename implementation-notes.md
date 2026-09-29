@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-09-29 · Claude Sonnet 5.5 模型接入（docs/04、05、07、10）
+
+- **官方依据**：[模型](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)、[迁移](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)、[推理档位](https://platform.claude.com/docs/en/build-with-claude/effort)。1M 上下文、128K 输出，支持 low/medium/high/xhigh/max，默认 high；输入/输出每百万 token $2/$10，缓存读取/5 分钟写入/1 小时写入 $0.20/$2.50/$4，美国区域 ×1.1。Sonnet 5 取消涨价，保留原价格；不添加未公布的 Fast 价格。
+- **配置与路由**：补齐能力、价格、OAuth 发现失败时的候选及转换路径模型提示；`claude-sonnet` 首选 5.5、保留 5 供指定版本与回退。复用现有通配别名，不增加重复 provider。账号实时发现优先，静态目录不代表订阅授权。
+- **兼容边界**：复用已配置的采样字段和旧 thinking 模式移除策略，enabled/disabled 被移除后采用上游默认 adaptive；不将 disabled 擅自改写为 between_tools。原生 between_tools、adaptive/display、签名历史和逐消息 effort 保留；between_tools 仅支持 low/medium/high，不能携带其他 thinking 字段或在会话中改变 effort。强制工具调用、旧 computer 工具及不支持的 advisor 组合交给上游拒绝，不静默降级工具语义；无新协议分支。
+- **运维限制**：挂载配置须同步能力、价格及 lane，单独更新镜像不足以启用完整配置。自动化验收使用合成请求，不执行真实付费推理；发布后须核对运行时版本、目录和路由。
+
 ## 2026-09-28 · 原生透传取消模型准入名单，兼容规则归入配置（docs/04、05、10）
 
 - **根因修复**：同协议 Anthropic 不再因 Sonnet、未知模型或 inline system/developer 进入整包转换。上游负责原生角色校验；原始缓存边界与 native 400 保留。显式开关、跨协议/continuation 校验和不可重放保护保留。
@@ -73,17 +80,9 @@
 - **边界**：保留既有手动粘贴和 device-code 流程、账号标签和完成后的 pool rebuild；普通 `Connect` 仍从空白表单开始。代理密钥不经过管理端，只在网关内从加密设置严格恢复；读取或解密失败则拒绝启动。Copilot 沿用已保存的 Enterprise 域名。重连在服务端 session 固定原账号，完成或轮询时拒绝账号不匹配；原标签保留空白，不隐式改名。取消后不再打开迟到的授权页。
 
 
-## 2026-09-25 · Claude OAuth 手动重置额度（OAuth / Admin，研究契约）
-
-- **决定**：新增独立的 `reset-grants` 管理端点，读取官方 Claude OAuth usage/profile，并在二次确认后发送一次 `cedar_ember` reset 请求；保留现有 Codex `/reset` 路径语义。
-- **安全边界**：POST 前重新读取并校验同一组织、下一个 grant、额度计数、有效期、scope 与冷却；请求 ID 在发送前持久化。超时或读回不确定时保持 pending，禁止自动重试和重复消费。不会在测试或部署验收中点击真实重置。
-- **按钮信息**：管理页预取每个 Anthropic 账户的只读 grant 状态，在按钮上显示剩余重置次数和过期日期；确认 POST 边界不变，成功读回后同步更新按钮。
-- **交互边界**：Claude 重置确认框禁止点击遮罩或按 Escape 关闭，必须明确点击“取消”或二次确认；避免把一次性额度操作误触成直接消费。
-- **读回限制**：只有 grant 计数减少且受影响 quota windows 读回恢复才报告 `reset`；已确认后逐个刷新已验证同组织别名并更新 quota store/cooldown。刷新失败仍返回已确认的上游结果，但 `quotaRefreshed=false`，需后续只读刷新。
-- **读回校验**：仅对重置前可观测的 scope 要求恢复，nullable overage 不阻止确认；已观测窗口消失仍拒绝确认。部分重置复用既有 95% 活跃限额恢复判定，保留未清除周窗的 cooldown。同组织身份核实后即纳入刷新集合，暂时读取失败标记刷新不完整；结果不明时关闭确认框并提示可能已扣次数，需人工核查。
-- **供应商差异**：Claude 的 early-use grant 不套 Codex 的 90% 阈值；未知 scope 不授权消费。上游接口若变化，管理端点 fail-closed，普通 Anthropic quota PULL 保持原 schema。
-
 ## 更早历史总览
+
+2026-09-25：Claude OAuth 手动重置额度，含组织/额度校验、二次确认、结果不明禁止重试与权威读回，详见 Git 历史。
 
 2026-09-25：Replay 分块落盘、已接收请求防重放与响应内存边界，详见 Git 历史。
 

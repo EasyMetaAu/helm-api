@@ -170,8 +170,10 @@ attempt (a promoted head that cannot serve is skipped and the chain falls throug
 official form (lowercase, `.`→`-` version separators), so equivalent dotted and
 hyphenated version ids match; the **earliest** in-chain match wins (preserving
 operator provider preference). The payoff: Claude Code pinning
-`claude-sonnet-5` on a **standard** key now serves the requested
-Sonnet instead of the lane's primary.
+`claude-sonnet-5` on a key with `allow_custom_model` now serves the requested
+Sonnet instead of the lane's Sonnet 5.5 primary. The shipped `claude-sonnet`
+lane keeps Sonnet 5 behind Sonnet 5.5, followed by `balanced`; both versions
+remain addressable.
 
 Promotion is **suppressed** wherever the routing brain deliberately overrode the
 client's choice: an over-budget `degrade` (the downgrade must not be bypassable by
@@ -217,7 +219,7 @@ balanced:
   reasoning_effort: medium
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - anthropic/claude-sonnet-5
+    - claude-sonnet
     - grok
     - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
@@ -270,7 +272,7 @@ vision:
   primary: openai-codex/gpt-5.6-terra
   fallback:
     - grok
-    - anthropic/claude-sonnet-5
+    - claude-sonnet
     - anthropic/claude-opus-4-8
   constraints:
     require_vision: true
