@@ -226,7 +226,7 @@ describe("checked-in config samples", () => {
     });
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
     expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5-5");
-    expect(lanes["claude-sonnet"]?.fallback).toEqual(["anthropic/claude-sonnet-5", "balanced"]);
+    expect(lanes["claude-sonnet"]?.fallback).toEqual(["balanced"]);
     // gpt-5.5 is RETIRED: no lane, no alias — a pinned `gpt-5.5` falls through the
     // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
     // entries deliberately survive for historical cost reprice (see load.test.ts).

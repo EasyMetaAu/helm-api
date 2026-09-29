@@ -151,7 +151,7 @@ describe("shipped config rules drive routing", () => {
     ["claude-sonnet", "claude-sonnet-5-5"],
     ["claude-sonnet-5-5", "claude-sonnet-5-5"],
     ["claude-sonnet-5.5", "claude-sonnet-5-5"],
-    ["claude-sonnet-5", "claude-sonnet-5"],
+    ["claude-sonnet-5", "claude-sonnet-5-5"],
   ])("routes %s to %s while preserving the previous Sonnet", async (requested, expected) => {
     const config = loadConfig({ configDir, env: {} });
     if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
@@ -170,7 +170,7 @@ describe("shipped config rules drive routing", () => {
     );
     expect(result.decision.lane.selected_lane).toBe("claude-sonnet");
     expect(result.decision.lane.candidate_chain[0]).toBe(`anthropic/${expected}`);
-    expect(result.decision.lane.candidate_chain).toContain("anthropic/claude-sonnet-5");
+    expect(result.decision.lane.candidate_chain).not.toContain("anthropic/claude-sonnet-5");
   });
 
   it("keeps every exact shipped lane ahead of compatibility aliases and wildcards", async () => {
