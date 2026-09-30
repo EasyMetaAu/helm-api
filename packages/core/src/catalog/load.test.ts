@@ -397,7 +397,7 @@ describe("loadRuntimeCatalog", () => {
   });
 
   it.each([
-    ["gpt-6-sol", 2, 10],
+    ["gpt-6.1-sol", 2, 10],
     ["gpt-6-luna", 0.1, 0.5],
   ] as const)("loads %s capabilities and official context/service prices", (model, input, output) => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
@@ -408,15 +408,25 @@ describe("loadRuntimeCatalog", () => {
         jsonOutput: "schema",
         supportsVision: true,
         supportsStreaming: true,
-        maxContextTokens: 1_050_000,
+        maxContextTokens:
+          model === "gpt-6.1-sol" && provider === "openai-codex" ? 272_000 : 1_050_000,
         maxOutputTokens: 128_000,
         reasoningEffort: {
           openaiReasoning: {
             supported: true,
-            levels: ["none", "low", "medium", "high", "xhigh", "max"],
+            levels:
+              model === "gpt-6.1-sol"
+                ? ["low", "medium", "high", "xhigh", "max"]
+                : ["none", "low", "medium", "high", "xhigh", "max"],
           },
         },
       });
+      if (model === "gpt-6.1-sol") {
+        expect(
+          entry?.capabilities.requestCompatibility?.openaiChat?.toolReasoningEffort,
+        ).toBeUndefined();
+        expect(entry?.pricing.inferenceGeoMultipliers).toEqual({ global: 1, us: 1.1, eu: 1.1 });
+      }
       for (const [serviceTier, multiplier] of [
         ["default", 1],
         ["flex", 0.5],
@@ -436,7 +446,11 @@ describe("loadRuntimeCatalog", () => {
               },
             }),
           ).toBeCloseTo(
-            ((prompt - 300) * i + 200 * i * 0.1 + 100 * i * 1.25 + 50 * o) / 1_000_000,
+            ((prompt - 300) * i +
+              200 * i * (model === "gpt-6.1-sol" ? 0.05 : 0.1) +
+              100 * i * 1.25 +
+              50 * o) /
+              1_000_000,
             12,
           );
         }

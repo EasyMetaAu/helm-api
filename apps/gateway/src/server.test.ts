@@ -1,5 +1,6 @@
+import { fileURLToPath } from "node:url";
 import type { ExecutionPlan, ProviderClient } from "@helm/core";
-import { createCircuitBreaker } from "@helm/core";
+import { createCircuitBreaker, loadConfig } from "@helm/core";
 import type { InternalRequest } from "@helm/shared";
 import { RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
@@ -102,6 +103,45 @@ describe("buildInternalLlmKeyInput", () => {
 });
 
 describe("buildProviderClients provider dispatch", () => {
+  it("sends configured GPT-6.1 Sol tools and reasoning through Responses", async () => {
+    const config = loadConfig({
+      configDir: fileURLToPath(new URL("../../../config", import.meta.url)),
+      env: {},
+    });
+    const provider = config.providers.find((p) => p.name === "openai-responses");
+    if (!provider) throw new Error("Missing GPT-6.1 Responses provider");
+    const fetchMock = vi.fn(async () =>
+      Response.json({ id: "r", object: "response", status: "completed", output: [] }),
+    );
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const client = buildProviderClients([provider], "https://fallback.invalid", 1_000).get(
+        "openai-responses",
+      );
+      expect(client?.nativeProtocolProfile).toBe("generic_openai_responses");
+      await client?.chatCompletion({
+        model: "gpt-6.1-sol",
+        messages: [{ role: "user", content: "Check the weather" }],
+        reasoning_effort: "high",
+        tools: [
+          { type: "function", function: { name: "weather", parameters: { type: "object" } } },
+        ],
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(String(url)).toBe("https://api.openai.com/v1/responses");
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        model: "gpt-6.1-sol",
+        reasoning: { effort: "high" },
+        tools: [{ type: "function", name: "weather", parameters: { type: "object" } }],
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("creates an Anthropic-native client with provider-backed count_tokens", () => {
     const previous = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "anthropic-secret";

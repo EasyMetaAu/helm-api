@@ -211,6 +211,16 @@ providers:
   # for gpt-image-2. Shipped lanes do not reference these paid OpenAI aliases;
   # text aliases require explicit custom-model access; the exact image alias accepts
   # any valid key through the dedicated image endpoint.
+  # GPT-6.1 Sol requires Responses for tools; reuse the generic Responses client
+  # and official API credentials. Other OpenAI models keep their existing wire.
+  - name: openai-responses
+    type: openai-responses-generic
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    models:
+      - alias: openai/gpt-6.1-sol
+        provider_model: gpt-6.1-sol
+
   - name: openai
     type: openai
     base_url: https://api.openai.com/v1
@@ -218,8 +228,6 @@ providers:
     models:
       - alias: openai/gpt-6-astra
         provider_model: gpt-6-astra
-      - alias: openai/gpt-6-sol
-        provider_model: gpt-6-sol
       - alias: openai/gpt-6-luna
         provider_model: gpt-6-luna
       - alias: openai/gpt-5.6

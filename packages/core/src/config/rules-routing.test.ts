@@ -101,7 +101,7 @@ describe("shipped config rules drive routing", () => {
     expect(config.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
     expect(config.lanes?.vision).toMatchObject({
-      primary: "gpt-6-sol",
+      primary: "gpt-6.1-sol",
       fallback: ["grok", "claude-sonnet", "claude-opus"],
     });
     expect(config.lanes?.tool_use).toBeDefined();

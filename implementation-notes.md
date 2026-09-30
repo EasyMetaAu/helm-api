@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-30 · GPT-6.1 Sol 接入与 Sol 配置迁移（docs/04、05、07、10）
+
+- **官方依据**：[模型](https://developers.openai.com/api/docs/models/gpt-6.1-sol)、[价格](https://developers.openai.com/api/docs/pricing)、[Codex](https://developers.openai.com/codex/models)。API 上下文 1,050,000、最大输入 922,000、输出 128,000；推理 low/medium/high/xhigh/max，API 默认 medium，不支持 none/minimal。当前 catalog 没有独立输入上限字段，由上游继续校验 922K 输入限制。
+- **协议与路由**：Sol lane 升级为 `gpt-6.1-sol`，balanced/json/vision 及旧 Sol/Terra 别名同步迁移；Codex 优先与既有 fallback 不变。工具调用必须走 Responses，付费 `openai/gpt-6.1-sol` 复用独立的 generic Responses provider；不继承旧 Sol Chat 工具的 `none` 规则。旧模型能力/价格保留历史兼容，旧原生 Chat 示例不代表 6.1 支持。
+- **价格**：每百万 token 输入/缓存读取/缓存写入/输出 $2/$0.10/$2.50/$10；超过 272K 输入时整单输入和缓存 ×2、输出 ×1.5；Flex ×0.5、Fast/priority ×2、US/EU ×1.1。复用现有计价字段；未新增 Batch 执行能力或 Ultrafast 档位。EU 不支持 Fast；区域端点选择和该组合限制仍由部署配置及上游执行。
+- **订阅目录**：使用官方同步脚本更新至 Codex `rust-v0.159.2`，bundle SHA256 `e0c1feb6be3e5d7f079b594a64255f4e8e6a97fba8cc5970e9b82abecf7d4b3c`。6.1 bundled 默认上下文 272K、最大 872K、默认推理 low、最低客户端 0.153.0；静态 Codex 能力采用默认 272K，实时账号目录优先。bundle 中的 ultra 属于编排，不作为 API effort；目录不代表账号授权。
+- **迁移边界**：挂载部署需同步 lanes/model-aliases/providers/capabilities/pricing 五个 YAML；`allowed_lanes` 中显式列出旧 `gpt-6-sol` 的 key 需迁移到新 lane，别名不会绕过权限限制。Relay 的模型/lane 引用也须同步。此次仅修改仓库并以 mock 验证，未执行真实付费推理或生产变更。
+
 ## 2026-09-29 · Claude Sonnet 5.5 模型接入（docs/04、05、07、10）
 
 - **官方依据**：[模型](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)、[迁移](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)、[推理档位](https://platform.claude.com/docs/en/build-with-claude/effort)。1M 上下文、128K 输出，支持 low/medium/high/xhigh/max，默认 high；输入/输出每百万 token $2/$10，缓存读取/5 分钟写入/1 小时写入 $0.20/$2.50/$4，美国区域 ×1.1。不添加未公布的 Fast 价格。
@@ -74,13 +82,9 @@
 - **验证与限制**：新增执行器回归覆盖 429 → DeepSeek fallback 成功与拒绝；保留真实 400 详情。原 trace 的历史已在现行部署做限输出回放，未复现 reasoning 400，但没有该失败尝试的完整出站正文，不能据此宣称原始拒绝已修复。此改动只修复诊断缺失。
 
 
-## 2026-09-26 · 订阅账号重新连接入口（Admin / OAuth）
-
-- **决定**：账号显示 `needs reconnect` 状态时，在账号行 Actions 区显示 `Reconnect`；复用现有 OAuth 对话框并预选原 provider/account，打开后自动开始授权流程。重新连接的启动请求带 account 标识，网关从已保存的账号设置恢复 egress proxy，避免重新授权时意外绕过原代理。
-- **边界**：保留既有手动粘贴和 device-code 流程、账号标签和完成后的 pool rebuild；普通 `Connect` 仍从空白表单开始。代理密钥不经过管理端，只在网关内从加密设置严格恢复；读取或解密失败则拒绝启动。Copilot 沿用已保存的 Enterprise 域名。重连在服务端 session 固定原账号，完成或轮询时拒绝账号不匹配；原标签保留空白，不隐式改名。取消后不再打开迟到的授权页。
-
-
 ## 更早历史总览
+
+2026-09-26：订阅重连复用 OAuth 流程及原账号代理、标签，解密和账号匹配失败时拒绝，详见 Git 历史。
 
 2026-09-25：Claude OAuth 手动重置额度，含组织/额度校验、二次确认、结果不明禁止重试与权威读回，详见 Git 历史。
 
