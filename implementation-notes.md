@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-30 · Codex 账号详情只展示周额度周期（docs/11）
+
+- **决定**：详情页复用已有的 Codex 账号周额度选择器，按实际时长识别周窗口，不再把 `primary` 固定当作周限；当前用量、历史、已用比例与倒计时统一使用周窗口，隐藏 5h 周期切换。
+- **边界**：仅调整 Codex 详情展示，保留原始周期记录、API、5h 路由限额及按日/自然周汇总。没有可识别周窗口时不以 5h 冒充周额度；其他 provider 维持原行为。
+
 ## 2026-09-30 · GPT-6.1 Sol 接入与 Sol 配置迁移（docs/04、05、07、10）
 
 - **官方依据**：[模型](https://developers.openai.com/api/docs/models/gpt-6.1-sol)、[价格](https://developers.openai.com/api/docs/pricing)、[Codex](https://developers.openai.com/codex/models)。API 上下文 1,050,000、最大输入 922,000、输出 128,000；推理 low/medium/high/xhigh/max，API 默认 medium，不支持 none/minimal。当前 catalog 没有独立输入上限字段，由上游继续校验 922K 输入限制。
@@ -76,13 +81,9 @@
 - **真实生产 box 验证发现请求详情页会报错（非回归，是预期的"字段未上线"场景）→ 已补防御**：本次给 `PortalDecisionView` 新增的 `attempts`/`tps`/`ttfb_ms`/`requested_reasoning_effort`/`reasoning_effort` 字段还没有部署到生产 box，代理到真实数据时旧响应缺这些字段（JSON.parse 后是 `undefined` 而非 `null`），`detail.attempts.length` 会触发 `Cannot read properties of undefined`。这不是代码 bug，但客户端理应对"字段未部署"宽容降级：新增 `apps/portal/src/lib/request-detail-normalize.ts`（`normalizePortalDetail`），在 `load()` 拿到响应后立即把缺失的 `attempts`→`[]`、`tps`/`ttfb_ms`/`generation_ms`→`null`，页面模板其余逻辑不用改。单测 `request-detail-normalize.test.ts` 覆盖"字段齐全原样透传"与"字段缺失时按各自类型的哨兵值归一化"两种情况；`request-detail-parity.test.ts` 新增一条固化调用点存在。原先 TODO 已解决。
 - **可视化走查已完成**：真实生产数据 Playwright 走查全部完成（12 张 + 1 张 mock 截图），Overview/Requests/Connect/Memory/Account 五个页面在两种视口下逐一审阅，无遗留视觉问题；定向 vitest 57/57、`svelte-check` 0 错误 0 警告、i18n 对齐 12/12。
 
-## 2026-09-26 · DeepSeek 兜底与 Responses 请求变更可观测性（Provider fallback，docs/04、07）
-
-- **决定**：保留 DeepSeek 对 opaque reasoning history 的 `effort: none` 降级，并让 request-contract 生成的 body mutation ledger 回写到执行器持有的 carrier。这样首选上游 429 后，DeepSeek 的候选尝试既可成功，也能在管理记录中显示实际应用的降级。
-- **验证与限制**：新增执行器回归覆盖 429 → DeepSeek fallback 成功与拒绝；保留真实 400 详情。原 trace 的历史已在现行部署做限输出回放，未复现 reasoning 400，但没有该失败尝试的完整出站正文，不能据此宣称原始拒绝已修复。此改动只修复诊断缺失。
-
-
 ## 更早历史总览
+
+2026-09-26：DeepSeek fallback 保留 opaque reasoning 降级，request-contract mutation ledger 回写执行器；未据此宣称历史上游 400 已修复。完整记录见 git history。
 
 2026-09-26：订阅重连复用 OAuth 流程及原账号代理、标签，解密和账号匹配失败时拒绝，详见 Git 历史。
 
