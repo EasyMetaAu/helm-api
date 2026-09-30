@@ -1,6 +1,6 @@
 {
   "name": "helm-api",
-  "version": "0.30.32",
+  "version": "0.30.33",
   "private": true,
   "type": "module",
   "engines": {
