@@ -484,7 +484,10 @@ interface LoadedCodexAccountCatalog {
 
 async function loadCodexAccountCatalog(input: {
   account: string;
-  tokenManager: ReturnType<typeof createTokenManager>;
+  tokenManager: Pick<
+    ReturnType<typeof createTokenManager>,
+    "getAuthHeader" | "currentMetadata" | "invalidate"
+  >;
   proxyFetch?: typeof globalThis.fetch;
   clientVersion: string;
   catalog: CodexModelCatalog;
@@ -879,7 +882,7 @@ export interface OAuthQuotaSeed {
 // no credential can be built (fail-open). The raw client carries NO circuit breaker
 // (that lives in the executor layer), so a one-off test client is fully isolated from
 // the live pool's breaker/telemetry state.
-function buildOAuthAccountClient(
+async function buildOAuthAccountClient(
   providerId: string,
   account: string,
   oauthCtx: OAuthRuntimeCtx,
@@ -887,9 +890,9 @@ function buildOAuthAccountClient(
   fastMode: boolean,
   base: { baseUrl: string; timeoutMs: number },
   onResponseMeta?: (headers: Headers) => void,
-  codexRuntime?: CodexAccountRuntime,
+  codexRuntime?: CodexAccountRuntime | CodexOAuthRuntime,
   xaiRuntime?: XaiAccountRuntime,
-): ProviderClient | null {
+): Promise<ProviderClient | null> {
   const spec = ROUTABLE_OAUTH[providerId];
   if (!spec) return null;
   const accountConfig = {
@@ -904,6 +907,28 @@ function buildOAuthAccountClient(
   } as unknown as ProviderConfigShared;
   const cred = buildCredential(accountConfig, oauthCtx, proxy, base.timeoutMs);
   if (!cred) return null;
+  let accountCodexRuntime: CodexAccountRuntime | undefined;
+  if (providerId === "openai-codex" && codexRuntime && "getAuthHeader" in cred) {
+    accountCodexRuntime =
+      "key" in codexRuntime
+        ? codexRuntime
+        : (
+            await loadCodexAccountCatalog({
+              account,
+              tokenManager: {
+                getAuthHeader: cred.getAuthHeader,
+                currentMetadata: cred.currentMetadata,
+                invalidate: cred.onUnauthorized,
+              },
+              proxyFetch: proxy ? makeProxyFetch(proxy) : undefined,
+              clientVersion: codexRuntime.clientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+              catalog: codexRuntime.catalog,
+              runInBackground: codexRuntime.runInBackground,
+              onCatalogChanged: codexRuntime.onCatalogChanged,
+              responsesWebSocketConnector: codexRuntime.responsesWebSocketConnector,
+            })
+          )?.runtime;
+  }
   // Stable per-account anti-ban identity (never rotates): Anthropic gets a
   // metadata.user_id; Codex a stable session_id plus its own installation id (the
   // client's is machine-wide, shared by every account on that install). All
@@ -925,7 +950,7 @@ function buildOAuthAccountClient(
     identity,
     onResponseMeta,
     fastMode,
-    codexRuntime,
+    accountCodexRuntime,
     xaiRuntime,
   );
 }
@@ -1277,7 +1302,7 @@ export async function synthesizeOAuthProviders(
       // Per-account executor client: type + oauth preset + base, threaded with the
       // egress proxy + stable anti-ban identity. Extracted to buildOAuthAccountClient
       // so the admin connectivity tester binds IDENTICALLY (it shares this builder).
-      const client = buildOAuthAccountClient(
+      const client = await buildOAuthAccountClient(
         providerId,
         account,
         oauthCtx,
@@ -4015,10 +4040,16 @@ export async function buildServer(
             acctSettings,
           );
           const fastMode = getAccountSettings(acctSettings, providerId, account).fastMode === true;
-          return buildOAuthAccountClient(providerId, account, ctx, proxy, fastMode, {
-            baseUrl: synthBaseUrl,
-            timeoutMs,
-          });
+          return buildOAuthAccountClient(
+            providerId,
+            account,
+            ctx,
+            proxy,
+            fastMode,
+            { baseUrl: synthBaseUrl, timeoutMs },
+            undefined,
+            codexRuntime,
+          );
         },
       });
     }
