@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { selectCodexAccountWeeklyQuotaWindows } from '@helm/shared';
   import { invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { OAuthQuotaWindow, OAuthUsagePeriod } from '$lib/api/oauth.js';
@@ -57,6 +58,13 @@
         keys.push(p.windowKey);
       }
     }
+    // Codex history follows the account's weekly allowance, never its 5h resets.
+    if (data.providerId === 'openai-codex') {
+      const weeklyKeys = new Set(
+        selectCodexAccountWeeklyQuotaWindows(data.quota?.windows ?? []).map((w) => w.key),
+      );
+      return keys.filter((key) => weeklyKeys.has(key));
+    }
     return keys;
   });
 
@@ -68,7 +76,7 @@
 
   let activeKey = $state<string | null>(null);
   $effect(() => {
-    if (activeKey === null && windowKeys.length > 0) {
+    if (activeKey === null || !windowKeys.includes(activeKey)) {
       activeKey = windowKeys.find(isWeeklyKey) ?? windowKeys[0] ?? null;
     }
   });
