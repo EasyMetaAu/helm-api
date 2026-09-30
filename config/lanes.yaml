@@ -42,7 +42,7 @@ economy:
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   reasoning_effort: medium
-  primary: gpt-6-sol
+  primary: gpt-6.1-sol
   fallback:
     - claude-sonnet
     - grok
@@ -80,9 +80,9 @@ gpt-6-astra:
     require_json: false
     require_vision: false
 
-gpt-6-sol:
-  purpose: OpenAI gpt-6-sol — complex coding and agentic workflows
-  primary: openai-codex/gpt-6-sol
+gpt-6.1-sol:
+  purpose: OpenAI gpt-6.1-sol — complex coding and agentic workflows
+  primary: openai-codex/gpt-6.1-sol
   fallback:
     - deepseek-responses/deepseek-flash
     - balanced
@@ -126,7 +126,7 @@ json:
   # PRUNES that primary (no_response_schema_support) and lands on the cheap, natively
   # schema-capable openrouter mirror (jsonOutput:schema), only then dropping through
   # balanced whose `*/auto` tail (jsonOutput:none) is pruned for any JSON request.
-  primary: gpt-6-sol
+  primary: gpt-6.1-sol
   fallback:
     - claude-sonnet
     - openrouter/deepseek-v4-flash
@@ -141,7 +141,7 @@ vision:
   # Subscription-first: Sol has the best everyday quality/quota balance; Grok
   # image input has also been verified live. Claude subscriptions cover structured
   # and long-context vision without automatically invoking a paid ZenMux model.
-  primary: gpt-6-sol
+  primary: gpt-6.1-sol
   fallback:
     - grok
     - claude-sonnet

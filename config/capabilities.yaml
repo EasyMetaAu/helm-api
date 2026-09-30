@@ -200,6 +200,23 @@ openai-codex/gpt-6-astra:
   maxOutputTokens: 128000
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
+# GPT-6.1 Sol: Responses for tools, no none/minimal reasoning.
+# https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
+# Codex fallback context is 272K from rust-v0.159.2; API context is 1.05M.
+openai-codex/gpt-6.1-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+  maxContextTokens: 272000
+  maxOutputTokens: 128000
 openai-codex/gpt-6-sol:
   requestCompatibility:
     openaiChat:
@@ -420,6 +437,23 @@ openai/gpt-6-astra:
   maxOutputTokens: 128000
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
+# GPT-6.1 Sol: Responses for tools, no none/minimal reasoning.
+# https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
+# Codex fallback context is 272K from rust-v0.159.2; API context is 1.05M.
+openai/gpt-6.1-sol:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
 openai/gpt-6-sol:
   requestCompatibility:
     openaiChat:

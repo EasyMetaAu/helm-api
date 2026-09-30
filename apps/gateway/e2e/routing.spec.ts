@@ -25,7 +25,7 @@ const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application
 // OAuth account is bound.
 const ECONOMY_CONFIGURED_PRIMARY = "gpt-6-luna";
 const PREMIUM_CONFIGURED_PRIMARY = "gpt-6-astra";
-const BALANCED_CONFIGURED_PRIMARY = "gpt-6-sol";
+const BALANCED_CONFIGURED_PRIMARY = "gpt-6.1-sol";
 const ECONOMY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-flash";
 const QUALITY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-pro";
 // Paid OpenAI aliases are absent from shipped lanes but deliberately remain

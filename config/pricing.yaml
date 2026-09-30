@@ -130,6 +130,58 @@ openai-codex/gpt-6-astra:
           cacheWritePerMTokUsd: 50.0
 # GPT-6 Sol/Luna API-equivalent rates: https://developers.openai.com/api/docs/pricing
 # Verified 2026-09-28; full-request long-context rates apply above 272K input.
+# GPT-6.1 Sol (2026-09-30): cached input 5%, cache writes 1.25x;
+# >272K full-request context rates, Flex 0.5x, Fast/priority 2x. No Ultrafast.
+# https://developers.openai.com/api/docs/pricing
+openai-codex/gpt-6.1-sol:
+  inputPerMTokUsd: 2
+  outputPerMTokUsd: 10
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 2.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 15
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1
+      outputPerMTokUsd: 5
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 1.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2
+          outputPerMTokUsd: 7.5
+          cacheReadPerMTokUsd: 0.1
+          cacheWritePerMTokUsd: 2.5
+    priority:
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
+    fast:
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
 openai-codex/gpt-6-sol:
   inputPerMTokUsd: 2
   outputPerMTokUsd: 10
@@ -478,6 +530,58 @@ openai/gpt-6-astra:
           cacheWritePerMTokUsd: 50.0
 # GPT-6 Sol/Luna API-equivalent rates: https://developers.openai.com/api/docs/pricing
 # Verified 2026-09-28; full-request long-context rates apply above 272K input.
+# GPT-6.1 Sol (2026-09-30): cached input 5%, cache writes 1.25x;
+# >272K full-request context rates, Flex 0.5x, Fast/priority 2x. No Ultrafast.
+# https://developers.openai.com/api/docs/pricing
+openai/gpt-6.1-sol:
+  inputPerMTokUsd: 2
+  outputPerMTokUsd: 10
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 2.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 15
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1
+      outputPerMTokUsd: 5
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 1.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2
+          outputPerMTokUsd: 7.5
+          cacheReadPerMTokUsd: 0.1
+          cacheWritePerMTokUsd: 2.5
+    priority:
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
+    fast:
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
 openai/gpt-6-sol:
   inputPerMTokUsd: 2
   outputPerMTokUsd: 10
