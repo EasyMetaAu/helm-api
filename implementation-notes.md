@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-30 · Codex 连通性测试复用账号运行配置（docs/05、11）
+
+- **根因**：管理测试只传账号凭证，遗漏 Codex 运行配置，导致客户端版本回退为 `0.0.0`，同时失去账号目录的模型参数与持久身份；正常路由已正确加载这些配置。
+- **修复**：共享账号客户端构建器复用现有的账号目录加载逻辑；测试沿用运行时客户端版本、代理、模型元数据与账号身份，仍固定指定账号，不进入模型回退或写入请求遥测。
+- **验收边界**：真实管理端点的合成回归覆盖默认版本、自定义版本、账号身份及 Responses Lite；目录不代表账号已获上游授权，真实上游拒绝仍原样展示。
+
 ## 2026-09-30 · Codex 账号详情只展示周额度周期（docs/11）
 
 - **决定**：详情页复用已有的 Codex 账号周额度选择器，按实际时长识别周窗口，不再把 `primary` 固定当作周限；当前用量、历史、已用比例与倒计时统一使用周窗口，隐藏 5h 周期切换。
@@ -71,17 +77,9 @@
 - **验证方式**：本机起 admin/portal 开发服务器，只读代理到线上（非 GET 一律本地 403），在 1440 和 2560 两种视口下截图逐页走查；admin 单测 834/834，svelte-check 0 错误，admin e2e 14/14（真实 gateway + adapter-static 构建）。
 - **TODO（后续 PR）**：方案文档第 6 期"配置 UI 化"——把运行时调优类配置（超时、memory worker、signal feedback 等）并入 DB runtime settings；providers/model-aliases/pricing/capabilities 走 YAML 回写并做跨文件引用校验；引导与密钥类配置在 UI 上只读展示。
 
-## 2026-09-26 · Self-Service Portal UI 审计整改（docs/12）
-
-- **背景**：对 portal（key 持有者自助门户）做了一轮 UI/信息密度审计，修复 6 项：Overview 增加「按模型」表格与≥7d 的「每日用量」表；Requests 列表改为 ↑input/↓output+cached 分列显示、延迟按秒显示；请求详情页补齐请求时间、requested vs served model、reasoning effort、TTFT/TPS/生成耗时、fallback 尝试；Account 页三张卡片在宽屏并排（页面铺满、卡内两列 `<dl>`，标签与值不会被拉开）+ 用量/限额进度条；内容不限宽（见上一条），顶部导航直接放 LocaleSwitcher、新增 Account 导航项。
-- **fallback 尝试展示边界（R7，docs/12 §8）**：详情页新增「Fallback attempts」区块，逐条只显示 outcome（success/timeout/rate_limited/circuit_open/skipped/error）+ latency_ms，**绝不**显示 provider、内部 alias 或 wire model——这些是供应链细节（CLAUDE.md 原则 6），且 `toPortalDecisionView` 的白名单投影本就没有透出这些字段。测试 `request-detail-parity.test.ts` 用 `not.toContain("attempt.provider")` / `not.toContain("attempt.alias")` 固化这条边界，防止未来有人为了"更详细"而误加。
-- **删除 CostBreakdown.svelte（偏离字面任务措辞的决定）**：原任务描述是"修复 Cost 卡片，隐藏空行"，但检查 `CostBreakdownSchema`（`packages/shared/src/decision/schema.ts`）后发现 `routing_usd`/`eval_usd` 对 portal key holder 永远是 null（后端从不为 portal 填充这两项），补丁式"隐藏空行"只会剩一个多余的容器包着一个数字。按 CLAUDE.md「优先复用/删除过时路径而非加兼容层」的原则，直接删除该组件，详情页改为渲染 `detail.cost_usd` 单一 Total。测试同步固化为 `not.toContain("CostBreakdown")` + `cost-total` testid。
-- **Overview 「按模型」表 / 「每日用量」表未引入新字段**：两者都复用既有 `GET /portal/api/usage/stats` 返回的 `by_model` 和 `series`（未新增/修改后端 schema），因此未新增安全边界测试——现有的 key 隔离测试（`apps/gateway/src/routes/portal/index.test.ts` 的 R5 write-force 断言）已覆盖这条数据源。
-- **可视化走查发现并修复的布局坑**：Overview 页最初把「按模型」表放进了甜甜圈图所在的 `lg:col-span-1` 卡片（3 栏网格的 1/3 宽）——5 列（Model/Requests/Tokens/Cost/Share）在该宽度下右侧 Cost/Share 列被裁切。修复：表格移出，改为图表网格下方独立的 `lg:col-span-3` 全宽 `<section class="card mt-4">`（与「每日用量」表同一模式），甜甜圈卡片只保留图 + 精简色块图例。用真实生产数据（只读代理到 helm.easymeta.au）截图两种尺寸（1440×812、2560×1440）验证修复前后对比确认。
-- **真实生产 box 验证发现请求详情页会报错（非回归，是预期的"字段未上线"场景）→ 已补防御**：本次给 `PortalDecisionView` 新增的 `attempts`/`tps`/`ttfb_ms`/`requested_reasoning_effort`/`reasoning_effort` 字段还没有部署到生产 box，代理到真实数据时旧响应缺这些字段（JSON.parse 后是 `undefined` 而非 `null`），`detail.attempts.length` 会触发 `Cannot read properties of undefined`。这不是代码 bug，但客户端理应对"字段未部署"宽容降级：新增 `apps/portal/src/lib/request-detail-normalize.ts`（`normalizePortalDetail`），在 `load()` 拿到响应后立即把缺失的 `attempts`→`[]`、`tps`/`ttfb_ms`/`generation_ms`→`null`，页面模板其余逻辑不用改。单测 `request-detail-normalize.test.ts` 覆盖"字段齐全原样透传"与"字段缺失时按各自类型的哨兵值归一化"两种情况；`request-detail-parity.test.ts` 新增一条固化调用点存在。原先 TODO 已解决。
-- **可视化走查已完成**：真实生产数据 Playwright 走查全部完成（12 张 + 1 张 mock 截图），Overview/Requests/Connect/Memory/Account 五个页面在两种视口下逐一审阅，无遗留视觉问题；定向 vitest 57/57、`svelte-check` 0 错误 0 警告、i18n 对齐 12/12。
-
 ## 更早历史总览
+
+2026-09-26：Portal 用量、请求详情与布局审计，复用 key 隔离数据源，缺失字段兼容及真实页面验证；完整记录见 git history。
 
 2026-09-26：DeepSeek fallback 保留 opaque reasoning 降级，request-contract mutation ledger 回写执行器；未据此宣称历史上游 400 已修复。完整记录见 git history。
 
