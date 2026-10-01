@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-01 · Helm 级联 Responses 续接恢复（docs/04、05、07）
+
+- **根因与边界**：上游 Helm 在确认本轮尚未发给 provider 后，会关闭 WebSocket（1012）让 Codex 重发完整历史；中间 Helm 无法从关闭事件证明是否执行，将其报告为结果不明。HTTP 回退后的增量续接因此反复失败。
+- **协议决定**：仅 Helm relay 握手携带 `x-helm-responses-recovery: errors`，请求结构化错误；普通 Codex 连接沿用现有 1012 恢复。复用已有 before-send 错误和内部 proof，不把任意断线或 1012 当作可重放证明；保留恢复原因与冷却时间，非 2xx 嵌套错误同样保留。
+- **兼容与验收**：新旧版本混用时继续保守处理，不扩大重放范围；完整修复需要更新链路上的 Helm。真实本地 socket 回归覆盖 SSE/HTTP 错误、无冷却/长冷却和完整历史恢复；原有断线不重放与直连 Codex 恢复测试保留。最初为何回退 HTTP 的历史记录不足，本次不据此归因网络或代理。
+
 ## 2026-09-30 · Codex 连通性测试复用账号运行配置（docs/05、11）
 
 - **根因**：管理测试只传账号凭证，遗漏 Codex 运行配置，导致客户端版本回退为 `0.0.0`，同时失去账号目录的模型参数与持久身份；正常路由已正确加载这些配置。
@@ -67,17 +73,9 @@
 - **保留的显式策略**：账户 installation ID 隔离、Codex 超大历史优化、可选 Memory/视觉压缩/XML 恢复仍有各自用途，不因“透传”取消安全与治理。passthrough_used 表示绕过 IR，不代表完全没有已记录的策略或传输适配。
 - **验证边界**：三角色审查，核心/辅助接口先红后绿，mock 覆盖实际执行器、provider、OAuth 包装和原生 SSE；本机类型检查及定向测试不代表 CI、合并、部署或线上缓存改善。没有重放用户长会话或执行真实付费调用。私有请求审计只保留本地，不进入公共 PR。
 
-## 2026-09-26 · Admin UI 走查整改 + 首次安装 key 验证修复（docs/11、12；方案见 docs/ui-audit-2026-09-26.md）
-
-- **安装向导 key 验证（用户反馈"DeepSeek key 一直验证不过"，确认为 bug）**：`testStaticProviderKey` 过去只要非 2xx 就判失败，而 DeepSeek 对**余额为 0 的有效 key** 返回 402，向导又要求测试通过才允许完成，结果有效 key 根本存不进去；错误信息只有 `upstream returned 402`。现改为：401/403 等才判无效；402/429 视为"key 已通过鉴权"，放行并返回 warning；错误与警告都带上脱敏后的上游 `error.message`；服务端与页面都会 trim 粘贴的 key；探测模型跳过图像/视频/TTS/embedding 类（ZenMux 的 `models[0]` 曾是 `gpt-image-2`）；修复错误显示成 `[object Object]` 的问题。未做：代理环境（`HTTPS_PROXY`）下的出站连接，egress 仍是直连 undici Agent。
-- **布局策略**：所有页面铺满窗口，不设最大宽度（用户拍板：限宽在全屏外接显示器上显得局促、偏在一边，不好看），统一用 `.page` 外壳，并有测试禁止页面容器加 `max-w-`/`mx-auto`。笔记本屏的可读性靠合并列与折叠次要信息来保证，而不是限宽。侧栏去掉会被截断的副标题（改为 hover title），顶栏不再重复页面标题。验收标准：1440×812 下主表格不出现横向滚动。
-- **表格收敛而不删字段**：Requests 12→8 列（Session 并到 Key 下、Serving 并到 Model 下、请求体大小并到 Performance、Request ID 挪到时间链接的 title）；Keys 只显示非默认的限额（全是默认值时显示灰色 "Defaults"），Rotate/Revoke/查看完整 key 收进原生 `<details>` 做的 `⋯` 菜单；Providers 11→7 列（优先级/可调度/Fast/过期时间合并为一个 Scheduling 列）。三张表在 1440 下所需宽度从 1966/1869/1653px 降到 ≤1150px。`cell-request-body`、`request-detail-link` 等 testid 保持不变（e2e 依赖）。
-- **长配置页**：Lanes 卡片默认折叠为一行摘要（主模型 → +N fallback · 推理强度），页面高度从约 15.5k px 降到约 2k px；校验失败的 lane 会自动展开，避免错误被藏起来。e2e 的 lane 编辑用例先展开卡片再填写。Policies 用一句话概括每条规则；Settings 增加吸顶的分区跳转导航，两个同名的 "Queue wait timeout (ms)" 分别改为 Key/Account 排队超时。
-- **修复**：`requests/[traceId]/+page.ts` 导出了 `safeBackTo`，SvelteKit 开发模式的路由校验会拒绝这种非标准导出，导致 `vite dev` 下请求详情 500（生产构建不做这项检查）。函数移到 `$lib/nav.ts`，并加测试固定路由模块只能导出合法名字。
-- **验证方式**：本机起 admin/portal 开发服务器，只读代理到线上（非 GET 一律本地 403），在 1440 和 2560 两种视口下截图逐页走查；admin 单测 834/834，svelte-check 0 错误，admin e2e 14/14（真实 gateway + adapter-static 构建）。
-- **TODO（后续 PR）**：方案文档第 6 期"配置 UI 化"——把运行时调优类配置（超时、memory worker、signal feedback 等）并入 DB runtime settings；providers/model-aliases/pricing/capabilities 走 YAML 回写并做跨文件引用校验；引导与密钥类配置在 UI 上只读展示。
-
 ## 更早历史总览
+
+2026-09-26：Admin UI 走查整改、DeepSeek 零余额 key 验证兼容与请求详情路由导出修复；完整记录见 git history。
 
 2026-09-26：Portal 用量、请求详情与布局审计，复用 key 隔离数据源，缺失字段兼容及真实页面验证；完整记录见 git history。
 

@@ -77,6 +77,7 @@ it("keeps two native turns on one authenticated upstream socket and closes it on
   expect(input.url).toBe("wss://remote.test/v1/responses");
   expect(new Headers(input.headers).get("authorization")).toBe("Bearer upstream-secret");
   expect(new Headers(input.headers).has(CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER)).toBe(false);
+  expect(new Headers(input.headers).get("x-helm-responses-recovery")).toBe("errors");
   expect(JSON.parse(f.send.mock.calls[1]?.[0] ?? "null")).toMatchObject({
     type: "response.create",
     model: "gpt-5.6-sol",
@@ -96,8 +97,11 @@ it("rejects continuation without the original connection without sending or chan
   expect(f.fetch).not.toHaveBeenCalled();
 });
 
-it("never replays a request after the socket closes with an unknown execution result", async () => {
+it.each([
+  1006, 1012,
+])("never treats socket close %i alone as proof of a safe replay", async (code) => {
   const f = fixture([null]);
+  f.connection.closeInfo = () => ({ code, reason: "upstream response stream disconnected" });
   await expect(consume(f.client, "session-a")).rejects.toMatchObject({
     providerRaw: { error: { code: "response_create_outcome_unknown" } },
   });
@@ -111,12 +115,23 @@ it("preserves proven before-send recovery across a Helm hop", async () => {
     {
       type: "error",
       error: { code: "response_create_not_sent", message: "original session unavailable" },
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        reason: "oauth_affinity_unavailable",
+        retry_after_ms: 28_000,
+      },
     },
   ]);
   await expect(consume(f.client, "session-a")).rejects.toMatchObject({
     providerRaw: {
       error: { code: "response_create_not_sent" },
-      recovery: { safe_to_replay: true },
+      recovery: {
+        safe_to_replay: true,
+        lifecycle_phase: "before_send",
+        reason: "oauth_affinity_unavailable",
+        retry_after_ms: 28_000,
+      },
     },
   });
   expect(f.close).toHaveBeenCalledTimes(1);
