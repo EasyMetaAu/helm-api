@@ -1,9 +1,15 @@
 import { once } from "node:events";
 import { createServer, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
-import { createResponseWorkAdmission } from "@helm/core";
+import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  createGenericOpenAIResponsesClient,
+  createResponseWorkAdmission,
+} from "@helm/core";
+import { createNativePassthroughCarrier } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
+import { createCodexResponsesWebSocketConnector } from "./codex-responses-websocket.js";
 import {
   installResponsesWebSocketBridge,
   isResponsesWebSocketPath,
@@ -1242,6 +1248,93 @@ describe("Responses websocket bridge", () => {
     expect(bodies[0]?.previous_response_id).toBe("resp-parent");
     expect(bodies[1]?.previous_response_id).toBeUndefined();
     expect(closedSessionId).not.toBe("");
+  });
+
+  it.each([
+    ["sse", 0],
+    ["http", 0],
+    ["sse", 50_000],
+    ["http", 50_000],
+  ] as const)("preserves %s recovery with %i ms cooldown through a real Helm relay and accepts full history", async (transport, retryAfterMs) => {
+    const bodies: Record<string, unknown>[] = [];
+    const recovery = {
+      safe_to_replay: true,
+      lifecycle_phase: "before_send",
+      reason: "websocket_session_unavailable",
+      retry_after_ms: retryAfterMs,
+    };
+    const remoteUrl = await startBridge(async (request) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      bodies.push(body);
+      if (!body.previous_response_id) {
+        return new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"parent","status":"completed","output":[]}}\n\n',
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      }
+      const error = { code: "response_create_not_sent", message: "send full history" };
+      const headers = { [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF };
+      return transport === "http"
+        ? Response.json(
+            { error: { code: "lane_unavailable", provider_raw: { error, recovery } } },
+            { status: 503, headers },
+          )
+        : new Response(
+            `event: error\ndata: ${JSON.stringify({ type: "error", ...error, recovery })}\n\n`,
+            { headers: { ...headers, "content-type": "text/event-stream" } },
+          );
+    });
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      throw Error("must not replay via HTTP");
+    });
+    const connector = createCodexResponsesWebSocketConnector({
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1_000_000,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: `${remoteUrl.replace("ws:", "http:")}/v1`,
+        apiKey: "relay-test-key",
+        timeoutMs: 1000,
+      },
+      responsesWebSocketConnector: connector,
+      fetch,
+    });
+    const consume = async (previous?: string) => {
+      const body = {
+        model: "gpt-5.6-sol",
+        stream: true,
+        input: [{ role: "user", content: "full conversation" }],
+        ...(previous ? { previous_response_id: previous } : {}),
+      };
+      const carrier = createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        body,
+        rawBody: JSON.stringify(body),
+        headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "relay-session" },
+      });
+      const frames: string[] = [];
+      if (!client.nativePassthroughStream) throw Error("missing native stream");
+      for await (const frame of client.nativePassthroughStream(carrier)) frames.push(frame);
+      return frames.join("");
+    };
+    try {
+      expect(await consume()).toContain("response.completed");
+      await expect(consume("parent")).rejects.toMatchObject({
+        providerRaw: { error: { code: "response_create_not_sent" }, recovery },
+      });
+      expect(bodies).toHaveLength(2);
+      expect(await consume()).toContain("response.completed");
+      expect(bodies).toHaveLength(3);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      await client.closeResponsesWebSocketSession?.("relay-session");
+    }
   });
 
   it("paces a trusted pre-send recovery until its short account cooldown expires", async () => {

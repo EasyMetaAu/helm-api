@@ -670,6 +670,7 @@ export {
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
   type GenericOpenAIResponsesClientDeps,
+  HELM_RESPONSES_RECOVERY_HEADER,
   hoistResponsesInstructions,
   isCodexResponsesBeforeSendError,
   isCodexResponsesPostSendFailureCode,

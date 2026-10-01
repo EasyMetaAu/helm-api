@@ -228,6 +228,7 @@ export interface GenericOpenAIResponsesRequestContract {
 }
 
 export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
+export const HELM_RESPONSES_RECOVERY_HEADER = "x-helm-responses-recovery";
 const CODEX_RESPONSES_SESSION_UNAVAILABLE_CODE = "previous_response_id_session_unavailable";
 const CODEX_RESPONSES_NOT_SENT_CODE = "response_create_not_sent";
 
@@ -4245,7 +4246,11 @@ export function createGenericOpenAIResponsesClient(
     if (opts?.signal?.aborted) throw opts.signal.reason;
     if (!state) {
       state = {
-        connection: connector({ url: url.href, headers: prepared.headers, signal: opts?.signal }),
+        connection: connector({
+          url: url.href,
+          headers: { ...prepared.headers, [HELM_RESPONSES_RECOVERY_HEADER]: "errors" },
+          signal: opts?.signal,
+        }),
         busy: false,
       };
       websocketSessions.set(sessionId, state);
@@ -4278,7 +4283,10 @@ export function createGenericOpenAIResponsesClient(
             const message =
               typeof error.message === "string" ? error.message : "Helm websocket upstream error";
             if (error.code === CODEX_RESPONSES_NOT_SENT_CODE)
-              throw new CodexResponsesBeforeSendError(message);
+              throw new CodexResponsesBeforeSendError(
+                message,
+                isRecord(event.recovery) ? event.recovery : {},
+              );
             terminal = true;
           }
           terminal ||= [

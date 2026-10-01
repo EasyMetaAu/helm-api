@@ -3,6 +3,7 @@ import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  HELM_RESPONSES_RECOVERY_HEADER,
   isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
   type ResponseWorkAdmission,
@@ -257,10 +258,12 @@ async function responseErrorEnvelope(response: Response): Promise<Record<string,
   const error = errorShape(body, `HTTP ${response.status}`);
   const recoverableCode = recoverableDisconnectCode(body);
   if (recoverableCode !== null) error.code = recoverableCode;
+  const recovery = recoveryRecord(body);
   return {
     type: "error",
     status: response.status,
     error,
+    ...(recovery === null ? {} : { recovery }),
     headers: selectedResponseHeaders(response.headers),
   };
 }
@@ -335,10 +338,15 @@ function recoverableDisconnectCode(value: unknown): string | null {
 }
 
 function recoveryRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-  const recovery = (value as { recovery?: unknown }).recovery;
-  if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) return null;
-  return recovery as Record<string, unknown>;
+  let current = value;
+  while (current !== null && typeof current === "object" && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>;
+    const recovery = record.recovery;
+    if (recovery !== null && typeof recovery === "object" && !Array.isArray(recovery))
+      return recovery as Record<string, unknown>;
+    current = record.error ?? record.provider_raw;
+  }
+  return null;
 }
 
 function recoveryRetryAfterMs(value: unknown): number {
@@ -478,10 +486,14 @@ async function forwardResponse(
   const trustedRecovery =
     sessionProof !== undefined &&
     response.headers.get(CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER) === sessionProof;
+  // Helm relays need the explicit before-send proof; a bare close is ambiguous.
+  // Direct Codex clients still recover through the existing 1012 disconnect.
+  const relayRecovery = request.headers[HELM_RESPONSES_RECOVERY_HEADER] === "errors";
   if (!response.ok) {
     const envelope = await responseErrorEnvelope(response);
     if (
       trustedRecovery &&
+      !relayRecovery &&
       recoverableDisconnectCode(envelope) !== null &&
       shouldCloseForFullHistoryRecovery(envelope)
     ) {
@@ -508,6 +520,7 @@ async function forwardResponse(
       type = parsed.type;
       if (
         trustedRecovery &&
+        !relayRecovery &&
         recoverableDisconnectCode(parsed) !== null &&
         shouldCloseForFullHistoryRecovery(parsed)
       ) {
