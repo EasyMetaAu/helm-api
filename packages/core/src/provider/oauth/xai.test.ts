@@ -44,11 +44,11 @@ describe("xAI OAuth", () => {
   });
 
   it("builds the first-party Grok CLI inference headers for the resolved wire model", () => {
-    expect(XAI_GROK_CLIENT_VERSION).toBe("0.2.101");
+    expect(XAI_GROK_CLIENT_VERSION).toBe("1.0.46");
     expect(xaiGrokInferenceHeaders("grok-composer-2.5-fast")).toEqual({
       "X-XAI-Token-Auth": "xai-grok-cli",
       "x-authenticateresponse": "authenticate-response",
-      "x-grok-client-version": "0.2.101",
+      "x-grok-client-version": "1.0.46",
       "x-grok-client-identifier": "helm-api",
       "x-grok-client-mode": "headless",
       "x-grok-model-override": "grok-composer-2.5-fast",
@@ -71,7 +71,7 @@ describe("xAI OAuth", () => {
   });
 
   it("uses a validated operator override for the Grok CLI protocol version", () => {
-    expect(resolveXaiGrokClientVersion({})).toBe("0.2.101");
+    expect(resolveXaiGrokClientVersion({})).toBe("1.0.46");
     expect(resolveXaiGrokClientVersion({ [XAI_GROK_CLIENT_VERSION_ENV]: " 0.3.1 " })).toBe("0.3.1");
     expect(
       xaiGrokInferenceHeaders("grok-4.5", {
@@ -365,7 +365,7 @@ describe("xAI OAuth", () => {
     const discoveryHeaders = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
     expect(discoveryHeaders.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
     expect(discoveryHeaders.get("x-authenticateresponse")).toBeNull();
-    expect(discoveryHeaders.get("x-grok-client-version")).toBe("0.2.101");
+    expect(discoveryHeaders.get("x-grok-client-version")).toBe("1.0.46");
     expect(discoveryHeaders.get("x-grok-client-mode")).toBe("headless");
     expect(discoveryHeaders.get("x-grok-model-override")).toBeNull();
   });

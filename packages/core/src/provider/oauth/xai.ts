@@ -21,9 +21,9 @@ export const XAI_OAUTH_SCOPE =
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configuration`;
 export const XAI_GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-// First-party protocol version observed from the installed Grok CLI release.
+// First-party stable protocol version: https://x.ai/cli/stable (2026-10-05).
 // The subscription proxy rejects inference requests without this header (HTTP 426).
-export const XAI_GROK_CLIENT_VERSION = "0.2.101";
+export const XAI_GROK_CLIENT_VERSION = "1.0.46";
 export const XAI_GROK_CLIENT_VERSION_ENV = "HELM_XAI_GROK_CLIENT_VERSION";
 
 const SEMVER_PATTERN =
@@ -31,7 +31,7 @@ const SEMVER_PATTERN =
 
 /**
  * Resolve the first-party protocol version advertised to the Grok CLI proxy.
- * The checked-in default tracks the Grok CLI release used by Helm's live smoke.
+ * The checked-in default tracks the verified stable Grok CLI release.
  * An operator may temporarily follow an upstream minimum-version bump without a
  * Helm rebuild; strict semver validation prevents header injection/fake labels.
  */
@@ -42,7 +42,7 @@ export function resolveXaiGrokClientVersion(
   const version = configured || XAI_GROK_CLIENT_VERSION;
   if (version.length > 64 || !SEMVER_PATTERN.test(version)) {
     throw new Error(
-      `${XAI_GROK_CLIENT_VERSION_ENV} must be a semantic version (for example 0.2.101)`,
+      `${XAI_GROK_CLIENT_VERSION_ENV} must be a semantic version (for example 1.0.46)`,
     );
   }
   return version;

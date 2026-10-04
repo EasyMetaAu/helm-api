@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-05 · Grok CLI 协议版本更新（docs/05、10）
+
+- **依据与决定**：官方 `https://x.ai/cli/stable` 当前为 `1.0.46`；sub2api 10 月 1 日已同步。将 xAI 订阅默认 `x-grok-client-version` 从 `0.2.101` 更新为 `1.0.46`，同步环境变量示例；保留原有版本覆盖校验、订阅地址、`helm-api` 标识与 `headless` 模式，不引入未经本次验证的身份模拟或跨域回退。
+- **真实验证**：本机同一订阅账号的旧版本请求被上游以 426 拒绝，网关最终返回 502；只升级版本后，Grok 4.6 的 Responses / Chat Completions 均在非流式与 SSE 模式返回 `OK`，流式终止事件完整。82 个定向测试通过；这不代表远程生产已修复或所有模型已验证。
+- **本机兼容限制**：用户本机仍是 8 月的定制镜像；基于它生成仅替换已核对一致的 xAI 模块的本地补丁镜像，保留原镜像。重启暴露挂载配置早已升级的兼容问题：旧 schema 不认识 `requestCompatibility`，因此本机独立 Compose override 挂载兼容快照，源 YAML 不改；正式升级到当前网关时应移除该本地 override。具体镜像、验证 trace 与恢复说明保存在被忽略的 `data/local-xai-test/`。
+
 ## 2026-10-01 · Helm 级联 Responses 续接恢复（docs/04、05、07）
 
 - **根因与边界**：上游 Helm 在确认本轮尚未发给 provider 后，会关闭 WebSocket（1012）让 Codex 重发完整历史；中间 Helm 无法从关闭事件证明是否执行，将其报告为结果不明。HTTP 回退后的增量续接因此反复失败。
@@ -64,16 +70,9 @@
 - **协议兼容**：Lite 恢复 function/custom 工具返回值中直接图片的 detail 清理，不递归改业务数据；Interactions 允许已实现的 `delivery: inline`，仍拒绝 `uri`。
 - **计数路由**：按 registry alias 或唯一原生 provider 所属关系解析 wire model；未知、歧义、lane 和模型/lane/预算受限 key 均本地估算，避免绕过生成权限外发正文。明确禁用模型与上游请求/鉴权/权限错误仍拒绝；计数端点不支持（404/405）、限流和故障可估算。
 
-## 2026-09-27 · 原生协议、缓存与重放边界修复（docs/04、05、07）
-
-- **Claude**：更新已公布模型的 inline system 支持，删除默认日期改写，保留原生 thinking/context、缓存标记及未变化请求的 raw JSON；缓存超限交给上游拒绝，不静默裁剪。保留鉴权、路由、明确治理和有实际依据的兼容处理。
-- **Responses**：保留原生 context_management 和标准 custom tools；xAI 订阅端显式声明不兼容。Codex shim 只匹配 Codex profile；指令只提升前导纯文本，密文只识别已知外来 UUID 形状，Lite 图片清理不递归修改工具数据。移除工具转换附带的图片重编码。
-- **安全与成本**：Claude/Responses 按协议白名单转发头；只有 Codex 和显式 Helm relay 可转发 Codex 元数据。生成/compact 的发送结果不明或 HTTP 200 后正文失败均禁止自动换账户重发；非流式正文读取有超时。Gemini 媒体抓取复用 Node BlockList 验证映射 IPv6，DNS 失败或空结果拒绝，连接必须固定到已验证地址；保留 provider-managed Files 引用并记录实际变换。
-- **辅助入口**：Responses 查询参数沿 registry 所属账户传递；计数接口保留确定性 4xx。Images→Gemini 不能表达的选项、Interactions 未支持字段/输入块、Realtime 多余 multipart 块在调用上游前拒绝；这修正了过去接受后静默忽略的行为，调用方须移除不支持字段或选择支持的原生接口。
-- **保留的显式策略**：账户 installation ID 隔离、Codex 超大历史优化、可选 Memory/视觉压缩/XML 恢复仍有各自用途，不因“透传”取消安全与治理。passthrough_used 表示绕过 IR，不代表完全没有已记录的策略或传输适配。
-- **验证边界**：三角色审查，核心/辅助接口先红后绿，mock 覆盖实际执行器、provider、OAuth 包装和原生 SSE；本机类型检查及定向测试不代表 CI、合并、部署或线上缓存改善。没有重放用户长会话或执行真实付费调用。私有请求审计只保留本地，不进入公共 PR。
-
 ## 更早历史总览
+
+2026-09-27：原生协议与缓存语义保持、发送结果不明禁止重放、辅助接口权限与 SSRF 边界修复；完整记录见 git history。
 
 2026-09-26：Admin UI 走查整改、DeepSeek 零余额 key 验证兼容与请求详情路由导出修复；完整记录见 git history。
 
