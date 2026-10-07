@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": [
+    "./sync-client-versions.ts",
+    "./sync-client-versions.test.ts",
+    "./sync-claude-cli.ts",
+    "./sync-codex-models.ts"
+  ]
+}

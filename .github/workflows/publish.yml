@@ -4,6 +4,8 @@ name: Publish image
 # Every commit gets an immutable :sha-<full-SHA> identity. Reruns validate and reuse
 # that image instead of rebuilding or overwriting it; semver and :latest are promoted
 # from the resolved immutable digest rather than from another build.
+# Client versions/catalog are the checked-in snapshot accepted by CI; never
+# fetch or mutate upstream client defaults while building this verified SHA.
 #
 # GitHub and GHCR writes are not atomic. The workflow serializes writers, rechecks
 # main before mutable boundaries, and fails closed on inconsistent release state,

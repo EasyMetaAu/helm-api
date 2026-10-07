@@ -16,6 +16,7 @@ import {
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
 import { ProviderConfigSchema } from "@helm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { XAI_GROK_CLIENT_VERSION } from "../../../packages/core/src/provider/oauth/grok-client-version.generated.js";
 import {
   getAccountSettings,
   loadAccountSettings,
@@ -668,7 +669,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       expect(headers.get("chatgpt-account-id")).toBeNull();
       expect(headers.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
       expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
-      expect(headers.get("x-grok-client-version")).toBe("0.2.101");
+      expect(headers.get("x-grok-client-version")).toBe(XAI_GROK_CLIENT_VERSION);
       expect(headers.get("x-grok-user-id")).toBe("xai-user-heavy");
       expect(headers.get("x-grok-model-override")).toBe("grok-composer-2.5-fast");
       expect(headers.get("Accept")).toBe("text/event-stream");

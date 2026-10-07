@@ -386,3 +386,45 @@ check, and Docker push offers no cross-system compare-and-swap. Treat the full-S
 tag/digest as the authoritative deployment and rollback reference. A later
 verified publish converges `latest`; automation that requires exact release
 identity should never resolve `latest` at deployment time.
+
+
+## Subscription client versions at release
+
+Prepare every version bump with `pnpm release:prepare <new-semver>` (for example,
+`pnpm release:prepare 0.30.37`). This fetches and validates all three official stable
+versions and the Codex catalog from the same release tag, writes their source/hash
+manifest, then changes Helm's package version. It does not commit, push, or publish.
+`pnpm version` also refreshes the snapshot through `preversion`. Existing
+`sync:claude-cli` and `sync:codex-models` commands now refresh the whole snapshot.
+
+| Client | Authoritative stable source |
+| --- | --- |
+| Grok | `https://x.ai/cli/stable`, the stable pointer used by xAI's official installer |
+| Claude Code | `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` |
+| Codex | `https://api.github.com/repos/openai/codex/releases/latest`, stable `rust-vX.Y.Z` tags only |
+
+Use an existing read-only `GITHUB_TOKEN` when needed to avoid GitHub's anonymous
+rate limit. Credentials are sent only to the GitHub API, never to the other sources.
+Lookup errors, malformed versions, drafts/prereleases, empty/invalid Codex catalogs,
+and stale snapshots stop release preparation or verification; there is no stale
+fallback. All upstream inputs are validated before generated files are changed.
+
+The existing CI `verify` gate runs `pnpm check:release-clients`: every untagged Helm
+version must match official latest stable, including follow-up commits after a
+version bump. An existing tag permits reproducible historical builds; inconsistent
+partial release state remains rejected by the publisher. `pnpm check:client-versions`
+and `prebuild` check the local manifest/modules/catalog without network access.
+Commit the snapshot with the release version; run the normal typecheck, lint, build,
+unit, e2e and Docker CI gates. Publishing consumes exactly that CI-accepted source
+snapshot and never fetches newer clients during its Docker rebuild. "Latest" means
+latest at the successful release CI check; a newer upstream release during publish
+belongs to the next Helm release. No new models, entitlements, or protocol features
+are inferred merely from a higher client version.
+
+The manifest is `config/generated/client-versions.json`. Keep the semantic protocol
+and tool/stream checks when a version changes; mocks alone do not prove live upstream
+compatibility. After deployment, read back effective versions and perform a real
+account smoke. **Remove temporary `HELM_XAI_GROK_CLIENT_VERSION` or
+`HELM_OPENAI_CODEX_CLIENT_VERSION` recovery overrides once the new image default
+reaches that version**; otherwise the old override masks future release updates.
+Intentional operator pins remain supported and take precedence.

@@ -114,6 +114,7 @@ pnpm build          # 构建网关 + admin + portal + ops bundle
 - Commit message 结尾带：
   `Co-Authored-By: Codex <noreply@openai.com>`
 - 只有用户明确要求时才提交/推送。
+- 每次 release 必须先运行 `pnpm release:prepare <新版本>`，统一同步 Grok、Claude Code、Codex 官方最新稳定版及同 tag 的 Codex 模型目录；将生成快照随版本变更提交。CI 拒绝未发布版本使用过时快照；构建和发布阶段禁止重新拉取并修改已验证的版本。部署新默认值后移除临时版本覆盖，核对有效版本并做真实上游验收。
 
 ---
 
