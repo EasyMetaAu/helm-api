@@ -12,11 +12,11 @@ import {
   runtimeResponseWorkAdmission,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
+  XAI_GROK_CLIENT_VERSION,
 } from "@helm/core";
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
 import { ProviderConfigSchema } from "@helm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { XAI_GROK_CLIENT_VERSION } from "../../../packages/core/src/provider/oauth/grok-client-version.generated.js";
 import {
   getAccountSettings,
   loadAccountSettings,
