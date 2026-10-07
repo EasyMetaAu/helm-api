@@ -1,6 +1,6 @@
 {
   "name": "helm-api",
-  "version": "0.30.36",
+  "version": "0.30.37",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,7 +11,7 @@
     "start": "node --env-file-if-exists=.env apps/gateway/dist/index.js",
     "dev": "pnpm --filter @helm/admin dev",
     "dev:admin": "pnpm --filter @helm/admin dev",
-    "typecheck": "pnpm -r typecheck && pnpm typecheck:ops",
+    "typecheck": "pnpm -r typecheck && pnpm typecheck:ops && pnpm typecheck:clients",
     "typecheck:ops": "tsc --noEmit -p scripts/ops/tsconfig.json",
     "test": "vitest run",
     "test:ci:fast": "HELM_CI_FAST=1 vitest run --maxWorkers=2 --bail=1",
@@ -43,7 +43,14 @@
     "test:passthrough:final": "pnpm test:passthrough && pnpm test:passthrough:live",
     "test:protocol-compat:ast": "bash scripts/protocol-compat/ast-grep-gates.sh",
     "sync:claude-cli": "tsx scripts/sync-claude-cli.ts",
-    "prebuild": "pnpm sync:claude-cli"
+    "prebuild": "pnpm check:client-versions",
+    "sync:client-versions": "tsx scripts/sync-client-versions.ts --sync",
+    "sync:grok-cli": "pnpm sync:client-versions",
+    "check:client-versions": "tsx scripts/sync-client-versions.ts --check",
+    "check:release-clients": "tsx scripts/sync-client-versions.ts --release-check",
+    "release:prepare": "tsx scripts/sync-client-versions.ts --release",
+    "preversion": "pnpm sync:client-versions",
+    "typecheck:clients": "tsc --noEmit -p scripts/tsconfig.clients.json"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",
@@ -54,7 +61,8 @@
     "esbuild": "^0.27.7",
     "tsx": "^4.22.3",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "zod": "^4.4.3"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

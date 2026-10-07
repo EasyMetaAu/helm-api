@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-07 · 发布时同步订阅客户端版本（docs/05、06、10）
+
+- **官方来源**：Grok 使用官方安装器的 `https://x.ai/cli/stable`，Claude Code 使用 npm `@anthropic-ai/claude-code/latest`，Codex 使用 `openai/codex` 最新稳定 release；Codex 模型目录固定取同一 tag。拒绝预览版本、错误响应及非法目录，不在失败时沿用旧值。
+- **发布边界**：`release:prepare` / `preversion` 统一同步，未打 tag 的版本在每次 CI 中校验最新值，避免版本变更后的后续提交绕过检查。生成模块、来源 manifest 与目录 hash 一并签入；原来的 Claude 构建前联网更新改为离线一致性校验，发布不改动已过 CI 的输入。
+- **限制**：“最新”以成功的 release CI 检查为准，发布期间上游新增版本留待下次。三个 sync 命令统一维护同一快照；仍允许运维应急覆盖，但新镜像默认值追上后须移除覆盖，防止未来发布继续使用旧版本。版本更新不等于获得新模型授权，仍需真实上游验收。
+
 ## 2026-10-01 · Helm 级联 Responses 续接恢复（docs/04、05、07）
 
 - **根因与边界**：上游 Helm 在确认本轮尚未发给 provider 后，会关闭 WebSocket（1012）让 Codex 重发完整历史；中间 Helm 无法从关闭事件证明是否执行，将其报告为结果不明。HTTP 回退后的增量续接因此反复失败。
@@ -63,15 +69,6 @@
 - **重放边界**：真实连接拒绝与 DNS 解析失败可继续安全 fallback；发送结果不明、断管和响应正文失败仍禁止重放。
 - **协议兼容**：Lite 恢复 function/custom 工具返回值中直接图片的 detail 清理，不递归改业务数据；Interactions 允许已实现的 `delivery: inline`，仍拒绝 `uri`。
 - **计数路由**：按 registry alias 或唯一原生 provider 所属关系解析 wire model；未知、歧义、lane 和模型/lane/预算受限 key 均本地估算，避免绕过生成权限外发正文。明确禁用模型与上游请求/鉴权/权限错误仍拒绝；计数端点不支持（404/405）、限流和故障可估算。
-
-## 2026-09-27 · 原生协议、缓存与重放边界修复（docs/04、05、07）
-
-- **Claude**：更新已公布模型的 inline system 支持，删除默认日期改写，保留原生 thinking/context、缓存标记及未变化请求的 raw JSON；缓存超限交给上游拒绝，不静默裁剪。保留鉴权、路由、明确治理和有实际依据的兼容处理。
-- **Responses**：保留原生 context_management 和标准 custom tools；xAI 订阅端显式声明不兼容。Codex shim 只匹配 Codex profile；指令只提升前导纯文本，密文只识别已知外来 UUID 形状，Lite 图片清理不递归修改工具数据。移除工具转换附带的图片重编码。
-- **安全与成本**：Claude/Responses 按协议白名单转发头；只有 Codex 和显式 Helm relay 可转发 Codex 元数据。生成/compact 的发送结果不明或 HTTP 200 后正文失败均禁止自动换账户重发；非流式正文读取有超时。Gemini 媒体抓取复用 Node BlockList 验证映射 IPv6，DNS 失败或空结果拒绝，连接必须固定到已验证地址；保留 provider-managed Files 引用并记录实际变换。
-- **辅助入口**：Responses 查询参数沿 registry 所属账户传递；计数接口保留确定性 4xx。Images→Gemini 不能表达的选项、Interactions 未支持字段/输入块、Realtime 多余 multipart 块在调用上游前拒绝；这修正了过去接受后静默忽略的行为，调用方须移除不支持字段或选择支持的原生接口。
-- **保留的显式策略**：账户 installation ID 隔离、Codex 超大历史优化、可选 Memory/视觉压缩/XML 恢复仍有各自用途，不因“透传”取消安全与治理。passthrough_used 表示绕过 IR，不代表完全没有已记录的策略或传输适配。
-- **验证边界**：三角色审查，核心/辅助接口先红后绿，mock 覆盖实际执行器、provider、OAuth 包装和原生 SSE；本机类型检查及定向测试不代表 CI、合并、部署或线上缓存改善。没有重放用户长会话或执行真实付费调用。私有请求审计只保留本地，不进入公共 PR。
 
 ## 更早历史总览
 
@@ -131,3 +128,6 @@
 2026-09-05 Fable 5.1 目录/价格、2026-09-02 HTTP 结果不明禁止重放（保留明确拒绝的有界重试）、2026-09-01 超大历史发送前保护已并入历史；完整内容见基线 `8a7df80c6684b10bfa7ff7f4f07f237a92f95d58`。2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。
 
 2026-09-21（docs/05、06、07）：Jev Decisions 独立协议面保留权限与请求数原子预留，强制无正文审计，采用 32 KB 请求、256 KB 响应与 30 秒上游边界。完整记录见 Git 历史。
+
+
+2026-09-27 原生协议、缓存与重放边界修复保留发送后结果不明禁止重放、provider 字段保真及权限检查；完整记录见 git history。

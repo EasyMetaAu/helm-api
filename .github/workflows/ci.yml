@@ -57,6 +57,12 @@ jobs:
         if: github.event_name == 'push'
         run: pnpm config set store-dir /home/runner/_work/.pnpm-store
       - run: pnpm install --frozen-lockfile
+      # Tag-aware on EVERY commit: a follow-up main commit can become the release
+      # SHA after the version-bump commit's publisher was skipped as stale.
+      - name: Verify release client versions
+        run: pnpm check:release-clients
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: pnpm typecheck
       - run: pnpm lint
       # build BEFORE test: admin-static.test.ts serves apps/admin/build, which is

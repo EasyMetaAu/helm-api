@@ -5,6 +5,10 @@
 // Protocol behaviour adapted from OpenClaw (MIT, © 2026 OpenClaw Foundation),
 // extensions/xai/xai-oauth.ts. Helm keeps only the provider-neutral OAuth pieces.
 
+import { XAI_GROK_CLIENT_VERSION } from "./grok-client-version.generated.js";
+
+export { XAI_GROK_CLIENT_VERSION } from "./grok-client-version.generated.js";
+
 import {
   buildOAuthRequestSignal,
   isOAuthInvalidGrant,
@@ -21,9 +25,7 @@ export const XAI_OAUTH_SCOPE =
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configuration`;
 export const XAI_GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-// First-party protocol version observed from the installed Grok CLI release.
-// The subscription proxy rejects inference requests without this header (HTTP 426).
-export const XAI_GROK_CLIENT_VERSION = "0.2.101";
+// Stable first-party protocol version is pinned during release preparation.
 export const XAI_GROK_CLIENT_VERSION_ENV = "HELM_XAI_GROK_CLIENT_VERSION";
 
 const SEMVER_PATTERN =

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "versions": {
+    "grok": "1.0.46",
+    "claude": "2.1.292",
+    "codex": "0.160.1"
+  },
+  "sources": {
+    "grok": "https://x.ai/cli/stable",
+    "claude": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    "codex": "https://api.github.com/repos/openai/codex/releases/latest",
+    "codexModels": "https://raw.githubusercontent.com/openai/codex/rust-v0.160.1/codex-rs/models-manager/models.json"
+  },
+  "codexTag": "rust-v0.160.1",
+  "catalogSha256": "e0c1feb6be3e5d7f079b594a64255f4e8e6a97fba8cc5970e9b82abecf7d4b3c"
+}
