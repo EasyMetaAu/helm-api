@@ -1130,5 +1130,7 @@
   "effort ≤ {e}": "推理强度 ≤ {e}",
   "{n} concurrent": "{n} 并发",
   "Measured only for streamed responses.": "仅对流式响应进行测量。",
-  "Reset window": "重置周期"
+  "Reset window": "重置周期",
+  "Plan unknown": "套餐未知",
+  "Plan checked": "套餐核验时间"
 }

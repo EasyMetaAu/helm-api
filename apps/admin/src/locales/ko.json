@@ -1130,5 +1130,7 @@
   "effort ≤ {e}": "effort ≤ {e}",
   "{n} concurrent": "{n} concurrent",
   "Measured only for streamed responses.": "Measured only for streamed responses.",
-  "Reset window": "Reset window"
+  "Reset window": "Reset window",
+  "Plan unknown": "요금제 알 수 없음",
+  "Plan checked": "요금제 확인 시간"
 }

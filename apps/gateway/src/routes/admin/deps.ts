@@ -15,6 +15,7 @@ import type {
   TelemetryStore,
 } from "@helm/core";
 import type {
+  AnthropicPlanType,
   AnthropicResetRequest,
   AnthropicResetResult,
   AnthropicResetStatus,
@@ -107,6 +108,8 @@ export interface OAuthAdminStatus {
     // non-Codex provider; no token or secret material crosses this boundary.
     email?: string;
     chatgptPlanType?: string;
+    anthropicPlanType?: AnthropicPlanType | null;
+    anthropicPlanCheckedAt?: number | null;
     chatgptAccountId?: string;
     isFedramp?: boolean;
     expiresAt: number | null;

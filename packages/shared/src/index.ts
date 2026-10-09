@@ -285,6 +285,7 @@ export {
   nativePassthroughBody,
   nativePassthroughMutations,
 } from "./native-passthrough.js";
+export { type AnthropicPlanType, AnthropicPlanTypeSchema } from "./oauth/anthropic-plan.js";
 export * from "./oauth/anthropic-reset.js";
 // Per-account OAuth subscription usage + quota observability (providers page).
 // Fail-open artifacts: usage = today's served traffic; quota = latest rate-limit

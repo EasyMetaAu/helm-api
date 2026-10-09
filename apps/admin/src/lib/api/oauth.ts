@@ -14,6 +14,7 @@ import {
   AnthropicResetRequestSchema,
   AnthropicResetResultSchema,
   AnthropicResetStatusSchema,
+  type AnthropicPlanType,
   type AnthropicResetRequest,
   type AnthropicResetResult,
   type AnthropicResetStatus,
@@ -29,6 +30,8 @@ export interface OAuthAccount {
   // because legacy records and non-Codex providers do not have these fields.
   email?: string;
   chatgptPlanType?: string;
+  anthropicPlanType?: AnthropicPlanType | null;
+  anthropicPlanCheckedAt?: number | null;
   chatgptAccountId?: string;
   isFedramp?: boolean;
   expiresAt: number | null;

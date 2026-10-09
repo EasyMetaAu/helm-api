@@ -1130,5 +1130,7 @@
   "effort ≤ {e}": "effort ≤ {e}",
   "{n} concurrent": "{n} concurrent",
   "Measured only for streamed responses.": "Measured only for streamed responses.",
-  "Reset window": "Reset window"
+  "Reset window": "Reset window",
+  "Plan unknown": "Plano desconhecido",
+  "Plan checked": "Plano verificado"
 }
