@@ -23,6 +23,7 @@ import {
   type OAuthQuotaWindow,
 } from "@helm/shared";
 import { isUserMessageRequest } from "../../queue/user-turn.js";
+import { AnthropicIdentityError, anthropicRequestAccountUuid } from "../anthropic-identity.js";
 import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
@@ -144,6 +145,8 @@ function isAccountBackpressureFailure(err: unknown): boolean {
 // over one that has already served.
 export interface OAuthPoolMember {
   account: string;
+  /** Verified token account UUID snapshot; final dispatch rechecks the live credential. */
+  anthropicAccountUuid?: string;
   priority: number;
   schedulable: boolean;
   // Optional per-account model entitlement. Undefined preserves the legacy
@@ -468,6 +471,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function stickyKeyFromNative(input: NativePassthroughInput): string | null {
     const body = nativePassthroughBody(input);
+    if (nativeProtocolProfile === "anthropic_messages") {
+      const accountUuid = anthropicRequestAccountUuid(body);
+      if (accountUuid) return `anthropic_account_uuid:${accountUuid}`;
+    }
     if (isNativePassthroughCarrier(input)) {
       const turnState = headerValue(input.headers, "x-codex-turn-state");
       if (turnState !== null) return `x-codex-turn-state:${turnState}`;
@@ -513,6 +520,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   function stickyKeyFromChat(req: ChatCompletionRequest): string | null {
+    if (nativeProtocolProfile === "anthropic_messages") {
+      const accountUuid = anthropicRequestAccountUuid(req);
+      if (accountUuid) return `anthropic_account_uuid:${accountUuid}`;
+    }
     const previousResponseId = bodyString(req, "previous_response_id");
     if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     const deviceKey = deviceAffinityKeyFromBody(req);
@@ -935,7 +946,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       stickyKey?.startsWith("previous_response_id:") === true ||
       stickyKey?.startsWith("x-codex-turn-state:") === true ||
       stickyKey?.startsWith("responses_websocket_session:") === true ||
-      stickyKey?.startsWith("provider_account:") === true
+      stickyKey?.startsWith("provider_account:") === true ||
+      stickyKey?.startsWith("anthropic_account_uuid:") === true
     );
   }
 
@@ -986,7 +998,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): PoolEntry {
     const nowMs = now();
     const model = opts.model ?? null;
-    const eligible = eligibleEntries(nowMs, exclude, model);
+    const assertedAccount = stickyKey?.startsWith("anthropic_account_uuid:")
+      ? stickyKey.slice("anthropic_account_uuid:".length)
+      : null;
+    const eligible = eligibleEntries(nowMs, exclude, model).filter(
+      (entry) =>
+        assertedAccount === null ||
+        entry.member.anthropicAccountUuid?.toLowerCase() === assertedAccount,
+    );
+    if (assertedAccount !== null && eligible.length === 0) throw new AnthropicIdentityError();
     // General selection prefers healthy accounts; the credit-spending sink tier only
     // surfaces when no healthy account is left. A strict-sticky continuation (below)
     // still uses the full `eligible` set so a pinned conversation is never diverted.

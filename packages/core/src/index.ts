@@ -497,6 +497,10 @@ export {
   translateAnthropicSSE,
 } from "./provider/anthropic.js";
 export {
+  AnthropicIdentityError,
+  anthropicRequestAccountUuid,
+} from "./provider/anthropic-identity.js";
+export {
   type ChunkClass,
   guardPreOutputFailure,
   type PreOutputClassifier,

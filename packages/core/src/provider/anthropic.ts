@@ -1,3 +1,7 @@
+import {
+  anthropicRequestAccountUuid,
+  assertAnthropicAccountIdentity,
+} from "./anthropic-identity.js";
 import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 // Native Anthropic Messages executor (issue #38) — routes Helm's internal
 // OpenAI-Chat IR to the Anthropic /v1/messages API, used by Claude Pro/Max
@@ -69,14 +73,13 @@ export interface AnthropicClientConfig {
   baseUrl: string; // e.g. https://api.anthropic.com (NO /v1)
   apiKey?: string; // static x-api-key path (rare); mutually exclusive with getAuthHeader
   getAuthHeader?: () => Promise<string>; // dynamic "Bearer <oauth-access>"
+  currentMetadata?: () => Readonly<Record<string, unknown>>;
   onUnauthorized?: () => void; // 401 hook -> force token refresh, replay once
   currentSecrets?: () => string[]; // live token set for redaction
   timeoutMs?: number;
-  // Anti-ban stable device identity (Claude subscription, ref claude-relay-service):
-  // an opaque, per-account-STABLE string sent verbatim as `metadata.user_id` on every
-  // request. Computed ONCE per account upstream (deterministic, never per-request) so
-  // the device identity never rotates — the real-client posture Anthropic expects.
-  // Undefined → no `metadata` is sent (back-compat; matches openclaw's default).
+  // Legacy per-account metadata for translated requests without an explicit client
+  // account assertion. This is not verified identity or protection from suspension.
+  // Explicit client identities take precedence and are checked against OAuth metadata.
   metadataUserId?: string;
   // Wire-image profile for Claude Code emulation. "auto" keeps static API-key
   // providers conservative while making OAuth subscription traffic strict.
@@ -1318,10 +1321,12 @@ export function openaiToAnthropicRequest(
           ? r.max_tokens
           : DEFAULT_MAX_TOKENS,
   };
-  // Anti-ban stable device identity: forward the ready-made, per-account-stable
-  // user_id verbatim. Anthropic's metadata.user_id is an opaque ≤256-char string;
-  // we carry {device_id, account_uuid, session_id} like the official client.
-  if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
+  // Keep an explicit client account assertion intact; the OAuth sender verifies
+  // it against authenticated token metadata before dispatch. Legacy unbound
+  // callers retain their configured metadata (not a guarantee of account safety).
+  if (anthropicRequestAccountUuid(r) && isRecord(r.metadata)) {
+    body.metadata = { user_id: r.metadata.user_id };
+  } else if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
   if (typeof r.temperature === "number") {
     body.temperature = r.temperature;
   }
@@ -1568,10 +1573,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   async function headers(
     body: Record<string, unknown>,
     extraBetas: readonly string[] = [],
-    options: { includeClaudeCliRuntimeHeaders?: boolean } = {},
+    options: {
+      includeClaudeCliRuntimeHeaders?: boolean;
+      sourceIdentity?: Record<string, unknown>;
+    } = {},
   ): Promise<Record<string, string>> {
     const userAgent = userAgentFromBody(body);
-    const cliVersion = userAgent.match(/^claude-cli\/([^ ]+)/)?.[1] ?? FALLBACK_CLAUDE_CODE_VERSION;
     const h: Record<string, string> = {
       "Content-Type": "application/json",
       // Header parity with openclaw's OAuth recipe — both are load-bearing for the
@@ -1588,21 +1595,19 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     };
     if (options.includeClaudeCliRuntimeHeaders === true && fingerprintMode !== "off") {
       h["x-client-request-id"] = randomUUID();
-      if (fingerprintMode === "strict") {
-        h["X-Stainless-Arch"] = process.arch;
-        h["X-Stainless-OS"] = process.platform;
-        h["X-Stainless-Package-Version"] = cliVersion;
-      }
-      h["X-Stainless-Lang"] = "js";
-      h["X-Stainless-Runtime"] = "node";
-      h["X-Stainless-Runtime-Version"] = process.version;
-      h["X-Stainless-Retry-Count"] = "0";
-      h["X-Stainless-Timeout"] = "600";
+      // This adapter uses fetch, not the Stainless SDK. Do not invent its SDK,
+      // OS, timeout or retry telemetry. Native clients retain their own headers.
       const sessionId = claudeSessionIdFromBody(body);
       if (sessionId !== null) h["X-Claude-Code-Session-Id"] = sessionId;
     }
-    if (cfg.getAuthHeader) h.Authorization = await cfg.getAuthHeader();
-    else h["x-api-key"] = cfg.apiKey as string;
+    if (cfg.getAuthHeader) {
+      h.Authorization = await cfg.getAuthHeader();
+      // Auth acquisition can load or refresh credentials. Read identity afterwards,
+      // on every dispatch (including count_tokens and the one 401 retry).
+      const identity = cfg.currentMetadata?.() ?? {};
+      assertAnthropicAccountIdentity(body, identity);
+      if (options.sourceIdentity) assertAnthropicAccountIdentity(options.sourceIdentity, identity);
+    } else h["x-api-key"] = cfg.apiKey as string;
     return h;
   }
 
@@ -1637,6 +1642,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
+    sourceIdentity?: Record<string, unknown>,
   ): Promise<AnthropicRequestResult> {
     const wireInput = normalizeAnthropicModelParameters(
       cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
@@ -1645,9 +1651,9 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     const body = nativePassthroughBody(wireInput);
     const prepared = prepareNativePassthroughRequest(
       wireInput,
-      await headers(body, extraBetas, { includeClaudeCliRuntimeHeaders }),
+      await headers(body, extraBetas, { includeClaudeCliRuntimeHeaders, sourceIdentity }),
       {
-        mergeHeaders: ["anthropic-beta"],
+        mergeHeaders: includeClaudeCliRuntimeHeaders ? ["anthropic-beta"] : [],
         forceAcceptEncodingIdentity: cfg.getAuthHeader !== undefined && body.stream === true,
         ...(cfg.getAuthHeader !== undefined && body.stream === true
           ? { providerProfileApplied: "anthropic_official_safe" }
@@ -1744,6 +1750,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
+    sourceIdentity?: Record<string, unknown>,
   ): Promise<AnthropicRequestResult> {
     const result = await request(
       body,
@@ -1754,6 +1761,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       includeClaudeCliRuntimeHeaders,
       normalizeToolNames,
       compatibility,
+      sourceIdentity,
     );
     if (result.res.status === 401 && cfg.onUnauthorized !== undefined) {
       await result.res.body?.cancel().catch(() => {});
@@ -1767,6 +1775,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         includeClaudeCliRuntimeHeaders,
         normalizeToolNames,
         compatibility,
+        sourceIdentity,
       );
     }
     return result;
@@ -1804,6 +1813,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
         true,
         opts?.requestCompatibility?.anthropic,
+        req,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1831,6 +1841,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
         true,
         opts?.requestCompatibility?.anthropic,
+        req,
       );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs, toolNameMap);

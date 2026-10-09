@@ -1329,6 +1329,10 @@ export async function synthesizeOAuthProviders(
         : client;
       members.push({
         account,
+        ...(providerId === "anthropic" &&
+        typeof tm.currentMetadata().anthropicAccountUuid === "string"
+          ? { anthropicAccountUuid: tm.currentMetadata().anthropicAccountUuid as string }
+          : {}),
         priority: s.priority ?? 50,
         schedulable: true,
         models: memberModels,

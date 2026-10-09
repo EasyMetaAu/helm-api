@@ -11,6 +11,11 @@
 // the operator opts in (see README disclaimer, issue #38).
 
 import { createServer, type Server } from "node:http";
+import { z } from "zod";
+import {
+  AnthropicAccountUuidSchema,
+  AnthropicOAuthIdentityChangedError,
+} from "../anthropic-identity.js";
 import { consumeUpstreamBodyWithinBudget } from "../openai.js";
 import {
   buildOAuthRequestSignal,
@@ -68,7 +73,15 @@ function parseTokenCredentials(responseBody: string): OAuthCredentials {
   ) {
     throw new Error("Anthropic token response missing required fields");
   }
-  return { access: rec.access_token, refresh: rec.refresh_token, expires };
+  const identity = z
+    .object({ account: z.object({ uuid: AnthropicAccountUuidSchema.optional() }).nullish() })
+    .parse(rec);
+  return {
+    access: rec.access_token,
+    refresh: rec.refresh_token,
+    expires,
+    ...(identity.account?.uuid ? { anthropicAccountUuid: identity.account.uuid } : {}),
+  };
 }
 
 function startCallbackServer(expectedState: string): Promise<CallbackServer> {
@@ -347,6 +360,22 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
   name: "Anthropic (Claude Pro/Max)",
   usesCallbackServer: true,
   login: loginAnthropic,
-  refreshToken: (creds, fetchImpl) => refreshAnthropicToken(creds.refresh, fetchImpl),
+  refreshToken: async (creds, fetchImpl) => {
+    const next = await refreshAnthropicToken(creds.refresh, fetchImpl);
+    const previous = AnthropicAccountUuidSchema.safeParse(creds.anthropicAccountUuid);
+    if (
+      previous.success &&
+      next.anthropicAccountUuid &&
+      next.anthropicAccountUuid !== previous.data
+    ) {
+      throw new AnthropicOAuthIdentityChangedError();
+    }
+    return {
+      ...next,
+      ...(previous.success && !next.anthropicAccountUuid
+        ? { anthropicAccountUuid: previous.data }
+        : {}),
+    };
+  },
   getApiKey: (creds) => creds.access,
 };

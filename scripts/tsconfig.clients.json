@@ -5,6 +5,8 @@
     "rootDir": ".."
   },
   "include": [
+    "./claude-protocol-review.ts",
+    "./claude-protocol-review.test.ts",
     "./sync-client-versions.ts",
     "./sync-client-versions.test.ts",
     "./sync-claude-cli.ts",

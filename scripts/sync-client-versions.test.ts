@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,22 @@ const roots: string[] = [];
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "helm-client-versions-"));
   roots.push(root);
+  await mkdir(join(root, "config"));
+  await writeFile(
+    join(root, "config/claude-protocol-review.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      cliVersion: "2.1.200",
+      observedSdkVersion: "0.100.0",
+      artifact: {
+        name: "@anthropic-ai/claude-code-darwin-arm64",
+        integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+        binarySha256: "a".repeat(64),
+      },
+      reviewedHeaders: ["anthropic-beta"],
+      evidence: "docs/claude-protocol-safety.md",
+    }),
+  );
   await writeFile(join(root, "package.json"), JSON.stringify({ version: "0.30.36" }));
   return root;
 }
@@ -36,6 +52,11 @@ function upstream(overrides: Record<string, unknown> = {}) {
     const url = String(input);
     expect(init?.signal).toBeDefined();
     const values: Record<string, unknown> = {
+      "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/2.1.200": {
+        name: "@anthropic-ai/claude-code-darwin-arm64",
+        version: "2.1.200",
+        dist: { integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}` },
+      },
       [SOURCES.grok]: "1.0.46\n",
       [SOURCES.claude]: { name: "@anthropic-ai/claude-code", version: "2.1.200" },
       [SOURCES.codex]: { tag_name: "rust-v0.170.0", draft: false, prerelease: false },
@@ -73,6 +94,14 @@ describe("release client version snapshots", () => {
     ).toContain('"0.170.0"');
   });
   it.each([
+    { [SOURCES.claude]: { name: "@anthropic-ai/claude-code", version: "2.1.201" } },
+    {
+      "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/2.1.200": {
+        name: "@anthropic-ai/claude-code-darwin-arm64",
+        version: "2.1.200",
+        dist: { integrity: "changed" },
+      },
+    },
     { [SOURCES.grok]: "1.0.46-alpha.1" },
     { [SOURCES.claude]: { name: "@anthropic-ai/claude-code", version: "2.1.200\nINJECT" } },
     { [SOURCES.codex]: { tag_name: "rust-v0.170.0", draft: false, prerelease: true } },
