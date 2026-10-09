@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "cliVersion": "2.1.295",
+  "observedSdkVersion": "0.128.0",
+  "artifact": {
+    "name": "@anthropic-ai/claude-code-darwin-arm64",
+    "integrity": "sha512-qGetxxeqaqHR7Ev5AfTFfYuze0S99d27DV2IuFfjXigY9CKkLUy2jf3cCXjt8y4BAlGyNrqwKmIdrCjwtjAe8g==",
+    "binarySha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "reviewedHeaders": [
+    "anthropic-version",
+    "anthropic-beta",
+    "x-claude-code-prompt-id",
+    "x-claude-code-request-class",
+    "x-claude-code-agent-type",
+    "x-claude-code-compaction",
+    "x-claude-code-context-compacted",
+    "x-claude-code-prev-tool-durations",
+    "x-anthropic-additional-protection",
+    "x-client-app"
+  ],
+  "evidence": "docs/claude-protocol-safety.md"
+}

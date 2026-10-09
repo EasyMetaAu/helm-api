@@ -12,6 +12,8 @@ import type {
   XaiOAuthModel,
 } from "@helm/core";
 import {
+  AnthropicIdentityError,
+  anthropicRequestAccountUuid,
   applyForcedAnthropicThinking,
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
@@ -1902,6 +1904,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         //    provider model (not the originally-requested alias) — the gateway
         //    picked this model, so the upstream must be told which one to run.
         try {
+          // A cross-protocol renderer can discard the account assertion. Keep
+          // account-bound Claude history inside an Anthropic identity boundary.
+          if (
+            req.protocol === "anthropic_messages" &&
+            target.targetProviderProtocol !== "anthropic_messages" &&
+            (anthropicRequestAccountUuid(req.provider_raw ?? {}) ||
+              (req.native_request &&
+                anthropicRequestAccountUuid(nativePassthroughBody(req.native_request))))
+          ) {
+            throw new AnthropicIdentityError(
+              "Account-bound Claude requests cannot cross protocol boundaries",
+            );
+          }
           // Capture sink for the EXACT bytes forwarded upstream (AFTER memory injection +
           // protocol translation). Each provider fires this just before its HTTP POST with
           // the serialized provider-native body; the value the SERVED attempt captured
@@ -2482,7 +2497,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // body is invalid for EVERY candidate, so do NOT advance the chain and do NOT
           // fault the breaker (the upstream is healthy — the request is what's wrong).
           // Surface the upstream's structured error VERBATIM as a 400 invalid_request.
-          if (isUpstreamRequestRejection(err)) {
+          if (err instanceof AnthropicIdentityError || isUpstreamRequestRejection(err)) {
+            if (err instanceof AnthropicIdentityError) settleBreaker("abort");
             const detail = errorDetailOf(err);
             attempts.push({
               alias,

@@ -1,5 +1,6 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import {
+  AnthropicIdentityError,
   CodexResponsesBeforeSendError,
   createAnthropicClient,
   createCircuitBreaker,
@@ -9550,4 +9551,133 @@ it.each([
   expect(out.final.status).toBe("ok");
   expect(out.nativePassthrough).toBe(true);
   expect(sent).toEqual({ ...body, output_config: { format: body.output_config.format } });
+});
+
+describe("createExecute — Anthropic identity boundary", () => {
+  it("stops outer alias fallback without faulting the provider or inventing upstream status", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockRejectedValue(new AnthropicIdentityError()),
+      chatCompletionStream: vi.fn(),
+    };
+    const cb = breaker();
+    const failed = vi.spyOn(cb, "recordFailure");
+    const aborted = vi.spyOn(cb, "recordAbort");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ primary: "m-primary", fallback: "m-fallback" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["primary", "fallback"]), req());
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error");
+    expect(out.final.error.error_class).toBe("invalid_request");
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attempts[0]?.error_detail?.upstream_status).toBeNull();
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(failed).not.toHaveBeenCalled();
+    expect(aborted).toHaveBeenCalledWith("primary");
+  });
+});
+
+describe("createExecute — account-bound Claude translation", () => {
+  it.each([
+    false,
+    true,
+  ])("rejects mismatched OAuth identity through real Anthropic translation (stream=%s)", async (stream) => {
+    const metadata = {
+      user_id: JSON.stringify({ account_uuid: "11111111-1111-4111-8111-111111111111" }),
+    };
+    const fetcher = vi.fn();
+    const provider = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer test",
+        currentMetadata: () => ({ anthropicAccountUuid: "22222222-2222-4222-8222-222222222222" }),
+        metadataUserId: JSON.stringify({ account_uuid: "" }),
+      },
+      fetch: fetcher,
+    });
+    const baseRegistry = registry({ primary: "claude-test", fallback: "claude-test" });
+    const cb = breaker();
+    const failed = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: {
+        ...baseRegistry,
+        resolve(alias) {
+          const result = baseRegistry.resolve(alias);
+          if (!result.ok) return result;
+          return {
+            ...result,
+            value: { ...result.value, targetProviderProtocol: "anthropic_messages" },
+          };
+        },
+      },
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => false,
+    });
+    const out = await execute(
+      plan(["primary", "fallback"]),
+      req({
+        protocol: "anthropic_messages",
+        stream,
+        provider_raw: { metadata },
+        native_request: {
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [{ role: "user", content: "hello" }],
+          metadata,
+        },
+      }),
+    );
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error");
+    expect(out.final.error.error_class).toBe("invalid_request");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+    expect(out.attempts).toHaveLength(1);
+  });
+
+  it("rejects before a translator can drop the source account assertion", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ choices: [] }),
+      chatCompletionStream: vi.fn(),
+    };
+    const cb = breaker();
+    const failed = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ primary: "m-primary", fallback: "m-fallback" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => false,
+    });
+    const out = await execute(
+      plan(["primary", "fallback"]),
+      req({
+        protocol: "anthropic_messages",
+        provider_raw: {
+          metadata: {
+            user_id: JSON.stringify({ account_uuid: "11111111-1111-4111-8111-111111111111" }),
+          },
+        },
+      }),
+    );
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error");
+    expect(out.final.error.error_class).toBe("invalid_request");
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+  });
 });

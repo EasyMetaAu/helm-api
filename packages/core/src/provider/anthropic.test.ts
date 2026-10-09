@@ -1873,10 +1873,10 @@ describe("createAnthropicClient", () => {
       expect(h.get("accept")).toBe("application/json");
       expect(h.get("anthropic-dangerous-direct-browser-access")).toBe("true");
       expect(h.get("x-app")).toBe("cli");
-      expect(h.get("x-stainless-lang")).toBe("js");
-      expect(h.get("x-stainless-runtime")).toBe("node");
-      expect(h.get("x-stainless-retry-count")).toBe("0");
-      expect(h.get("x-stainless-timeout")).toBe("600");
+      expect(h.get("x-stainless-lang")).toBeNull();
+      expect(h.get("x-stainless-runtime")).toBeNull();
+      expect(h.get("x-stainless-retry-count")).toBeNull();
+      expect(h.get("x-stainless-timeout")).toBeNull();
       seenSessionHeaders.push(h.get("x-claude-code-session-id") ?? "");
       seenRequestIds.push(h.get("x-client-request-id") ?? "");
       seenMeta.push((JSON.parse(String(init?.body)) as { metadata?: unknown }).metadata);
@@ -1978,20 +1978,12 @@ describe("createAnthropicClient", () => {
     expect(secondCch).toBe(firstCch);
     expect(thirdCch).not.toBe(firstCch);
     expect(Object.keys(first)).toEqual(["model", "messages", "system", "metadata", "max_tokens"]);
-    expect(seenHeaderOrders[0]?.slice(0, 14)).toEqual([
+    expect(seenHeaderOrders[0]?.slice(0, 6)).toEqual([
       "Accept",
       "Authorization",
       "Content-Type",
       "User-Agent",
       "X-Claude-Code-Session-Id",
-      "X-Stainless-Arch",
-      "X-Stainless-Lang",
-      "X-Stainless-OS",
-      "X-Stainless-Package-Version",
-      "X-Stainless-Retry-Count",
-      "X-Stainless-Runtime",
-      "X-Stainless-Runtime-Version",
-      "X-Stainless-Timeout",
       "anthropic-beta",
     ]);
   });
@@ -3131,8 +3123,7 @@ describe("createAnthropicClient — nativePassthrough", () => {
     expect(h.get("x-claude-code-session-id")).toBeNull();
     const beta = h.get("anthropic-beta") ?? "";
     expect(beta).toContain("client-beta-2026-01-01");
-    expect(beta).toContain("oauth-2025-04-20");
-    expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).toBe("client-beta-2026-01-01");
     expect(carrier.mutations).toMatchObject({
       auth_replaced: true,
       content_length_recomputed: true,
@@ -3146,10 +3137,10 @@ describe("createAnthropicClient — nativePassthrough", () => {
         "x-helm-trace",
       ]),
     );
-    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
-      expect.arrayContaining(["anthropic-beta"]),
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten ?? []).not.toContain(
+      "anthropic-beta",
     );
-    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).not.toContain(
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten ?? []).not.toContain(
       "user-agent",
     );
   });

@@ -11,6 +11,7 @@
       "packages/**/*.ts",
       "scripts/ops/**/*.ts",
       "scripts/sync-client-versions*.ts",
+      "scripts/claude-protocol-review*.ts",
       "scripts/sync-claude-cli.ts",
       "scripts/sync-codex-models.ts",
       "!**/dist",

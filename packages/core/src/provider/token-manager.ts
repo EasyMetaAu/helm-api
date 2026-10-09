@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import type { ResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
+import { AnthropicOAuthIdentityChangedError } from "./anthropic-identity.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { buildOAuthRequestSignal, OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
@@ -444,7 +445,9 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       // "refresh failed" into a diagnosable one (e.g. 400 invalid_grant ⇒ re-login;
       // 429 ⇒ rate limited; 5xx ⇒ upstream down).
       const status = err instanceof OAuthHttpError ? err.httpStatus : null;
-      const identityMismatch = err instanceof OpenAICodexIdentityMismatchError;
+      const identityMismatch =
+        err instanceof OpenAICodexIdentityMismatchError ||
+        err instanceof AnthropicOAuthIdentityChangedError;
       const permanentCredentialFailure =
         identityMismatch || (err instanceof OAuthHttpError && err.permanentCredentialFailure);
       const retryableAccountFailure = isRetryableRefreshError(err);

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenRecord, OAuthTokenStore } from "../store/ports.js";
+import { anthropicOAuthProvider } from "./oauth/anthropic.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
@@ -777,5 +778,56 @@ describe("createTokenManager (preset kind)", () => {
     // meta persisted back for the next restart.
     const row = await store.get("github-copilot", "default");
     expect(JSON.parse(row?.meta ?? "{}")).toEqual({ enterpriseUrl: "ghe.acme.com" });
+  });
+});
+
+describe("Anthropic credential identity persistence", () => {
+  const uuid = "11111111-1111-4111-8111-111111111111";
+  it("persists a refreshed verified UUID without losing rotated credentials", async () => {
+    const store = memStore(
+      seedRecord({ expiresAt: 0, meta: JSON.stringify({ anthropicAccountUuid: uuid }) }),
+    );
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: store,
+      encKey: KEY,
+      oauthProvider: anthropicOAuthProvider,
+      now: () => 1_000_000,
+      fetch: vi.fn(async () =>
+        Response.json({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          expires_in: 3600,
+        }),
+      ),
+    });
+    expect(await tm.getAuthHeader()).toBe("Bearer rotated-access");
+    const saved = await store.get("anthropic", "default");
+    expect(JSON.parse(saved?.meta ?? "{}")).toEqual({ anthropicAccountUuid: uuid });
+    expect(tm.currentMetadata().anthropicAccountUuid).toBe(uuid);
+    expect(decryptSecret(saved?.refreshEnc ?? "", KEY)).toBe("rotated-refresh");
+  });
+  it("classifies refresh account replacement as permanent and leaves the original row intact", async () => {
+    const store = memStore(
+      seedRecord({ expiresAt: 0, meta: JSON.stringify({ anthropicAccountUuid: uuid }) }),
+    );
+    const before = await store.get("anthropic", "default");
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: store,
+      encKey: KEY,
+      oauthProvider: anthropicOAuthProvider,
+      now: () => 1_000_000,
+      fetch: vi.fn(async () =>
+        Response.json({
+          access_token: "wrong-access",
+          refresh_token: "wrong-refresh",
+          expires_in: 3600,
+          account: { uuid: "22222222-2222-4222-8222-222222222222" },
+        }),
+      ),
+    });
+    await expect(tm.getAuthHeader()).rejects.toMatchObject({ permanentCredentialFailure: true });
+    expect(await store.get("anthropic", "default")).toEqual(before);
   });
 });

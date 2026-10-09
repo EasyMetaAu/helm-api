@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { CodexModelsResponseSchema } from "../packages/core/src/provider/oauth/codex-model-info.js";
+import { checkClaudeProtocolReview } from "./claude-protocol-review.js";
 
 export const SOURCES = {
   grok: "https://x.ai/cli/stable",
@@ -98,6 +99,11 @@ function versionFiles(versions: z.infer<typeof Versions>) {
 }
 async function fetchSnapshot(options: Options) {
   const { versions, tag } = await latestVersions(options);
+  await checkClaudeProtocolReview({
+    root: options.root,
+    fetcher: options.fetcher,
+    cliVersion: versions.claude,
+  });
   const catalog = CodexModelsResponseSchema.parse(await (await get(modelUrl(tag), options)).json());
   if (!catalog.models.length) throw new Error("Codex release catalog is empty");
   const models = json({ models: catalog.models });
@@ -131,6 +137,7 @@ export async function checkClientVersions(
 ): Promise<void> {
   const root = options.root ?? process.cwd();
   const manifest = Manifest.parse(JSON.parse(await readFile(resolve(root, MANIFEST_PATH), "utf8")));
+  await checkClaudeProtocolReview({ root, offline: true });
   if (
     manifest.codexTag !== `rust-v${manifest.versions.codex}` ||
     manifest.sources.codexModels !== modelUrl(manifest.codexTag)
@@ -146,6 +153,11 @@ export async function checkClientVersions(
     throw new Error("Codex catalog is empty");
   if (options.latest) {
     const current = await latestVersions(options);
+    await checkClaudeProtocolReview({
+      root,
+      fetcher: options.fetcher,
+      cliVersion: current.versions.claude,
+    });
     if (json(current.versions) !== json(manifest.versions))
       throw new Error(
         `Client versions are stale; run pnpm sync:client-versions. Latest: ${JSON.stringify(current.versions)}`,
