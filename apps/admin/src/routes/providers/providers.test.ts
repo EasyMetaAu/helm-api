@@ -53,7 +53,7 @@ const invalidateAllMock = vi.mocked(invalidateAll);
 function provider(overrides: Partial<OAuthProviderStatus> = {}): OAuthProviderStatus {
   return {
     id: 'anthropic',
-    name: 'Claude Max',
+    name: 'Anthropic (Claude Pro/Max)',
     flow: 'manual_paste',
     accounts: [
       {
@@ -330,7 +330,9 @@ describe('providers page', () => {
       screen.getByText('Spread new sessions across accounts while keeping sessions sticky.'),
     ).toBeInTheDocument();
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('Claude Max')).toBeInTheDocument();
+    expect(within(row).getByText('Anthropic (Claude Pro/Max)')).toBeInTheDocument();
+    expect(within(row).getByText('Claude subscription · OAuth')).toBeInTheDocument();
+    expect(within(row).queryByText('Claude Max · OAuth')).not.toBeInTheDocument();
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
     expect(within(row).getByText('connected')).toBeInTheDocument();
     expect(within(row).getByText('42 req')).toBeInTheDocument();

@@ -213,10 +213,10 @@
   }
 
   // A short "platform · auth" pill so the supply-chain shape is legible at a glance
-  // (Claude Max / Codex / Copilot + how it authenticates) without exposing the model
+  // (Claude / Codex / Copilot + how it authenticates) without exposing the model
   // market (Principle 6 — provider aliases stay internal).
   function typeBadge(p: OAuthProviderStatus): string {
-    if (p.id === 'anthropic') return `${$t('Claude Max')} · OAuth`;
+    if (p.id === 'anthropic') return `${$t('Claude subscription')} · OAuth`;
     if (p.id === 'openai-codex') return `Codex · OAuth`;
     if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
     if (p.id === 'xai') return `Grok · OAuth · ${$t('Experimental')}`;
