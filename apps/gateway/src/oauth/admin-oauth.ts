@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   beginAnthropicLogin,
   beginCopilotDeviceLogin,
@@ -76,6 +76,7 @@ import {
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
+import { createAnthropicPlanAccess } from "./anthropic-plan.js";
 import { createAnthropicResetAccess } from "./anthropic-reset.js";
 import type { CodexModelCacheKey } from "./codex-model-cache.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
@@ -853,7 +854,14 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
       const models = enabledAccountModels(r.providerId, sch, discovered);
       const identity = await statusCodexIdentity(deps.store, deps.encKey, r.providerId, r.account);
+      const plan =
+        r.providerId === ANTHROPIC && fresh.healthy
+          ? await anthropicPlan.get(r.account, options.refresh, options.forceRefresh)
+          : { plan: null, checkedAt: null };
       return {
+        ...(r.providerId === ANTHROPIC
+          ? { anthropicPlanType: plan.plan, anthropicPlanCheckedAt: plan.checkedAt }
+          : {}),
         providerId: r.providerId,
         ...freshView,
         credentialFailed,
@@ -909,6 +917,59 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
 
+  async function getAnthropicClient(account: string) {
+    const provider = getOAuthProvider(ANTHROPIC);
+    if (!provider) throw new Error("Anthropic OAuth is not configured");
+    const proxy = getAccountSettings(
+      await loadAccountSettings(deps.config, deps.encKey),
+      ANTHROPIC,
+      account,
+    ).proxy as ProxyConfig | undefined;
+    const doFetch = makeFetch(proxy);
+    const tm = createTokenManager({
+      oauth: { kind: "preset", providerId: ANTHROPIC, account },
+      tokenStore: deps.store,
+      encKey: deps.encKey,
+      oauthProvider: provider,
+      fetch: doFetch,
+      now,
+    });
+    const authorization = await tm.getAuthHeader();
+    return async (path: string, init?: RequestInit) => {
+      const signal = AbortSignal.timeout(init?.method === "POST" ? 25_000 : QUOTA_FETCH_TIMEOUT_MS);
+      // No mutation retry. The reset service persists uncertainty before sending.
+      const response = await doFetch(`https://api.anthropic.com${path}`, {
+        ...init,
+        redirect: "error",
+        signal,
+        headers: {
+          ...ANTHROPIC_USAGE_HEADERS,
+          authorization,
+          "content-type": "application/json",
+        },
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`Anthropic account request failed (status ${response.status})`);
+      }
+      return readBoundedJsonResponse(response, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
+    };
+  }
+
+  const anthropicPlan = createAnthropicPlanAccess({
+    config: deps.config,
+    now,
+    binding: async (account) => {
+      const record = await deps.store.get(ANTHROPIC, account);
+      return record
+        ? createHash("sha256")
+            .update(JSON.stringify([record.accessEnc, record.refreshEnc, record.updatedAt]))
+            .digest("hex")
+        : null;
+    },
+    fetchProfile: async (account) => (await getAnthropicClient(account))("/api/oauth/profile"),
+  });
+
   const anthropicReset = createAnthropicResetAccess({
     config: deps.config,
     now,
@@ -922,46 +983,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           invalidateQuotaCache(ANTHROPIC, key.slice(ANTHROPIC.length + 1));
       }
     },
-    getClient: async (account) => {
-      const provider = getOAuthProvider(ANTHROPIC);
-      if (!provider) throw new Error("Anthropic OAuth is not configured");
-      const proxy = getAccountSettings(
-        await loadAccountSettings(deps.config, deps.encKey),
-        ANTHROPIC,
-        account,
-      ).proxy as ProxyConfig | undefined;
-      const doFetch = makeFetch(proxy);
-      const tm = createTokenManager({
-        oauth: { kind: "preset", providerId: ANTHROPIC, account },
-        tokenStore: deps.store,
-        encKey: deps.encKey,
-        oauthProvider: provider,
-        fetch: doFetch,
-        now,
-      });
-      const authorization = await tm.getAuthHeader();
-      return async (path, init) => {
-        const signal = AbortSignal.timeout(
-          init?.method === "POST" ? 25_000 : QUOTA_FETCH_TIMEOUT_MS,
-        );
-        // No mutation retry. The reset service persists uncertainty before sending.
-        const response = await doFetch(`https://api.anthropic.com${path}`, {
-          ...init,
-          redirect: "error",
-          signal,
-          headers: {
-            ...ANTHROPIC_USAGE_HEADERS,
-            authorization,
-            "content-type": "application/json",
-          },
-        });
-        if (!response.ok) {
-          await response.body?.cancel().catch(() => {});
-          throw new Error(`Anthropic reset request failed (status ${response.status})`);
-        }
-        return readBoundedJsonResponse(response, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
-      };
-    },
+    getClient: getAnthropicClient,
   });
 
   return {

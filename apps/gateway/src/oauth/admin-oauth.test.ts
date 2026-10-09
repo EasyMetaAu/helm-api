@@ -112,6 +112,57 @@ function codexCatalog(
 afterEach(() => vi.unstubAllGlobals());
 
 describe("createOAuthAdmin", () => {
+  it("reads per-account Claude plans through each configured proxy and keeps cached reads offline", async () => {
+    const { tokens, config } = makeStores();
+    for (const account of ["direct", "proxied"]) {
+      await tokens.upsert({
+        providerId: "anthropic",
+        account,
+        accessEnc: encryptSecret(`access-${account}`, KEY),
+        refreshEnc: encryptSecret("refresh", KEY),
+        expiresAt: Date.now() + 3_600_000,
+        meta: null,
+        updatedAt: 1,
+      });
+    }
+    const proxy = { type: "socks5" as const, host: "127.0.0.1", port: 1080 };
+    await setAccountSettings(config, KEY, "anthropic", "proxied", { proxy });
+    const profiles = vi.fn();
+    const makeFetch = (selected?: ProxyConfig): typeof fetch =>
+      (async (url, init) => {
+        if (String(url).endsWith("/api/oauth/profile")) {
+          profiles(selected, new Headers(init?.headers).get("authorization"));
+          expect(init?.redirect).toBe("error");
+          return json({
+            organization: { organization_type: selected ? "claude_max" : "claude_pro" },
+          });
+        }
+        return json({ data: [] });
+      }) as typeof fetch;
+    const admin = createOAuthAdmin({ store: tokens, config, encKey: KEY, makeFetch });
+    await admin.listCachedStatus();
+    expect(profiles).not.toHaveBeenCalled();
+    const accounts = (await admin.listStatus()).providers.find(
+      (p) => p.id === "anthropic",
+    )?.accounts;
+    expect(accounts?.find((a) => a.account === "direct")?.anthropicPlanType).toBe("pro");
+    expect(accounts?.find((a) => a.account === "proxied")?.anthropicPlanType).toBe("max");
+    expect(profiles).toHaveBeenCalledWith(undefined, "Bearer access-direct");
+    expect(profiles).toHaveBeenCalledWith(proxy, "Bearer access-proxied");
+    const cached = await createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      makeFetch,
+    }).listCachedStatus();
+    expect(cached.providers[0]?.accounts.map((a) => a.anthropicPlanType).sort()).toEqual([
+      "max",
+      "pro",
+    ]);
+    expect(profiles).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(cached)).not.toContain("access-direct");
+  });
+
   it("lists all four built-in providers with xAI available by default", async () => {
     const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     const status = await admin.listStatus();
@@ -1039,7 +1090,12 @@ describe("createOAuthAdmin", () => {
       enabled: ["claude-fable-5", "claude-sonnet-4-7"],
     });
     await admin.listStatus();
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(fetchMock).mock.calls.filter(([url]) => String(url).includes("/v1/models")),
+    ).toHaveLength(1);
+    expect(
+      vi.mocked(fetchMock).mock.calls.filter(([url]) => String(url).includes("/api/oauth/profile")),
+    ).toHaveLength(1);
   });
 
   it("listStatus: auto discovery failure stays empty instead of showing curated defaults", async () => {
@@ -1624,6 +1680,7 @@ describe("createOAuthAdmin", () => {
       store: tokens,
       encKey: KEY,
       config,
+      makeFetch: () => globalThis.fetch,
       genSessionId: () => `s${++seq}`,
     });
     vi.stubGlobal(

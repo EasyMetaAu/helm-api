@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-10 · Claude 账号真实套餐展示（docs/06、11）
+
+- **官方来源**：读取 `/api/oauth/profile` 的 `organization.organization_type`，仅将 `claude_pro`、`claude_max`、`claude_team`、`claude_enterprise` 映射为对应套餐；额度、邮箱、模型列表均不用于推断。
+- **读取与缓存**：显式刷新按每个账号的代理访问官方接口，普通列表读取不发上游请求。仅保存套餐、核验时间与凭证指纹，重启后可读；悬停标签可查看最近核验时间。刷新失败显示未知，五分钟内普通刷新复用结果，强制刷新跳过缓存。
+- **边界**：凭证变化使旧结果失效；查询期间退出或重新连接的响应被丢弃。此字段仅用于展示，不改变 OAuth 身份、调度或权益；首次升级后点击刷新取得套餐。
+
 ## 2026-10-09 · Claude 协议与 OAuth 账户边界（docs/04、05、06、07、10）
 
 - **身份边界**：从 OAuth token 响应保存真实 account UUID，刷新缺省时保留，变更则拒绝。原生与转换路径的明确账户声明只能路由到匹配 UUID，禁止带账户声明的 Claude 历史跨协议；保留原始身份到发送前及 401 重试后再次核验；本地拒绝终止外层 fallback，不改写身份、不记 provider 故障。旧令牌无 UUID 时需重新连接或正常刷新取得身份；无账户声明的会话仍未获得完整历史隔离证明。
@@ -64,15 +70,9 @@
 - **兼容决定**：删除 GPT-5.6、Sol/Terra/Luna 与 GPT-5.4/mini 独立 lane；旧客户端名称经别名分别进入 Astra/Sol/Luna，5.4-mini 进入 Luna，5.4 沿现有 gpt-5* 规则进入 premium。GPT-6 Sol 继承 Terra 的 balanced 兜底，避免普通档升级到 premium；历史能力与价格目录保留。
 - **部署边界**：此次仅同步 lanes/model-aliases，保留其他线上配置；部署前校验源文件哈希、别名目标及旧 lane 的 key 限制，保留回滚副本，部署后核对管理 API 实际顺序与链路。
 
-## 2026-09-28 · GPT-6 Sol / Luna 模型接入（docs/04、05、07、10）
-
-- **路由决定**：新增 `gpt-6-sol` / `gpt-6-luna`、日期后缀和 `openai.` 兼容别名；沿用 Codex 订阅优先 → DeepSeek Responses → premium/economy 的链路，保持现有质量档默认模型。付费 `openai/*` 仅供显式指定。
-- **官方依据**：[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol)、[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)、[价格](https://developers.openai.com/api/docs/pricing)，核对日期 2026-09-28。API 上下文 1,050,000、最大输出 128,000；推理 none/low/medium/high/xhigh/max。Chat 工具调用复用现有 `reasoning_effort: none` 适配，输出上限用 `max_completion_tokens`；Responses 保留推理档位。
-- **成本**：每百万 token 的输入/缓存读取/缓存写入/输出为 Sol $2/$0.20/$2.50/$10，Luna $0.10/$0.01/$0.125/$0.50。输入超过 272K 时整单输入及缓存 ×2、输出 ×1.5；Flex ×0.5，priority/fast ×2。订阅遥测沿用 API 等价价格，不表示订阅实际扣款。
-- **订阅边界**：通过现有同步脚本更新至官方 Codex `rust-v0.157.1`，两款模型要求最低客户端 0.155.0；不手写或伪造 bundled metadata。Codex 账号的实时模型列表与上下文限制仍优先于 API 静态能力；新增目录不代表所有账号都已获授权。未执行真实付费调用或生产配置变更。
-
-
 ## 更早历史总览
+
+2026-09-28 的 GPT-6 Sol / Luna 接入与目录兼容记录已归档于 Git 历史。
 
 2026-09-27：原生辅助接口兼容、重放边界和计数路由权限补修；完整记录见 git history。
 

@@ -331,7 +331,7 @@ describe('providers page', () => {
     ).toBeInTheDocument();
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('Anthropic (Claude Pro/Max)')).toBeInTheDocument();
-    expect(within(row).getByText('Claude subscription · OAuth')).toBeInTheDocument();
+    expect(within(row).getByText('Claude · Plan unknown · OAuth')).toBeInTheDocument();
     expect(within(row).queryByText('Claude Max · OAuth')).not.toBeInTheDocument();
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
     expect(within(row).getByText('connected')).toBeInTheDocument();
@@ -347,6 +347,25 @@ describe('providers page', () => {
     // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
     expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+  });
+
+  it('shows each Claude account authoritative plan independently', () => {
+    const base = provider();
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            { ...base.accounts[0], account: 'pro-account', anthropicPlanType: 'pro' },
+            { ...base.accounts[0], account: 'max-account', anthropicPlanType: 'max' },
+            { ...base.accounts[0], account: 'unknown-account', anthropicPlanType: null },
+          ],
+        }),
+      ],
+    });
+    const rows = screen.getAllByTestId('provider-account-row');
+    expect(within(rows[0]).getByText('Claude Pro · OAuth')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('Claude Max · OAuth')).toBeInTheDocument();
+    expect(within(rows[2]).getByText('Claude · Plan unknown · OAuth')).toBeInTheDocument();
   });
 
   it('renders Codex subscription identity details only when present', () => {

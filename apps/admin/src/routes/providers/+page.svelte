@@ -215,8 +215,12 @@
   // A short "platform · auth" pill so the supply-chain shape is legible at a glance
   // (Claude / Codex / Copilot + how it authenticates) without exposing the model
   // market (Principle 6 — provider aliases stay internal).
-  function typeBadge(p: OAuthProviderStatus): string {
-    if (p.id === 'anthropic') return `${$t('Claude subscription')} · OAuth`;
+  function typeBadge(p: OAuthProviderStatus, account: OAuthAccount): string {
+    if (p.id === 'anthropic') {
+      const labels = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
+      const plan = account.anthropicPlanType && labels[account.anthropicPlanType];
+      return plan ? `Claude ${plan} · OAuth` : `Claude · ${$t('Plan unknown')} · OAuth`;
+    }
     if (p.id === 'openai-codex') return `Codex · OAuth`;
     if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
     if (p.id === 'xai') return `Grok · OAuth · ${$t('Experimental')}`;
@@ -1130,7 +1134,12 @@
                   </div>
                 {/if}
                 <div class="mt-1 flex flex-wrap items-center gap-1">
-                  <span class="badge-neutral">{typeBadge(row.provider)}</span>
+                  <span
+                    class="badge-neutral"
+                    title={row.account.anthropicPlanCheckedAt
+                      ? `${$t('Plan checked')}: ${new Date(row.account.anthropicPlanCheckedAt).toLocaleString()}`
+                      : undefined}>{typeBadge(row.provider, row.account)}</span
+                  >
                   <!-- Egress proxy (redacted; "Direct" when none) -->
                   {#if proxyLabel(row.account.proxy)}
                     <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
