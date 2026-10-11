@@ -240,6 +240,24 @@ describe("createOpenAIClient.imageEdit", () => {
 });
 
 describe("createOpenAIClient.videoGeneration", () => {
+  it("preserves pinned endpoints and preset voices on the single upstream write", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ request_id: "frame_voice_1" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    const body = {
+      model: "grok-imagine-video-1.5",
+      image: { url: "https://example.test/start.png" },
+      last_frame: { url: "https://example.test/end.png" },
+      reference_audios: [{ voice_id: "eve" }],
+      duration: 12,
+      resolution: "720p",
+    };
+    await expect(client.videoGeneration?.(body)).resolves.toEqual({ request_id: "frame_voice_1" });
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://upstream.test/v1/videos/generations");
+    expect(JSON.parse(String(init.body))).toEqual(body);
+  });
+
   it.each([503, 529])("POSTs a single paid video write without retrying a %s", async (status) => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ error: { message: "busy" } }, status));
     const client = createOpenAIClient({ config: CONFIG, fetch });

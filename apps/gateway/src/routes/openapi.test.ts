@@ -64,6 +64,7 @@ describe("OpenAPI docs", () => {
     }
     const videoGenerationSchema = JSON.stringify(doc.components.schemas.VideoGenerationRequest);
     for (const officialVideoField of [
+      '"last_frame"',
       '"reference_audios"',
       '"voice_id"',
       '"4:3"',

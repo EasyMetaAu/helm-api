@@ -8,6 +8,33 @@
 > 2026-08-20 官方合同校准：xAI 当前 Videos 文档确认 generation 时长为 `1–15` 秒、默认 8 秒；Helm 在此基础上保留既有 `30` 兼容值。image-to-video 新增可选 `aspect_ratio` 与 1080p；reference-to-video 改为 1–7 张参考图、七种画幅，并支持最多 3 个严格 `{ voice_id }` 预设 `reference_audios`。
 > 同日本机 SuperGrok OAuth 单写 canary 已验证 1 张参考图 + `eve`、16:9/9:16、720p、8 秒和 AAC 音轨；1080p、其他时长与其他画幅未做付费穷举。
 
+
+## 2026-10-12 补充：首尾帧与预置声线组合
+
+本节覆盖下方历史方案中“单图与参考图始终互斥”的旧限制。依据 [xAI 官方首尾帧合同](https://docs.x.ai/developers/model-capabilities/video/reference-to-video#first--last-frame)，稳定版 `grok-imagine-video-1.5`（及 `xai/` 别名）现在增加固定首帧 `image`、固定尾帧 `last_frame` 与 `reference_audios: [{ voice_id }]` 的组合格式。
+
+- 至少提供一个固定端点；可只提供尾帧。`prompt` 可省略或为空。
+- 新组合为 1–15 秒、480p/720p，可选画幅；最多 3 个预置声音、14 张参考图。`reference_images` 和兼容字段 `images` 仍互斥，后者按既有规则转换。
+- `image` 固定首帧；`reference_images` 仅提供形象参考。存在 `image` 时它对应 `<IMAGE_0>`，参考数组从 `<IMAGE_1>` 开始，声音仍对应 `<AUDIO_0>`。
+- 图片沿用 `{ url }`（HTTPS 或 data URI）合同。没有开放自定义音频、Files API 的 `file_id`、中间关键帧或 ZDR `output`；这些能力需要分别核实访问资格与通道边界。本次不是全部官方能力接入。
+- 旧单图、纯文本、参考图、30秒兼容值和 extension 调用保持原合同；新组合不对 preview 模型或 30秒作未验证承诺。
+- 创建只发一次；未知结果不重试；鉴权、支出限额、任务归属、固定账号轮询及图像正文脱敏沿用原实现。
+
+```json
+{
+  "model": "grok-imagine-video-1.5",
+  "prompt": "The person in <IMAGE_0> speaks the supplied Mandarin sentence with <AUDIO_0>.",
+  "image": { "url": "https://example.test/start.png" },
+  "last_frame": { "url": "https://example.test/end.png" },
+  "reference_audios": [{ "voice_id": "eve" }],
+  "duration": 12,
+  "aspect_ratio": "9:16",
+  "resolution": "720p"
+}
+```
+
+验收分层：本地 schema、路由、provider 转发和 OpenAPI 测试能证明请求不被拒绝或丢字段；不能证明上游 OAuth 账号已支持该官方能力，也不能证明视频自然度。部署后还需受控的一次真实生成和视频回读。
+
 ## 实施状态
 
 - [x] 纯文本、单图、参考图与 extension 统一接受 `duration: 1–15 | 30`。

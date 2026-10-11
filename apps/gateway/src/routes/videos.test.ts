@@ -122,6 +122,67 @@ function extend(app: Hono<AppEnv>, body?: Record<string, unknown>) {
 }
 
 describe("registerVideosRoute", () => {
+  it("forwards first/last frames and preset voice together exactly once", async () => {
+    const { app, create, putIfAbsent } = setup();
+    const body = {
+      model: "grok-imagine-video-1.5",
+      image: { url: "data:image/png;base64,AAA=" },
+      last_frame: { url: "https://example.test/end.png" },
+      reference_audios: [{ voice_id: "eve" }],
+      duration: 12,
+      resolution: "720p",
+    };
+    expect((await post(app, body)).status).toBe(200);
+    expect(create).toHaveBeenCalledExactlyOnceWith(
+      body,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(putIfAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "video-create:req_1", keyId: identity.keyId }),
+    );
+    expect(putIfAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "video:vid_1", keyId: identity.keyId }),
+    );
+  });
+
+  it("normalizes images without dropping frame pins or preset voice", async () => {
+    const { app, create } = setup();
+    const body = {
+      model: "grok-imagine-video-1.5",
+      image: { url: "https://example.test/start.png" },
+      last_frame: { url: "https://example.test/end.png" },
+      reference_audios: [{ voice_id: "eve" }],
+      images: [{ url: "https://example.test/person.png" }],
+      duration: 12,
+      resolution: "720p",
+    };
+    expect((await post(app, body)).status).toBe(200);
+    const { images, ...rest } = body;
+    expect(create).toHaveBeenCalledExactlyOnceWith(
+      { ...rest, reference_images: images },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
+  it("rejects unsupported frame options before the provider is called", async () => {
+    const { app, create } = setup();
+    expect(
+      (
+        await post(app, {
+          model: "grok-imagine-video-1.5",
+          image: { url: "x" },
+          last_frame: { url: "y" },
+          reference_audios: [{ url: "https://example.test/voice.wav" }],
+          duration: 12,
+          resolution: "720p",
+        })
+      ).status,
+    ).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["prompt-only", { model: "grok-imagine-video", prompt: "waves", duration: 30 }],
     [
