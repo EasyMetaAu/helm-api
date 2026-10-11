@@ -314,6 +314,7 @@ describe("Anthropic adapter header semantics", () => {
       const headers = new Headers(init?.headers);
       for (const [key, value] of Object.entries(fields)) expect(headers.get(key), key).toBe(value);
       expect(headers.get("x-unrelated-token")).toBeNull();
+      expect(headers.get("x-claude-code-wiggly-dove")).toBeNull();
       expect(headers.get("cookie")).toBeNull();
       expect(headers.get("x-claude-remote-container-id")).toBeNull();
       return response();
@@ -328,6 +329,7 @@ describe("Anthropic adapter header semantics", () => {
       headers: {
         ...fields,
         "x-unrelated-token": "secret",
+        "x-claude-code-wiggly-dove": "opaque-client-value",
         cookie: "secret",
         "x-claude-remote-container-id": "private",
       },

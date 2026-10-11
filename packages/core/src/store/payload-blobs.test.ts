@@ -212,6 +212,24 @@ describe("externalizeImages / rehydrateImages", () => {
     expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
   });
 
+  it("externalizes last_frame bytes and removes signed endpoint URL credentials", () => {
+    const data = bigB64(32);
+    const { json, blobs } = externalizeImages(
+      JSON.stringify({
+        image: { url: "https://example.test/start.png?token=secret#credential" },
+        last_frame: { url: `data:image/png;base64,${data}` },
+      }),
+    );
+    expect(json).not.toContain(data);
+    expect(json).not.toContain("secret");
+    expect(json).not.toContain("credential");
+    expect(blobs).toHaveLength(1);
+    expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual({
+      image: { url: "https://example.test/start.png" },
+      last_frame: { url: `data:image/png;base64,${data}` },
+    });
+  });
+
   it("strips query and fragment secrets from captured media URL fields", () => {
     const original = JSON.stringify({
       output: { upload_url: "https://s3.example/video.mp4?signature=secret#fragment" },

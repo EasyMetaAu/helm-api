@@ -8,6 +8,64 @@ import {
 } from "./videos-schema.js";
 
 describe("VideoGenerationRequestSchema", () => {
+  const pinned = {
+    model: "grok-imagine-video-1.5",
+    image: { url: "data:image/png;base64,AAA=" },
+    last_frame: { url: "https://example.test/end.png" },
+    reference_audios: [{ voice_id: "eve" }],
+    duration: 12,
+    resolution: "720p",
+  };
+
+  it.each([
+    "grok-imagine-video-1.5",
+    "xai/grok-imagine-video-1.5",
+  ])("accepts official pinned endpoints with a voice and optional prompt for %s", (model) => {
+    for (const prompt of [undefined, "", "Speak with <AUDIO_0>"]) {
+      const body = { ...pinned, model, ...(prompt === undefined ? {} : { prompt }) };
+      expect(VideoGenerationRequestSchema.parse(body)).toEqual(body);
+    }
+  });
+
+  it("accepts first-only and last-only pins combined with reference images and voice", () => {
+    for (const pin of ["image", "last_frame"]) {
+      const { image, last_frame, ...base } = pinned;
+      const body = {
+        ...base,
+        [pin]: pin === "image" ? image : last_frame,
+        reference_images: [{ url: "https://example.test/person.png" }],
+      };
+      expect(VideoGenerationRequestSchema.parse(body)).toEqual(body);
+    }
+  });
+
+  it("supports the existing images alias with frame pins without accepting ambiguous aliases", () => {
+    const body = { ...pinned, images: [{ url: "https://example.test/person.png" }] };
+    expect(VideoGenerationRequestSchema.parse(body)).toEqual(body);
+    expect(
+      VideoGenerationRequestSchema.safeParse({ ...body, reference_images: body.images }).success,
+    ).toBe(false);
+  });
+
+  it("rejects invalid new frame combinations before any paid request", () => {
+    const { image, last_frame, ...noPins } = pinned;
+    for (const body of [
+      noPins,
+      { ...pinned, model: "grok-imagine-video" },
+      { ...pinned, model: "grok-imagine-video-1.5-preview" },
+      { ...pinned, last_frame: { url: "" } },
+      { ...pinned, last_frame: { url: "x", unknown: true } },
+      { ...pinned, duration: 30 },
+      { ...pinned, resolution: "1080p" },
+      { ...pinned, reference_audios: [{ url: "https://example.test/private.wav" }] },
+      { ...pinned, reference_audios: [{ voice_id: " " }] },
+      { ...pinned, reference_audios: Array.from({ length: 4 }, () => ({ voice_id: "eve" })) },
+      { ...pinned, reference_images: [] },
+      { ...pinned, output: { upload_url: "https://example.test/upload" } },
+    ])
+      expect(VideoGenerationRequestSchema.safeParse(body).success).toBe(false);
+  });
+
   it.each([1, 8, 15, 30])("accepts duration %s across every generation shape", (duration) => {
     const bodies = [
       { model: "grok-imagine-video", prompt: "waves", duration },

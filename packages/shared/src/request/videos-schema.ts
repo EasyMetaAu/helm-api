@@ -65,10 +65,52 @@ const ReferenceImageVideoRequestSchema = z.union([
   }),
 ]);
 
+// Stable 1.5 supports pinned endpoints together with preset voices and references.
+// Keep this additive: legacy 30s and preview single-image calls retain their existing
+// contract, while these new combinations follow the documented 1–15s / 720p limits.
+// Separate shapes keep the required anchor and mutually exclusive image aliases
+// visible in OpenAPI as well as enforcing them before the single paid POST.
+const PinnedVideoRequestBase = {
+  model: ReferenceImageVideoModelSchema,
+  prompt: z.string().optional(),
+  aspect_ratio: VideoAspectRatioSchema.optional(),
+  duration: z.number().int().min(1).max(15),
+  resolution: VideoResolutionSchema,
+  reference_audios: z.array(PresetVoiceReferenceSchema).min(1).max(3).optional(),
+};
+const PinnedReferenceImagesSchema = z.array(VideoSourceSchema).min(1).max(14);
+const PinnedVideoRequestSchema = z.union([
+  z.strictObject({
+    ...PinnedVideoRequestBase,
+    image: VideoSourceSchema,
+    last_frame: VideoSourceSchema.optional(),
+    reference_images: PinnedReferenceImagesSchema.optional(),
+  }),
+  z.strictObject({
+    ...PinnedVideoRequestBase,
+    image: VideoSourceSchema.optional(),
+    last_frame: VideoSourceSchema,
+    reference_images: PinnedReferenceImagesSchema.optional(),
+  }),
+  z.strictObject({
+    ...PinnedVideoRequestBase,
+    image: VideoSourceSchema,
+    last_frame: VideoSourceSchema.optional(),
+    images: PinnedReferenceImagesSchema,
+  }),
+  z.strictObject({
+    ...PinnedVideoRequestBase,
+    image: VideoSourceSchema.optional(),
+    last_frame: VideoSourceSchema,
+    images: PinnedReferenceImagesSchema,
+  }),
+]);
+
 export const VideoGenerationRequestSchema = z.union([
   PromptOnlyVideoRequestSchema,
   SingleImageVideoRequestSchema,
   ReferenceImageVideoRequestSchema,
+  PinnedVideoRequestSchema,
 ]);
 
 export const VideoExtensionRequestSchema = z.strictObject({

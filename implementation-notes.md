@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-10-12 · Grok 固定首尾帧与声线组合（docs/05、07；视频接口方案）
+
+- **决定**：新增稳定1.5的首帧/尾帧＋参考图/预置声线严格组合；至少一个固定端点，可省略prompt。新组合限1–15秒、480p/720p；不扩大既有30秒与preview语义，不开放自定义音频、file_id、中间关键帧或ZDR。
+- **边界**：只修改shared schema，OpenAPI随之生成；原provider原样转发、单写和归属保护保持不变。首次真实调用之前，离线测试不等于上游账号支持或视频质量通过。
+- **发布前置**（docs/10）：v0.30.41 按要求重新同步官方客户端；Claude 2.1.296 经独立静态协议审核，新增未公开字段继续拦截，不扩大转发白名单。审核与具体兼容性限制见 `docs/claude-protocol-safety.md`。
+
+
 ## 2026-10-10 · Claude 账号真实套餐展示（docs/06、11）
 
 - **官方来源**：读取 `/api/oauth/profile` 的 `organization.organization_type`，仅将 `claude_pro`、`claude_max`、`claude_team`、`claude_enterprise` 映射为对应套餐；额度、邮箱、模型列表均不用于推断。
@@ -64,13 +71,9 @@
 - **配置归一**：Anthropic 采样字段/旧 thinking 模式、OpenAI Chat token 字段/工具 reasoning 规则归入 `capabilities.yaml` 的 `requestCompatibility`，按路由 alias 解析并传至最终序列化。未配置即保留；非法字段 fail-closed。上下文上限复用 `maxContextTokens`，删除重复源码名单。
 - **迁移边界**：自定义 alias 需自行声明经验证的兼容例外；挂载配置的部署需合并字段并重载，单独升级镜像不更新配置。模型目录/别名/价格仍按既有配置与同步流程维护，本次未宣称新增模型无需提供这些业务数据。
 
-## 2026-09-28 · GPT lane 换代与线上配置回收（docs/04、11）
-
-- **配置基线**：先读取用户指定的 Remote 当前配置，再合并默认配置；保留线上 Grok 4.6 及其他未要求修改的通道。GPT 模型 lane 按 Astra → Sol → Luna 排列，质量与任务 lane 沿用线上已切换的 GPT-6 主通道。
-- **兼容决定**：删除 GPT-5.6、Sol/Terra/Luna 与 GPT-5.4/mini 独立 lane；旧客户端名称经别名分别进入 Astra/Sol/Luna，5.4-mini 进入 Luna，5.4 沿现有 gpt-5* 规则进入 premium。GPT-6 Sol 继承 Terra 的 balanced 兜底，避免普通档升级到 premium；历史能力与价格目录保留。
-- **部署边界**：此次仅同步 lanes/model-aliases，保留其他线上配置；部署前校验源文件哈希、别名目标及旧 lane 的 key 限制，保留回滚副本，部署后核对管理 API 实际顺序与链路。
-
 ## 更早历史总览
+
+2026-09-28：GPT lane换代、线上配置保留及别名回收；完整部署边界见git history。
 
 2026-09-28 的 GPT-6 Sol / Luna 接入与目录兼容记录已归档于 Git 历史。
 
