@@ -1132,5 +1132,10 @@
   "Measured only for streamed responses.": "Measured only for streamed responses.",
   "Reset window": "Reset window",
   "Plan unknown": "プラン不明",
-  "Plan checked": "プラン確認日時"
+  "Plan checked": "プラン確認日時",
+  "Allowed clients": "許可するクライアント",
+  "Restrict clients": "クライアントを制限",
+  "Select at least one allowed client.": "許可するクライアントを1つ以上選択してください。",
+  "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "クライアントを1つ以上選択してください。不明なクライアントは拒否されます。ルーティングとフォールバックは変更されません。",
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent ヘッダーは偽装できます。この設定は他のクライアントの誤使用を防ぐもので、アプリの身元を証明するものではありません。"
 }
