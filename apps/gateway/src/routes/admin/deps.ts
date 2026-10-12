@@ -20,6 +20,7 @@ import type {
   AnthropicResetResult,
   AnthropicResetStatus,
   ClassifierConfig,
+  ClientPolicy,
   DecisionRecord,
   InternalRequest,
   OAuthQuotaWindow,
@@ -598,6 +599,7 @@ export interface KeySummary {
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   blocked_models: string[] | null;
+  client_policy?: ClientPolicy | null;
   allow_fast_mode: boolean;
   disabled: boolean;
   // Per-key rate-limit override (docs/06). null = inherit the system default; a

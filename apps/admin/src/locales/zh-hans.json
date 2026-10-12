@@ -1132,5 +1132,10 @@
   "Measured only for streamed responses.": "仅对流式响应进行测量。",
   "Reset window": "重置周期",
   "Plan unknown": "套餐未知",
-  "Plan checked": "套餐核验时间"
+  "Plan checked": "套餐核验时间",
+  "Allowed clients": "允许的客户端",
+  "Restrict clients": "限制客户端",
+  "Select at least one allowed client.": "请至少选择一个允许的客户端。",
+  "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "请至少选择一个客户端。无法识别的客户端将被拒绝；正常放行后，路由和故障回退保持不变。",
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 可以被伪造。此设置用于防止误接其他客户端，不能证明应用的真实身份。"
 }

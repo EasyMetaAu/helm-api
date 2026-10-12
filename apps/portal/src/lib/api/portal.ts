@@ -1,3 +1,4 @@
+import type { ClientPolicy } from "@helm/shared";
 import { apiGet, apiPatch } from "./client";
 
 // Portal API response contracts — mirror the /portal/api/* JSON the gateway emits.
@@ -7,6 +8,7 @@ export interface Me {
   key_prefix: string;
   role: string;
   allowed_lanes: string[] | null;
+  client_policy?: ClientPolicy | null;
   rate_limit: { rpm: number | null; tpm: number | null };
   budget: {
     requests: number | null;

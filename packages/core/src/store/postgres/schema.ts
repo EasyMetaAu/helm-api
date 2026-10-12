@@ -1,3 +1,4 @@
+import type { ClientPolicy } from "@helm/shared";
 import {
   bigint,
   boolean,
@@ -42,6 +43,7 @@ export const apiKeys = pgTable("api_keys", {
   name: text("name"), // human-readable label; NULL = unnamed (cosmetic only)
   allowedLanes: jsonb("allowed_lanes").$type<string[]>(), // native jsonb array
   allowCustomModel: boolean("allow_custom_model").notNull().default(false),
+  clientPolicy: jsonb("client_policy").$type<ClientPolicy>(),
   blockedModels: jsonb("blocked_models").$type<string[]>(), // model blacklist patterns
   allowFastMode: boolean("allow_fast_mode").notNull().default(false),
   disabled: boolean("disabled").notNull().default(false),

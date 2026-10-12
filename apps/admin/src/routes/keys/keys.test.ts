@@ -430,6 +430,7 @@ describe('keys page', () => {
         allowed_lanes: ['economy'],
         allow_custom_model: false,
         blocked_models: ['gpt-4o'],
+        client_policy: null,
         allow_fast_mode: false,
         rate_limit_rpm: 120,
         rate_limit_tpm: null, // untouched → still inherit (null), not undefined

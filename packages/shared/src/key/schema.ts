@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ReasoningEffortSchema } from "../config/lanes-schema.js";
 import { MemoryModeSchema } from "../request/schema.js";
+import { ClientPolicySchema } from "./client-policy.js";
 
 // API key record (storage layer shape) per docs/06. Per CLAUDE.md principle 7,
 // keys are stored as sha256 hash + display prefix ONLY — there is no plaintext
@@ -55,6 +56,7 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key model blacklist. It removes case-insensitive exact/glob model
   // patterns from every route this key can take; legacy rows default to null.
   blocked_models: BlockedModelsSchema.default(null),
+  client_policy: ClientPolicySchema.nullable().optional(),
   // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
   // unless the serving subscription account itself has Fast mode forced on.
   allow_fast_mode: z.boolean().default(false),
@@ -141,6 +143,7 @@ export const CreateKeyRequestSchema = z
     allowed_lanes: z.array(z.string().min(1)).min(1).optional(),
     allow_custom_model: z.boolean().optional(),
     blocked_models: z.array(z.string().trim().min(1)).optional(),
+    client_policy: ClientPolicySchema.nullable().optional(),
     allow_fast_mode: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
     // default. 0 => explicitly unlimited for that dimension (Principle 2 fail-closed on
@@ -191,6 +194,7 @@ export const UpdateKeyRequestSchema = z
     allowed_lanes: z.array(z.string().min(1)).min(1).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
     blocked_models: BlockedModelsSchema.optional(),
+    client_policy: ClientPolicySchema.nullable().optional(),
     allow_fast_mode: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
     rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),

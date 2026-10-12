@@ -9,6 +9,7 @@ import { z } from "zod";
 // The error classes from docs/07, in document order.
 export const ErrorClassSchema = z.enum([
   "auth_error",
+  "client_not_allowed",
   "invalid_request",
   "lane_unavailable",
   "all_providers_failed",
@@ -39,6 +40,7 @@ export type HelmError = z.infer<typeof HelmErrorSchema>;
 // updating the map is a compile error (exhaustiveness guard).
 export const ERROR_CLASS_HTTP_STATUS: Record<ErrorClass, number> = {
   auth_error: 401,
+  client_not_allowed: 403,
   invalid_request: 400,
   lane_unavailable: 503,
   all_providers_failed: 502,

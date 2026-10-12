@@ -62,6 +62,7 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
       key_prefix: identity.keyPrefix,
       role: identity.role,
       allowed_lanes: identity.caps.allowedLanes,
+      client_policy: identity.caps.clientPolicy ?? null,
       rate_limit: { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm },
       budget: {
         requests: b.requests,

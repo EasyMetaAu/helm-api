@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CLIENT_LABELS } from "@helm/shared";
   import { t } from "$lib/i18n";
   import { formatUsd, formatTokens } from "$lib/format";
   import { getMe, getUsage, type Me } from "$lib/api/portal";
@@ -69,6 +70,8 @@
           <dd class="text-right font-mono">{me.key_prefix}…</dd>
           <dt class="text-ink-muted">{$t("Role")}</dt>
           <dd class="text-right">{me.role}</dd>
+          <dt class="text-ink-muted">{$t("Allowed clients")}</dt>
+          <dd class="text-right">{me.client_policy?.allowed_clients.map((id) => CLIENT_LABELS[id]).join(", ") ?? $t("all")}</dd>
           <dt class="text-ink-muted">{$t("Available lanes")}</dt>
           <dd class="text-right">
             {me.allowed_lanes?.join(", ") ?? $t("all")}

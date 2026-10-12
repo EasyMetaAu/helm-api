@@ -1,4 +1,4 @@
-import { type ApiKeyRecord, ReasoningEffortSchema } from "@helm/shared";
+import { type ApiKeyRecord, ClientPolicySchema, ReasoningEffortSchema } from "@helm/shared";
 import { asc, eq } from "drizzle-orm";
 import type { CreateKeyInput, KeyPatch, KeyStore, RotateKeyInput } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
@@ -23,6 +23,10 @@ export class SqliteKeyStore implements KeyStore {
       hash: input.hash,
       prefix: input.prefix,
       secretEnc: input.secretEnc ?? null,
+      clientPolicy:
+        input.clientPolicy == null
+          ? null
+          : JSON.stringify(ClientPolicySchema.parse(input.clientPolicy)),
       accountId: input.accountId,
       role: input.role,
       // Human-readable label: undefined input => NULL => unnamed.
@@ -112,6 +116,7 @@ export class SqliteKeyStore implements KeyStore {
         | "name"
         | "allowedLanes"
         | "allowCustomModel"
+        | "clientPolicy"
         | "blockedModels"
         | "allowFastMode"
         | "rateLimitRpm"
@@ -137,6 +142,11 @@ export class SqliteKeyStore implements KeyStore {
       set.allowedLanes = patch.allowedLanes === null ? null : JSON.stringify(patch.allowedLanes);
     }
     if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
+    if (patch.clientPolicy !== undefined)
+      set.clientPolicy =
+        patch.clientPolicy === null
+          ? null
+          : JSON.stringify(ClientPolicySchema.parse(patch.clientPolicy));
     if (patch.blockedModels !== undefined) {
       set.blockedModels = patch.blockedModels === null ? null : JSON.stringify(patch.blockedModels);
     }
@@ -206,6 +216,8 @@ export class SqliteKeyStore implements KeyStore {
       name: row.name ?? null,
       allowed_lanes: row.allowedLanes ? (JSON.parse(row.allowedLanes) as string[]) : null,
       allow_custom_model: row.allowCustomModel,
+      client_policy:
+        row.clientPolicy === null ? null : ClientPolicySchema.parse(JSON.parse(row.clientPolicy)),
       blocked_models: row.blockedModels ? (JSON.parse(row.blockedModels) as string[]) : null,
       allow_fast_mode: row.allowFastMode,
       disabled: row.disabled,

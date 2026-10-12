@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import { type RealtimeSidebandTarget, runtimeMemoryBudget } from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { codexWebSocketAgent } from "./codex-responses-websocket.js";
+import { HelmHttpError } from "./middleware/error-handler.js";
 import type { RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
@@ -23,7 +24,7 @@ type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) 
 export interface RealtimeWebSocketBridgeOptions {
   server: RealtimeWebSocketUpgradeServer;
   registry: RealtimeCallRegistry;
-  resolveKey(credential: string | null): Promise<string | null>;
+  resolveKey(credential: string | null, userAgent?: string): Promise<string | null>;
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
   maxPayloadBytes?: number;
@@ -270,7 +271,7 @@ export function installRealtimeWebSocketBridge(
     socket.on("error", onSocketError);
     socket.on("close", onSocketClose);
     void (async () => {
-      const keyId = await options.resolveKey(bearer(request));
+      const keyId = await options.resolveKey(bearer(request), request.headers["user-agent"]);
       if (!keyId) {
         await rejectUpgrade(socket, 401, "missing or invalid API key");
         return;
@@ -300,7 +301,11 @@ export function installRealtimeWebSocketBridge(
       .catch(async (cause: unknown) => {
         if (socket.destroyed) return;
         const message = cause instanceof Error ? cause.message : "realtime websocket failed";
-        await rejectUpgrade(socket, 502, message).catch(() => socket.destroy());
+        await rejectUpgrade(
+          socket,
+          cause instanceof HelmHttpError ? cause.helm.http_status : 502,
+          message,
+        ).catch(() => socket.destroy());
       })
       .finally(() => {
         preflightControllers.delete(preflightController);

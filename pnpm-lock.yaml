@@ -159,6 +159,10 @@ importers:
         version: 4.22.3
 
   apps/portal:
+    dependencies:
+      '@helm/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
     devDependencies:
       '@mylukin/easy-i18n-js':
         specifier: ^0.1.2

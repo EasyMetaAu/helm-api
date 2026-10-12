@@ -9,6 +9,7 @@ import { type ProviderAttempt, TtsSpeechRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -136,6 +137,8 @@ export function registerTtsRoute(app: Hono<AppEnv>, deps: TtsRouteDeps): void {
     const identity = await deps.auth.resolve(bearer(c.req.header("Authorization")));
     if (identity === null)
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
+    const denied = clientPolicyRejection(c, identity);
+    if (denied) return denied;
     if (deps.rateLimiter) {
       const rl = await deps.rateLimiter.check({
         keyId: identity.keyId,

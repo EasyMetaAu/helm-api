@@ -1,7 +1,9 @@
 import { createBlockedModelMatcher, type ProviderClient, UpstreamError } from "@helm/core";
+import type { ClientPolicy } from "@helm/shared";
 import { RealtimeSessionSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal } from "../middleware/limits.js";
@@ -31,6 +33,7 @@ export interface RealtimeRouteDeps {
     resolve(credential: string | null): Promise<{
       keyId: string;
       blockedModels?: string[] | null;
+      clientPolicy?: ClientPolicy | null;
       concurrencyLimit?: number | null;
       rateLimit?: { rpm: number | null; tpm: number | null };
     } | null>;
@@ -70,6 +73,11 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
   const handle = async (c: Context<AppEnv>): Promise<Response> => {
     const identity = await deps.auth.resolve(bearer(c.req.header("Authorization")));
     if (!identity) return error(c, 401, "missing or invalid API key", "invalid_api_key");
+    const denied = clientPolicyRejection(c, {
+      keyId: identity.keyId,
+      caps: { clientPolicy: identity.clientPolicy },
+    });
+    if (denied) return denied;
 
     if (deps.rateLimiter) {
       const result = await deps.rateLimiter.check({

@@ -14,6 +14,7 @@ import {
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -166,6 +167,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         "invalid_api_key",
       );
     }
+    const denied = clientPolicyRejection(c, identity, "openai");
+    if (denied) return denied;
     const captureRecord =
       deps.record === undefined
         ? undefined

@@ -60,7 +60,10 @@ export function registerDecisionsRoute(app: Hono<AppEnv>, deps: DecisionsRouteDe
     c.header("cache-control", "no-store");
     await next();
   });
-  app.use(path, authMiddleware({ keyStore: deps.keyStore, log: () => {} }));
+  app.use(
+    path,
+    authMiddleware({ keyStore: deps.keyStore, enforceClientPolicy: true, log: () => {} }),
+  );
   app.use(path, async (c, next) => {
     c.set("decisions", { bytes: 0 });
     try {

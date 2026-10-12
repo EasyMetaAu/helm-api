@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { CLIENT_LABELS, ClientIdSchema, type ClientId } from '@helm/shared';
   import type { ApiKeyView } from '$lib/api/keys.js';
 
   // Shared editing buffer for every per-key cap. Both key dialogs (create + edit)
@@ -12,12 +13,22 @@
     allowedLanesTouched: boolean;
     allowCustomModel: boolean;
     blockedModels: string[];
+    restrictClients: boolean;
+    allowedClients: ClientId[];
     allowFastMode: boolean;
     rpm: number | null;
     tpm: number | null;
     concurrencyLimit: number | null;
     // 'inherit' = no cap; a tier caps client-requested reasoning effort down to it.
-    maxReasoningEffort: 'inherit' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    maxReasoningEffort:
+      | 'inherit'
+      | 'none'
+      | 'minimal'
+      | 'low'
+      | 'medium'
+      | 'high'
+      | 'xhigh'
+      | 'max';
     budgetRequests: number | null;
     budgetTokens: number | null;
     budgetSpend: number | null;
@@ -37,6 +48,8 @@
       allowedLanesTouched: false,
       allowCustomModel: false,
       blockedModels: [],
+      restrictClients: false,
+      allowedClients: [],
       allowFastMode: false,
       rpm: null,
       tpm: null,
@@ -64,6 +77,8 @@
       allowedLanesTouched: false,
       allowCustomModel: key.allow_custom_model,
       blockedModels: [...(key.blocked_models ?? [])],
+      restrictClients: key.client_policy != null,
+      allowedClients: [...(key.client_policy?.allowed_clients ?? [])],
       allowFastMode: key.allow_fast_mode,
       rpm: key.rate_limit_rpm,
       tpm: key.rate_limit_tpm,
@@ -213,6 +228,34 @@
 {/snippet}
 
 <!-- Basics: what the key can reach, and what it must never reach. Always visible. -->
+<fieldset class="flex flex-col gap-2 text-sm">
+  <legend class="field-label">{$t('Allowed clients')}</legend>
+  <label class="flex items-center gap-1.5">
+    <input type="checkbox" class="checkbox" bind:checked={form.restrictClients} />
+    <span>{$t('Restrict clients')}</span>
+  </label>
+  {#if form.restrictClients}
+    <div class="flex flex-wrap gap-3">
+      {#each ClientIdSchema.options as client (client)}
+        <label class="flex items-center gap-1.5">
+          <input type="checkbox" class="checkbox" value={client} bind:group={form.allowedClients} />
+          <span>{CLIENT_LABELS[client]}</span>
+        </label>
+      {/each}
+    </div>
+    <span class="field-help"
+      >{$t(
+        'Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.',
+      )}</span
+    >
+  {/if}
+  <span class="field-help"
+    >{$t(
+      'User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.',
+    )}</span
+  >
+</fieldset>
+
 <fieldset class="flex flex-col gap-1 text-sm">
   <legend class="field-label">{$t('Allowed lanes')}</legend>
   <div class="flex flex-wrap gap-3">
@@ -452,11 +495,7 @@
 
 <details class="form-section" bind:open={openRequestContent}>
   <summary class="form-section-summary">
-    {@render sectionHead(
-      $t('Request content storage'),
-      openRequestContent,
-      requestContentSummary,
-    )}
+    {@render sectionHead($t('Request content storage'), openRequestContent, requestContentSummary)}
   </summary>
   <div class="form-section-body">
     <label class="flex flex-col gap-1 text-sm">

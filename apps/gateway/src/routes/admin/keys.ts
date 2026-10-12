@@ -1,3 +1,4 @@
+import type { ClientPolicy } from "@helm/shared";
 import { CreateKeyRequestSchema, StatsQuerySchema, UpdateKeyRequestSchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -34,6 +35,7 @@ function toSummary(rec: {
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   blocked_models: string[] | null;
+  client_policy?: ClientPolicy | null;
   allow_fast_mode: boolean;
   disabled: boolean;
   rate_limit_rpm: number | null;
@@ -59,6 +61,7 @@ function toSummary(rec: {
     allowed_lanes: rec.allowed_lanes,
     allow_custom_model: rec.allow_custom_model,
     blocked_models: rec.blocked_models,
+    client_policy: rec.client_policy ?? null,
     allow_fast_mode: rec.allow_fast_mode,
     disabled: rec.disabled,
     rate_limit_rpm: rec.rate_limit_rpm,
@@ -217,6 +220,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       allowedLanes: parsed.data.allowed_lanes,
       allowCustomModel: parsed.data.allow_custom_model ?? false,
       blockedModels: parsed.data.blocked_models,
+      clientPolicy: parsed.data.client_policy,
       allowFastMode: parsed.data.allow_fast_mode ?? false,
       rateLimitRpm: parsed.data.rate_limit_rpm,
       rateLimitTpm: parsed.data.rate_limit_tpm,
@@ -271,6 +275,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       allowedLanes?: string[] | null;
       allowCustomModel?: boolean;
       blockedModels?: string[] | null;
+      clientPolicy?: ClientPolicy | null;
       allowFastMode?: boolean;
       rateLimitRpm?: number | null;
       rateLimitTpm?: number | null;
@@ -291,6 +296,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
     if (d.blocked_models !== undefined) patch.blockedModels = d.blocked_models;
+    if (d.client_policy !== undefined) patch.clientPolicy = d.client_policy;
     if (d.allow_fast_mode !== undefined) patch.allowFastMode = d.allow_fast_mode;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;
     if (d.rate_limit_tpm !== undefined) patch.rateLimitTpm = d.rate_limit_tpm;

@@ -1132,5 +1132,10 @@
   "Measured only for streamed responses.": "Measured only for streamed responses.",
   "Reset window": "Reset window",
   "Plan unknown": "Plan unknown",
-  "Plan checked": "Plan checked"
+  "Plan checked": "Plan checked",
+  "Allowed clients": "Allowed clients",
+  "Restrict clients": "Restrict clients",
+  "Select at least one allowed client.": "Select at least one allowed client.",
+  "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.",
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity."
 }

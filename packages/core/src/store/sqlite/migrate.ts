@@ -1430,6 +1430,17 @@ CREATE TABLE request_payload_response_chunks (
 );`);
     },
   },
+  {
+    version: 54,
+    run(db) {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["client_policy"])
+      ) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN client_policy TEXT;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

@@ -196,6 +196,7 @@ export {
   HelmErrorSchema,
   makeHelmError,
 } from "./error/schema.js";
+export * from "./key/client-policy.js";
 // API key record (docs/06) — hash + prefix only, never plaintext.
 export {
   type ApiKeyRecord,

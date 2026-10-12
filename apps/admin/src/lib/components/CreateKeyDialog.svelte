@@ -50,9 +50,14 @@
 
   async function handleCreate(): Promise<void> {
     error = null;
+    if (form.restrictClients && form.allowedClients.length === 0) {
+      error = $t('Select at least one allowed client.');
+      return;
+    }
     creating = true;
     const input: CreateKeyInput = {
       role,
+      client_policy: form.restrictClients ? { allowed_clients: [...form.allowedClients] } : null,
       allow_custom_model: form.allowCustomModel,
       allow_fast_mode: form.allowFastMode,
     };
@@ -118,6 +123,7 @@
         // response. NEVER a slice of the plaintext.
         prefix: revealed.prefix,
         role,
+        client_policy: form.restrictClients ? { allowed_clients: [...form.allowedClients] } : null,
         name: name.trim().length > 0 ? name.trim() : null,
         allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
         allow_custom_model: form.allowCustomModel,
