@@ -1,8 +1,10 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
+import { makeHelmError } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
+import { HelmHttpError } from "./middleware/error-handler.js";
 import { createRealtimeCallRegistry } from "./realtime-call-registry.js";
 import {
   installRealtimeWebSocketBridge,
@@ -407,4 +409,28 @@ describe("Realtime websocket bridge", () => {
     expect(upgrades).toBe(2);
     expect(failures).toEqual([401]);
   });
+});
+
+it("passes the original User-Agent to admission and rejects policy violations before taking a call", async () => {
+  const gateway = await listeningServer();
+  const registry = createRealtimeCallRegistry();
+  registry.put("restricted", "key-1", { url: "ws://127.0.0.1:1", headers: async () => ({}) });
+  const resolveKey = vi.fn(async () => {
+    throw new HelmHttpError(
+      makeHelmError({
+        error_class: "client_not_allowed",
+        message: "Client denied",
+        trace_id: "test",
+      }),
+    );
+  });
+  const bridge = installRealtimeWebSocketBridge({ server: gateway.server, registry, resolveKey });
+  closers.push(() => bridge.close());
+  const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=restricted`, {
+    headers: { Authorization: "Bearer helm-key", "User-Agent": "curl/8" },
+  });
+  const [, response] = await once(client, "unexpected-response");
+  expect(response.statusCode).toBe(403);
+  expect(resolveKey).toHaveBeenCalledWith("helm-key", "curl/8");
+  expect(registry.take("restricted", "key-1").ok).toBe(true);
 });

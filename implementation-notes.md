@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-13 · API key 客户端入口限制（docs/06、07、11）
+
+- **独立策略**：`client_policy` 默认为 null；开启须选择非空客户端集合。仅在鉴权后校验入口 User-Agent，不绑定模型、provider 或账号，不改分类与执行 fallback。策略严格校验，损坏存储不自动降级为不限。
+- **生效范围**：模型发现、所有已实现推理/计数/生命周期接口及 WebSocket 握手；Responses 每轮重查。已接纳流与 Realtime session 不强制中断；跨进程更新受鉴权缓存 TTL（默认 30 秒）约束。
+- **证据边界**：UA 可伪造，不承诺防封号。Claude Desktop 仅连接测试取样，Code/Cowork 未完整验证；Grok 标记仅覆盖 CLI。部署不替既有 key 开启。详见 `docs/api-key-client-policy.md`。
+
 ## 2026-10-12 · Grok 官方价格与媒体计费单位（docs/07、10）
 
 - **官方依据**：xAI 模型卡与 pricing 页面；Grok 4.5 缓存输入改为 $0.30/M，4.5/4.7 从 200K prompt tokens 起使用整单高档，Build Fast 仍在超过 200K 时切档。priority 按官方 2 倍计价。
@@ -64,14 +70,9 @@
 - **订阅目录**：使用官方同步脚本更新至 Codex `rust-v0.159.2`，bundle SHA256 `e0c1feb6be3e5d7f079b594a64255f4e8e6a97fba8cc5970e9b82abecf7d4b3c`。6.1 bundled 默认上下文 272K、最大 872K、默认推理 low、最低客户端 0.153.0；静态 Codex 能力采用默认 272K，实时账号目录优先。bundle 中的 ultra 属于编排，不作为 API effort；目录不代表账号授权。
 - **迁移边界**：挂载部署需同步 lanes/model-aliases/providers/capabilities/pricing 五个 YAML；`allowed_lanes` 中显式列出旧 `gpt-6-sol` 的 key 需迁移到新 lane，别名不会绕过权限限制。Relay 的模型/lane 引用也须同步。此次仅修改仓库并以 mock 验证，未执行真实付费推理或生产变更。
 
-## 2026-09-29 · Claude Sonnet 5.5 模型接入（docs/04、05、07、10）
-
-- **官方依据**：[模型](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)、[迁移](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)、[推理档位](https://platform.claude.com/docs/en/build-with-claude/effort)。1M 上下文、128K 输出，支持 low/medium/high/xhigh/max，默认 high；输入/输出每百万 token $2/$10，缓存读取/5 分钟写入/1 小时写入 $0.20/$2.50/$4，美国区域 ×1.1。不添加未公布的 Fast 价格。
-- **配置与路由**：补齐能力、价格、OAuth 发现失败时的候选及转换路径模型提示；`claude-sonnet` 首选 5.5 并回退到 `balanced`；旧 Sonnet 5 请求随通配别名进入 5.5；活动 YAML 删除旧能力和价格键，保留数据库历史记录和独立历史计费测试。复用现有通配别名，不增加重复 provider。账号实时发现优先，静态目录不代表订阅授权。
-- **兼容边界**：复用已配置的采样字段和旧 thinking 模式移除策略，enabled/disabled 被移除后采用上游默认 adaptive；不将 disabled 擅自改写为 between_tools。原生 between_tools、adaptive/display、签名历史和逐消息 effort 保留；between_tools 仅支持 low/medium/high，不能携带其他 thinking 字段或在会话中改变 effort。强制工具调用、旧 computer 工具及不支持的 advisor 组合交给上游拒绝，不静默降级工具语义；无新协议分支。
-- **运维限制**：挂载配置须同步能力、价格及 lane，单独更新镜像不足以启用完整配置。自动化验收使用合成请求，不执行真实付费推理；发布后须核对运行时版本、目录和路由。
-
 ## 更早历史总览
+
+2026-09-29：Claude Sonnet 5.5 接入；完整变更与验证见 Git 历史。
 
 2026-09-28：原生透传取消模型准入名单，兼容规则归入 capabilities 配置，保留边界校验；完整记录见 git history。
 

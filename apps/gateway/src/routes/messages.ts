@@ -12,6 +12,7 @@ import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -77,6 +78,7 @@ export interface MessagesIdentity {
     concurrencyLimit?: number | null;
     /** Case-insensitive exact/glob model ids denied across direct requests and lane/fallback routes. */
     blockedModels?: string[] | null;
+    clientPolicy?: ApiKeyRecord["client_policy"];
     /** Enables explicit model/lane selection instead of the default lane abstraction. */
     allowCustomModel?: boolean;
     /** Optional whitelist for explicitly selected lanes. */
@@ -109,6 +111,7 @@ export function capsFromRecord(record: ApiKeyRecord): NonNullable<MessagesIdenti
     allowedLanes: record.allowed_lanes,
     allowCustomModel: record.allow_custom_model,
     blockedModels: record.blocked_models,
+    clientPolicy: record.client_policy,
     allowFastMode: record.allow_fast_mode,
     rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
     concurrencyLimit: record.concurrency_limit,
@@ -343,6 +346,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
+    const denied = clientPolicyRejection(c, identity, "anthropic");
+    if (denied) return denied;
+
     return c.json({ status: "ok" });
   });
 
@@ -356,6 +362,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
+    const denied = clientPolicyRejection(c, identity, "anthropic");
+    if (denied) return denied;
+
     let native: unknown;
     let requestBodyMaterialized: (() => void) | undefined;
     try {
@@ -438,6 +447,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
+    const denied = clientPolicyRejection(c, identity, "anthropic");
+    if (denied) return denied;
+
     const captureRecord =
       deps.record === undefined
         ? undefined

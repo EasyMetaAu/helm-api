@@ -39,6 +39,10 @@
 
   async function handleSave(): Promise<void> {
     error = null;
+    if (form.restrictClients && form.allowedClients.length === 0) {
+      error = $t('Select at least one allowed client.');
+      return;
+    }
     saving = true;
     // Send the editable set (explicit null clears a cap). allowed_lanes is the one
     // tri-state exception: omit it when untouched so a legacy deny-all [] is not
@@ -46,6 +50,7 @@
     // `?? null` also catches the `undefined` Svelte 5 gives an emptied number input.
     const patch: UpdateKeyInput = {
       name: name.trim().length > 0 ? name.trim() : null,
+      client_policy: form.restrictClients ? { allowed_clients: [...form.allowedClients] } : null,
       allow_custom_model: form.allowCustomModel,
       blocked_models: form.blockedModels.length > 0 ? [...form.blockedModels] : null,
       allow_fast_mode: form.allowFastMode,
@@ -57,10 +62,8 @@
       budget_window_seconds: form.budgetWindow ?? null,
       over_budget_behavior: form.overBudgetBehavior,
       degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
-      request_content_mode:
-        form.requestContentMode === 'inherit' ? null : form.requestContentMode,
-      max_reasoning_effort:
-        form.maxReasoningEffort === 'inherit' ? null : form.maxReasoningEffort,
+      request_content_mode: form.requestContentMode === 'inherit' ? null : form.requestContentMode,
+      max_reasoning_effort: form.maxReasoningEffort === 'inherit' ? null : form.maxReasoningEffort,
       concurrency_limit: form.concurrencyLimit ?? null,
       memory_mode: form.memoryMode,
       memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,
@@ -76,6 +79,7 @@
         ...key,
         name: patch.name ?? null,
         allowed_lanes: form.allowedLanesTouched ? (patch.allowed_lanes ?? null) : key.allowed_lanes,
+        client_policy: form.restrictClients ? { allowed_clients: [...form.allowedClients] } : null,
         allow_custom_model: form.allowCustomModel,
         blocked_models: patch.blocked_models ?? null,
         allow_fast_mode: form.allowFastMode,

@@ -3,6 +3,7 @@ import { type ApiKeyRecord, type BudgetCaps, hashKey, type KeyStore } from "@hel
 import { effectiveMemoryProjectId, makeHelmError } from "@helm/shared";
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "./client-policy.js";
 
 // Resolved request identity, attached to the Hono context for downstream
 // (rate limit / classify / route) consumers.
@@ -19,6 +20,7 @@ export interface AuthIdentity {
     allowedLanes: string[] | null;
     allowCustomModel: boolean;
     blockedModels: string[] | null;
+    clientPolicy?: ApiKeyRecord["client_policy"];
     /** Per-key cap for client-requested Fast mode passthrough. Account-level Fast
      *  mode can still be forced by subscription account settings. */
     allowFastMode: boolean;
@@ -54,6 +56,7 @@ export interface AuthIdentity {
 export interface AuthDeps {
   keyStore: Pick<KeyStore, "getByHash">;
   log: (line: string) => void;
+  enforceClientPolicy?: boolean;
 }
 
 declare module "hono" {
@@ -124,6 +127,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
         blockedModels: record.blocked_models,
+        clientPolicy: record.client_policy,
         allowFastMode: record.allow_fast_mode,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
         concurrencyLimit: record.concurrency_limit,
@@ -148,6 +152,10 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
         maxReasoningEffort: record.max_reasoning_effort,
       },
     };
+    if (deps.enforceClientPolicy) {
+      const denied = clientPolicyRejection(c, identity);
+      if (denied) return denied;
+    }
     c.set("identity", identity);
     await next();
   };

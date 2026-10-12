@@ -16,6 +16,7 @@ import { type ErrorClass, type HelmError, makeHelmError } from "@helm/shared";
 // native type while the precise Helm class survives in the response trace_id /
 // telemetry. Exhaustive over ErrorClass (compile error if a class is added).
 const ANTHROPIC_ERROR_TYPE: Record<ErrorClass, string> = {
+  client_not_allowed: "permission_error",
   auth_error: "authentication_error",
   invalid_request: "invalid_request_error",
   lane_unavailable: "overloaded_error",

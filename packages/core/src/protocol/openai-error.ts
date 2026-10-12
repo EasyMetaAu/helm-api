@@ -25,6 +25,7 @@ import { type ErrorClass, type HelmError, makeHelmError } from "@helm/shared";
 // (invalid_request_error / api_error / rate_limit_error) while the precise Helm
 // class is preserved verbatim in `code` for debuggability. ————————————————————————
 export const OPENAI_ERROR_SHAPE: Record<ErrorClass, { type: string; code: string }> = {
+  client_not_allowed: { type: "invalid_request_error", code: "client_not_allowed" },
   auth_error: { type: "invalid_request_error", code: "invalid_api_key" },
   invalid_request: { type: "invalid_request_error", code: "invalid_request" },
   lane_unavailable: { type: "api_error", code: "lane_unavailable" },

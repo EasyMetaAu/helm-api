@@ -152,6 +152,7 @@ import {
   appendMutationList,
   cloneCarrierWithBody,
   ErrorClassSchema,
+  evaluateClientPolicy,
   isNativePassthroughCarrier,
   isOAuthPreset,
   makeHelmError,
@@ -281,7 +282,7 @@ export interface ServerHandle {
   responsesMemoryAdmission?: BodyMemoryAdmission;
   websocketIngressAdmission?: BodyMemoryAdmission;
   realtimeCallRegistry?: RealtimeCallRegistry;
-  resolveRealtimeKey?: (credential: string | null) => Promise<string | null>;
+  resolveRealtimeKey?: (credential: string | null, userAgent?: string) => Promise<string | null>;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void | Promise<void>;
@@ -3555,7 +3556,11 @@ export async function buildServer(
   for (const pattern of chatRoutePatterns) {
     app.use(
       pattern,
-      authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+      authMiddleware({
+        keyStore,
+        enforceClientPolicy: true,
+        log: (l) => logger.log("warn", "auth", { line: l }),
+      }),
     );
   }
   // Rate limit AFTER auth (needs the resolved key_id) and BEFORE classify/route
@@ -3626,11 +3631,19 @@ export async function buildServer(
   // caps (allow_custom_model / allowed_lanes). Read-only, so no rate-limit gate.
   app.use(
     "/v1/models",
-    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+    authMiddleware({
+      keyStore,
+      enforceClientPolicy: true,
+      log: (l) => logger.log("warn", "auth", { line: l }),
+    }),
   );
   app.use(
     "/v1/models/*",
-    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+    authMiddleware({
+      keyStore,
+      enforceClientPolicy: true,
+      log: (l) => logger.log("warn", "auth", { line: l }),
+    }),
   );
   registerModelsRoute(app, {
     lanes: () => lanes,
@@ -4574,6 +4587,7 @@ export async function buildServer(
           ? {
               keyId: identity.keyId,
               blockedModels: identity.caps?.blockedModels,
+              clientPolicy: identity.caps?.clientPolicy,
               concurrencyLimit: identity.caps?.concurrencyLimit,
               rateLimit: identity.caps?.rateLimit,
             }
@@ -5069,7 +5083,26 @@ export async function buildServer(
     responsesMemoryAdmission: requestBodyMemoryAdmission,
     websocketIngressAdmission,
     realtimeCallRegistry,
-    resolveRealtimeKey: async (credential) => (await resolveIdentity(credential))?.keyId ?? null,
+    resolveRealtimeKey: async (credential, userAgent) => {
+      const identity = await resolveIdentity(credential);
+      if (!identity) return null;
+      const result = evaluateClientPolicy(identity.caps?.clientPolicy, userAgent);
+      if (!result.allowed) {
+        logger.log("warn", "client_policy_denied", {
+          key_id: identity.keyId,
+          client: result.client,
+          reason: result.reason,
+        });
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "client_not_allowed",
+            message: "This API key does not allow this client.",
+            trace_id: randomUUID(),
+          }),
+        );
+      }
+      return identity.keyId;
+    },
     closeResponsesWebSocketSession: async (sessionId) => {
       await Promise.all(
         [...providerClients.values()].map(

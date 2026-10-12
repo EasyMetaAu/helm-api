@@ -15,6 +15,10 @@ OAuth token. The landing page, health/version probes, and headline OpenAPI/Swagg
 documents are public. The admin UI is a separate surface with its own HTTP Basic
 credentials (see [11 · Admin UI](11-admin-ui.md)).
 
+## Per-key client restrictions
+
+`client_policy: { allowed_clients: ["codex_app"] }` restricts inference ingress to selected User-Agent profiles. `null` disables it; omitted PATCH preserves the current policy. Existing keys remain unrestricted. Admission does not change routing or fallback. See the [design, supported profiles, session semantics, and validation plan](api-key-client-policy.md). User-Agent matching prevents accidental client misuse; it is not application authentication.
+
 ## Authentication
 
 Auth is enforced by a Hono middleware (`apps/gateway/src/middleware/auth.ts`)

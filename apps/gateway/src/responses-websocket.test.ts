@@ -1869,3 +1869,41 @@ describe("Responses websocket bridge", () => {
     ]);
   });
 });
+
+it("preserves User-Agent at handshake and every turn, including policy tightening", async () => {
+  let admitted = true;
+  const requests: Request[] = [];
+  const baseUrl = await startBridge(
+    (request) => {
+      requests.push(request);
+      if (!admitted)
+        return Response.json(
+          { error: { code: "client_not_allowed", message: "Client denied" } },
+          { status: 403 },
+        );
+      return new Response(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+    (request) => {
+      requests.push(request);
+      return Response.json({ data: [] });
+    },
+  );
+  const socket = await connect(`${baseUrl}/v1/responses`, {
+    "user-agent": "Codex Desktop/0.162.0",
+  });
+  await collectTurn(socket, { type: "response.create", model: "balanced", input: "hello" });
+  admitted = false;
+  const rejected = await collectTurn(socket, {
+    type: "response.create",
+    model: "balanced",
+    input: "again",
+  });
+  expect(rejected).toEqual(
+    expect.arrayContaining([expect.objectContaining({ type: "error", status: 403 })]),
+  );
+  expect(requests).toHaveLength(3);
+  expect(requests.every((r) => r.headers.get("user-agent") === "Codex Desktop/0.162.0")).toBe(true);
+});

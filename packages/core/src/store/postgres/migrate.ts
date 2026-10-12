@@ -1389,6 +1389,16 @@ CREATE TABLE request_payload_response_chunks (
         await db.execute(sql.raw(statement));
     },
   },
+  {
+    version: 53,
+    async run(db) {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS client_policy JSONB;"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

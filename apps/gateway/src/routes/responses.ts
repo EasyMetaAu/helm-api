@@ -23,10 +23,10 @@ import {
   makeHelmError,
   type NativePassthroughCarrier,
 } from "@helm/shared";
-
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
+import { clientPolicyError } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
@@ -915,6 +915,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const credential = extractCredential(c.req.header("Authorization"));
     const identity = await deps.auth.resolve(credential);
     if (identity === null) throw helmError("auth_error", "missing or invalid API key", traceId);
+    const denied = clientPolicyError(c, identity.caps?.clientPolicy, identity.keyId);
+    if (denied) throw new HelmHttpError(denied);
     return identity;
   };
 

@@ -9,6 +9,7 @@ import { type InteractionInputBlock, InteractionsRequestSchema } from "@helm/sha
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -207,6 +208,8 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     if (identity === null) {
       return errorJson(c, 401, "missing or invalid API key", "UNAUTHENTICATED");
     }
+    const denied = clientPolicyRejection(c, identity, "gemini");
+    if (denied) return denied;
     const captureRecord =
       deps.record === undefined
         ? undefined

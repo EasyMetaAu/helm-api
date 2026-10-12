@@ -1,5 +1,6 @@
 import type {
   ApiKeyRecord,
+  ClientPolicy,
   DecisionRecord,
   Fact,
   FactListStatus,
@@ -192,6 +193,7 @@ export interface CreateKeyInput {
   // are rejected, and automatic/lane/fallback chains are filtered.
   // Omitted => NULL => no blacklist.
   blockedModels?: string[];
+  clientPolicy?: ClientPolicy | null;
   // Per-key cap for CLIENT-requested Fast mode passthrough. Server/account-level
   // forced Fast mode is controlled separately by account settings.
   allowFastMode?: boolean;
@@ -271,6 +273,7 @@ export interface KeyPatch {
   allowCustomModel?: boolean;
   // null clears the blacklist; omitted leaves it untouched.
   blockedModels?: string[] | null;
+  clientPolicy?: ClientPolicy | null;
   allowFastMode?: boolean;
   rateLimitRpm?: number | null;
   rateLimitTpm?: number | null;

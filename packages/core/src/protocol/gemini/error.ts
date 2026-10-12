@@ -17,6 +17,7 @@ import { type ErrorClass, type HelmError, makeHelmError } from "@helm/shared";
 // Exhaustive over ErrorClass (compile error if a class is added). The precise Helm
 // class survives in telemetry / trace_id even where several collapse onto INTERNAL.
 const GEMINI_ERROR_STATUS: Record<ErrorClass, string> = {
+  client_not_allowed: "PERMISSION_DENIED",
   auth_error: "UNAUTHENTICATED",
   invalid_request: "INVALID_ARGUMENT",
   lane_unavailable: "UNAVAILABLE",

@@ -1,3 +1,4 @@
+import { ClientPolicySchema, type ClientPolicy } from '@helm/shared';
 // Admin API key client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and owns
 // NO auth logic (CLAUDE.md Principle 1). Normal list/detail responses are redacted
@@ -17,6 +18,7 @@ export interface ApiKeyView {
   name: string | null; // human-readable label; null = unnamed (cosmetic only)
   allowed_lanes: string[] | null; // null = unrestricted; legacy [] = deny every lane
   allow_custom_model: boolean; // explicit client-model passthrough
+  client_policy?: ClientPolicy | null;
   blocked_models: string[] | null; // case-insensitive exact/glob model ids denied across routes
   allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough
   disabled: boolean; // revoked state (soft)
@@ -57,6 +59,7 @@ export interface CreateKeyInput {
   name?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
+  client_policy?: ClientPolicy | null;
   blocked_models?: string[];
   allow_fast_mode?: boolean;
   // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -93,6 +96,7 @@ export interface UpdateKeyInput {
   name?: string | null;
   allowed_lanes?: string[] | null;
   allow_custom_model?: boolean;
+  client_policy?: ClientPolicy | null;
   blocked_models?: string[] | null;
   allow_fast_mode?: boolean;
   rate_limit_rpm?: number | null;
@@ -204,6 +208,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     blocked_models: Array.isArray(blocked) ? blocked.map(String) : null,
+    client_policy: raw.client_policy == null ? null : ClientPolicySchema.parse(raw.client_policy),
     allow_fast_mode: raw.allow_fast_mode === true,
     disabled: raw.disabled === true,
     // null/absent = inherit system default; a finite number (incl. 0) = override.
@@ -248,6 +253,7 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
 // `.strict()`, so empty/undefined optional fields must be omitted (Principle 2 fail-closed).
 function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   const out: Record<string, unknown> = { role: input.role ?? 'user' };
+  if (input.client_policy !== undefined) out.client_policy = input.client_policy;
   // Send a name only when the operator typed one (omitted => unnamed; .strict()).
   if (input.name !== undefined && input.name.length > 0) out.name = input.name;
   if (input.allowed_lanes && input.allowed_lanes.length > 0) {

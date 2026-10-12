@@ -1000,5 +1000,6 @@
   "Fallback attempts": "故障转移尝试",
   "Share": "占比",
   "Date": "日期",
-  "Daily usage": "每日用量"
+  "Daily usage": "每日用量",
+  "Allowed clients": "允许的客户端"
 }

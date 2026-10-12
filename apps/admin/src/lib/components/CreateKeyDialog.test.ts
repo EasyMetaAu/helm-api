@@ -55,6 +55,18 @@ describe('CreateKeyDialog', () => {
     expect(input.allow_fast_mode).toBe(true);
   });
 
+  it('requires a selected client when restricted and submits the independent policy', async () => {
+    setup();
+    await fireEvent.click(screen.getByLabelText('Restrict clients'));
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    expect(createKey).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByLabelText('Codex App'));
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    expect(createKey.mock.calls[0][0].client_policy).toEqual({ allowed_clients: ['codex_app'] });
+    expect(createKey.mock.calls[0][0].blocked_models).toBeUndefined();
+  });
+
   it('omits allowed_lanes when no lane is checked (no whitelist = any lane)', async () => {
     setup();
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));

@@ -1,4 +1,4 @@
-import { type ApiKeyRecord, ReasoningEffortSchema } from "@helm/shared";
+import { type ApiKeyRecord, ClientPolicySchema, ReasoningEffortSchema } from "@helm/shared";
 import { asc, eq } from "drizzle-orm";
 import type { CreateKeyInput, KeyPatch, KeyStore, RotateKeyInput } from "../ports.js";
 import type { PgDb } from "./migrate.js";
@@ -24,6 +24,8 @@ export class PgKeyStore implements KeyStore {
       hash: input.hash,
       prefix: input.prefix,
       secretEnc: input.secretEnc ?? null,
+      clientPolicy:
+        input.clientPolicy == null ? null : ClientPolicySchema.parse(input.clientPolicy),
       accountId: input.accountId,
       role: input.role,
       // Human-readable label: undefined input => NULL => unnamed.
@@ -114,6 +116,7 @@ export class PgKeyStore implements KeyStore {
         | "name"
         | "allowedLanes"
         | "allowCustomModel"
+        | "clientPolicy"
         | "blockedModels"
         | "allowFastMode"
         | "rateLimitRpm"
@@ -137,6 +140,9 @@ export class PgKeyStore implements KeyStore {
     // Native jsonb: assign the array (or null = no cap) directly, no stringify.
     if (patch.allowedLanes !== undefined) set.allowedLanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
+    if (patch.clientPolicy !== undefined)
+      set.clientPolicy =
+        patch.clientPolicy === null ? null : ClientPolicySchema.parse(patch.clientPolicy);
     if (patch.blockedModels !== undefined) set.blockedModels = patch.blockedModels;
     if (patch.allowFastMode !== undefined) set.allowFastMode = patch.allowFastMode;
     if (patch.rateLimitRpm !== undefined) set.rateLimitRpm = patch.rateLimitRpm;
@@ -206,6 +212,7 @@ export class PgKeyStore implements KeyStore {
       name: row.name ?? null,
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
+      client_policy: row.clientPolicy === null ? null : ClientPolicySchema.parse(row.clientPolicy),
       blocked_models: row.blockedModels ?? null,
       allow_fast_mode: row.allowFastMode,
       disabled: row.disabled,

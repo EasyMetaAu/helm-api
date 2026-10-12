@@ -8,6 +8,7 @@ import {
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -229,6 +230,8 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         trace_id: traceId,
       });
     }
+    const denied = clientPolicyRejection(c, identity, "gemini");
+    if (denied) return denied;
     const captureRecord =
       deps.record === undefined
         ? undefined

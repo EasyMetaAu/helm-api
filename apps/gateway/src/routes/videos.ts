@@ -16,6 +16,7 @@ import {
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
@@ -256,6 +257,8 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (identity === null)
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
+    const denied = clientPolicyRejection(c, identity);
+    if (denied) return denied;
     const captureRecord =
       deps.record === undefined
         ? undefined
@@ -454,6 +457,8 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (identity === null)
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
+    const denied = clientPolicyRejection(c, identity);
+    if (denied) return denied;
     const admission = await admit(c, deps, identity);
     if (admission !== null) return admission;
 

@@ -463,3 +463,70 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("session-timeline")).toHaveCount(0);
   });
 });
+
+test("client policy persists through the admin UI and gates the public API", async ({ page }) => {
+  const admin = await playwrightRequest.newContext({
+    baseURL: BASE,
+    extraHTTPHeaders: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
+  });
+  let keyId: string | undefined;
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    const created = await admin.post("/admin/api/keys", {
+      data: { name: "e2e client policy", role: "user" },
+    });
+    expect(created.status()).toBe(201);
+    const minted = (await created.json()) as { key_id: string; plaintext: string };
+    keyId = minted.key_id;
+    await page.goto(`${BASE}/admin/keys`);
+    const row = page.locator("tr").filter({ hasText: "e2e client policy" });
+    await row.getByTestId("key-actions").locator("summary").click();
+    await row.getByRole("button", { name: "Edit", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Restrict clients", { exact: true }).check();
+    await dialog.getByLabel("Codex App", { exact: true }).check();
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    await expect(dialog).toBeHidden();
+    const readback = await admin.get(`/admin/api/keys/${keyId}`);
+    expect((await readback.json()).client_policy).toEqual({ allowed_clients: ["codex_app"] });
+    const api = await playwrightRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { Authorization: `Bearer ${minted.plaintext}` },
+    });
+    try {
+      expect((await api.get("/v1/models", { headers: { "User-Agent": "curl/8" } })).status()).toBe(
+        403,
+      );
+      expect(
+        (
+          await api.get("/v1/models", { headers: { "User-Agent": "Codex Desktop/0.162.0" } })
+        ).status(),
+      ).toBe(200);
+      expect(
+        (await api.get("/portal/api/me", { headers: { "User-Agent": "curl/8" } })).status(),
+      ).toBe(200);
+      await page.reload();
+      await row.getByTestId("key-actions").locator("summary").click();
+      await row.getByRole("button", { name: "Edit", exact: true }).click();
+      await expect(dialog.getByLabel("Restrict clients", { exact: true })).toBeChecked();
+      await expect(dialog.getByLabel("Codex App", { exact: true })).toBeChecked();
+      await page.screenshot({ path: "/tmp/helm-client-policy-desktop.png" });
+      await dialog.getByLabel("Restrict clients", { exact: true }).uncheck();
+      await dialog.getByRole("button", { name: "Save changes" }).click();
+      await expect(dialog).toBeHidden();
+      expect((await api.get("/v1/models", { headers: { "User-Agent": "curl/8" } })).status()).toBe(
+        200,
+      );
+    } finally {
+      await api.dispose();
+    }
+    expect(errors).toEqual([]);
+  } finally {
+    if (keyId) {
+      await admin.delete(`/admin/api/keys/${keyId}`);
+      await admin.delete(`/admin/api/keys/${keyId}?purge=true`);
+    }
+    await admin.dispose();
+  }
+});

@@ -400,6 +400,7 @@ describe("port type contracts", () => {
       | "allowedLanes"
       | "allowCustomModel"
       | "blockedModels"
+      | "clientPolicy"
       | "allowFastMode"
       | "rateLimitRpm"
       | "rateLimitTpm"
