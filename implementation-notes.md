@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-12 · Grok 官方价格与媒体计费单位（docs/07、10）
+
+- **官方依据**：xAI 模型卡与 pricing 页面；Grok 4.5 缓存输入改为 $0.30/M，4.5/4.7 从 200K prompt tokens 起使用整单高档，Build Fast 仍在超过 200K 时切档。priority 按官方 2 倍计价。
+- **媒体配置**：新增 `imageOutputPerImageUsd`、`videoOutputPerSecondUsd` 可选非负字段，分别配置 Image $0.02/张、Quality $0.05/张、1.5 Preview $0.08/秒、Video $0.05/秒；官方 1.5 页面明确包含 preview 别名。价格是 API 等价参考，不是订阅实际账单。
+- **范围与限制**：本次只补全价格目录，不实现媒体用量结算或历史重计价。媒体 token 价继续为 null；spend-capped key 的既有拒绝策略不变，避免仅有参考单价却无法准确结算。Remote 仅合并这八个 Grok 条目，保留其他线上覆盖。
+
 ## 2026-10-12 · Grok 固定首尾帧与声线组合（docs/05、07；视频接口方案）
 
 - **决定**：新增稳定1.5的首帧/尾帧＋参考图/预置声线严格组合；至少一个固定端点，可省略prompt。新组合限1–15秒、480p/720p；不扩大既有30秒与preview语义，不开放自定义音频、file_id、中间关键帧或ZDR。
@@ -65,13 +71,9 @@
 - **兼容边界**：复用已配置的采样字段和旧 thinking 模式移除策略，enabled/disabled 被移除后采用上游默认 adaptive；不将 disabled 擅自改写为 between_tools。原生 between_tools、adaptive/display、签名历史和逐消息 effort 保留；between_tools 仅支持 low/medium/high，不能携带其他 thinking 字段或在会话中改变 effort。强制工具调用、旧 computer 工具及不支持的 advisor 组合交给上游拒绝，不静默降级工具语义；无新协议分支。
 - **运维限制**：挂载配置须同步能力、价格及 lane，单独更新镜像不足以启用完整配置。自动化验收使用合成请求，不执行真实付费推理；发布后须核对运行时版本、目录和路由。
 
-## 2026-09-28 · 原生透传取消模型准入名单，兼容规则归入配置（docs/04、05、10）
-
-- **根因修复**：同协议 Anthropic 不再因 Sonnet、未知模型或 inline system/developer 进入整包转换。上游负责原生角色校验；原始缓存边界与 native 400 保留。显式开关、跨协议/continuation 校验和不可重放保护保留。
-- **配置归一**：Anthropic 采样字段/旧 thinking 模式、OpenAI Chat token 字段/工具 reasoning 规则归入 `capabilities.yaml` 的 `requestCompatibility`，按路由 alias 解析并传至最终序列化。未配置即保留；非法字段 fail-closed。上下文上限复用 `maxContextTokens`，删除重复源码名单。
-- **迁移边界**：自定义 alias 需自行声明经验证的兼容例外；挂载配置的部署需合并字段并重载，单独升级镜像不更新配置。模型目录/别名/价格仍按既有配置与同步流程维护，本次未宣称新增模型无需提供这些业务数据。
-
 ## 更早历史总览
+
+2026-09-28：原生透传取消模型准入名单，兼容规则归入 capabilities 配置，保留边界校验；完整记录见 git history。
 
 2026-09-28：GPT lane换代、线上配置保留及别名回收；完整部署边界见git history。
 

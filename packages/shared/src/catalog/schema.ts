@@ -189,6 +189,10 @@ export const PricingSchema = z.object({
   // Image models can return text/thinking and image tokens in one response at
   // different rates. outputPerMTokUsd prices non-image output; this prices IMAGE.
   imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+  // Media rate-card metadata, in native billing units. These do not imply token
+  // pricing or enable media spend admission/settlement.
+  imageOutputPerImageUsd: NullablePriceSchema.optional(),
+  videoOutputPerSecondUsd: NullablePriceSchema.optional(),
   // Gemini Flash-Lite prices AUDIO prompt/cache tokens differently from
   // text/image/video. Optional rates fall back to the ordinary input/cache card.
   audioInputPerMTokUsd: NullablePriceSchema.optional(),
@@ -250,6 +254,8 @@ export const PricingOverrideEntrySchema = z
     cacheWritePerMTokUsd: z.number().nonnegative().nullable().optional(),
     cacheWrite1hPerMTokUsd: NullablePriceSchema.optional(),
     imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+    imageOutputPerImageUsd: NullablePriceSchema.optional(),
+    videoOutputPerSecondUsd: NullablePriceSchema.optional(),
     audioInputPerMTokUsd: NullablePriceSchema.optional(),
     audioCacheReadPerMTokUsd: NullablePriceSchema.optional(),
     contextTiers: ContextPricingTiersSchema.optional(),

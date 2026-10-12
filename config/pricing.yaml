@@ -1,4 +1,4 @@
-# Manual pricing overrides (layer 2), USD per 1M tokens. Keyed by modelKey.
+# Manual pricing overrides (layer 2), USD in the field's unit. Keyed by modelKey.
 # Manual entries ALWAYS WIN over generated pricing (per-field).
 # Used for cost telemetry only — pricing never drives runtime model selection.
 # Validated by PricingOverrideSchema — illegal values fail-closed.
@@ -21,15 +21,26 @@
 # decision, Grok uses xAI's public API rates as an API-equivalent estimate for
 # telemetry AND API-key budget settlement. Grok 4.6 rates and its >=200K context
 # band were verified against xAI's official price card on 2026-08-13.
+# Verified 2026-10-12: https://docs.x.ai/developers/models/grok-4.5
 xai/grok-4.5:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 6.0
-  cacheReadPerMTokUsd: 0.5
+  cacheReadPerMTokUsd: 0.3
+  contextTiers:
+    - minPromptTokens: 200000
+      inputPerMTokUsd: 4.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 0.6
   serviceTiers:
     priority:
       inputPerMTokUsd: 4.0
       outputPerMTokUsd: 12.0
-      cacheReadPerMTokUsd: 1.0
+      cacheReadPerMTokUsd: 0.6
+      contextTiers:
+        - minPromptTokens: 200000
+          inputPerMTokUsd: 8.0
+          outputPerMTokUsd: 24.0
+          cacheReadPerMTokUsd: 1.2
 xai/grok-4.6:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 6.0
@@ -49,15 +60,15 @@ xai/grok-4.6:
           inputPerMTokUsd: 8.0
           outputPerMTokUsd: 24.0
           cacheReadPerMTokUsd: 2.0
-# Verified 2026-09-22: https://docs.x.ai/developers/models/grok-4.7
+# Verified 2026-10-12: https://docs.x.ai/developers/models/grok-4.7
 # https://docs.x.ai/developers/pricing (priority is 2x; Fast has its own card).
-# Higher-context rates apply ABOVE 200k prompt tokens, not at exactly 200k.
+# Standard higher-context rates apply AT 200k; Build Fast applies ABOVE 200k.
 xai/grok-4.7:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 6.0
   cacheReadPerMTokUsd: 0.5
   contextTiers:
-    - minPromptTokens: 200001
+    - minPromptTokens: 200000
       inputPerMTokUsd: 4.0
       outputPerMTokUsd: 12.0
       cacheReadPerMTokUsd: 1.0
@@ -67,7 +78,7 @@ xai/grok-4.7:
       outputPerMTokUsd: 12.0
       cacheReadPerMTokUsd: 1.0
       contextTiers:
-        - minPromptTokens: 200001
+        - minPromptTokens: 200000
           inputPerMTokUsd: 8.0
           outputPerMTokUsd: 24.0
           cacheReadPerMTokUsd: 2.0
@@ -1084,21 +1095,36 @@ deepseek-v4-flash:
   outputPerMTokUsd: 0.28
   cacheReadPerMTokUsd: 0.0028
 
-# SuperGrok media has no verified per-generation rate card. Keep cost unknown;
-# request-count budgets may admit it, while spend-capped keys fail closed upstream
-# of the paid create path until a trustworthy maximum price is configured.
+# Public API-equivalent media rate cards, verified 2026-10-12:
+# https://docs.x.ai/developers/models/grok-imagine-image
+# https://docs.x.ai/developers/models/grok-imagine-image-quality
+# https://docs.x.ai/developers/models/grok-imagine-video-1.5
+# https://docs.x.ai/developers/models/grok-imagine-video
+# The official 1.5 card explicitly lists the 1.5-preview alias.
+# These are USD per output image / output video second, NOT per million tokens.
+# Subscription bills remain flat-fee. Media usage settlement is not implemented;
+# preserve unknown token cost and existing fail-closed spend-cap admission.
+xai/grok-imagine-image:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+  imageOutputPerImageUsd: 0.02
 xai/grok-imagine-image-quality:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+  imageOutputPerImageUsd: 0.05
 xai/grok-imagine-video-1.5-preview:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+  videoOutputPerSecondUsd: 0.08
 xai/grok-imagine-video:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+  videoOutputPerSecondUsd: 0.05

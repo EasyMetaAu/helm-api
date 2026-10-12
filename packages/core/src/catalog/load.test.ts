@@ -283,13 +283,29 @@ describe("loadRuntimeCatalog", () => {
     expect(grok45?.pricing).toEqual({
       inputPerMTokUsd: 2,
       outputPerMTokUsd: 6,
-      cacheReadPerMTokUsd: 0.5,
+      cacheReadPerMTokUsd: 0.3,
       cacheWritePerMTokUsd: null,
+      contextTiers: [
+        {
+          minPromptTokens: 200_000,
+          inputPerMTokUsd: 4,
+          outputPerMTokUsd: 12,
+          cacheReadPerMTokUsd: 0.6,
+        },
+      ],
       serviceTiers: {
         priority: {
           inputPerMTokUsd: 4,
-          cacheReadPerMTokUsd: 1,
+          cacheReadPerMTokUsd: 0.6,
           outputPerMTokUsd: 12,
+          contextTiers: [
+            {
+              minPromptTokens: 200_000,
+              inputPerMTokUsd: 8,
+              outputPerMTokUsd: 24,
+              cacheReadPerMTokUsd: 1.2,
+            },
+          ],
         },
       },
     });
@@ -336,7 +352,44 @@ describe("loadRuntimeCatalog", () => {
           input_tokens_details: { cached_tokens: 4 },
         },
       }),
-    ).toBeCloseTo((6 * 2 + 4 * 0.5 + 5 * 6) / 1_000_000, 12);
+    ).toBeCloseTo((6 * 2 + 4 * 0.3 + 5 * 6) / 1_000_000, 12);
+  });
+
+  it("loads official Grok media rates without inventing token prices or token costs", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    for (const [model, field, rate] of [
+      ["grok-imagine-image", "imageOutputPerImageUsd", 0.02],
+      ["grok-imagine-image-quality", "imageOutputPerImageUsd", 0.05],
+      ["grok-imagine-video-1.5-preview", "videoOutputPerSecondUsd", 0.08],
+      ["grok-imagine-video", "videoOutputPerSecondUsd", 0.05],
+    ] as const) {
+      const pricing = catalog.get(`xai/${model}`)?.pricing;
+      expect(pricing).toMatchObject({
+        [field]: rate,
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+      });
+      expect(
+        resolveCostUsd(pricing, { usage: { input_tokens: 100, output_tokens: 100 } }),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects invalid per-image and per-second override rates", () => {
+    for (const field of ["imageOutputPerImageUsd", "videoOutputPerSecondUsd"]) {
+      for (const value of [-1, "0.05"]) {
+        expect(() =>
+          loadRuntimeCatalog({
+            configDir: "/cfg",
+            readFile: reader((path) => {
+              if (path.endsWith("pricing.yaml"))
+                return JSON.stringify({ "xai/media": { [field]: value } });
+              enoent();
+            }),
+          }),
+        ).toThrow(CatalogError);
+      }
+    }
   });
 
   it("loads Grok 4.7 standard and Build Fast capabilities and official price bands", () => {
@@ -365,8 +418,9 @@ describe("loadRuntimeCatalog", () => {
         cacheReadPerMTokUsd: cache,
       });
       for (const prompt of [199_999, 200_000, 200_001]) {
-        const [i, o, c] =
-          prompt > 200_000 ? [longInput, longOutput, longCache] : [input, output, cache];
+        const [i, o, c] = (model === "xai/grok-4.7" ? prompt >= 200_000 : prompt > 200_000)
+          ? [longInput, longOutput, longCache]
+          : [input, output, cache];
         expect(
           resolveCostUsd(entry?.pricing, {
             usage: {
@@ -380,7 +434,7 @@ describe("loadRuntimeCatalog", () => {
     }
     const standard = catalog.get("xai/grok-4.7");
     for (const prompt of [200_000, 200_001]) {
-      const multiplier = prompt > 200_000 ? 2 : 1;
+      const multiplier = prompt >= 200_000 ? 2 : 1;
       expect(
         resolveCostUsd(standard?.pricing, {
           service_tier: "priority",
