@@ -519,6 +519,20 @@ describe("client-scoped discovery", () => {
         .map((m) => m.id),
     ).toEqual(expect.arrayContaining(allAliases));
   });
+  it("does not rebuild wire model mappings for unrestricted discovery", async () => {
+    const names = vi.fn(() => new Map<string, string>());
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      () => allAliases,
+      () => lanes,
+      undefined,
+      undefined,
+      names,
+    );
+    await app.request("/v1/models", { headers: AUTH });
+    await app.request("/v1/models", { headers: AUTH });
+    expect(names).not.toHaveBeenCalled();
+  });
   it("honors existing caps, rejects unknown clients, and resolves live wire model names", async () => {
     const rec = restricted();
     rec.blocked_models = ["openai/*"];

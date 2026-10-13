@@ -92,8 +92,11 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     c.header("Vary", "User-Agent, Authorization, x-api-key");
     return classifyClient(c.req.header("user-agent"));
   };
-  const clientList = (c: Context<AppEnv>) =>
-    filterModelsForClient(build(c), discoveryClient(c), deps.modelNames?.());
+  const clientList = (c: Context<AppEnv>) => {
+    const client = discoveryClient(c);
+    const list = build(c);
+    return client === undefined ? list : filterModelsForClient(list, client, deps.modelNames?.());
+  };
 
   app.get("/v1/models", async (c) => {
     const rawClientVersion = c.req.query("client_version");
