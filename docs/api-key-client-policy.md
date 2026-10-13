@@ -10,7 +10,7 @@
 
 开启客户端限制后，`GET /v1/models` 与 `GET /v1/models/:id` 按本次请求的实际客户端显示具体模型：Codex App/CLI 显示 GPT/Codex（含 OpenAI o 系列）；Claude CLI/Desktop 显示 Claude；Grok CLI 显示 Grok。允许多个客户端的同一把 key 在各客户端看到各自的列表，而不是这些客户端模型的并集。关闭限制后恢复原列表。
 
-匹配配置中的真实 `provider_model`，而不是供应商名或任意 alias；OAuth 使用当前的 wire model 映射。未知模型家族不展示。原有 `allow_custom_model`、`allowed_lanes` 和 `blocked_models` 仍先行生效。普通列表中的 `auto` 和可用 lane 保留；仅展示规则变化，不向路由或 provider 执行层增加家族限制，跨模型 fallback 保持不变。手工指定模型的调用仍服从既有路由权限，不把列表隐藏当成新的模型授权规则。
+匹配配置中的真实 `provider_model`，而不是供应商名或任意 alias；OAuth 使用当前的 wire model 映射。未知模型家族不展示。原有 `allow_custom_model`、`allowed_lanes` 和 `blocked_models` 仍先行生效。普通列表保留 `auto`、通用档位（economy/balanced/premium）和任务 lane（coding/json/vision/tool_use）；模型家族命名的 lane 同样过滤：Codex 仅显示 GPT/Codex/o 系列 lane，Claude 仅显示 Claude lane，Grok 仅显示 Grok lane。Gemini、DeepSeek lane 不在这五种客户端中展示。其他自定义名称视为通用 lane；家族由 lane 名称判断，不沿 primary/fallback 推断，避免把通用 premium 误判为 Claude。仅展示规则变化，不向路由或 provider 执行层增加家族限制，跨模型 fallback 保持不变。手工指定模型的调用仍服从既有路由权限，不把列表隐藏当成新的模型授权规则。
 
 Codex 的 `client_version` 专用列表继续返回其原生格式并过滤具体模型；受限的非 Codex 客户端不能用这个参数获取 Codex 列表。若过滤改变了返回内容，ETag 与 Responses 跟踪同步使用过滤后的值。内部缓存只保存未经过客户端过滤的基础列表，每个请求独立过滤；受限响应设置 `private, no-store`，避免外部缓存串用。
 

@@ -61,3 +61,60 @@ describe("client model discovery", () => {
     expect(isModelVisibleForClient("unknown", "claude_cli")).toBe(false);
   });
 });
+
+const genericLanes = [
+  "auto",
+  "economy",
+  "balanced",
+  "premium",
+  "coding",
+  "json",
+  "vision",
+  "tool_use",
+  "custom-team",
+];
+const familyLanes = [
+  "gpt-6.1-sol",
+  "gpt-image",
+  "claude-opus",
+  "claude-sonnet",
+  "claude-fable",
+  "claude-haiku",
+  "grok",
+  "grok-fast",
+  "grok-imagine-video",
+  "gemini-pro",
+  "gemini-image",
+];
+const laneList: ModelsList = {
+  object: "list",
+  data: [...genericLanes, ...familyLanes].map((id) => ({
+    id,
+    object: "model",
+    created: 0,
+    owned_by: "helm",
+    type: "lane",
+  })),
+};
+it.each<[ClientId, string[]]>([
+  ["codex_app", ["gpt-6.1-sol", "gpt-image"]],
+  ["codex_cli", ["gpt-6.1-sol", "gpt-image"]],
+  ["claude_cli", ["claude-opus", "claude-sonnet", "claude-fable", "claude-haiku"]],
+  ["claude_desktop", ["claude-opus", "claude-sonnet", "claude-fable", "claude-haiku"]],
+  ["grok_cli", ["grok", "grok-fast", "grok-imagine-video"]],
+])("filters family lanes for %s without reclassifying generic lanes by their underlying models", (client, expected) => {
+  const before = JSON.stringify(laneList);
+  // Concrete alias mappings cannot change a lane's public identity.
+  const mappings = new Map([
+    ["premium", "claude-opus-5"],
+    ["claude-opus", "gpt-6-astra"],
+  ]);
+  expect(filterModelsForClient(laneList, client, mappings).data.map((m) => m.id)).toEqual([
+    ...genericLanes,
+    ...expected,
+  ]);
+  expect(JSON.stringify(laneList)).toBe(before);
+});
+it("retains every family lane for unrestricted keys", () => {
+  expect(filterModelsForClient(laneList, undefined)).toBe(laneList);
+});
