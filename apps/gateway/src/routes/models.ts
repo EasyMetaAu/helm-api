@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import type { LanesConfig, OpenAICodexModelsResult } from "@helm/core";
-import { buildModelsList } from "@helm/core";
-import { type CatalogEntry, makeHelmError } from "@helm/shared";
+import { buildModelsList, filterModelsForClient, isModelVisibleForClient } from "@helm/core";
+import { type CatalogEntry, classifyClient, makeHelmError } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
@@ -20,6 +21,8 @@ export interface ModelsRouteDeps {
   catalog: Map<string, CatalogEntry>;
   // Configured provider aliases: config.providers[].models[].alias.
   providerAliases: string[];
+  /** Live alias-to-wire-model map for client-family discovery only. */
+  modelNames?: () => ReadonlyMap<string, string>;
   // Live curated subscription (OAuth) aliases — `<provider>/<model>` ids synthesized
   // from bound credentials, not config. Hot-reloadable (admin curation / connect /
   // disconnect), so read per request like `lanes` rather than snapshotted. Optional:
@@ -81,6 +84,17 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     return value;
   };
 
+  const discoveryClient = (c: Context<AppEnv>) => {
+    if (c.get("identity").caps.clientPolicy == null) return undefined;
+    // Auth has already admitted this client. Do not share client-specific bodies
+    // through external caches. The internal cache holds only the unfiltered list.
+    c.header("Cache-Control", "private, no-store");
+    c.header("Vary", "User-Agent, Authorization, x-api-key");
+    return classifyClient(c.req.header("user-agent"));
+  };
+  const clientList = (c: Context<AppEnv>) =>
+    filterModelsForClient(build(c), discoveryClient(c), deps.modelNames?.());
+
   app.get("/v1/models", async (c) => {
     const rawClientVersion = c.req.query("client_version");
     if (rawClientVersion !== undefined && deps.codexModels !== undefined) {
@@ -94,15 +108,29 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
           }),
         );
       }
+      const client = discoveryClient(c);
+      if (client !== undefined && client !== "codex_app" && client !== "codex_cli") {
+        return c.json({ models: [] }, 200);
+      }
       const caps = c.get("identity").caps;
       const timeoutMs = Math.max(1, deps.codexModelsTimeoutMs ?? 5_000);
-      const result = await deps.codexModels({
+      let result = await deps.codexModels({
         clientVersion,
         allowCustomModel: caps.allowCustomModel,
         allowedLanes: caps.allowedLanes,
         blockedModels: caps.blockedModels,
         signal: AbortSignal.any([requestSignal(c), AbortSignal.timeout(timeoutMs)]),
       });
+      if (result && client !== undefined) {
+        const models = result.models.filter((model) => isModelVisibleForClient(model.slug, client));
+        if (models.length !== result.models.length) {
+          result = {
+            ...result,
+            models,
+            etag: `"helm-client-${createHash("sha256").update(JSON.stringify(models)).digest("hex")}"`,
+          };
+        }
+      }
       if (result?.etag !== undefined) {
         c.header("ETag", result.etag);
         deps.onCodexModelsListed?.(c.get("identity").keyId, clientVersion, result.etag);
@@ -112,7 +140,7 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
       }
       return c.json({ models: result?.models ?? [] }, 200);
     }
-    return c.json(build(c), 200);
+    return c.json(clientList(c), 200);
   });
 
   // Retrieve a single model the key can use. An id outside the key's listing is
@@ -120,7 +148,7 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
   // the OpenAI envelope is rendered by the global handler.
   app.get("/v1/models/:id", (c) => {
     const id = c.req.param("id");
-    const model = build(c).data.find((m) => m.id === id);
+    const model = clientList(c).data.find((m) => m.id === id);
     if (!model) {
       throw new HelmHttpError(
         makeHelmError({

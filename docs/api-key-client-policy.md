@@ -6,6 +6,14 @@
 
 在成功鉴权后、读取正文和调用上游之前执行检查。不通过时返回协议对应的 403，错误类别为 `client_not_allowed`；不触发 provider 重试、熔断或 fallback。通过后原路由链不变：不绑定模型、厂商、订阅账号，不更改分类兜底或执行兜底，不覆盖任何出站身份头。
 
+## 按客户端显示模型
+
+开启客户端限制后，`GET /v1/models` 与 `GET /v1/models/:id` 按本次请求的实际客户端显示具体模型：Codex App/CLI 显示 GPT/Codex（含 OpenAI o 系列）；Claude CLI/Desktop 显示 Claude；Grok CLI 显示 Grok。允许多个客户端的同一把 key 在各客户端看到各自的列表，而不是这些客户端模型的并集。关闭限制后恢复原列表。
+
+匹配配置中的真实 `provider_model`，而不是供应商名或任意 alias；OAuth 使用当前的 wire model 映射。未知模型家族不展示。原有 `allow_custom_model`、`allowed_lanes` 和 `blocked_models` 仍先行生效。普通列表中的 `auto` 和可用 lane 保留；仅展示规则变化，不向路由或 provider 执行层增加家族限制，跨模型 fallback 保持不变。手工指定模型的调用仍服从既有路由权限，不把列表隐藏当成新的模型授权规则。
+
+Codex 的 `client_version` 专用列表继续返回其原生格式并过滤具体模型；受限的非 Codex 客户端不能用这个参数获取 Codex 列表。若过滤改变了返回内容，ETag 与 Responses 跟踪同步使用过滤后的值。内部缓存只保存未经过客户端过滤的基础列表，每个请求独立过滤；受限响应设置 `private, no-store`，避免外部缓存串用。
+
 ## 识别依据与限制
 
 使用有长度上限的确定性 User-Agent 产品标记匹配。缺失、畸形、未知或多客户端冲突标记在开启限制时拒绝。不固定版本号，不接受用户自定义正则。

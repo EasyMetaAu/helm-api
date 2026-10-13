@@ -79,10 +79,15 @@ function buildApp(
   lanesThunk: () => typeof lanes = () => lanes,
   codexModels?: ModelsRouteDeps["codexModels"],
   onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void,
+  modelNames?: ModelsRouteDeps["modelNames"],
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
-  const auth = authMiddleware({ keyStore: { getByHash }, log: () => {} });
+  const auth = authMiddleware({
+    keyStore: { getByHash },
+    enforceClientPolicy: true,
+    log: () => {},
+  });
   app.use("/v1/models", auth);
   app.use("/v1/models/*", auth);
   registerModelsRoute(app, {
@@ -92,6 +97,7 @@ function buildApp(
     oauthAliases,
     codexModels,
     onCodexModelsListed,
+    modelNames,
   });
   return app;
 }
@@ -455,5 +461,114 @@ describe("GET /v1/models", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { type: string; trace_id: string } };
     expect(body.error.trace_id.length).toBeGreaterThan(0);
+  });
+});
+
+describe("client-scoped discovery", () => {
+  const allAliases = ["openai/gpt-6.1-sol", "anthropic/claude-opus-5", "xai/grok-4.5"];
+  const agents = {
+    codex: "Codex Desktop/0.162.0",
+    claude: "claude-cli/2.1.296 (external, cli)",
+    grok: "grok-shell/1.0.52",
+  };
+  const policy = { allowed_clients: ["codex_app", "claude_cli", "grok_cli"] as const };
+  const restricted = () =>
+    record({
+      allow_custom_model: true,
+      client_policy: { allowed_clients: [...policy.allowed_clients] },
+    });
+  it("isolates cached lists by actual client, handles detail, and immediately restores unrestricted discovery", async () => {
+    const rec = restricted();
+    const app = buildApp(rec, () => allAliases);
+    for (const [ua, expected] of [
+      [agents.codex, allAliases[0]],
+      [agents.claude, allAliases[1]],
+      [agents.grok, allAliases[2]],
+      [agents.codex, allAliases[0]],
+    ] as const) {
+      const response = await app.request("/v1/models", { headers: { ...AUTH, "User-Agent": ua } });
+      expect(((await response.json()) as ModelsList).data.map((m) => m.id)).toEqual([
+        "economy",
+        "balanced",
+        "auto",
+        expected,
+      ]);
+      expect(response.headers.get("cache-control")).toContain("no-store");
+    }
+    expect(
+      (
+        await app.request("/v1/models/anthropic%2Fclaude-opus-5", {
+          headers: { ...AUTH, "User-Agent": agents.codex },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request("/v1/models/openai%2Fgpt-6.1-sol", {
+          headers: { ...AUTH, "User-Agent": agents.codex },
+        })
+      ).status,
+    ).toBe(200);
+    rec.client_policy = null;
+    const response = await app.request("/v1/models", {
+      headers: { ...AUTH, "User-Agent": agents.codex },
+    });
+    expect(
+      ((await response.json()) as ModelsList).data
+        .filter((m) => m.type === "model")
+        .map((m) => m.id),
+    ).toEqual(expect.arrayContaining(allAliases));
+  });
+  it("honors existing caps, rejects unknown clients, and resolves live wire model names", async () => {
+    const rec = restricted();
+    rec.blocked_models = ["openai/*"];
+    const names = new Map([["relay/fast", "anthropic/claude-opus-5"]]);
+    const app = buildApp(
+      rec,
+      () => [...allAliases, "relay/fast"],
+      () => lanes,
+      undefined,
+      undefined,
+      () => names,
+    );
+    const headers = { ...AUTH, "User-Agent": agents.codex };
+    const ids = async () =>
+      ((await (await app.request("/v1/models", { headers })).json()) as ModelsList).data.map(
+        (m) => m.id,
+      );
+    expect(await ids()).toEqual(["economy", "balanced", "auto"]);
+    names.set("relay/fast", "gpt-6.1-sol");
+    expect(await ids()).toEqual(["economy", "balanced", "auto", "relay/fast"]);
+    rec.allow_custom_model = false;
+    expect(await ids()).toEqual(["economy", "balanced", "auto"]);
+    rec.allowed_lanes = [];
+    expect(await ids()).toEqual([]);
+    expect((await app.request("/v1/models", { headers: AUTH })).status).toBe(403);
+  });
+  it("narrows native Codex discovery and records the filtered ETag, without leaking through client_version", async () => {
+    const codexModels = vi.fn(() => ({
+      models: [{ slug: "gpt-6.1-sol" }, { slug: "claude-opus-5" }] as CodexModelInfo[],
+      etag: '"all-models"',
+    }));
+    const tracker = vi.fn();
+    const app = buildApp(
+      restricted(),
+      () => allAliases,
+      () => lanes,
+      codexModels,
+      tracker,
+    );
+    const response = await app.request("/v1/models?client_version=0.162.0", {
+      headers: { ...AUTH, "User-Agent": agents.codex },
+    });
+    expect(await response.json()).toEqual({ models: [{ slug: "gpt-6.1-sol" }] });
+    expect(response.headers.get("etag")).not.toBe('"all-models"');
+    expect(tracker).toHaveBeenCalledWith("k1", "0.162.0", response.headers.get("etag"));
+    codexModels.mockClear();
+    const other = await app.request("/v1/models?client_version=0.162.0", {
+      headers: { ...AUTH, "User-Agent": agents.claude },
+    });
+    expect(await other.json()).toEqual({ models: [] });
+    expect(codexModels).not.toHaveBeenCalled();
   });
 });

@@ -3653,6 +3653,13 @@ export async function buildServer(
     // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
     // routability never disagree.
     oauthAliases: availableOAuthAliases,
+    modelNames: () =>
+      new Map([
+        ...config.providers.flatMap((provider) =>
+          provider.models.map((model) => [model.alias, model.provider_model] as const),
+        ),
+        ...oauthWireModelMap,
+      ]),
     codexModels: async ({
       clientVersion,
       allowCustomModel,
