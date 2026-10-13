@@ -9,6 +9,7 @@
 
 ## 2026-10-13 · API key 客户端入口限制（docs/06、07、11）
 
+- **Opus 审查修正**：无效或新版未知策略读取为只读空名单，单 key 拒绝而非全站启动失败，管理员可修复；严格写入校验不变。Postgres 区分 SQL NULL 与 JSON null。拒绝日志不收集任意 UA 原文；MCP embedding 明确在策略范围外。
 - **独立策略**：`client_policy` 默认为 null；开启须选择非空客户端集合。仅在鉴权后校验入口 User-Agent，不绑定模型、provider 或账号，不改分类与执行 fallback。策略严格校验，损坏存储不自动降级为不限。
 - **生效范围**：模型发现、所有已实现推理/计数/生命周期接口及 WebSocket 握手；Responses 每轮重查。已接纳流与 Realtime session 不强制中断；跨进程更新受鉴权缓存 TTL（默认 30 秒）约束。
 - **证据边界**：UA 可伪造，不承诺防封号。Claude Desktop 仅连接测试取样，Code/Cowork 未完整验证；Grok 标记仅覆盖 CLI。部署不替既有 key 开启。详见 `docs/api-key-client-policy.md`。

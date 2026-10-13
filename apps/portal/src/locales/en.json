@@ -1001,5 +1001,6 @@
   "Share": "Share",
   "Date": "Date",
   "Daily usage": "Daily usage",
-  "Allowed clients": "Allowed clients"
+  "Allowed clients": "Allowed clients",
+  "No clients allowed. Contact your administrator.": "No clients allowed. Contact your administrator."
 }

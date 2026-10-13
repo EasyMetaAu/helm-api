@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ReasoningEffortSchema } from "../config/lanes-schema.js";
 import { MemoryModeSchema } from "../request/schema.js";
-import { ClientPolicySchema } from "./client-policy.js";
+import { ClientPolicySchema, StoredClientPolicySchema } from "./client-policy.js";
 
 // API key record (storage layer shape) per docs/06. Per CLAUDE.md principle 7,
 // keys are stored as sha256 hash + display prefix ONLY — there is no plaintext
@@ -56,7 +56,7 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key model blacklist. It removes case-insensitive exact/glob model
   // patterns from every route this key can take; legacy rows default to null.
   blocked_models: BlockedModelsSchema.default(null),
-  client_policy: ClientPolicySchema.nullable().optional(),
+  client_policy: StoredClientPolicySchema.nullable().optional(),
   // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
   // unless the serving subscription account itself has Fast mode forced on.
   allow_fast_mode: z.boolean().default(false),

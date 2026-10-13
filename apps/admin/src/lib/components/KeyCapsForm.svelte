@@ -235,6 +235,11 @@
     <span>{$t('Restrict clients')}</span>
   </label>
   {#if form.restrictClients}
+    {#if form.allowedClients.length === 0}
+      <span class="field-help" role="status"
+        >{$t('No clients allowed. Select a client or disable the restriction.')}</span
+      >
+    {/if}
     <div class="flex flex-wrap gap-3">
       {#each ClientIdSchema.options as client (client)}
         <label class="flex items-center gap-1.5">

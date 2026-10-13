@@ -1001,5 +1001,6 @@
   "Share": "Share",
   "Date": "Date",
   "Daily usage": "Daily usage",
-  "Allowed clients": "許可するクライアント"
+  "Allowed clients": "許可するクライアント",
+  "No clients allowed. Contact your administrator.": "許可されたクライアントがありません。管理者にお問い合わせください。"
 }

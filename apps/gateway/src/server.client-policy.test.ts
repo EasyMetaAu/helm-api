@@ -19,6 +19,18 @@ it("enforces client policy across HTTP model boundaries while preserving portal 
       role: "user",
       clientPolicy: { allowed_clients: ["codex_app"] },
     });
+    await new SqliteKeyStore(db).createKey({
+      keyId: "corrupt",
+      hash: hashKey("corrupt-test-key"),
+      prefix: "test",
+      accountId: "test",
+      role: "user",
+    });
+    db.$sqlite
+      .prepare("UPDATE api_keys SET client_policy = ? WHERE key_id = ?")
+      .run("not-json", "corrupt");
+    vi.stubEnv("HELM_ADMIN_USER", "test-admin");
+    vi.stubEnv("HELM_ADMIN_PASSWORD", "test-password");
     vi.stubEnv("HELM_DATA_DIR", dir);
     vi.stubEnv("HELM_SIGNALS_DISABLED", "1");
     vi.stubEnv("HELM_OAUTH_ENC_KEY", "11".repeat(32));
@@ -75,6 +87,44 @@ it("enforces client policy across HTTP model boundaries while preserving portal 
     for (const path of ["/v1/models", "/v1/responses/resp_test", "/v1/videos/vid_test"]) {
       expect((await server.app.request(path, { headers })).status, path).toBe(403);
     }
+    const corruptHeaders = {
+      ...headers,
+      Authorization: "Bearer corrupt-test-key",
+      "x-api-key": "corrupt-test-key",
+      "x-goog-api-key": "corrupt-test-key",
+      "user-agent": "Codex Desktop/0.162.0",
+    };
+    for (const path of paths) {
+      expect(
+        (await server.app.request(path, { method: "POST", headers: corruptHeaders, body: "{}" }))
+          .status,
+        path,
+      ).toBe(403);
+    }
+    await expect(
+      server.resolveRealtimeKey?.("corrupt-test-key", "Codex Desktop/0.162.0"),
+    ).rejects.toMatchObject({ helm: { http_status: 403 } });
+    const adminHeaders = {
+      Authorization: `Basic ${Buffer.from("test-admin:test-password").toString("base64")}`,
+      "content-type": "application/json",
+    };
+    const listed = await server.app.request("/admin/api/keys", { headers: adminHeaders });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key_id: "corrupt", client_policy: { allowed_clients: [] } }),
+      ]),
+    );
+    expect(
+      (
+        await server.app.request("/admin/api/keys/corrupt", {
+          method: "PATCH",
+          headers: adminHeaders,
+          body: JSON.stringify({ client_policy: null }),
+        })
+      ).status,
+    ).toBe(200);
+    expect((await server.app.request("/v1/models", { headers: corruptHeaders })).status).toBe(200);
     expect(upstream).not.toHaveBeenCalled();
     await expect(server.resolveRealtimeKey?.("test-only-key", "curl/8")).rejects.toMatchObject({
       helm: { http_status: 403 },

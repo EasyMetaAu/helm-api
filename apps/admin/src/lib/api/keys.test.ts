@@ -64,6 +64,20 @@ describe('keys api client', () => {
     expect(keys[0]).not.toHaveProperty('plaintext');
   });
 
+  it('keeps invalid stored policies visible and restricted for administrator repair', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          summaryRow('bad', { client_policy: { allowed_clients: ['future'] } }),
+          summaryRow('legacy'),
+        ]),
+      ),
+    );
+    const keys = await listKeys();
+    expect(keys[0].client_policy).toEqual({ allowed_clients: [] });
+    expect(keys[1].client_policy).toBeNull();
+  });
+
   it('getKeysUsage GETs /keys/usage with the window and normalizes rows', async () => {
     const rows = [
       { key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 },
@@ -95,7 +109,9 @@ describe('keys api client', () => {
     fn.mockResolvedValueOnce(new Response(JSON.stringify(summaryRow('k1')), { status: 200 }));
     expect((await getKey('k1'))?.key_id).toBe('k1');
     // 404 → null (genuine missing key), never a throw.
-    fn.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }));
+    fn.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }),
+    );
     expect(await getKey('nope')).toBeNull();
     // 500 → throws, so the caller surfaces a real load error (not a fake 404).
     fn.mockResolvedValueOnce(new Response('boom', { status: 500 }));

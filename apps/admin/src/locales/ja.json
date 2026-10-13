@@ -1137,5 +1137,6 @@
   "Restrict clients": "クライアントを制限",
   "Select at least one allowed client.": "許可するクライアントを1つ以上選択してください。",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "クライアントを1つ以上選択してください。不明なクライアントは拒否されます。ルーティングとフォールバックは変更されません。",
-  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent ヘッダーは偽装できます。この設定は他のクライアントの誤使用を防ぐもので、アプリの身元を証明するものではありません。"
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent ヘッダーは偽装できます。この設定は他のクライアントの誤使用を防ぐもので、アプリの身元を証明するものではありません。",
+  "No clients allowed. Select a client or disable the restriction.": "許可されたクライアントがありません。クライアントを選択するか制限を無効にしてください。"
 }

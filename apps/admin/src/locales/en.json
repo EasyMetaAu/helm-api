@@ -1137,5 +1137,6 @@
   "Restrict clients": "Restrict clients",
   "Select at least one allowed client.": "Select at least one allowed client.",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.",
-  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity."
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.",
+  "No clients allowed. Select a client or disable the restriction.": "No clients allowed. Select a client or disable the restriction."
 }

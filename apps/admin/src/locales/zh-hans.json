@@ -1137,5 +1137,6 @@
   "Restrict clients": "限制客户端",
   "Select at least one allowed client.": "请至少选择一个允许的客户端。",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "请至少选择一个客户端。无法识别的客户端将被拒绝；正常放行后，路由和故障回退保持不变。",
-  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 可以被伪造。此设置用于防止误接其他客户端，不能证明应用的真实身份。"
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 可以被伪造。此设置用于防止误接其他客户端，不能证明应用的真实身份。",
+  "No clients allowed. Select a client or disable the restriction.": "当前拒绝所有客户端。请选择客户端或关闭限制。"
 }
