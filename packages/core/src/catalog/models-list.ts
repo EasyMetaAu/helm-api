@@ -146,6 +146,17 @@ export function isModelVisibleForClient(
   }
 }
 
+// Generic quality/task/custom lanes retain their routing abstraction. Public
+// family-named lanes are discovery entries too; never classify them by primary
+// or fallback candidates, which would change the meaning of generic lanes.
+function isLaneVisibleForClient(id: string, client: ClientId | null): boolean {
+  const name = id.toLowerCase();
+  const family = /^(gpt|chatgpt|codex|claude|grok|gemini|deepseek)(?:[-.]|$)/.exec(name)?.[1];
+  if (family !== undefined) return isModelVisibleForClient(`${family}-lane`, client);
+  if (/^o[1-9][0-9]*(?:[-.]|$)/.test(name)) return isModelVisibleForClient(name, client);
+  return true;
+}
+
 export function filterModelsForClient(
   list: ModelsList,
   client: ClientId | null | undefined,
@@ -154,10 +165,10 @@ export function filterModelsForClient(
   if (client === undefined) return list;
   return {
     ...list,
-    data: list.data.filter(
-      (model) =>
-        model.type === "lane" ||
-        isModelVisibleForClient(modelNames?.get(model.id) ?? model.id, client),
+    data: list.data.filter((model) =>
+      model.type === "lane"
+        ? isLaneVisibleForClient(model.id, client)
+        : isModelVisibleForClient(modelNames?.get(model.id) ?? model.id, client),
     ),
   };
 }

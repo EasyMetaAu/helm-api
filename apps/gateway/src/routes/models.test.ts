@@ -586,3 +586,45 @@ describe("client-scoped discovery", () => {
     expect(codexModels).not.toHaveBeenCalled();
   });
 });
+
+it("filters family lane lists and details while retaining generic fallback lanes even without custom model permission", async () => {
+  const familyConfig = parseLanesConfig({
+    balanced: { primary: "anthropic/claude-opus-5", fallback: ["openai/gpt-6.1-sol"] },
+    "claude-opus": { primary: "anthropic/claude-opus-5", fallback: ["balanced"] },
+    "gpt-6.1-sol": { primary: "openai/gpt-6.1-sol", fallback: ["balanced"] },
+    grok: { primary: "xai/grok-4.5", fallback: [] },
+  });
+  const before = JSON.stringify(familyConfig);
+  const rec = record({
+    client_policy: { allowed_clients: ["codex_app", "claude_cli", "grok_cli"] },
+  });
+  const app = buildApp(
+    rec,
+    () => ["anthropic/claude-opus-5", "openai/gpt-6.1-sol", "xai/grok-4.5"],
+    () => familyConfig,
+  );
+  for (const [ua, family] of [
+    ["Codex Desktop/0.162.0", "gpt-6.1-sol"],
+    ["claude-cli/2.1.296 (external, cli)", "claude-opus"],
+    ["grok-shell/1.0.52", "grok"],
+    ["Codex Desktop/0.162.0", "gpt-6.1-sol"],
+  ] as const) {
+    const headers = { ...AUTH, "User-Agent": ua };
+    const response = await app.request("/v1/models", { headers });
+    expect(((await response.json()) as ModelsList).data.map((m) => m.id)).toEqual([
+      "balanced",
+      family,
+      "auto",
+    ]);
+    expect((await app.request("/v1/models/" + family, { headers })).status).toBe(200);
+    if (family !== "claude-opus")
+      expect((await app.request("/v1/models/claude-opus", { headers })).status).toBe(400);
+  }
+  rec.client_policy = null;
+  expect(
+    ((await (await app.request("/v1/models", { headers: AUTH })).json()) as ModelsList).data.map(
+      (m) => m.id,
+    ),
+  ).toEqual(["balanced", "claude-opus", "gpt-6.1-sol", "grok", "auto"]);
+  expect(JSON.stringify(familyConfig)).toBe(before);
+});
