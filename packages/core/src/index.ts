@@ -48,7 +48,12 @@ export {
 } from "./catalog/cost.js";
 export { CatalogError, type LoadCatalogDeps, loadCatalog } from "./catalog/index.js";
 export { type LoadRuntimeCatalogOptions, loadRuntimeCatalog } from "./catalog/load.js";
-export { type BuildModelsListInput, buildModelsList } from "./catalog/models-list.js";
+export {
+  type BuildModelsListInput,
+  buildModelsList,
+  filterModelsForClient,
+  isModelVisibleForClient,
+} from "./catalog/models-list.js";
 export {
   type AttemptDecision,
   type BreakerDeps,

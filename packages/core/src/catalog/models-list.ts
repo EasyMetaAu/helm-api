@@ -1,4 +1,4 @@
-import type { CatalogEntry, ModelObject, ModelsList } from "@helm/shared";
+import type { CatalogEntry, ClientId, ModelObject, ModelsList } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { createBlockedModelMatcher } from "../model-blocking.js";
@@ -121,4 +121,43 @@ export function buildModelsList(input: BuildModelsListInput): ModelsList {
   }
 
   return { object: "list", data };
+}
+
+// Discovery is a presentation rule, never a provider-selection constraint. Lane
+// entries retain their entire cross-family fallback chain. Resolve configured
+// aliases to wire model IDs so arbitrary alias/provider names cannot mislabel them.
+export function isModelVisibleForClient(
+  model: string,
+  client: ClientId | null | undefined,
+): boolean {
+  if (client === undefined) return true;
+  const name = model.slice(model.lastIndexOf("/") + 1).toLowerCase();
+  switch (client) {
+    case "codex_app":
+    case "codex_cli":
+      return /^(?:gpt-|chatgpt-|codex-|o[1-9][0-9]*(?:[-.]|$))/.test(name);
+    case "claude_cli":
+    case "claude_desktop":
+      return name.startsWith("claude-");
+    case "grok_cli":
+      return name.startsWith("grok-");
+    default:
+      return false;
+  }
+}
+
+export function filterModelsForClient(
+  list: ModelsList,
+  client: ClientId | null | undefined,
+  modelNames?: ReadonlyMap<string, string>,
+): ModelsList {
+  if (client === undefined) return list;
+  return {
+    ...list,
+    data: list.data.filter(
+      (model) =>
+        model.type === "lane" ||
+        isModelVisibleForClient(modelNames?.get(model.id) ?? model.id, client),
+    ),
+  };
 }
