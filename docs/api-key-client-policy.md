@@ -20,9 +20,13 @@
 
 User-Agent 可伪造。这是防止误接客户端的入口限制，不是应用身份认证，也不能保证上游账号不被封禁。`originator` 等附加头不单独作为放行凭证。Claude Desktop 内嵌 agent 模式若使用其他标记，会被拒绝，需新增真实样本后再扩展，不能根据猜测放行。
 
+损坏或当前版本不认识的持久化策略读取为 `{"allowed_clients":[]}`（仅用于读取的拒绝所有客户端标记），返回 403，不阻断网关启动或其他 key。管理页面可重新选择客户端或关闭限制；写入接口仍拒绝空名单。只有数据库 SQL NULL 表示关闭，JSON null 也按无效策略拒绝。
+
+拒绝日志保留 trace_id、key ID、识别结果与原因，不记录原始 User-Agent。UA 是任意客户端输入，可能夹带敏感信息；排查客户端格式变更时应另行进行限定范围的脱敏采样。
+
 ## 边界与生效时间
 
-覆盖 Chat 及别名、Messages 与 token count、Responses 与生命周期/compact/input tokens、Gemini 及别名、Interactions、Decisions、图片、视频、TTS、Realtime 会话建立和模型发现。管理面、Portal、usage、memory/MCP 与健康检查保持其原鉴权；它们不作为模型推理入口。
+覆盖 Chat 及别名、Messages 与 token count、Responses 与生命周期/compact/input tokens、Gemini 及别名、Interactions、Decisions、图片、视频、TTS、Realtime 会话建立和模型发现。管理面、Portal、usage、memory/MCP 与健康检查保持其原鉴权；其中 MCP 的 memory_recall 在配置 embedding 模型时可能产生上游调用，这类 Memory 辅助调用明确不属于此策略范围。
 
 Responses WebSocket 在握手的模型发现检查，以及每次 `response.create` 对应的 HTTP 入口执行检查。Realtime 在会话建立和 sideband 握手时检查；已经接受的实时会话和进行中的流不因修改开关而中断。此功能不提供强制终止既有会话。
 

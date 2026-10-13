@@ -1,5 +1,7 @@
+import { evaluateClientPolicy } from "@helm/shared";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import { bootstrapRootKey } from "../auth/bootstrap.js";
 import { createCachedKeyStore } from "./cached-keystore.js";
 import { PgKeyStore } from "./postgres/keystore.js";
 import { createPgliteDb } from "./postgres/migrate.js";
@@ -39,16 +41,41 @@ describe.each(["sqlite", "postgres"])("%s client policy persistence", (dialect) 
         clientPolicy: policy,
       });
       expect(created.client_policy).toEqual(policy);
-      // Corrupt persisted policy must never normalize into unrestricted access.
-      if ("$sqlite" in db)
-        db.$sqlite
-          .prepare("UPDATE api_keys SET client_policy = ? WHERE key_id = ?")
-          .run('{"allowed_clients":[]}', "k2");
-      else
-        await db.execute(
-          sql`UPDATE api_keys SET client_policy = '{"allowed_clients":[]}'::jsonb WHERE key_id = 'k2'`,
-        );
-      await expect(inner.getById("k2")).rejects.toThrow();
+      // A bad row denies only its own key and stays repairable through management.
+      const corruptValues = ['{"allowed_clients":[]}', '{"allowed_clients":["future"]}', "null"];
+      if ("$sqlite" in db) corruptValues.push("not-json");
+      for (const value of corruptValues) {
+        if ("$sqlite" in db)
+          db.$sqlite
+            .prepare("UPDATE api_keys SET client_policy = ? WHERE key_id = ?")
+            .run(value, "k2");
+        else
+          await db.execute(
+            sql`UPDATE api_keys SET client_policy = ${value}::jsonb WHERE key_id = 'k2'`,
+          );
+        const bad = await inner.getById("k2");
+        expect(bad?.client_policy).toEqual({ allowed_clients: [] });
+        expect(
+          evaluateClientPolicy(
+            (await inner.getByHash("h2"))?.client_policy,
+            "Codex Desktop/0.162.0",
+          ).reason,
+        ).toBe("invalid_policy");
+        expect(await inner.list()).toHaveLength(2);
+        expect((await inner.getByHash("new-h"))?.client_policy).toBeNull();
+        expect(
+          await bootstrapRootKey({
+            keyStore: inner,
+            generateKey: () => {
+              throw new Error("Unexpected mint");
+            },
+            now: () => new Date(),
+            log: () => {},
+          }),
+        ).toEqual({ created: false, keyId: null });
+      }
+      await inner.updateKey("k2", { clientPolicy: policy });
+      expect((await inner.getById("k2"))?.client_policy).toEqual(policy);
     } finally {
       if ("$sqlite" in db) db.$sqlite.close();
       else await db.$close();

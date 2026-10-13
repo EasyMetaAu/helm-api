@@ -26,6 +26,25 @@ export const ClientPolicySchema = z
   .strict();
 export type ClientPolicy = z.infer<typeof ClientPolicySchema>;
 
+// Read-side sentinel: corrupt or newer policies deny every client without making
+// unrelated keys or the management plane unavailable. Never accepted on writes.
+export const StoredClientPolicySchema = z.union([
+  ClientPolicySchema,
+  z.object({ allowed_clients: z.tuple([]) }).strict(),
+]);
+export function readStoredClientPolicy(value: unknown): ClientPolicy {
+  const parsed = ClientPolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : { allowed_clients: [] };
+}
+
+export function readStoredClientPolicyJson(value: string): ClientPolicy {
+  try {
+    return readStoredClientPolicy(JSON.parse(value));
+  } catch {
+    return { allowed_clients: [] };
+  }
+}
+
 // These are observed product tokens, not authentication proofs. Versions are
 // deliberately not pinned; ambiguity and malformed headers fail closed.
 const profiles: Record<ClientId, RegExp> = {

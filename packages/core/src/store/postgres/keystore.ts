@@ -1,10 +1,20 @@
-import { type ApiKeyRecord, ClientPolicySchema, ReasoningEffortSchema } from "@helm/shared";
-import { asc, eq } from "drizzle-orm";
+import {
+  type ApiKeyRecord,
+  ClientPolicySchema,
+  ReasoningEffortSchema,
+  readStoredClientPolicy,
+} from "@helm/shared";
+import { asc, eq, getTableColumns, sql } from "drizzle-orm";
 import type { CreateKeyInput, KeyPatch, KeyStore, RotateKeyInput } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
-type ApiKeyRow = typeof apiKeys.$inferSelect;
+type ApiKeyRow = typeof apiKeys.$inferSelect & { clientPolicyIsSqlNull?: boolean };
+// Drivers decode JSONB null and SQL NULL identically; only SQL NULL disables policy.
+const readColumns = {
+  ...getTableColumns(apiKeys),
+  clientPolicyIsSqlNull: sql<boolean>`${apiKeys.clientPolicy} IS NULL`,
+};
 
 // Postgres adapter for the KeyStore port — the supabase implementation. Same
 // contract as SqliteKeyStore, but async (postgres-js / pglite). Uses native
@@ -63,13 +73,21 @@ export class PgKeyStore implements KeyStore {
   }
 
   async getByHash(hash: string): Promise<ApiKeyRecord | null> {
-    const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.hash, hash)).limit(1);
+    const rows = await this.db
+      .select(readColumns)
+      .from(apiKeys)
+      .where(eq(apiKeys.hash, hash))
+      .limit(1);
     const row = rows[0];
     return row ? this.toRecord(row) : null;
   }
 
   async getById(keyId: string): Promise<ApiKeyRecord | null> {
-    const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).limit(1);
+    const rows = await this.db
+      .select(readColumns)
+      .from(apiKeys)
+      .where(eq(apiKeys.keyId, keyId))
+      .limit(1);
     const row = rows[0];
     return row ? this.toRecord(row) : null;
   }
@@ -79,7 +97,7 @@ export class PgKeyStore implements KeyStore {
     // explicit ORDER BY Postgres returns rows in an unspecified order that shifts as
     // rows are updated/deleted, so the admin list appeared to reshuffle between loads.
     const rows = await this.db
-      .select()
+      .select(readColumns)
       .from(apiKeys)
       .orderBy(asc(apiKeys.createdAt), asc(apiKeys.keyId));
     return rows.map((r) => this.toRecord(r));
@@ -162,7 +180,11 @@ export class PgKeyStore implements KeyStore {
     if (patch.maxReasoningEffort !== undefined) set.maxReasoningEffort = patch.maxReasoningEffort;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
-      const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).limit(1);
+      const rows = await this.db
+        .select(readColumns)
+        .from(apiKeys)
+        .where(eq(apiKeys.keyId, keyId))
+        .limit(1);
       if (rows.length === 0) throw new Error(`key not found: ${keyId}`);
       return;
     }
@@ -212,7 +234,10 @@ export class PgKeyStore implements KeyStore {
       name: row.name ?? null,
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
-      client_policy: row.clientPolicy === null ? null : ClientPolicySchema.parse(row.clientPolicy),
+      client_policy:
+        row.clientPolicy === null && row.clientPolicyIsSqlNull !== false
+          ? null
+          : readStoredClientPolicy(row.clientPolicy),
       blocked_models: row.blockedModels ?? null,
       allow_fast_mode: row.allowFastMode,
       disabled: row.disabled,

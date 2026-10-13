@@ -1001,5 +1001,6 @@
   "Share": "Share",
   "Date": "Date",
   "Daily usage": "Daily usage",
-  "Allowed clients": "Clientes permitidos"
+  "Allowed clients": "Clientes permitidos",
+  "No clients allowed. Contact your administrator.": "Nenhum cliente permitido. Contate o administrador."
 }

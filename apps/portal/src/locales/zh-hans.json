@@ -1001,5 +1001,6 @@
   "Share": "占比",
   "Date": "日期",
   "Daily usage": "每日用量",
-  "Allowed clients": "允许的客户端"
+  "Allowed clients": "允许的客户端",
+  "No clients allowed. Contact your administrator.": "当前拒绝所有客户端，请联系管理员。"
 }

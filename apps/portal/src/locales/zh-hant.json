@@ -1001,5 +1001,6 @@
   "Share": "Share",
   "Date": "Date",
   "Daily usage": "Daily usage",
-  "Allowed clients": "允許的客戶端"
+  "Allowed clients": "允許的客戶端",
+  "No clients allowed. Contact your administrator.": "目前拒絕所有用戶端，請聯絡管理員。"
 }

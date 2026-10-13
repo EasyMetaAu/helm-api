@@ -1,4 +1,4 @@
-import { ClientPolicySchema, type ClientPolicy } from '@helm/shared';
+import { readStoredClientPolicy, type ClientPolicy } from '@helm/shared';
 // Admin API key client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and owns
 // NO auth logic (CLAUDE.md Principle 1). Normal list/detail responses are redacted
@@ -208,7 +208,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     blocked_models: Array.isArray(blocked) ? blocked.map(String) : null,
-    client_policy: raw.client_policy == null ? null : ClientPolicySchema.parse(raw.client_policy),
+    client_policy: raw.client_policy == null ? null : readStoredClientPolicy(raw.client_policy),
     allow_fast_mode: raw.allow_fast_mode === true,
     disabled: raw.disabled === true,
     // null/absent = inherit system default; a finite number (incl. 0) = override.

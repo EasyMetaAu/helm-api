@@ -1137,5 +1137,6 @@
   "Restrict clients": "限制客戶端",
   "Select at least one allowed client.": "請至少選擇一個允許的客戶端。",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "請至少選擇一個客戶端。無法識別的客戶端將被拒絕；正常放行後，路由與故障回退保持不變。",
-  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 可以被偽造。此設定用於防止誤接其他客戶端，不能證明應用程式的真實身分。"
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 可以被偽造。此設定用於防止誤接其他客戶端，不能證明應用程式的真實身分。",
+  "No clients allowed. Select a client or disable the restriction.": "目前拒絕所有用戶端。請選擇用戶端或關閉限制。"
 }

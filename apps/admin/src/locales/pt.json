@@ -1137,5 +1137,6 @@
   "Restrict clients": "Restringir clientes",
   "Select at least one allowed client.": "Selecione pelo menos um cliente permitido.",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "Selecione pelo menos um cliente. Clientes desconhecidos são rejeitados. O roteamento e o fallback permanecem inalterados.",
-  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "Os cabeçalhos User-Agent podem ser falsificados. Esta opção evita o uso acidental por outros clientes; não verifica a identidade do aplicativo."
+  "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "Os cabeçalhos User-Agent podem ser falsificados. Esta opção evita o uso acidental por outros clientes; não verifica a identidade do aplicativo.",
+  "No clients allowed. Select a client or disable the restriction.": "Nenhum cliente permitido. Selecione um cliente ou desative a restrição."
 }

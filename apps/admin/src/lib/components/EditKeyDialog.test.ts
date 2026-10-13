@@ -35,6 +35,27 @@ describe('EditKeyDialog client policy', () => {
     updateKey.mockReset();
     updateKey.mockResolvedValue(undefined);
   });
+  it('shows an invalid policy as denied and lets the administrator repair it', async () => {
+    render(EditKeyDialog, {
+      key: { ...key, client_policy: { allowed_clients: [] } },
+      lanes: ['balanced'],
+      onsaved: vi.fn(),
+      onclose: vi.fn(),
+    });
+    expect(
+      screen.getByText('No clients allowed. Select a client or disable the restriction.'),
+    ).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(updateKey).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByLabelText('Codex App'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateKey).toHaveBeenCalledWith(
+        'key',
+        expect.objectContaining({ client_policy: { allowed_clients: ['codex_app'] } }),
+      ),
+    );
+  });
   it('preserves the existing policy on an unrelated edit', async () => {
     render(EditKeyDialog, { key, lanes: ['balanced'], onsaved: vi.fn(), onclose: vi.fn() });
     expect(screen.getByLabelText('Restrict clients')).toBeChecked();

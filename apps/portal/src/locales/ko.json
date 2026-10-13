@@ -1001,5 +1001,6 @@
   "Share": "Share",
   "Date": "Date",
   "Daily usage": "Daily usage",
-  "Allowed clients": "허용된 클라이언트"
+  "Allowed clients": "허용된 클라이언트",
+  "No clients allowed. Contact your administrator.": "허용된 클라이언트가 없습니다. 관리자에게 문의하세요."
 }
