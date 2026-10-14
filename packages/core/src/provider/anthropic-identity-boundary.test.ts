@@ -306,6 +306,12 @@ describe("Anthropic adapter header semantics", () => {
       "x-claude-code-context-compacted": "true",
       "x-claude-code-prev-tool-durations": "1",
     };
+    const system = [
+      {
+        type: "text",
+        text: "x-anthropic-billing-header: cc_version=2.1.299.test; cc_entrypoint=cli; cc_gateway=env;",
+      },
+    ];
     const review = JSON.parse(readFileSync("config/claude-protocol-review.json", "utf8")) as {
       reviewedHeaders: string[];
     };
@@ -315,8 +321,10 @@ describe("Anthropic adapter header semantics", () => {
       for (const [key, value] of Object.entries(fields)) expect(headers.get(key), key).toBe(value);
       expect(headers.get("x-unrelated-token")).toBeNull();
       expect(headers.get("x-claude-code-wiggly-dove")).toBeNull();
+      expect(headers.get("x-claude-code-upload-lane")).toBeNull();
       expect(headers.get("cookie")).toBeNull();
       expect(headers.get("x-claude-remote-container-id")).toBeNull();
+      expect(JSON.parse(String(init?.body)).system).toEqual(system);
       return response();
     });
     const client = createAnthropicClient({
@@ -325,11 +333,12 @@ describe("Anthropic adapter header semantics", () => {
     });
     await client.nativePassthrough?.({
       protocol: "anthropic_messages",
-      body: request(),
+      body: { ...request(), system },
       headers: {
         ...fields,
         "x-unrelated-token": "secret",
         "x-claude-code-wiggly-dove": "opaque-client-value",
+        "x-claude-code-upload-lane": "private-upload-route",
         cookie: "secret",
         "x-claude-remote-container-id": "private",
       },
