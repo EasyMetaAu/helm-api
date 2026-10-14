@@ -83,6 +83,7 @@ export interface VideoCreateTarget {
 export type VideoCreateOperation = "generation" | "extension";
 
 export interface VideosRouteDeps {
+  isNativeSelection?: (model: string) => boolean;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   registry: AtomicResponsesRegistryPort;
   resolver: {
@@ -366,8 +367,19 @@ export function registerMediaTaskRoutes(
       return errorJson(c, 400, "video model is not available to this key", "model_not_found");
     }
     const target = await deps.resolver.create(body, identity, operation);
-    if (target === null)
+    if (target === null) {
+      if (
+        kind === "video" &&
+        !knownArkModels.has(requestedModel) &&
+        !deps.isNativeSelection?.(requestedModel)
+      ) {
+        const schema =
+          operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema;
+        if (!schema.safeParse(body).success)
+          return errorJson(c, 400, "invalid video request", "invalid_request");
+      }
       return errorJson(c, 503, "video provider is unavailable", "provider_unavailable");
+    }
     const isArk = target.providerType === "ark";
     const isNative = target.nativeTask !== undefined;
     if (kind === "transcription" && !isNative)

@@ -4963,6 +4963,23 @@ export async function buildServer(
   };
 
   const mediaRoutes: VideosRouteDeps = {
+    isNativeSelection: (model) => {
+      const selection = resolveMediaSelection(model);
+      const aliases = Object.hasOwn(lanes, selection)
+        ? expandLaneChain(selection, lanes)
+        : [selection];
+      return aliases.some((alias) => {
+        const target = registry.resolve(alias);
+        return (
+          target.ok &&
+          config.providers.some(
+            (p) =>
+              p.name === target.value.providerName &&
+              ["ark", "bailian-media", "minimax-media"].includes(p.type),
+          )
+        );
+      });
+    },
     auth: { resolve: resolveIdentity },
     registry: responsesRegistry,
     rateLimiter,

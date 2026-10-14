@@ -1110,3 +1110,14 @@ describe("Ark lane permissions", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 });
+it("keeps the legacy invalid-model boundary when a non-native target is unavailable", async () => {
+  const { app } = setup({
+    auth: {
+      resolve: async () => ({ accountId: "a", keyId: "k", caps: { allowCustomModel: true } }),
+    },
+    resolver: { create: async () => null, poll: async () => null },
+  });
+  const response = await post(app, { model: "static/video", prompt: "bird" });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+});
