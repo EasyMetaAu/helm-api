@@ -1129,79 +1129,406 @@ xai/grok-imagine-video:
   cacheWritePerMTokUsd: null
   videoOutputPerSecondUsd: 0.05
 
-# Native media rates are not verified USD token rates. Null never means free.
+# Native media official list prices, verified 2026-10-14. See docs/media-pricing.md.
+# Native currency and billing units are preserved; USD token fields remain unknown.
+# Temporary promotions are metadata, not permanent rates or budget settlement.
 ark/seedream-5.0-flash:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "doubao-seedream-5-0-flash-260915"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.0, "conditions": {}}
+      - {"direction": "output", "unit": "image", "price": 0.12, "conditions": {}}
+    notes:
+      - "Only successfully output images are billed."
 ark/seedream-5.0-pro:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "doubao-seedream-5-0-pro-260628"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.02, "conditions": {}, "freeQuantity": 1}
+      - {"direction": "output", "unit": "image", "price": 0.3, "conditions": {"mode": "single_image", "pixelsLte": 2610000}}
+      - {"direction": "output", "unit": "image", "price": 0.6, "conditions": {"mode": "single_image", "pixelsGt": 2610000}}
+      - {"direction": "output", "unit": "layer", "price": 0.15, "conditions": {"mode": "layer_decomposition", "pixelsLte": 2610000}}
+      - {"direction": "output", "unit": "layer", "price": 0.3, "conditions": {"mode": "layer_decomposition", "pixelsGt": 2610000}}
+    notes:
+      - "First input image free per request; bill remaining images."
+      - "Each output layer is priced by its own actual pixel count; failed outputs not billed."
 ark/seedance-2.5:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "doubao-seedance-2-5-260628"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
+    rates:
+      - {"direction": "completion", "unit": "million_tokens", "price": 70.0, "conditions": {"resolution": "480p", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 70.0, "conditions": {"resolution": "720p", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 77.0, "conditions": {"resolution": "1080p", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 42.0, "conditions": {"resolution": "480p", "hasInputVideo": true}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 42.0, "conditions": {"resolution": "720p", "hasInputVideo": true}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 46.0, "conditions": {"resolution": "1080p", "hasInputVideo": true}}
+    notes:
+      - "Actual billable quantity is usage.completion_tokens, not a flat per-second price."
+      - "Estimate tokens = (input_video_seconds + output_video_seconds) * width * height * fps / 1024. Input-video requests have a minimum token floor; use actual usage for settlement."
+      - "Draft and final video are separately billed. Draft is 480p; final price and input duration depend on original inputs, excluding draft duration."
+      - "Only successful video generation billed; offline inference unsupported."
 ark/seed3d-2.0:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "doubao-seed3d-2-0-260328"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
+    rates:
+      - {"direction": "output", "unit": "successful_3d_file", "price": 2.4, "conditions": {}}
+    notes:
+      - "Equivalent to 30000 tokens * CNY 0.80 / 10000 tokens; do not charge both units."
 bailian/qwen-image-3.0-pro:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-image-3.0-pro"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#2e0ddf5c9edy0"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.02, "conditions": {}}
+      - {"direction": "output", "unit": "image", "price": 0.25, "conditions": {"resolutionClass": "1k"}}
+      - {"direction": "output", "unit": "image", "price": 0.5, "conditions": {"resolutionClass": "2k"}}
+    notes:
+      - "Do not assume a free first input image. Failed requests not billed."
 bailian/qwen-image-3.0:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-image-3.0"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#2e0ddf5c9edy0"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.02, "conditions": {}}
+      - {"direction": "output", "unit": "image", "price": 0.18, "conditions": {"resolutionClass": "1k"}}
+      - {"direction": "output", "unit": "image", "price": 0.18, "conditions": {"resolutionClass": "2k"}}
+    notes:
+      - "Do not assume a free first input image. Failed requests not billed."
 bailian/qwen-image-2.1-pro:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-image-2.1-pro"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#qwen-image-2-0-series-pricing"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.0, "conditions": {}}
+      - {"direction": "output", "unit": "image", "price": 0.25, "conditions": {}}
+    notes:
+      - "Input free under pricing page general rule for models without input pricing; charge successful output count."
 bailian/qwen-image-2.1-turbo:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-image-2.1-turbo"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#qwen-image-2-0-series-pricing"
+    rates:
+      - {"direction": "input", "unit": "image", "price": 0.0, "conditions": {}}
+      - {"direction": "output", "unit": "image", "price": 0.1, "conditions": {}}
+    notes:
+      - "Input free under pricing page general rule for models without input pricing; charge successful output count."
 bailian/wan3.0-video:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "wan3.0-video"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#wan30video_cn_h3"
+    rates:
+      - {"direction": "input_and_output_video", "unit": "second", "price": 0.3, "conditions": {"outputResolution": "480P"}, "promotion": {"multiplier": 0.7, "effectivePrice": 0.21, "endDate": null, "status": "official page says limited-time; no end date stated"}}
+      - {"direction": "input_and_output_video", "unit": "second", "price": 0.6, "conditions": {"outputResolution": "720P"}, "promotion": {"multiplier": 0.7, "effectivePrice": 0.42, "endDate": null, "status": "official page says limited-time; no end date stated"}}
+      - {"direction": "input_and_output_video", "unit": "second", "price": 1.2, "conditions": {"outputResolution": "1080P"}, "promotion": {"multiplier": 0.7, "effectivePrice": 0.84, "endDate": null, "status": "official page says limited-time; no end date stated"}}
+    notes:
+      - "Bill actual input video seconds + successful output video seconds at output-resolution tier."
+      - "Failed generation not billed. Do not silently treat limited-time promotion as permanent."
 bailian/wan3.0-video-prime:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "wan3.0-video-prime"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#wan30video_cn_h3"
+    rates:
+      - {"direction": "input_and_output_video", "unit": "second", "price": 0.45, "conditions": {"outputResolution": "480P"}}
+      - {"direction": "input_and_output_video", "unit": "second", "price": 0.9, "conditions": {"outputResolution": "720P"}}
+      - {"direction": "input_and_output_video", "unit": "second", "price": 1.8, "conditions": {"outputResolution": "1080P"}}
+    notes:
+      - "Bill actual input video seconds + successful output video seconds at output-resolution tier."
+      - "Failed generation not billed. Do not silently treat limited-time promotion as permanent."
 bailian/qwen3-asr-flash:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen3-asr-flash"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
 bailian/qwen3-asr-flash-filetrans:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
-bailian/qwen-audio-3.1-asr-flash-filetrans:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen3-asr-flash-filetrans"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
 bailian/qwen-audio-3.0-asr-flash-filetrans:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-audio-3.0-asr-flash-filetrans"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
 bailian/fun-asr:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "fun-asr"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
 bailian/paraformer-v2:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "paraformer-v2"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 8e-05, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
 bailian/paraformer-8k-v2:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "paraformer-8k-v2"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 8e-05, "conditions": {}}
+    notes:
+      - "Output not billed. Use provider billable duration; no rounding rule is invented."
+bailian/qwen-audio-3.1-asr-flash-filetrans:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-audio-3.1-asr-flash-filetrans"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#0fa27e11f4nq5"
+    rates:
+      - {"direction": "input", "unit": "million_tokens", "price": 0.8, "conditions": {}}
+      - {"direction": "output", "unit": "million_tokens", "price": 2.7, "conditions": {}}
+    notes:
+      - "This 3.1 model uses tokens, not the 3.0 per-second rates."
 bailian/qwen-audio-3.1-tts-flash:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-audio-3.1-tts-flash"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#qattcn002h3"
+    rates:
+      - {"direction": "input", "unit": "million_tokens", "price": 1.5, "conditions": {}}
+      - {"direction": "output", "unit": "million_tokens", "price": 12.0, "conditions": {}}
+    notes:
+      - "Requires separately reported input/output tokens; do not estimate invoice from text length."
 bailian/qwen-audio-3.0-tts-plus:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "qwen-audio-3.0-tts-plus"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input", "unit": "ten_thousand_billable_characters", "price": 1.4, "conditions": {}}
+    notes:
+      - "Han characters count as 2; other characters incl punctuation/spaces count as 1; SSML tags excluded. Output not billed."
 bailian/cosyvoice-v3.5-plus:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "cosyvoice-v3.5-plus"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input", "unit": "ten_thousand_billable_characters", "price": 1.5, "conditions": {}}
+    notes:
+      - "Han characters count as 2; other characters incl punctuation/spaces count as 1; SSML tags excluded. Output not billed."
 bailian/cosyvoice-v3.5-flash:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "cosyvoice-v3.5-flash"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    rates:
+      - {"direction": "input", "unit": "ten_thousand_billable_characters", "price": 0.8, "conditions": {}}
+    notes:
+      - "Han characters count as 2; other characters incl punctuation/spaces count as 1; SSML tags excluded. Output not billed."
 minimax/MiniMax-H3:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "USD"
+    region: "MiniMax international platform"
+    providerModel: "MiniMax-H3"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://platform.minimax.io/docs/pricing/overview#models/video"
+    rates:
+      - {"direction": "output_video", "unit": "second", "price": 0.08, "conditions": {"outputResolution": "768P"}}
+      - {"direction": "output_video", "unit": "second", "price": 0.13, "conditions": {"outputResolution": "2K"}}
+      - {"direction": "input_video", "unit": "second", "price": 0.08, "conditions": {"outputResolution": "768P"}}
+      - {"direction": "input_video", "unit": "second", "price": 0.13, "conditions": {"outputResolution": "2K"}}
+      - {"direction": "input_image", "unit": "image", "price": 0.04, "conditions": {}, "freeQuantity": 5}
+      - {"direction": "input_audio", "unit": "second", "price": 0.0, "conditions": {}}
+    notes:
+      - "Charge each dimension once; provider billable seconds are authoritative, not media container duration."
+      - "These are direct MiniMax international platform rates, not Alibaba resold MiniMax rates."
 minimax/MiniMax-H3-Max:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "USD"
+    region: "MiniMax international platform"
+    providerModel: "MiniMax-H3-Max"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://platform.minimax.io/docs/pricing/overview#models/video"
+    rates:
+      - {"direction": "output_video", "unit": "second", "price": 0.05, "conditions": {"outputResolution": "480P"}}
+      - {"direction": "output_video", "unit": "second", "price": 0.08, "conditions": {"outputResolution": "768P"}}
+      - {"direction": "input_video", "unit": "second", "price": 0.0553, "conditions": {"outputResolution": "480P"}}
+      - {"direction": "input_video", "unit": "second", "price": 0.143, "conditions": {"outputResolution": "768P"}}
+      - {"direction": "input_image", "unit": "image", "price": 0.074, "conditions": {}, "freeQuantity": 2}
+      - {"direction": "input_audio", "unit": "second", "price": 0.0, "conditions": {}}
+    notes:
+      - "Charge each dimension once; provider billable seconds are authoritative, not media container duration."
+      - "These are direct MiniMax international platform rates, not Alibaba resold MiniMax rates."
 minimax/speech-2.8-hd:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "USD"
+    region: "MiniMax international platform"
+    providerModel: "speech-2.8-hd"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://platform.minimax.io/docs/pricing/overview#models/speech"
+    rates:
+      - {"direction": "input", "unit": "million_billable_characters", "price": 100.0, "conditions": {}}
+    conditionalFees:
+      - {"kind": "rapid_voice_cloning", "pricePerVoice": 1.5, "charged": "first_synthesis_use"}
+      - {"kind": "voice_design", "pricePerVoice": 3.0, "charged": "first_synthesis_use"}
+    notes:
+      - "Use extra_info.usage_characters; word_count and norm_text_char_count are not billing quantities."
+      - "Price page lists same standard rates for synchronous and asynchronous TTS; streaming changes transport, not character unit."
+      - "If using externally created cloned/designed voice, first-use voice fee may apply."
 minimax/speech-2.8-turbo:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
+  media:
+    currency: "USD"
+    region: "MiniMax international platform"
+    providerModel: "speech-2.8-turbo"
+    basis: "official_list_price"
+    verifiedOn: "2026-10-14"
+    source: "https://platform.minimax.io/docs/pricing/overview#models/speech"
+    rates:
+      - {"direction": "input", "unit": "million_billable_characters", "price": 60.0, "conditions": {}}
+    conditionalFees:
+      - {"kind": "rapid_voice_cloning", "pricePerVoice": 1.5, "charged": "first_synthesis_use"}
+      - {"kind": "voice_design", "pricePerVoice": 3.0, "charged": "first_synthesis_use"}
+    notes:
+      - "Use extra_info.usage_characters; word_count and norm_text_char_count are not billing quantities."
+      - "Price page lists same standard rates for synchronous and asynchronous TTS; streaming changes transport, not character unit."
+      - "If using externally created cloned/designed voice, first-use voice fee may apply."

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ReasoningEffortSchema } from "../config/lanes-schema.js";
+import { MediaPricingSchema } from "./media-pricing.js";
 
 // Catalog metadata = per-model capabilities + pricing. Two layers:
 //   1. generated  — synced from LiteLLM's model_prices_and_context_window.json
@@ -178,6 +179,8 @@ export const ServicePricingTierSchema = z
 export type ServicePricingTier = z.infer<typeof ServicePricingTierSchema>;
 
 export const PricingSchema = z.object({
+  // Official native-currency media card; never interpreted as USD token costs.
+  media: MediaPricingSchema.optional(),
   inputPerMTokUsd: z.number().nonnegative().nullable(),
   outputPerMTokUsd: z.number().nonnegative().nullable(),
   // Prompt-cache prices (memory compaction economics). Synced from LiteLLM's
@@ -251,6 +254,7 @@ export const CapabilitiesOverrideEntrySchema = CapabilitiesSchema.partial().stri
 // and the merge preserves the generated value; an explicit `null` clears it.
 export const PricingOverrideEntrySchema = z
   .object({
+    media: MediaPricingSchema.optional(),
     inputPerMTokUsd: z.number().nonnegative().nullable().optional(),
     outputPerMTokUsd: z.number().nonnegative().nullable().optional(),
     cacheReadPerMTokUsd: z.number().nonnegative().nullable().optional(),
