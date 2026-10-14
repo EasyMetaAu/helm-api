@@ -1,5 +1,6 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { ERROR_CLASS_HTTP_STATUS, type ProviderAttempt } from "@helm/shared";
+import { ArkMediaError } from "../../../../packages/core/src/provider/ark.js";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
   requestCancellationReason,
@@ -68,6 +69,7 @@ export interface ImageChainServed {
 export interface ImageChainTerminal {
   ok: false;
   errorClass: string;
+  errorCode?: string;
   httpStatus: number;
   message: string;
   providerRaw: unknown | null;
@@ -177,6 +179,69 @@ export async function runImageChain(
           errorClass: "outcome_unknown",
           httpStatus: 503,
           message: "image create outcome is unknown",
+          providerRaw: null,
+          aborted: false,
+          attempts,
+        };
+      }
+      // Ark transport knows whether the write was rejected, never sent, or has
+      // an uncertain result. Handle it before generic OpenAI shape heuristics.
+      if (err instanceof ArkMediaError) {
+        const rejected = err.outcome === "rejected";
+        const unknown = err.outcome === "unknown";
+        const status = err.upstreamStatus;
+        const invalidRequest = rejected && (status === 400 || status === 413 || status === 422);
+        const errorClass = unknown
+          ? "outcome_unknown"
+          : invalidRequest
+            ? "invalid_request"
+            : "upstream_error";
+        const raw = err.providerRaw;
+        const providerError =
+          typeof raw === "object" && raw !== null && "error" in raw ? raw.error : null;
+        const providerCode =
+          typeof providerError === "object" && providerError !== null && "code" in providerError
+            ? providerError.code
+            : null;
+        // Only a bounded machine code crosses the public boundary. Upstream
+        // messages/raw bodies can contain account identifiers or supplied URLs.
+        const errorCode = unknown
+          ? "outcome_unknown"
+          : !rejected
+            ? "provider_unavailable"
+            : typeof providerCode === "string" &&
+                /^[A-Za-z][A-Za-z0-9_.]{0,127}$/.test(providerCode)
+              ? providerCode
+              : "upstream_rejected";
+        if (unknown) breaker.recordFailure(target.alias);
+        else releaseProbeLock();
+        attempts.push({
+          alias: target.alias,
+          skipped: false,
+          skip_reason: null,
+          status: "error",
+          error_class: errorClass,
+          latency_ms: Date.now() - started,
+          cost_usd: null,
+          error_detail: null,
+        });
+        return {
+          ok: false,
+          errorClass,
+          errorCode,
+          httpStatus:
+            unknown || !rejected
+              ? 503
+              : invalidRequest
+                ? (status ?? 400)
+                : status === 429
+                  ? 429
+                  : 502,
+          message: unknown
+            ? "image create outcome is unknown"
+            : rejected
+              ? "Ark image request was rejected"
+              : "Ark image request was not sent",
           providerRaw: null,
           aborted: false,
           attempts,

@@ -1,6 +1,7 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { createCircuitBreaker, UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
+import { ArkMediaError } from "../../../../packages/core/src/provider/ark.js";
 import { type ImageAttempt, type ImageChainTarget, runImageChain } from "./image-chain.js";
 
 // A breaker double: every alias CLOSED unless listed in `open`. Records calls so a
@@ -331,5 +332,42 @@ describe("runImageChain", () => {
     expect(res.errorClass).toBe("lane_unavailable");
     expect(res.httpStatus).toBe(503);
     expect(attempt).not.toHaveBeenCalled();
+  });
+});
+
+describe("Ark media write outcomes", () => {
+  it.each([
+    ["rejected", 400, 400, "InvalidParameter.TaskTypeConstraint"],
+    ["rejected", 429, 429, "SetLimitExceeded"],
+    ["rejected", 403, 502, "AccessDenied"],
+    ["not_sent", null, 503, "provider_unavailable"],
+    ["unknown", 503, 503, "outcome_unknown"],
+    ["unknown", 400, 503, "outcome_unknown"],
+  ] as const)("keeps %s/%s separate and never falls back", async (outcome, status, expectedStatus, code) => {
+    const breaker = fakeBreaker();
+    const error = new ArkMediaError(
+      outcome,
+      "upstream_error",
+      "safe transport message",
+      {
+        error: { code, type: "invalid_request_error", message: "account-linked upstream message" },
+      },
+      status,
+    );
+    const attempt = vi.fn().mockRejectedValue(error);
+    const result = await runImageChain(
+      [target("primary"), target("fallback")],
+      breaker,
+      attempt,
+      new AbortController().signal,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected failure");
+    expect(result.httpStatus).toBe(expectedStatus);
+    expect(result.errorCode).toBe(code);
+    expect(result.message).not.toContain("account-linked");
+    expect(result.providerRaw).toBeNull();
+    expect(attempt).toHaveBeenCalledTimes(1);
+    if (outcome !== "unknown") expect(breaker.recordFailure).not.toHaveBeenCalled();
   });
 });

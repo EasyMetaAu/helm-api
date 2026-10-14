@@ -2,6 +2,7 @@ import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createArkMediaClient } from "../../../../packages/core/src/provider/ark.js";
 import type { AppEnv } from "../app.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { type ImagesRouteDeps, registerImagesRoute } from "./images.js";
@@ -705,5 +706,327 @@ describe("Images Gemini translation fidelity", () => {
     const response = await post(app, { model: "gemini-image", prompt: "a cat", ...options });
     expect(response.status).toBe(400);
     expect(nativePassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe("Ark Seedream image generation", () => {
+  const flash = "doubao-seedream-5-0-flash-260915";
+  const pro = "doubao-seedream-5-0-pro-260628";
+  const source = "https://media.example.com/source.png";
+  function arkSetup(
+    providerModel = flash,
+    options: {
+      spendCapped?: boolean;
+      error?: Error;
+      result?: Record<string, unknown>;
+      priced?: boolean;
+    } = {},
+  ) {
+    const result = options.result ?? {
+      model: providerModel,
+      created: 1,
+      data: [{ url: source, size: "1024x1024", output_format: "png" }],
+      usage: { input_images: 0, generated_images: 1, output_tokens: 4096, total_tokens: 4096 },
+    };
+    const create = options.error
+      ? vi.fn().mockRejectedValue(options.error)
+      : vi.fn().mockResolvedValue(result);
+    const fallback = vi.fn().mockResolvedValue(result);
+    const imageEdit = vi.fn().mockResolvedValue(result);
+    const costOf = vi.fn().mockReturnValue(null);
+    const fixture = setup({
+      auth: {
+        resolve: async () =>
+          ({
+            keyId: "ark-key",
+            accountId: "acct",
+            caps: options.spendCapped ? { budget: BUDGET_CAPS } : {},
+          }) as MessagesIdentity,
+      },
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "image",
+        candidateChain: ["ark-primary", "ark-fallback"],
+        targets: [
+          {
+            client: { imageGeneration: create, imageEdit } as unknown as ProviderClient,
+            providerModel,
+            alias: "ark-primary",
+            kind: "openai",
+          },
+          {
+            client: { imageGeneration: fallback, imageEdit } as unknown as ProviderClient,
+            providerModel,
+            alias: "ark-fallback",
+            kind: "openai",
+          },
+        ],
+      }),
+      isPriced: options.priced === undefined ? undefined : () => options.priced === true,
+      costOf,
+    });
+    return { ...fixture, create, fallback, imageEdit, result, costOf };
+  }
+  it.each([
+    [flash, flash],
+    [pro, pro],
+    ["ark/seedream-5.0-flash", flash],
+    ["ark/seedream-5.0-pro", pro],
+    ["seedream-flash", flash],
+    ["seedream-pro", pro],
+    ["configured-custom-alias", flash],
+  ])("validates after resolving public model %s", async (model, wire) => {
+    const fixture = arkSetup(wire);
+    const body = {
+      model,
+      prompt: "湖面",
+      image: [source, source],
+      size: "1.5K",
+      response_format: "url",
+    };
+    const res = await post(fixture.app, body);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(fixture.result);
+    expect(fixture.create).toHaveBeenCalledExactlyOnceWith(
+      { ...body, model: wire },
+      expect.anything(),
+    );
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it.each([
+    flash,
+    pro,
+  ])("preserves automatic layer input/output and metadata for %s", async (model) => {
+    const result = {
+      model,
+      created: 1,
+      data: [
+        { url: source, size: "1024x1024", output_format: "jpeg", z_index: 0 },
+        {
+          url: source,
+          size: "512x512",
+          output_format: "png",
+          z_index: 1,
+          bounding_box: { absolute: [0, 0, 512, 512], normalized: [0, 0, 500, 500] },
+          name: "主体",
+          description: "前景主体",
+        },
+      ],
+      usage: { input_images: 1, generated_images: 2, output_tokens: 5120, total_tokens: 5120 },
+    };
+    const fixture = arkSetup(model, { result });
+    const body = {
+      model: "configured-layer-alias",
+      image: source,
+      layer_decomposition: true,
+      size: "auto",
+    };
+    const res = await post(fixture.app, body);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(fixture.create).toHaveBeenCalledExactlyOnceWith({ ...body, model }, expect.anything());
+    const payload = fixture.enqueuePayload.mock.calls[0]?.[0];
+    expect(JSON.parse(payload.responseJson)).toEqual(result);
+  });
+  it.each([
+    { stream: true },
+    { n: 1 },
+    { tools: [] },
+    { sequential_image_generation: "disabled" },
+    { image: Array(11).fill(source) },
+    { image: "http://example.com/a.png" },
+    { size: "4K" },
+    { layer_decomposition: true, image: [source, source] },
+    { unexpected: true },
+  ])("rejects unsupported parameters behind arbitrary aliases before POST: %j", async (fields) => {
+    const fixture = arkSetup();
+    expect((await post(fixture.app, { model: "any-alias", prompt: "x", ...fields })).status).toBe(
+      400,
+    );
+    expect(fixture.create).not.toHaveBeenCalled();
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it("does not relax prompt requirements for non-Ark targets", async () => {
+    const fixture = setup();
+    expect(
+      (await post(fixture.app, { model: "gpt-image-2", layer_decomposition: true, image: source }))
+        .status,
+    ).toBe(400);
+    expect(fixture.imageGeneration).not.toHaveBeenCalled();
+  });
+  it.each([
+    "doubao-seedance-2-5-260628",
+    "doubao-seed3d-2-0-260328",
+  ])("rejects wrong media capability %s", async (model) => {
+    const fixture = arkSetup(model);
+    expect((await post(fixture.app, { model: "alias", prompt: "x" })).status).toBe(400);
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+  it("rejects Ark multipart/JSON edits surface even if the client exposes imageEdit", async () => {
+    const fixture = arkSetup();
+    const res = await fixture.app.request("/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "seedream-flash", prompt: "Edit", image: { url: source } }),
+    });
+    expect(res.status).toBe(400);
+    expect(fixture.imageEdit).not.toHaveBeenCalled();
+  });
+  it.each([
+    false,
+    true,
+    undefined,
+  ])("rejects spend-capped Ark even when pricing hook says %s", async (priced) => {
+    const fixture = arkSetup(flash, { spendCapped: true, priced });
+    const res = await post(fixture.app, { model: "seedream-flash", prompt: "x" });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ error: { code: "media_pricing_unavailable" } });
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+  it("rejects a plain image returned for layer decomposition without replay", async () => {
+    const fixture = arkSetup();
+    const res = await post(fixture.app, { model: flash, image: source, layer_decomposition: true });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it("rejects the wrong delivery carrier without replay", async () => {
+    const fixture = arkSetup();
+    const res = await post(fixture.app, { model: flash, prompt: "x", response_format: "b64_json" });
+    expect(res.status).toBe(503);
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it.each([
+    {},
+    { model: flash, created: 1, data: [{ url: source }] },
+    { model: pro, created: 1, data: [{ url: source, size: "1024x1024", output_format: "png" }] },
+  ])("rejects malformed or wrong-model success without a second POST", async (result) => {
+    const fixture = arkSetup(flash, { result });
+    const res = await post(fixture.app, { model: flash, prompt: "x" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("Ark route through SDK with offline HTTP boundary", () => {
+  const models = ["doubao-seedream-5-0-flash-260915", "doubao-seedream-5-0-pro-260628"] as const;
+  function sdkFixture(model: string, fetch: typeof globalThis.fetch) {
+    const media = createArkMediaClient({
+      config: {
+        baseUrl: "https://ark.example.test/api/v3",
+        apiKey: "offline-ark-test-key",
+        timeoutMs: 1000,
+      },
+      fetch,
+    });
+    const fallback = vi.fn();
+    const fixture = setup({
+      auth: {
+        resolve: async () =>
+          ({ keyId: "ark-key", accountId: "acct", caps: {} }) as MessagesIdentity,
+      },
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "image",
+        candidateChain: ["ark-primary", "ark-fallback"],
+        targets: [
+          {
+            client: media as unknown as ProviderClient,
+            providerModel: model,
+            alias: "ark-primary",
+            kind: "openai",
+          },
+          {
+            client: { imageGeneration: fallback } as unknown as ProviderClient,
+            providerModel: model,
+            alias: "ark-fallback",
+            kind: "openai",
+          },
+        ],
+      }),
+      isPriced: () => false,
+      costOf: () => {
+        throw new Error("Ark must not use chat token pricing");
+      },
+    });
+    return { ...fixture, fallback };
+  }
+  it.each(models)("serves %s through the real SDK with exactly one mock POST", async (model) => {
+    const result = {
+      model,
+      created: 1,
+      data: [{ b64_json: "AAAA", size: "1024x1024", output_format: "png" }],
+      usage: { generated_images: 1, input_images: 0, output_tokens: 4096, total_tokens: 4096 },
+    };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockImplementation(async () => Response.json(result));
+    const fixture = sdkFixture(model, fetch);
+    const body = {
+      model: "public-image-alias",
+      prompt: "湖面",
+      response_format: "b64_json",
+      output_format: "png",
+    };
+    const res = await post(fixture.app, body);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(String(url)).toBe("https://ark.example.test/api/v3/images/generations");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ ...body, model });
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it.each(
+    models.flatMap((model) => [400, 429, 503, 0].map((status) => [model, status] as const)),
+  )("handles %s HTTP %s without duplicate POST or leaking error text", async (model, status) => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () => {
+      if (status === 0) throw new Error("Connection lost");
+      return Response.json(
+        {
+          error: {
+            code: "SetLimitExceeded",
+            message: "account-linked detail offline-ark-test-key",
+          },
+        },
+        { status },
+      );
+    });
+    const fixture = sdkFixture(model, fetch);
+    const res = await post(fixture.app, { model, prompt: "x" });
+    expect(res.status).toBe(status === 400 || status === 429 ? status : 503);
+    const response = await res.text();
+    expect(response).toContain(
+      status === 400 || status === 429 ? "SetLimitExceeded" : "outcome_unknown",
+    );
+    expect(response).not.toContain("account-linked");
+    expect(response).not.toContain("offline-ark-test-key");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+  it("times out after one SDK POST and does not send a fallback", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async (_url, init) => {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+        else
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+      });
+    });
+    const fixture = sdkFixture(models[0], fetch);
+    const res = await post(fixture.app, { model: models[0], prompt: "x" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fixture.fallback).not.toHaveBeenCalled();
   });
 });
