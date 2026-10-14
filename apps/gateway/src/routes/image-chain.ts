@@ -55,7 +55,16 @@ export type ImageAttempt = (target: ImageChainTarget) => Promise<ImageAttemptRes
 // interactions route filters kinds itself). Built in server.ts over the registry +
 // catalog + lanes; returns a 404/503 marker when nothing resolves to an image model.
 export type ResolveImageChain = (model: string) =>
-  | { ok: true; laneName: string; candidateChain: string[]; targets: ImageChainTarget[] }
+  | {
+      ok: true;
+      /** Authoritative selection kind. A direct alias may still have the synthetic
+       * telemetry label "image"; that label must not grant lane permissions.
+       * Optional for existing headless resolvers; legacy lanes use laneName=model. */
+      isLane?: boolean;
+      laneName: string;
+      candidateChain: string[];
+      targets: ImageChainTarget[];
+    }
   // 404 → nothing resolved to a configured image model; 503 → resolved an image
   // model but its provider credential/client is missing (a server-config problem).
   | { ok: false; status: 404 | 503 };

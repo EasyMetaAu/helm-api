@@ -62,3 +62,16 @@ pnpm exec biome check apps/gateway/src/routes/images.ts \
 - image-chain在**尚未开始调用**时仍可因本地熔断跳过候选；开始调用后绝不换provider重发。模型发现/配置层应固定所请求的模型，不利用聊天fallback替换媒体模型。
 - spend-capped图片请求继续拒绝；按实际图层和像素档位结算金额未在此任务开放。usage保真不表示计费验收完成。
 - 未跑全仓测试、远程CI、真实付费生成或生产验证。真实产物、上游实际格式/大小、公开alias从server端到端解析，以及最终预算/权限联合验收归主控后续任务。
+
+## 权限联合测试后的修复（2026-10-14）
+
+主控在真实buildServer+SQLite边界发现：`allowedLanes:["balanced"]` 的key请求 `seedream-flash` 未被图片路由拒绝。现已增加解析目标后的权限检查，位置在模型专属校验、预算检查和任何上游调用之前。
+
+- `ResolveImageChain`成功分支新增可选`isLane`。主控server应返回真实`isLane`和解析后的真实`laneName`；直接alias上的`laneName:"image"`仅是遥测标签，不能当作允许的lane。
+- `isLane:true`：`allowedLanes=null/undefined`表示不限；数组必须包含实际lane；空数组拒绝。即使`allowCustomModel:true`也不能绕过所选lane的白名单。
+- `isLane:false`：Ark最终wire模型所对应的所有直接名字（原始wire ID、具体alias、任意无斜线alias）均要求`allowCustomModel:true`。非Ark带provider前缀的直接alias同样要求该权限，images/edits也执行。
+- 与core显式模型语义一致，获`allowCustomModel:true`授权的直接模型不受lane白名单限制；它没有选择任何lane。不能用此规则绕过`isLane:true`的检查。
+- 兼容历史非Ark裸模型：标准key继续可调用；若设置`allowedLanes`，则必须包含`image`。没有改成所有历史图片调用都必须开启custom权限。
+- 未传`isLane`的既有headless resolver暂按`laneName===请求model`识别lane。主控应显式传布尔值，尤其避免名为`image`的具体alias被合成遥测标签混淆；测试覆盖了显式false的这一碰撞场景。
+
+TDD证据在同一仓库外证据目录：`t05-permissions-red.log`为9失败/79通过；`t05-permissions-green.log`最终112/112通过（images88，image-chain24）。新增14个权限用例，覆盖lane白名单、空白名单、custom开关、Ark wire ID和任意alias、合成image标签碰撞、旧resolver兼容、非Ark裸模型兼容、prefixed模型及edits。拒绝用例断言没有上游调用，lane拒绝也在budgetGate之前。`t05-permissions-typecheck.log`为`tsc --noEmit -p apps/gateway/tsconfig.json --rootDir .`检查，标准barrel集成限制仍同上。

@@ -740,7 +740,10 @@ describe("Ark Seedream image generation", () => {
           ({
             keyId: "ark-key",
             accountId: "acct",
-            caps: options.spendCapped ? { budget: BUDGET_CAPS } : {},
+            caps: {
+              allowCustomModel: true,
+              ...(options.spendCapped ? { budget: BUDGET_CAPS } : {}),
+            },
           }) as MessagesIdentity,
       },
       resolveImageChain: () => ({
@@ -927,7 +930,11 @@ describe("Ark route through SDK with offline HTTP boundary", () => {
     const fixture = setup({
       auth: {
         resolve: async () =>
-          ({ keyId: "ark-key", accountId: "acct", caps: {} }) as MessagesIdentity,
+          ({
+            keyId: "ark-key",
+            accountId: "acct",
+            caps: { allowCustomModel: true },
+          }) as MessagesIdentity,
       },
       resolveImageChain: () => ({
         ok: true,
@@ -1028,5 +1035,157 @@ describe("Ark route through SDK with offline HTTP boundary", () => {
     expect(await res.json()).toMatchObject({ error: { code: "outcome_unknown" } });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fixture.fallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("image selection permissions", () => {
+  const wire = "doubao-seedream-5-0-flash-260915";
+  function permissionFixture(
+    options: {
+      caps?: MessagesIdentity["caps"];
+      isLane?: boolean;
+      laneName?: string;
+      providerModel?: string;
+    } = {},
+  ) {
+    const create = vi.fn().mockResolvedValue({
+      model: wire,
+      created: 1,
+      data: [{ url: "https://media.example.com/a.png", size: "1024x1024", output_format: "png" }],
+    });
+    const budgetCheck = vi.fn().mockResolvedValue({ overBudget: false });
+    const fixture = setup({
+      auth: {
+        resolve: async () =>
+          ({ keyId: "permission-key", accountId: "acct", caps: options.caps }) as MessagesIdentity,
+      },
+      budgetGate: { check: budgetCheck },
+      resolveImageChain: () => ({
+        ok: true,
+        isLane: options.isLane,
+        laneName: options.laneName ?? "image",
+        candidateChain: ["ark/seedream-5.0-flash"],
+        targets: [
+          {
+            client: { imageGeneration: create, imageEdit: create } as unknown as ProviderClient,
+            providerModel: options.providerModel ?? wire,
+            alias: "ark/seedream-5.0-flash",
+            kind: "openai",
+          },
+        ],
+      }),
+      costOf: () => null,
+    });
+    return { ...fixture, create, budgetCheck };
+  }
+  it.each([
+    undefined,
+    null,
+    ["seedream-flash"],
+  ])("allows the selected lane when allowedLanes=%j without custom model permission", async (allowedLanes) => {
+    const fixture = permissionFixture({
+      isLane: true,
+      laneName: "seedream-flash",
+      caps: { allowedLanes, allowCustomModel: false },
+    });
+    expect((await post(fixture.app, { model: "seedream-flash", prompt: "x" })).status).toBe(200);
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    false,
+    true,
+  ])("rejects disallowed or empty lane whitelist even with custom=%s", async (allowCustomModel) => {
+    for (const allowedLanes of [["balanced"], []]) {
+      const fixture = permissionFixture({
+        isLane: true,
+        laneName: "seedream-flash",
+        caps: { allowedLanes, allowCustomModel, budget: { ...BUDGET_CAPS, behavior: "reject" } },
+      });
+      const res = await post(fixture.app, { model: "seedream-flash", prompt: "x" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: { code: "lane_not_allowed" } });
+      expect(fixture.create).not.toHaveBeenCalled();
+      expect(fixture.budgetCheck).not.toHaveBeenCalled();
+    }
+  });
+  it.each([
+    "ark/seedream-5.0-flash",
+    wire,
+    "private-image-alias",
+  ])("requires custom permission for concrete Ark selection %s", async (model) => {
+    for (const allowCustomModel of [undefined, false]) {
+      const fixture = permissionFixture({
+        isLane: false,
+        caps: { allowCustomModel, allowedLanes: ["image"] },
+      });
+      const res = await post(fixture.app, { model, prompt: "x" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: { code: "model_not_found" } });
+      expect(fixture.create).not.toHaveBeenCalled();
+    }
+  });
+  it("permits explicit concrete alias with allowCustomModel even when lane whitelist is restricted", async () => {
+    const fixture = permissionFixture({
+      isLane: false,
+      caps: { allowCustomModel: true, allowedLanes: ["balanced"] },
+    });
+    expect((await post(fixture.app, { model: wire, prompt: "x" })).status).toBe(200);
+  });
+  it("does not mistake the synthetic image label for an actual lane", async () => {
+    const fixture = permissionFixture({
+      isLane: false,
+      laneName: "image",
+      caps: { allowedLanes: ["image"], allowCustomModel: false },
+    });
+    expect((await post(fixture.app, { model: "image", prompt: "x" })).status).toBe(400);
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+  it("honors resolver lane identity even when public input is rewritten", async () => {
+    const fixture = permissionFixture({
+      isLane: true,
+      laneName: "seedream-flash",
+      caps: { allowedLanes: ["seedream-flash"] },
+    });
+    expect((await post(fixture.app, { model: "public-image", prompt: "x" })).status).toBe(200);
+  });
+  it("retains legacy resolver lane support while enforcing its whitelist", async () => {
+    const fixture = permissionFixture({
+      laneName: "seedream-flash",
+      caps: { allowedLanes: ["balanced"] },
+    });
+    expect((await post(fixture.app, { model: "seedream-flash", prompt: "x" })).status).toBe(400);
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+  it("preserves legacy bare image model access but enforces its image lane whitelist", async () => {
+    for (const allowedLanes of [null, ["image"], ["balanced"], []]) {
+      const fixture = permissionFixture({
+        isLane: false,
+        providerModel: "gpt-image-2",
+        caps: { allowedLanes, allowCustomModel: false },
+      });
+      expect((await post(fixture.app, { model: "gpt-image-2", prompt: "x" })).status).toBe(
+        allowedLanes === null || allowedLanes.includes("image") ? 200 : 400,
+      );
+    }
+  });
+  it("requires permission for prefixed non-Ark concrete aliases, including edits", async () => {
+    const fixture = permissionFixture({
+      isLane: false,
+      providerModel: "gpt-image-2",
+      caps: { allowCustomModel: false },
+    });
+    for (const path of ["/v1/images/generations", "/v1/images/edits"]) {
+      const res = await fixture.app.request(path, {
+        method: "POST",
+        headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-image-2",
+          prompt: "x",
+          image: { url: "https://media.example.com/a.png" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(fixture.create).not.toHaveBeenCalled();
   });
 });

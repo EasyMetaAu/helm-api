@@ -358,6 +358,47 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             "provider_unavailable",
           );
     }
+    // A resolver knows whether selection was a real lane or a concrete model.
+    // The legacy convention remains supported, but new resolvers must set isLane
+    // explicitly (especially when the input name is itself "image").
+    const isLane = chain.isLane ?? chain.laneName === model;
+    const allowedLanes = identity.caps?.allowedLanes;
+    const customAllowed = identity.caps?.allowCustomModel === true;
+    if (isLane) {
+      if (allowedLanes != null && !allowedLanes.includes(chain.laneName)) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image lane is not permitted for this key",
+          "lane_not_allowed",
+        );
+      }
+    } else {
+      // Keep legacy bare non-Ark image models available to standard keys. Ark
+      // wire IDs and aliases are concrete selection, regardless of their spelling.
+      const concreteSelection =
+        model.includes("/") ||
+        chain.targets.some((target) => isArkImageModel(target.providerModel));
+      if (concreteSelection && !customAllowed) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image model is not available to this key",
+          "model_not_found",
+        );
+      }
+      if (!customAllowed && allowedLanes != null && !allowedLanes.includes("image")) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image lane is not permitted for this key",
+          "lane_not_allowed",
+        );
+      }
+    }
     // Resolve first: checking the public name alone lets arbitrary aliases bypass
     // model-specific validation. Reject wrong Ark media kinds even if misconfigured.
     for (const target of chain.targets) {
