@@ -3,6 +3,13 @@
 
 export const SHARED_PACKAGE = "@helm/shared" as const;
 
+export {
+  type MediaPriceRate,
+  MediaPriceRateSchema,
+  type MediaPricing,
+  MediaPricingSchema,
+} from "./catalog/media-pricing.js";
+
 // Catalog model — capabilities + pricing, generated (supply-chain) + override
 // (manual wins). See CLAUDE.md implementation conventions, docs/02 security rules.
 export {

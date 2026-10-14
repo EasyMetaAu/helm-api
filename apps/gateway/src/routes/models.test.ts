@@ -6,6 +6,7 @@ import {
   type CodexModelInfo,
   createGenericOpenAIResponsesClient,
   hashKey,
+  loadRuntimeCatalog,
   type OpenAICodexModelsResult,
   parseLanesConfig,
 } from "@helm/core";
@@ -113,6 +114,35 @@ function buildApp(
 const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
 
 describe("GET /v1/models", () => {
+  it("serves all native media cards from the runtime config with original currencies and units", async () => {
+    const runtimeCatalog = loadRuntimeCatalog({ configDir: "config" });
+    const mediaAliases = [...runtimeCatalog.values()]
+      .filter((entry) => entry.pricing.media !== undefined)
+      .map((entry) => entry.modelKey);
+    const app = createApp({ logger: { log: () => {} } });
+    app.use(
+      "/v1/models",
+      authMiddleware({
+        keyStore: { getByHash: vi.fn().mockResolvedValue(record({ allow_custom_model: true })) },
+        log: () => {},
+      }),
+    );
+    registerModelsRoute(app, {
+      lanes: () => lanes,
+      catalog: runtimeCatalog,
+      providerAliases: mediaAliases,
+    });
+    const response = await app.request("/v1/models", { headers: AUTH });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ModelsList;
+    const models = body.data.filter((item) => item.type === "model");
+    expect(models).toHaveLength(25);
+    for (const model of models) {
+      expect(model.pricing).toEqual(runtimeCatalog.get(model.id)?.pricing);
+      expect(model.pricing?.media?.rates.length).toBeGreaterThan(0);
+    }
+  });
+
   it("requires auth: 401 without a key", async () => {
     const res = await buildApp(record()).request("/v1/models");
     expect(res.status).toBe(401);
