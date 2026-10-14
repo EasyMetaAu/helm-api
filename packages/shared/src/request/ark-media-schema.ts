@@ -343,6 +343,10 @@ export const ArkThreeDRetrieveResponseSchema = z
   .strictObject({
     ...TaskBase,
     model: ArkThreeDModelSchema,
+    service_tier: z.enum(["default", "flex"]).optional(),
+    execution_expires_after: Count.optional(),
+    draft: z.boolean().optional(),
+    priority: Count.max(9).optional(),
     status: ArkTaskStatusSchema.exclude(["expired"]),
     content: z.strictObject({ file_url: ArkMediaUrlSchema }).optional(),
     fileformat: z.literal("glb").optional(),

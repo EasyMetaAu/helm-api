@@ -207,3 +207,7 @@ Seed3D：`POST /v1/3d/generations`，单图GLB。
 - [官方模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list?lang=zh)
 - [官方 Python SDK 0.12.0](https://pypi.org/project/arkruntime/0.12.0/)
 - [官方 Python SDK 源码](https://github.com/volcengine/ark-runtime-python)
+
+## 2026-10-14 实测字段补充
+
+Seed3D 查询实测 running 响应包含 `service_tier`、`execution_expires_after`、`draft`、`priority`。这些公共任务字段已加入严格响应 schema；请求字段与未知字段拒绝保持不变。真实模型状态见后续 T13 验收记录。

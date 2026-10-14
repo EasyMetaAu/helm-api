@@ -359,6 +359,22 @@ describe("responses", () => {
       }).success,
     ).toBe(true);
   });
+  it("accepts Seed3D common task metadata observed in live running responses", () => {
+    const response = {
+      id: "cgt-fixture",
+      model: threeModel,
+      status: "running",
+      created_at: 1791966252,
+      updated_at: 1791966252,
+      service_tier: "default",
+      execution_expires_after: 172800,
+      draft: false,
+      priority: 0,
+    };
+    expect(ThreeDResponse.safeParse(response).success).toBe(true);
+    expect(ThreeDResponse.safeParse({ ...response, priority: -1 }).success).toBe(false);
+    expect(ThreeDResponse.safeParse({ ...response, unexpected_field: true }).success).toBe(false);
+  });
   it("accepts null success errors and video expiry but rejects undocumented 3D expiry", () => {
     expect(
       VideoResponse.safeParse({
