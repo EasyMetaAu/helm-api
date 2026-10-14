@@ -1,8 +1,10 @@
 import { expect, it, vi } from "vitest";
-import { fetchPublicResultJson } from "./gemini.js";
+import { fetchPublicResultJson, type GeminiMediaFetch } from "./gemini.js";
 
 it("fetches bounded result JSON through a public pinned address without credentials", async () => {
-  const fetch = vi.fn(async () => Response.json({ transcripts: [{ text: "hello" }] }));
+  const fetch = vi.fn<GeminiMediaFetch>(async () =>
+    Response.json({ transcripts: [{ text: "hello" }] }),
+  );
   const result = await fetchPublicResultJson("https://cdn.example/result.json", {
     fetch,
     lookup: async () => ["8.8.8.8"],
