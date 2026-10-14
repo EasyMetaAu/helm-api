@@ -41,7 +41,7 @@ export class SqliteResponsesRegistryStore implements ResponsesRegistryStore {
       this.db.$sqlite
         .prepare(`DELETE FROM responses_registry WHERE response_id IN (
           SELECT response_id FROM responses_registry
-          WHERE selected_lane IS NULL OR selected_lane NOT IN ('video', 'three-d')
+          WHERE selected_lane IS NULL OR selected_lane NOT IN ('video', 'three-d', 'transcription')
           ORDER BY created_at DESC, response_id DESC LIMIT ? OFFSET ?
         )`)
         .run(limit, maxEntries);

@@ -169,6 +169,7 @@ export const ProviderConfigSchema = z
     // `oauth` block is an alternative; the exactly-one refine below keeps a
     // provider from booting with both / neither.
     api_key_env: z.string().min(1).optional(),
+    media_account_id: z.string().trim().min(1).max(128).optional(),
     oauth: OAuthCredentialSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
     // Provider wire protocol for #217 same-protocol serialization decisions.
@@ -181,6 +182,44 @@ export const ProviderConfigSchema = z
     normalize_reasoning_delta_alias: z.boolean().default(false),
     response_model_policy: z.enum(["provider", "requested_alias", "both"]).default("provider"),
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
+  })
+  .superRefine((p, ctx) => {
+    if (!p.type.startsWith("bailian-media") && !p.type.startsWith("minimax-media")) return;
+    if (p.type !== "bailian-media" && p.type !== "minimax-media") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["type"],
+        message: "unknown native media provider type",
+      });
+      return;
+    }
+    if (!p.media_account_id || !p.api_key_env || p.oauth) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["media_account_id"],
+        message: "native media requires an explicit account ID and static credential reference",
+      });
+    }
+    try {
+      const url = new URL(p.base_url ?? "");
+      const expected = p.type === "bailian-media" ? "/api/v1" : "";
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash ||
+        url.pathname.replace(/\/+$/, "") !== expected
+      )
+        throw new Error("invalid endpoint");
+    } catch {
+      ctx.addIssue({
+        code: "custom",
+        path: ["base_url"],
+        message:
+          "native media requires its HTTPS API base endpoint without credentials, query or fragment",
+      });
+    }
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
     message: "provider requires `name` or `alias`",
