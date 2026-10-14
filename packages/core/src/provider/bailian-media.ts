@@ -216,7 +216,19 @@ export async function materializeBailianTranscription(
   if (results.length > 100) throw new Error("too many transcription results");
   for (const result of results) {
     if (result.subtask_status === "FAILED" || !result.transcription_url) continue;
-    const transcript = await download(result.transcription_url, { signal });
+    const url = new URL(result.transcription_url);
+    // Beijing filetrans returns signed HTTP OSS URLs; this same host serves HTTPS.
+    // Upgrade only this observed origin. The downloader still validates DNS and redirects.
+    if (
+      url.protocol === "http:" &&
+      url.hostname === "dashscope-result-bj.oss-cn-beijing.aliyuncs.com" &&
+      !url.port &&
+      !url.username &&
+      !url.password
+    )
+      url.protocol = "https:";
+    if (url.protocol !== "https:") throw new Error("transcription results require HTTPS");
+    const transcript = await download(url.href, { signal });
     if (!transcript || typeof transcript !== "object" || Array.isArray(transcript))
       throw new Error("invalid transcription result JSON");
     result.transcript = transcript;
