@@ -1,14 +1,20 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
 import {
   type ApiKeyRecord,
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type CodexModelInfo,
+  createGenericOpenAIResponsesClient,
   hashKey,
   type OpenAICodexModelsResult,
   parseLanesConfig,
 } from "@helm/core";
-import type { CatalogEntry, ModelsList } from "@helm/shared";
+import { type CatalogEntry, createNativePassthroughCarrier, type ModelsList } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { createCodexResponsesWebSocketConnector } from "../codex-responses-websocket.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { installResponsesWebSocketBridge } from "../responses-websocket.js";
 import { type ModelsRouteDeps, registerModelsRoute } from "./models.js";
 
 const lanes = parseLanesConfig({
@@ -80,6 +86,7 @@ function buildApp(
   codexModels?: ModelsRouteDeps["codexModels"],
   onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void,
   modelNames?: ModelsRouteDeps["modelNames"],
+  codexModelsTimeoutMs?: number,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
@@ -96,6 +103,7 @@ function buildApp(
     providerAliases,
     oauthAliases,
     codexModels,
+    codexModelsTimeoutMs,
     onCodexModelsListed,
     modelNames,
   });
@@ -402,6 +410,167 @@ describe("GET /v1/models", () => {
     expect(response.status).toBe(200);
     expect(received).toBeInstanceOf(AbortSignal);
     expect(received?.aborted).toBe(true);
+  });
+
+  it("reports an internal catalog deadline as 504 instead of a client disconnect", async () => {
+    let catalogSignal: AbortSignal | undefined;
+    const app = buildApp(
+      record(),
+      undefined,
+      () => lanes,
+      ({ signal }) => {
+        catalogSignal = signal;
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        );
+      },
+      undefined,
+      undefined,
+      10,
+    );
+    const caller = new AbortController();
+    const response = await app.request("/v1/models?client_version=0.162.0", {
+      headers: AUTH,
+      signal: caller.signal,
+    });
+    expect(catalogSignal?.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+    expect(response.status).toBe(504);
+    expect(await response.json()).toMatchObject({ error: { code: "timeout" } });
+  });
+
+  it.each([
+    false,
+    true,
+  ])("preserves caller cancellation when the catalog deadline fires: %s", async (atDeadline) => {
+    const caller = new AbortController();
+    const app = buildApp(
+      record(),
+      undefined,
+      () => lanes,
+      ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              if (atDeadline) caller.abort();
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+          if (!atDeadline) caller.abort();
+        }),
+      undefined,
+      undefined,
+      10,
+    );
+    const response = await app.request("/v1/models?client_version=0.162.0", {
+      headers: AUTH,
+      signal: caller.signal,
+    });
+    expect(response.status).toBe(499);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("rechecks authentication after a real catalog deadline and keeps relay continuation (revoked: %s)", async (revoked) => {
+    const key = record();
+    let catalogCalls = 0;
+    const app = buildApp(
+      key,
+      undefined,
+      () => lanes,
+      ({ signal }) => {
+        catalogCalls += 1;
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              if (revoked) key.disabled = true;
+              reject(signal.reason);
+            },
+            { once: true },
+          ),
+        );
+      },
+      undefined,
+      undefined,
+      10,
+    );
+    const modelRequests: Request[] = [];
+    const server = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    const bridge = installResponsesWebSocketBridge({
+      server,
+      preflightTimeoutMs: 1000,
+      fetch: async (request) => {
+        if (request.method === "GET") return app.fetch(request);
+        modelRequests.push(request);
+        return new Response(
+          `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            response: { id: `resp-${modelRequests.length}`, status: "completed", output: [] },
+          })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("missing server address");
+    const connector = vi.fn(createCodexResponsesWebSocketConnector({ timeoutMs: 1000 }));
+    const httpFetch = vi.fn<typeof fetch>(async () => {
+      throw new Error("unexpected HTTP fallback");
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "helm_live_secret" },
+      responsesWebSocketConnector: connector,
+      fetch: httpFetch,
+    });
+    const consume = async (previous?: string) => {
+      const body = {
+        model: "mock-model",
+        input: [],
+        stream: true,
+        ...(previous ? { previous_response_id: previous } : {}),
+      };
+      const carrier = createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        body,
+        headers: {
+          version: "0.162.0-alpha.17.2",
+          [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "relay-session",
+        },
+      });
+      let output = "";
+      for await (const chunk of client.nativePassthroughStream?.(carrier) ?? []) output += chunk;
+      return output;
+    };
+    try {
+      if (revoked) {
+        await expect(consume()).rejects.toMatchObject({ upstreamStatus: 401 });
+        expect(modelRequests).toHaveLength(0);
+      } else {
+        expect(await consume()).toContain('"id":"resp-1"');
+        expect(await consume("resp-1")).toContain('"id":"resp-2"');
+        expect(modelRequests).toHaveLength(2);
+        expect(await modelRequests[1]?.json()).toMatchObject({ previous_response_id: "resp-1" });
+        expect(modelRequests[0]?.headers.get(CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER)).toBe(
+          modelRequests[1]?.headers.get(CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER),
+        );
+      }
+      expect(catalogCalls).toBe(1);
+      expect(connector).toHaveBeenCalledTimes(1);
+      expect(httpFetch).not.toHaveBeenCalled();
+    } finally {
+      await client.closeResponsesWebSocketSession?.("relay-session");
+      await bridge.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("keeps the native Codex envelope when no model is available to the key", async () => {

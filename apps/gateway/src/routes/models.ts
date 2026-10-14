@@ -117,13 +117,30 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
       }
       const caps = c.get("identity").caps;
       const timeoutMs = Math.max(1, deps.codexModelsTimeoutMs ?? 5_000);
-      let result = await deps.codexModels({
-        clientVersion,
-        allowCustomModel: caps.allowCustomModel,
-        allowedLanes: caps.allowedLanes,
-        blockedModels: caps.blockedModels,
-        signal: AbortSignal.any([requestSignal(c), AbortSignal.timeout(timeoutMs)]),
-      });
+      const callerSignal = requestSignal(c);
+      const catalogDeadline = AbortSignal.timeout(timeoutMs);
+      let result: OpenAICodexModelsResult | null;
+      try {
+        result = await deps.codexModels({
+          clientVersion,
+          allowCustomModel: caps.allowCustomModel,
+          allowedLanes: caps.allowedLanes,
+          blockedModels: caps.blockedModels,
+          signal: AbortSignal.any([callerSignal, catalogDeadline]),
+        });
+      } catch (error) {
+        // A catalog deadline is not a client disconnect. Keep its 504 visible to
+        // WebSocket preflight so the existing authenticated fallback can run.
+        callerSignal.throwIfAborted();
+        if (!catalogDeadline.aborted) throw error;
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "timeout",
+            message: "Codex model catalog lookup timed out",
+            trace_id: c.get("trace_id"),
+          }),
+        );
+      }
       if (result && client !== undefined) {
         const models = result.models.filter((model) => isModelVisibleForClient(model.slug, client));
         if (models.length !== result.models.length) {
