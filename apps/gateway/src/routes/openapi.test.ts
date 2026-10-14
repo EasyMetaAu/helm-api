@@ -29,6 +29,8 @@ describe("OpenAPI docs", () => {
       "/v1/images/generations",
       "/v1/images/edits",
       "/v1/videos/generations",
+      "/v1/3d/generations",
+      "/v1/3d/{requestId}",
       "/v1/videos/extensions",
       "/v1/videos/{requestId}",
       "/v1/tts/voices",
@@ -47,6 +49,10 @@ describe("OpenAPI docs", () => {
     expect(modelsList?.$schema).toBeUndefined();
     // Image/interactions bodies reuse their Zod schemas (single source of truth).
     for (const name of [
+      "ArkImageGenerationRequest",
+      "ArkVideoGenerationRequest",
+      "ArkThreeDGenerationRequest",
+      "ArkTaskResult",
       "ImageGenerationRequest",
       "GrokImagineImageGenerationRequest",
       "ImageEditRequest",

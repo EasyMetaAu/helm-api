@@ -22,6 +22,8 @@ Helm records every routing decision for debugging. Clients only change their
 operations and request debugging; a separate bearer-scoped portal lets each key
 holder view only their own usage, requests, connection instructions, and memory.
 
+Ark media integration: [English / 中文 API guide](ark-media.md), [contracts](ark-media-contract.md), and [task status](ark-media-development-plan.md).
+
 ## Reading order
 
 > **New to the codebase?** [Architecture & Data Flow](architecture.md) draws the

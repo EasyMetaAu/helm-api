@@ -117,6 +117,17 @@ describe('LaneEditor', () => {
     expect(onchange.mock.lastCall?.[0].fallback).toEqual(['premium', 'balanced']);
   });
 
+  it('labels dedicated media models in the lane model picker', () => {
+    const { container } = render(LaneEditor, {
+      lane: makeLane(),
+      models: [{ alias: 'ark/seed3d-2.0', accounts: [], outputKind: '3d' }],
+      onchange: vi.fn(),
+    });
+    expect(container.querySelector('option[value="ark/seed3d-2.0"]')?.getAttribute('label')).toBe(
+      'ark · 3D',
+    );
+  });
+
   it('offers the model catalog as combobox suggestions on primary + fallback inputs', () => {
     const aliases = ['deepseek/deepseek-v4-flash', 'openai-codex/gpt-5.5', 'zenmux/auto'];
     const models = aliases.map((alias) => ({ alias, accounts: [] }));

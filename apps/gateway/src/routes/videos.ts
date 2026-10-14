@@ -322,25 +322,10 @@ export function registerMediaTaskRoutes(
       if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody))
         return errorJson(c, 400, "invalid media request object", "invalid_request");
       const rawRecord = rawBody as Record<string, unknown>;
-      const isArkInput = typeof rawRecord.model === "string" && knownArkModels.has(rawRecord.model);
-      if (isArkInput || kind === "three-d") {
-        body = rawRecord;
-        admitted?.materialized();
-      } else {
-        const parsed = (
-          operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema
-        ).safeParse(rawBody);
-        if (!parsed.success) {
-          return errorJson(
-            c,
-            400,
-            parsed.error.issues[0]?.message ?? "invalid video generation request",
-            "invalid_request",
-          );
-        }
-        body = parsed.data;
-        admitted?.materialized();
-      }
+      if (typeof rawRecord.model !== "string" || rawRecord.model.trim().length === 0)
+        return errorJson(c, 400, "media model is required", "invalid_request");
+      body = rawRecord;
+      admitted?.materialized();
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
         c.header("retry-after", "1");
@@ -377,8 +362,6 @@ export function registerMediaTaskRoutes(
         );
       if (operation === "extension")
         return errorJson(c, 400, "Ark media extension is unsupported", "invalid_request");
-      if (!knownArkModels.has(requestedModel))
-        return errorJson(c, 400, "unsupported Ark media model", "model_not_found");
       const parsed = parseArkTaskRequest(kind, body, target.providerModel);
       if (!parsed.success)
         return errorJson(
@@ -393,6 +376,19 @@ export function registerMediaTaskRoutes(
         (!Number.isSafeInteger(target.registryTtlMs) || target.registryTtlMs < ARK_TASK_TTL_MS)
       )
         return errorJson(c, 503, "Ark media task retention is unavailable", "provider_unavailable");
+    }
+    if (!isArk) {
+      const parsed = (
+        operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema
+      ).safeParse(body);
+      if (!parsed.success)
+        return errorJson(
+          c,
+          400,
+          parsed.error.issues[0]?.message ?? "invalid video generation request",
+          "invalid_request",
+        );
+      body = parsed.data;
     }
     const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
     if (

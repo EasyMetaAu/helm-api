@@ -1,7 +1,6 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
-import { createCircuitBreaker, UpstreamError } from "@helm/core";
+import { ArkMediaError, createCircuitBreaker, UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
-import { ArkMediaError } from "../../../../packages/core/src/provider/ark.js";
 import { type ImageAttempt, type ImageChainTarget, runImageChain } from "./image-chain.js";
 
 // A breaker double: every alias CLOSED unless listed in `open`. Records calls so a

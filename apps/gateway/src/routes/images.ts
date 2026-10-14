@@ -7,19 +7,17 @@ import {
   type ImageEditInput,
 } from "@helm/core";
 import {
+  ArkImageGenerationRequestSchema,
+  ArkImageGenerationResponseSchema,
+  ArkImageModelSchema,
+  ArkThreeDModelSchema,
+  ArkVideoModelSchema,
   GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
 } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import {
-  ArkImageGenerationRequestSchema,
-  ArkImageGenerationResponseSchema,
-  ArkImageModelSchema,
-  ArkThreeDModelSchema,
-  ArkVideoModelSchema,
-} from "../../../../packages/shared/src/request/ark-media-schema.js";
 import type { AppEnv } from "../app.js";
 import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
@@ -479,16 +477,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       }
     }
     const blockedModels = createBlockedModelMatcher(identity.caps?.blockedModels);
-    const permittedTargets =
-      blockedModels === null
-        ? operationTargets
-        : operationTargets.filter((target) => !blockedModels.matches(target.alias));
-    const permittedCandidateChain =
-      blockedModels === null
-        ? operationTargets.map((target) => target.alias)
-        : operationTargets
-            .map((target) => target.alias)
-            .filter((alias) => !blockedModels.matches(alias));
+    const permittedTargets = operationTargets.filter(
+      (target) =>
+        blockedModels === null ||
+        ![model, target.alias, target.providerModel].some((name) => blockedModels.matches(name)),
+    );
+    const permittedCandidateChain = permittedTargets.map((target) => target.alias);
     if (permittedTargets.length === 0) {
       const directBlocked = chain.laneName !== model && blockedModels?.matches(model) === true;
       return errorJson(

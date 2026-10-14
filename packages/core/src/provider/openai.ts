@@ -174,6 +174,8 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  /** Dedicated media transport: never eligible for conversational execution. */
+  mediaOnly?: boolean;
   nativeProtocolProfile?: NativeProtocolProfile;
   /** Native Responses is preserved by default. Providers with known incompatible
    * input items (such as xAI subscription) explicitly set false. */
@@ -231,6 +233,11 @@ export interface ProviderClient {
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   videoRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
+  threeDGeneration?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>>;
+  threeDRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   ttsSpeech?(
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,

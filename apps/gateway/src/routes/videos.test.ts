@@ -816,6 +816,7 @@ describe("Ark video tasks", () => {
   it.each([
     "seedance-video",
     "ark/seedance-2.5",
+    "custom/seedance",
     arkModel,
   ])("validates and forwards %s with a public UUID and 7-day owner mapping", async (model) => {
     const { app, create, records } = setupArk();

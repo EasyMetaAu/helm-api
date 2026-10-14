@@ -7,6 +7,7 @@ import {
   openAICodexIdentityFingerprint,
   parseOpenAICodexIdentity,
 } from "@helm/core";
+import type { MediaOutputKind } from "@helm/shared";
 import {
   type AccountSettings,
   getAccountSettings,
@@ -60,6 +61,7 @@ export function effectiveAccountModels(
 // that back it (a model may be exposed by several accounts of the same provider —
 // the pool rotates across them). Configured (non-OAuth) providers carry no account.
 export interface ModelOption {
+  outputKind?: MediaOutputKind;
   alias: string;
   accounts: string[];
 }

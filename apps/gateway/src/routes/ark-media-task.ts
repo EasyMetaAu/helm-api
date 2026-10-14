@@ -1,13 +1,13 @@
 import { Buffer } from "node:buffer";
 import type { ResponsesRegistryRecord } from "@helm/core";
-import { z } from "zod";
 import {
   ArkTaskCreateResponseSchema,
   ArkThreeDGenerationRequestSchema,
   ArkThreeDRetrieveResponseSchema,
   ArkVideoGenerationRequestSchema,
   ArkVideoRetrieveResponseSchema,
-} from "../../../../packages/shared/src/request/ark-media-schema.js";
+} from "@helm/shared";
+import { z } from "zod";
 
 export type ArkTaskKind = "video" | "three-d";
 export const ARK_TASK_TTL_MS = 7 * 86400000;
@@ -119,7 +119,12 @@ export function normalizeArkTaskResult(
           : task.status,
   };
   if (task.status === "failed") {
-    const code = task.error?.code === "SetLimitExceeded" ? "SetLimitExceeded" : "task_failed";
+    const knownCodes = new Set([
+      "SetLimitExceeded",
+      "InvalidParameter.TaskTypeConstraint",
+      "InvalidParameter.TaskTypeMismatch",
+    ]);
+    const code = task.error && knownCodes.has(task.error.code) ? task.error.code : "task_failed";
     base.error = {
       code,
       message:

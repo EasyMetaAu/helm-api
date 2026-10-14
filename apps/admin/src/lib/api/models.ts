@@ -1,3 +1,4 @@
+import { MediaOutputKindSchema, type MediaOutputKind } from '@helm/shared';
 // Admin models API client. The catalog of routable `provider/model` aliases the
 // gateway exposes at /admin/api/models (sourced from config/providers.yaml). The
 // Lanes UI uses it for combobox suggestions so an operator picks a real alias
@@ -10,6 +11,7 @@ const ENDPOINT = '/admin/api/models';
 // exposing it (empty for configured providers). The Lanes picker shows the
 // account(s) under each model so the operator knows which bound account backs it.
 export interface ModelOption {
+  outputKind?: MediaOutputKind;
   alias: string;
   accounts: string[];
 }
@@ -35,7 +37,14 @@ export async function listModels(): Promise<ModelOption[]> {
         const accounts = Array.isArray(raw)
           ? raw.filter((a): a is string => typeof a === 'string')
           : [];
-        return [{ alias: (x as { alias: string }).alias, accounts }];
+        const media = MediaOutputKindSchema.safeParse((x as { outputKind?: unknown }).outputKind);
+        return [
+          {
+            alias: (x as { alias: string }).alias,
+            accounts,
+            ...(media.success ? { outputKind: media.data } : {}),
+          },
+        ];
       }
       return [];
     });

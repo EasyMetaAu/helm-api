@@ -27,6 +27,8 @@ export class SqliteResponsesRegistryStore implements ResponsesRegistryStore {
   }
 
   async prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void> {
+    // Paid media ownership must survive until expiresAt. The ordinary Responses
+    // count cap must not evict active tasks or pre-write reservations.
     const maxEntries = Math.max(1, Math.floor(input.maxEntries));
     const limit = Math.max(1, Math.floor(input.limit));
     this.db.transaction(() => {
@@ -39,6 +41,7 @@ export class SqliteResponsesRegistryStore implements ResponsesRegistryStore {
       this.db.$sqlite
         .prepare(`DELETE FROM responses_registry WHERE response_id IN (
           SELECT response_id FROM responses_registry
+          WHERE selected_lane IS NULL OR selected_lane NOT IN ('video', 'three-d')
           ORDER BY created_at DESC, response_id DESC LIMIT ? OFFSET ?
         )`)
         .run(limit, maxEntries);

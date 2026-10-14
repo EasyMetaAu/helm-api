@@ -1,6 +1,6 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
+import { ArkMediaError } from "@helm/core";
 import { ERROR_CLASS_HTTP_STATUS, type ProviderAttempt } from "@helm/shared";
-import { ArkMediaError } from "../../../../packages/core/src/provider/ark.js";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
   requestCancellationReason,

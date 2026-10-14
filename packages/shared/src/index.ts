@@ -18,6 +18,8 @@ export {
   type GeneratedCatalogEntry,
   GeneratedCatalogEntrySchema,
   GeneratedCatalogSchema,
+  type MediaOutputKind,
+  MediaOutputKindSchema,
   type Pricing,
   type PricingOverride,
   PricingOverrideSchema,
@@ -320,6 +322,11 @@ export {
   selectCodexAccountWeeklyQuotaWindows,
   unpackCodexQuotaMetadata,
 } from "./oauth/usage-schema.js";
+export {
+  type ArkPublicTaskResult,
+  ArkPublicTaskResultSchema,
+} from "./request/ark-media-public-schema.js";
+export * from "./request/ark-media-schema.js";
 export {
   type GrokImagineImageGenerationRequest,
   GrokImagineImageGenerationRequestSchema,

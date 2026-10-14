@@ -389,3 +389,39 @@ grok-imagine-video:
     require_tools: false
     require_json: false
     require_vision: false
+
+seedream-flash:
+  purpose: Ark dedicated media generation
+  primary: ark/seedream-5.0-flash
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seedream-pro:
+  purpose: Ark dedicated media generation
+  primary: ark/seedream-5.0-pro
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seedance-video:
+  purpose: Ark dedicated media generation
+  primary: ark/seedance-2.5
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seed3d:
+  purpose: Ark dedicated media generation
+  primary: ark/seed3d-2.0
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false

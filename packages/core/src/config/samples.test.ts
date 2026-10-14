@@ -17,6 +17,26 @@ function readYaml(file: string): unknown {
 }
 
 describe("checked-in config samples", () => {
+  it("registers four Ark models in dedicated lanes without chat fallback or invented prices", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const ark = cfg.providers.find((p) => p.type === "ark");
+    expect(ark?.api_key_env).toBe("ARK_API_KEY");
+    expect(ark?.models).toHaveLength(4);
+    const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
+    for (const [lane, alias, capability] of [
+      ["seedream-flash", "ark/seedream-5.0-flash", "outputImage"],
+      ["seedream-pro", "ark/seedream-5.0-pro", "outputImage"],
+      ["seedance-video", "ark/seedance-2.5", "outputVideo"],
+      ["seed3d", "ark/seed3d-2.0", "outputThreeD"],
+    ] as const) {
+      expect(expandLaneChain(lane, cfg.lanes ?? {})).toEqual([alias]);
+      expect(capabilities[alias]?.[capability]).toBe(true);
+    }
+    expect(expandLaneChain("balanced", cfg.lanes ?? {}).some((a) => a.startsWith("ark/"))).toBe(
+      false,
+    );
+  });
+
   it("replaces retired GPT lanes with ordered GPT-6 tiers and preserves client aliases", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes ?? {};

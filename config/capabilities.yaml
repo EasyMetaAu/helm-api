@@ -901,3 +901,39 @@ openrouter/auto:
   supportsStreaming: true
   maxContextTokens: 200000
   maxOutputTokens: 8192
+
+ark/seedream-5.0-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputImage: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seedream-5.0-pro:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputImage: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seedance-2.5:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputVideo: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seed3d-2.0:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputThreeD: true
+  maxContextTokens: 0
+  maxOutputTokens: null

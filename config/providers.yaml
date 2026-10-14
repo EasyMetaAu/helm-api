@@ -367,3 +367,18 @@ providers:
   # xAI documents this client/proxy path for Grok CLI, not as a third-party OAuth
   # contract. Connect it in Providers; the runtime synthesizes `xai/<live-model>` aliases from
   # https://cli-chat-proxy.grok.com/v1/models; NO YAML block is required.
+
+  # Optional static Ark media transport. Missing ARK_API_KEY disables these targets.
+  - name: ark
+    type: ark
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+    models:
+      - alias: ark/seedream-5.0-flash
+        provider_model: doubao-seedream-5-0-flash-260915
+      - alias: ark/seedream-5.0-pro
+        provider_model: doubao-seedream-5-0-pro-260628
+      - alias: ark/seedance-2.5
+        provider_model: doubao-seedance-2-5-260628
+      - alias: ark/seed3d-2.0
+        provider_model: doubao-seed3d-2-0-260328

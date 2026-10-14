@@ -1,8 +1,7 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
-import { UpstreamError } from "@helm/core";
+import { createArkMediaClient, UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createArkMediaClient } from "../../../../packages/core/src/provider/ark.js";
 import type { AppEnv } from "../app.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { type ImagesRouteDeps, registerImagesRoute } from "./images.js";

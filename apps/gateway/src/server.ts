@@ -16,6 +16,7 @@ import {
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
+  createArkMediaClient,
   createAutoVacuumRunner,
   createBlockedModelMatcher,
   createBudgetGate,
@@ -246,6 +247,7 @@ import {
   type ResponsesRouteDeps,
   registerResponsesRoute,
 } from "./routes/responses.js";
+import { registerThreeDRoute } from "./routes/three-d.js";
 import { registerTtsRoute } from "./routes/tts.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
@@ -1643,7 +1645,9 @@ export function buildProviderClients(
     const fastMode = resolveProviderFastMode(p, accountSettings);
     const cred = buildCredential(p, oauthCtx, proxy, timeoutMs);
     if (!cred) continue; // no credential → cannot build a client; skip.
-    const baseUrl = p.base_url ?? fallbackBaseUrl;
+    const baseUrl =
+      p.base_url ??
+      (p.type === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : fallbackBaseUrl);
     clients.set(
       p.name,
       createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy, undefined, undefined, fastMode),
@@ -1686,6 +1690,19 @@ function createProviderClient(
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
   const providerFetch = makeProviderFetch(p, proxy);
+  if (p.type === "ark") {
+    return {
+      ...createArkMediaClient({ config: { ...base, ...cred }, fetch: providerFetch }),
+      mediaOnly: true,
+      async chatCompletion() {
+        throw new Error("Ark requires a dedicated media endpoint");
+      },
+      chatCompletionStream() {
+        throw new Error("Ark requires a dedicated media endpoint");
+      },
+    };
+  }
+
   if (p.type === "anthropic") {
     return createAnthropicClient({
       config: {
@@ -2002,6 +2019,8 @@ export async function testStaticProviderKey(
   rawApiKey: string,
 ): Promise<{ warning?: string }> {
   if (provider.oauth) throw new Error("only static API-key providers can be tested here");
+  if (provider.type === "ark")
+    throw new Error("Ark media models do not support chat connectivity tests");
   const apiKey = rawApiKey.trim();
   const model = (
     provider.models.find((m) => !MEDIA_ONLY_MODEL.test(m.provider_model)) ?? provider.models[0]
@@ -4045,6 +4064,12 @@ export async function buildServer(
       for (const alias of configuredAliases) byAlias.set(alias, { alias, accounts: [] });
       // OAuth options win on a clash (they carry the exposing accounts).
       for (const opt of oauthOptions) byAlias.set(opt.alias, opt);
+      for (const option of byAlias.values()) {
+        const caps = catalog.get(option.alias)?.capabilities;
+        if (caps?.outputThreeD) option.outputKind = "3d";
+        else if (caps?.outputVideo) option.outputKind = "video";
+        else if (caps?.outputImage) option.outputKind = "image";
+      }
       return [...byAlias.values()].sort((a, b) => a.alias.localeCompare(b.alias));
     };
     // Per-account connectivity tester for the providers page "Test" button. Builds a
@@ -4652,6 +4677,15 @@ export async function buildServer(
   // providers serve images via generateContent (nativePassthrough); everyone else via
   // the OpenAI Images API. Only catalog `capabilities.outputImage` models qualify (a
   // TEXT gemini alias that merely has nativePassthrough is NOT an image model → null).
+  // Wire IDs are accepted only when exactly one configured Ark alias owns them.
+  // Ambiguous IDs remain unresolved; callers can use an explicit alias or lane.
+  const resolveMediaSelection = (model: string): string => {
+    if (Object.hasOwn(lanes, model) || registry.resolve(model).ok) return model;
+    const matches = config.providers
+      .filter((p) => p.type === "ark")
+      .flatMap((p) => p.models.filter((m) => m.provider_model === model));
+    return matches.length === 1 ? (matches[0]?.alias ?? model) : model;
+  };
   const resolveImageTarget = (model: string): ImageChainTarget | { kind: "unavailable" } | null => {
     const slash = model.indexOf("/");
     const prefix = slash > 0 ? model.slice(0, slash) : "";
@@ -4693,8 +4727,9 @@ export async function buildServer(
   // → 503; nothing resolvable → 404. Shared by both model-pinned image routes; this is
   // keeps the existing 503/404 distinction without permitting paid POST replay.
   const resolveImageChain: ResolveImageChain = (model) => {
-    const isLane = Object.hasOwn(lanes, model);
-    const aliases = isLane ? expandLaneChain(model, lanes) : [model];
+    const selection = resolveMediaSelection(model);
+    const isLane = Object.hasOwn(lanes, selection);
+    const aliases = isLane ? expandLaneChain(selection, lanes) : [selection];
     const targets: ImageChainTarget[] = [];
     let sawUnavailable = false;
     for (const alias of aliases) {
@@ -4709,6 +4744,7 @@ export async function buildServer(
     if (targets.length === 0) return { ok: false, status: sawUnavailable ? 503 : 404 };
     return {
       ok: true,
+      isLane,
       laneName: isLane ? model : "image",
       candidateChain: targets.map((t) => t.alias),
       targets,
@@ -4722,8 +4758,14 @@ export async function buildServer(
     auth: { resolve: resolveIdentity },
     resolveImageChain,
     breaker,
-    costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
+    costOf: (alias, body) => {
+      const target = registry.resolve(alias);
+      if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) return null;
+      return resolveCostUsd(catalog.get(alias)?.pricing, body);
+    },
     isPriced: (alias) => {
+      const target = registry.resolve(alias);
+      if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) return false;
       const pricing = catalog.get(alias)?.pricing;
       return pricing?.inputPerMTokUsd != null || pricing?.outputPerMTokUsd != null;
     },
@@ -4753,7 +4795,7 @@ export async function buildServer(
         ? "grok-imagine-video-1.5-preview"
         : model === "xai/grok-imagine-video-1.5"
           ? "xai/grok-imagine-video-1.5-preview"
-          : model;
+          : resolveMediaSelection(model);
     const aliases = Object.hasOwn(lanes, selectionModel)
       ? expandLaneChain(selectionModel, lanes)
       : [selectionModel];
@@ -4766,11 +4808,15 @@ export async function buildServer(
       const isHelmRelay =
         relay.ok &&
         config.providers.some((p) => p.name === relay.value.providerName && p.type === "helm");
-      if (!isHelmRelay && (prefix !== "xai" || !isOAuthAliasAvailable(alias))) continue;
+      const isArk =
+        relay.ok &&
+        config.providers.some((p) => p.name === relay.value.providerName && p.type === "ark");
+      if (isArk && operation === "extension") continue;
+      if (!isArk && !isHelmRelay && (prefix !== "xai" || !isOAuthAliasAvailable(alias))) continue;
       const providerAlias = alias;
-      const providerName = isHelmRelay && relay.ok ? relay.value.providerName : prefix;
+      const providerName = (isArk || isHelmRelay) && relay.ok ? relay.value.providerName : prefix;
       const providerModel =
-        isHelmRelay && relay.ok
+        (isArk || isHelmRelay) && relay.ok
           ? relay.value.providerModel
           : model.endsWith("grok-imagine-video-1.5")
             ? "grok-imagine-video-1.5"
@@ -4780,6 +4826,8 @@ export async function buildServer(
       const create = operation === "extension" ? client?.videoExtension : client?.videoGeneration;
       if (!create) continue;
       const target: VideoCreateTarget = {
+        ...(isArk ? { providerType: "ark" as const } : {}),
+        laneName: Object.hasOwn(lanes, selectionModel) ? selectionModel : undefined,
         providerAlias,
         providerName,
         providerModel,
@@ -4827,11 +4875,70 @@ export async function buildServer(
         const client = providerClients.get(record.providerName);
         if (!client?.videoRetrieve) return null;
         return {
+          ...(client.mediaOnly
+            ? { providerType: "ark" as const, providerModel: record.providerModel ?? undefined }
+            : {}),
           retrieve: (requestId, signal) =>
             client.videoRetrieve?.(requestId, {
               signal,
               ...(record.providerAccount ? { providerAccount: record.providerAccount } : {}),
             }) ?? Promise.reject(new Error("video retrieval unavailable")),
+        };
+      },
+    },
+  });
+
+  registerThreeDRoute(app, {
+    auth: { resolve: resolveIdentity },
+    registry: responsesRegistry,
+    rateLimiter,
+    concurrencyGate,
+    memoryAdmission: requestBodyMemoryAdmission,
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
+    },
+    log: (event, fields) => logger.log("info", event, fields),
+    resolver: {
+      create: async (body) => {
+        if (typeof body.model !== "string") return null;
+        const selection = resolveMediaSelection(body.model);
+        const isLane = Object.hasOwn(lanes, selection);
+        const aliases = isLane ? expandLaneChain(selection, lanes) : [selection];
+        for (const alias of aliases) {
+          const target = registry.resolve(alias);
+          if (!target.ok || catalog.get(alias)?.capabilities.outputThreeD !== true) continue;
+          const client = providerClients.get(target.value.providerName);
+          if (!client?.mediaOnly || !client.threeDGeneration) continue;
+          const create = client.threeDGeneration;
+          return {
+            providerType: "ark",
+            laneName: isLane ? selection : undefined,
+            providerAlias: alias,
+            providerName: target.value.providerName,
+            providerModel: target.value.providerModel,
+            providerAccount: null,
+            client: { create: (request, signal) => create(request, { signal }) },
+          };
+        }
+        return null;
+      },
+      poll: async (record) => {
+        if (!record.providerName) return null;
+        const client = providerClients.get(record.providerName);
+        if (!client?.mediaOnly || !client.threeDRetrieve) return null;
+        const retrieve = client.threeDRetrieve;
+        return {
+          providerType: "ark",
+          providerModel: record.providerModel ?? undefined,
+          retrieve: (id, signal) => retrieve(id, { signal }),
         };
       },
     },
@@ -4868,7 +4975,11 @@ export async function buildServer(
     auth: { resolve: resolveIdentity },
     resolveImageChain,
     breaker,
-    costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
+    costOf: (alias, body) => {
+      const target = registry.resolve(alias);
+      if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) return null;
+      return resolveCostUsd(catalog.get(alias)?.pricing, body);
+    },
     budgetGate,
     settleBudget: settleKeyBudget,
     record: {

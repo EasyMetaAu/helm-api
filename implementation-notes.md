@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-10-14 · Ark 多媒体集成（docs/04、05、06、07、10）
+
+- **SDK 与范围**：使用官方 OpenAI Node SDK 7.33.0 的兼容 Images 与自定义 post/get，maxRetries=0；没有证据需要重写官方 Ark SDK，条件任务 T03 不适用。独立 type: ark 客户端只支持媒体，媒体模型从聊天执行和聊天连通性测试中拒绝。
+- **权限与单写**：真实 lane 检查 allowed_lanes，直接 Ark alias／wire ID 要求 allow_custom_model；wire ID 仅在唯一配置映射时解析。集成测试发现旧图片接口未检查 lane 白名单，补齐后保留历史非 Ark 裸模型行为。付费创建一旦发出不重试、不跨 provider 回退；上游 ID 与 Helm UUID 分离，保存 key/account/provider/model/kind 绑定并在轮询核验。
+- **成本与恢复**：尚无可靠 USD 媒体结算上界，金额预算 key 预先拒绝，未知成本仍为 null。任务保存 7 天，结果 URL 24 小时；SQLite/Postgres 的条数清理排除未过期媒体任务与预写保留记录，仍按 TTL 清理，因此媒体记录可能使总行数超过普通 Responses 的 10,000 条软上限；3D 返回 ZIP 内 GLB/PBR，未新增资产托管。媒体 catalog 的 maxContextTokens=0 表示不适用聊天 token context，不是宣称上游零输入额度。
+- **限制**：组合参考显式要求 omni_reference_task_type=reference，避免默认自动选入未支持的编辑/延长任务。仅离线验收；唯一此前 Seedance 实测 failed/SetLimitExceeded。四模型真实成功产物、账单和生产均未验收。任务明细与证据见 docs/ark-media-development-plan.md。
+
 ## 2026-10-13 · API key 客户端入口限制（docs/06、07、11）
 
 - **家族 lane 修正**：模型家族命名的 lane 也按当前客户端过滤；auto、通用档位、任务与自定义通用名称保留。只依公共 lane 名判断家族，不沿执行链推断；未知命名仍按通用 lane，操作者自定义别名应遵循家族前缀。详情与列表一致，不改路由链和 fallback。
@@ -65,15 +72,9 @@
 - **决定**：详情页复用已有的 Codex 账号周额度选择器，按实际时长识别周窗口，不再把 `primary` 固定当作周限；当前用量、历史、已用比例与倒计时统一使用周窗口，隐藏 5h 周期切换。
 - **边界**：仅调整 Codex 详情展示，保留原始周期记录、API、5h 路由限额及按日/自然周汇总。没有可识别周窗口时不以 5h 冒充周额度；其他 provider 维持原行为。
 
-## 2026-09-30 · GPT-6.1 Sol 接入与 Sol 配置迁移（docs/04、05、07、10）
-
-- **官方依据**：[模型](https://developers.openai.com/api/docs/models/gpt-6.1-sol)、[价格](https://developers.openai.com/api/docs/pricing)、[Codex](https://developers.openai.com/codex/models)。API 上下文 1,050,000、最大输入 922,000、输出 128,000；推理 low/medium/high/xhigh/max，API 默认 medium，不支持 none/minimal。当前 catalog 没有独立输入上限字段，由上游继续校验 922K 输入限制。
-- **协议与路由**：Sol lane 升级为 `gpt-6.1-sol`，balanced/json/vision 及旧 Sol/Terra 别名同步迁移；Codex 优先与既有 fallback 不变。工具调用必须走 Responses，付费 `openai/gpt-6.1-sol` 复用独立的 generic Responses provider；不继承旧 Sol Chat 工具的 `none` 规则。旧模型能力/价格保留历史兼容，旧原生 Chat 示例不代表 6.1 支持。
-- **价格**：每百万 token 输入/缓存读取/缓存写入/输出 $2/$0.10/$2.50/$10；超过 272K 输入时整单输入和缓存 ×2、输出 ×1.5；Flex ×0.5、Fast/priority ×2、US/EU ×1.1。复用现有计价字段；未新增 Batch 执行能力或 Ultrafast 档位。EU 不支持 Fast；区域端点选择和该组合限制仍由部署配置及上游执行。
-- **订阅目录**：使用官方同步脚本更新至 Codex `rust-v0.159.2`，bundle SHA256 `e0c1feb6be3e5d7f079b594a64255f4e8e6a97fba8cc5970e9b82abecf7d4b3c`。6.1 bundled 默认上下文 272K、最大 872K、默认推理 low、最低客户端 0.153.0；静态 Codex 能力采用默认 272K，实时账号目录优先。bundle 中的 ultra 属于编排，不作为 API effort；目录不代表账号授权。
-- **迁移边界**：挂载部署需同步 lanes/model-aliases/providers/capabilities/pricing 五个 YAML；`allowed_lanes` 中显式列出旧 `gpt-6-sol` 的 key 需迁移到新 lane，别名不会绕过权限限制。Relay 的模型/lane 引用也须同步。此次仅修改仓库并以 mock 验证，未执行真实付费推理或生产变更。
-
 ## 更早历史总览
+
+2026-09-30：GPT-6.1 Sol 接入与 Sol 配置迁移；旧 GPT-6 Sol lane 指向新模型，具体协议与发布证据见 Git 历史。
 
 2026-09-29：Claude Sonnet 5.5 接入；完整变更与验证见 Git 历史。
 

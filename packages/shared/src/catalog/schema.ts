@@ -89,6 +89,8 @@ export const CapabilitiesSchema = z.object({
   // distinct from `modalities:["video"]`, which only describes video INPUT.
   // Absent means false so video routes fail closed for every existing model card.
   outputVideo: z.boolean().optional(),
+  // Asynchronous 3D assets use their own task endpoint, never conversational routing.
+  outputThreeD: z.boolean().optional(),
   reasoningEffort: ReasoningEffortCapabilitySchema.optional(),
   // Explicit wire exceptions, keyed by routing alias in capabilities.yaml.
   // Omitted means preserve the request; model names never imply a rewrite.
@@ -280,3 +282,6 @@ export type GeneratedCatalogEntry = z.infer<typeof GeneratedCatalogEntrySchema>;
 export type GeneratedCatalog = z.infer<typeof GeneratedCatalogSchema>;
 export type CapabilitiesOverride = z.infer<typeof CapabilitiesOverrideSchema>;
 export type PricingOverride = z.infer<typeof PricingOverrideSchema>;
+
+export const MediaOutputKindSchema = z.enum(["image", "video", "3d"]);
+export type MediaOutputKind = z.infer<typeof MediaOutputKindSchema>;

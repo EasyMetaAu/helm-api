@@ -505,6 +505,7 @@ export {
   AnthropicIdentityError,
   anthropicRequestAccountUuid,
 } from "./provider/anthropic-identity.js";
+export { ArkMediaError, type ArkMediaOutcome, createArkMediaClient } from "./provider/ark.js";
 export {
   type ChunkClass,
   guardPreOutputFailure,

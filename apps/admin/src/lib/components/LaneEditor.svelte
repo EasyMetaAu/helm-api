@@ -62,10 +62,23 @@
   // subscription account(s) for OAuth models (e.g. "default", "default, mylukin"),
   // else the provider name (the `provider/` prefix) for configured models — so
   // every option carries a source hint, not just the subscription ones.
-  function modelLabel(alias: string, accounts: string[]): string | undefined {
-    if (accounts.length > 0) return accounts.join(', ');
+  function modelLabel(
+    alias: string,
+    accounts: string[],
+    outputKind?: ModelOption['outputKind'],
+  ): string | undefined {
     const slash = alias.indexOf('/');
-    return slash > 0 ? alias.slice(0, slash) : undefined;
+    const source =
+      accounts.length > 0 ? accounts.join(', ') : slash > 0 ? alias.slice(0, slash) : undefined;
+    const kind =
+      outputKind === '3d'
+        ? '3D'
+        : outputKind === 'video'
+          ? $t('Video')
+          : outputKind === 'image'
+            ? $t('Image')
+            : undefined;
+    return kind ? [source, kind].filter(Boolean).join(' · ') : source;
   }
 
   // Every lane needs a non-empty primary to be coherent; no lane name is special.
@@ -249,11 +262,11 @@
       {#each laneOptions as ln (ln)}
         <option value={ln} label={$t('lane')}></option>
       {/each}
-      {#each models as { alias, accounts } (alias)}
+      {#each models as { alias, accounts, outputKind } (alias)}
         <!-- label = the subscription account(s) backing this model (e.g. "default" /
            "default, mylukin"); for configured providers with no account it falls
            back to the provider name, so every option shows a source hint. -->
-        <option value={alias} label={modelLabel(alias, accounts)}></option>
+        <option value={alias} label={modelLabel(alias, accounts, outputKind)}></option>
       {/each}
     </datalist>
 

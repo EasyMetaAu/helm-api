@@ -1732,6 +1732,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // routes. Other providers may intentionally return images through their
         // native conversational protocol (for example Gemini inlineData).
         if (
+          provider.mediaOnly === true ||
+          caps?.outputThreeD === true ||
           caps?.outputVideo === true ||
           (alias.startsWith("xai/") && caps?.outputImage === true)
         ) {
