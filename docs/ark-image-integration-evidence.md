@@ -75,3 +75,7 @@ pnpm exec biome check apps/gateway/src/routes/images.ts \
 - 未传`isLane`的既有headless resolver暂按`laneName===请求model`识别lane。主控应显式传布尔值，尤其避免名为`image`的具体alias被合成遥测标签混淆；测试覆盖了显式false的这一碰撞场景。
 
 TDD证据在同一仓库外证据目录：`t05-permissions-red.log`为9失败/79通过；`t05-permissions-green.log`最终112/112通过（images88，image-chain24）。新增14个权限用例，覆盖lane白名单、空白名单、custom开关、Ark wire ID和任意alias、合成image标签碰撞、旧resolver兼容、非Ark裸模型兼容、prefixed模型及edits。拒绝用例断言没有上游调用，lane拒绝也在budgetGate之前。`t05-permissions-typecheck.log`为`tsc --noEmit -p apps/gateway/tsconfig.json --rootDir .`检查，标准barrel集成限制仍同上。
+
+## 主控集成补充
+
+以上为子任务交付时快照。主控已完成标准公共 import、server 接线与联合验收；任务条数清理保护、权限及错误码补充见 [集成验收记录](ark-media-integration-evidence.md)。最终以该记录中的代码 SHA 与 677 项定向测试结果为准。

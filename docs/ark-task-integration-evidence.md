@@ -107,3 +107,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 t06-typecheck-f
 ```
 
 重启查询用真实 `createResponsesRegistry` 重新构造实例、共享模拟持久 store 验证；它证明跨实例恢复契约，不代替 SQLite 迁移或实际进程重启验收。主控拥有 server+SQLite/HTTP 集成责任。T02 已有离线传输验收不重复运行，本轮没有传输代码改动。
+
+## 主控集成补充
+
+以上为子任务交付时快照。主控已完成标准公共 import、server 接线与联合验收；任务条数清理保护、权限及错误码补充见 [集成验收记录](ark-media-integration-evidence.md)。最终以该记录中的代码 SHA 与 677 项定向测试结果为准。

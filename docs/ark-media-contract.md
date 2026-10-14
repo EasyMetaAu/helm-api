@@ -2,7 +2,7 @@
 
 版本：2026-10-14。源码基线：`f0d962692f97b18fb8ed118c3c1991fbfe0d1770`。
 本文件与 `packages/shared/src/request/ark-media-schema.ts` 冻结本期允许的协议子集。
-当前仅完成独立 schema；路由、模型 alias、权限、预算、持久化与结果归一化由主控集成。不是上线或付费实测验收。
+当前 schema 已接入路由、模型配置、权限、预算拒绝、任务持久化和结果归一化；离线证据见 [集成验收记录](ark-media-integration-evidence.md)。不是上线或付费实测验收。
 
 ## 模型与入口
 
