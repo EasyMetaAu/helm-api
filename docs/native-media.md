@@ -13,7 +13,7 @@
 
 默认 lane：`qwen-image`、`wan-video`、`minimax-video`、`bailian-speech`、`minimax-speech`、`transcription-short`、`transcription-file`。给调用 Key 授权对应 lane；使用具体 alias/wire model 另需 `allow_custom_model`。不要把短 ASR 混入普通聊天 lane。
 
-模型清单由配置显式维护。千问图片支持 3.0/3.0-pro/2.1-pro/2.1-turbo；万相支持 3.0-video/video-prime；MiniMax 视频支持 H3/H3-Max；TTS 包括配置中的千问 Audio、CosyVoice 和 speech-2.8。每个模型的地域、音色和账户权限仍由上游确认。
+模型清单由配置显式维护。千问图片支持 3.0/3.0-pro/2.1-pro/2.1-turbo；万相支持 3.0-video/video-prime；MiniMax 视频支持 H3/H3-Max；TTS 包括配置中的千问 Audio、CosyVoice 和 speech-2.8。每个模型的地域、音色和账户权限仍由上游确认。例如 `qwen-audio-3.0-tts-plus` 可使用 `longanhuan_v3.6`，`qwen-audio-3.1-tts-flash` 应使用其音色表中的 `longanhuan_v3.1`；不能跨型号复用音色名。
 
 ## 请求示例
 
@@ -43,7 +43,7 @@
 
 创建请求只发送一次。网络超时或响应不完整返回 `outcome_unknown` 与 `error.operation_id`；不要重新创建。查询对应 `/operations/{operation_id}` 可了解状态。如果已经保存上游任务 ID，查询会恢复稳定公开 ID 并返回 `request_id`，之后可继续取结果；如果上游 ID 从未收到，仍需上游账户侧人工对账。没有凭空查询、取消或重发机制。
 
-任务记录保留 7 天；阿里查询窗口按 24 小时，MiniMax 按 7 天处理。产物链接有效期独立；不将保留期或查询期宣称为视频下载有效期。结果下载不带 API Key，要求公网 HTTPS，逐跳校验 DNS/IP、固定连接地址，限制大小和总超时。
+任务记录保留 7 天；阿里查询窗口按 24 小时，MiniMax 按 7 天处理。产物链接有效期独立；不将保留期或查询期宣称为视频下载有效期。结果下载不带 API Key，要求公网 HTTPS，逐跳校验 DNS/IP、固定连接地址，限制大小和总超时。北京文件识别实际返回的 `http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com` 结果链接仅在下载时升级为 HTTPS；其他 HTTP 域名仍被拒绝。
 
 ## 语音流
 
@@ -57,7 +57,7 @@
 {"type":"finish"}
 ```
 
-服务端发送有序 JSON 控制/usage 事件和二进制音频。是否支持 `flush`、`cancel` 由会话声明；不支持则拒绝。连接关闭、超时、完成和异常都释放并发名额。MiniMax 2205 只在明确未接受文本且该协议允许时进行有限重发，不重连重播已接受的文本。
+服务端发送有序 JSON 事件；`audio` 事件的 `audio` 字段为 Base64 编码音频，客户端解码后拼接播放。是否支持 `flush`、`cancel` 由会话声明；不支持则拒绝。连接关闭、超时、完成和异常都释放并发名额。MiniMax 2205 只在明确未接受文本且该协议允许时进行有限重发，不重连重播已接受的文本。
 
 ## 费用与验收边界
 

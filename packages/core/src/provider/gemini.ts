@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { lookup as nodeDnsLookup } from "node:dns/promises";
 import https from "node:https";
-import { BlockList, isIP } from "node:net";
+import { BlockList, isIP, type TcpSocketConnectOpts } from "node:net";
 import { Readable } from "node:stream";
 import {
   appendMutationList,
@@ -55,11 +55,18 @@ export type GeminiMediaFetch = (
 const pinnedHttpsMediaFetch: GeminiMediaFetch = (url, init) =>
   new Promise<Response>((resolve, reject) => {
     const pinned = init.pinnedAddress;
+    const addressOptions = {
+      autoSelectFamily: false,
+      family: isIP(pinned),
+    } satisfies Pick<TcpSocketConnectOpts, "autoSelectFamily" | "family">;
     const request = https.request(
       url,
       {
         method: "GET",
         servername: url.hostname,
+        // We already selected one validated IP. Node's family auto-selection asks
+        // lookup for an array, which is incompatible with this scalar pinned result.
+        ...addressOptions,
         ...(init.signal !== undefined ? { signal: init.signal } : {}),
         lookup: (
           _hostname: string,

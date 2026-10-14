@@ -14,7 +14,8 @@
 - 任务记录保留与查询期限独立：阿里查询 24 小时，MiniMax 7 天；不推测产物 URL 有效期。不明价格保留 null，并拒绝受费用上限约束的调用。
 - 短 ASR 使用现有 Chat 入口的专用 hook，保留 URL/Data URL/asr_options，跳过通用 IR 与聊天 fallback；流接管并发与请求内存直到完成。语音为独立 HTTP/WS 入口，不改变 xAI /v1/tts。
 - 独立验收补齐：操作记录保存完整恢复绑定，已知上游 ID 可通过 operation 查询恢复公开任务；成功产物不因后续辅助结算/遥测失败而丢失。
-- 开发与离线验收不包含生产部署或新的付费实测；详细任务状态与验收证据见 docs/media-provider-task-tracker.md。
+- **真实验收修复**：北京 Qwen3 文件识别实际返回 HTTP OSS 签名链接，仅将精确官方结果域名升级 HTTPS；继续使用公网 DNS/IP、固定连接、逐跳重定向与大小/超时边界。固定 IP 下载显式关闭 Node 地址族自动选择，并按已验证 IP 设置 family，修复默认 lookup(all:true) 与标量回调不兼容。
+- 用户授权后已通过本地 Helm 调用真实上游；型号、次数与未验收范围见 docs/media-provider-task-tracker.md。未部署生产。
 
 ## 2026-10-14 · Ark 多媒体集成（docs/04、05、06、07、10）
 
