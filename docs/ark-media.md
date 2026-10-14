@@ -1,6 +1,6 @@
 # 方舟媒体接入 / Ark media integration
 
-本地实现与离线验收；尚未发布或完成四模型真实调用验收。任务证据见 [开发计划](ark-media-development-plan.md) 与 [集成验收](ark-media-integration-evidence.md)。
+本地实现与离线验收完成；真实调用已有 Seed3D 成功产物，其他三项受上游额度限制，尚未发布。任务证据见 [开发计划](ark-media-development-plan.md) 与 [集成验收](ark-media-integration-evidence.md)。
 
 Configure `ARK_API_KEY` in the gateway environment, then restart Helm. The optional `type: ark` provider uses the official OpenAI Node SDK **7.33.0**, with custom `post/get` for Ark task endpoints. No Python/Go runtime or additional Ark SDK is needed. Requests use the configured provider proxy and bounded response reader. Never put credentials in YAML.
 
@@ -70,6 +70,6 @@ Then GET `/v1/3d/{request_id}` using the same Helm key. A successful response is
 - Paid POSTs have **zero automatic retries**, including timeout/503/connection errors. `outcome_unknown` means the provider may have accepted the task; reconcile before any manual new create. A failed local ownership write must not trigger replay.
 - `SetLimitExceeded` means the upstream account generation limit was reached. It does not mean the integration can fix the quota. Do not silently change safe experience settings, recharge or retry.
 - 本期不支持 Seedance 编辑/延长、Draft、webhook、账户任务列表/删除。现有 Grok 视频扩展接口仍按原契约运行。
-- 唯一已批准的 Seedance 实测任务为 `cgt-20261014140243-mgu53`，最终 `failed / SetLimitExceeded`，无成功产物。未新增付费调用。Flash、Pro、Seedance、Seed3D 都仍需经 Helm 的单独实测验收；离线 mock、CI 或构建成功均不代表真实模型或生产环境验收。
+- 2026-10-14 经批准四模型各测一次：Seed3D 成功返回有效 ZIP/GLB/PBR；Flash、Pro、Seedance 均 `SetLimitExceeded`，无成功图片或视频。Seed3D 的 low 请求被上游报告为 medium，档位语义尚未通过一致性验收。详见 [真实验收记录](ark-media-live-acceptance.md)。未核对实际账单或部署生产。
 
 官方协议来源：[Images](https://ark.volcengine.com/region:cn-beijing/docs/ark/image-generation-api?lang=zh)、[Video create](https://ark.volcengine.com/region:cn-beijing/docs/ark/create-video-generation-task-api?lang=zh)、[3D create](https://ark.volcengine.com/region:cn-beijing/docs/ark/create-3d-generation-task-api?lang=zh)。SDK 选型与传输限制见 [SDK evidence](ark-sdk-transport-evidence.md)。

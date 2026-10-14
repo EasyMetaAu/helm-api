@@ -13,7 +13,7 @@
 - **权限与单写**：真实 lane 检查 allowed_lanes，直接 Ark alias／wire ID 要求 allow_custom_model；wire ID 仅在唯一配置映射时解析。集成测试发现旧图片接口未检查 lane 白名单，补齐后保留历史非 Ark 裸模型行为。付费创建一旦发出不重试、不跨 provider 回退；上游 ID 与 Helm UUID 分离，保存 key/account/provider/model/kind 绑定并在轮询核验。
 - **成本与恢复**：尚无可靠 USD 媒体结算上界，金额预算 key 预先拒绝，未知成本仍为 null。任务保存 7 天，结果 URL 24 小时；SQLite/Postgres 的条数清理排除未过期媒体任务与预写保留记录，仍按 TTL 清理，因此媒体记录可能使总行数超过普通 Responses 的 10,000 条软上限；3D 返回 ZIP 内 GLB/PBR，未新增资产托管。媒体 catalog 的 maxContextTokens=0 表示不适用聊天 token context，不是宣称上游零输入额度。
 - **实测修正**：Seed3D 的 running 响应还包含 service_tier、execution_expires_after、draft、priority；新增严格字段校验与真实形状回归，修复 Helm 误报 502，未放开未知字段。
-- **限制**：组合参考显式要求 omni_reference_task_type=reference，避免默认自动选入未支持的编辑/延长任务。仅离线验收；唯一此前 Seedance 实测 failed/SetLimitExceeded。四模型真实成功产物、账单和生产均未验收。任务明细与证据见 docs/ark-media-development-plan.md。
+- **限制**：组合参考显式要求 omni_reference_task_type=reference，避免默认自动选入未支持的编辑/延长任务。本轮四次批准实测：3D 基础产物通过，Flash/Pro/Seedance 额度受限；3D 请求 low、上游回传 medium，档位语义尚未验收，不盲目改字段或重试付费创建。实际账单、生产未验收。任务明细与证据见 docs/ark-media-development-plan.md。
 
 ## 2026-10-13 · API key 客户端入口限制（docs/06、07、11）
 

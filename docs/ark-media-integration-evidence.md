@@ -95,3 +95,7 @@ pnpm --filter @helm/gateway... --filter @helm/admin build
 | `t10-error-green.log` | `85f160be7be8e1c8d8eb350a0033902ea0ad65ce3f820f8a9fa8f5c8324ee01a` |
 | `t11-admin-red.log` | `e50209d4165a89a7f7c8d511ebb8190bd29e56f12f61a1a7679c78b138fc56f9` |
 | `t11-admin-green.log` | `0739f1691d5adaa72d520ede7759645ed49586efcf42df04ef1da339edbbf8ab` |
+
+## 后续真实验收更新
+
+本记录为先前离线验收快照。随后经用户批准执行四次真实创建，修复 Seed3D 响应元数据兼容，3D 产物链路成功，其余三项受额度限制；另有 low/medium 参数差异。当前状态以 [T13 真实验收](ark-media-live-acceptance.md) 为准。
