@@ -4018,8 +4018,12 @@ export async function buildServer(
           for (const alias of aliases) {
             const target = registry.resolve(alias);
             if (!target.ok || target.value.providerModel !== "qwen3-asr-flash") continue;
-            const client = providerClients.get(target.value.providerName)?.shortAsr;
-            if (!client) continue;
+            if (
+              config.providers.find((p) => p.name === target.value.providerName)?.type !==
+              "bailian-media"
+            )
+              continue;
+            const client = providerClients.get(target.value.providerName)?.shortAsr ?? null;
             return {
               client,
               alias,

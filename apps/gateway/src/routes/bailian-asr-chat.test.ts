@@ -119,3 +119,35 @@ it("holds the ASR stream lease until cancellation and releases once", async () =
   await new Promise((r) => setTimeout(r, 0));
   expect(release).toHaveBeenCalledTimes(1);
 });
+it("fails closed for an ASR selection with no available credential", async () => {
+  const app = new Hono<AppEnv>();
+  app.post("/", async (c) => {
+    c.set("identity", { keyId: "k", caps: { allowCustomModel: true } } as never);
+    return (
+      (await handleBailianAsrChat(
+        c,
+        {
+          model: "asr",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "input_audio", input_audio: { data: "https://cdn.example/audio.mp3" } },
+              ],
+            },
+          ],
+        },
+        {
+          resolve: () => ({
+            client: null,
+            alias: "ali/asr",
+            model: "qwen3-asr-flash",
+            lane: "asr",
+            customModel: true,
+          }),
+        },
+      )) ?? c.text("fallback")
+    );
+  });
+  expect((await app.request("/", { method: "POST" })).status).toBe(503);
+});

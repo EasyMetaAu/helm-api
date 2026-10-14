@@ -9,7 +9,7 @@ import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
 import type { AudioSpeechRouteDeps } from "./audio-speech.js";
 export interface ShortAsrTarget {
-  client: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream">;
+  client: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream"> | null;
   alias: string;
   model: string;
   lane: string;
@@ -35,8 +35,10 @@ export async function handleBailianAsrChat(
   const target = deps.resolve(raw.model);
   if (!target) return null;
   const identity = c.get("identity");
-  const fail = (status: 400 | 403 | 422 | 429 | 502, code: string) =>
+  const fail = (status: 400 | 403 | 422 | 429 | 502 | 503, code: string) =>
     c.json({ error: { type: "api_error", code, message: code.replaceAll("_", " ") } }, status);
+  const client = target.client;
+  if (!client) return fail(503, "provider_unavailable");
   const caps = identity.caps,
     blocked = createBlockedModelMatcher(caps?.blockedModels);
   if ([raw.model, target.alias, target.model, target.lane].some((m) => blocked?.matches(m)))
@@ -103,7 +105,7 @@ export async function handleBailianAsrChat(
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
       try {
-        for await (const chunk of target.client.chatCompletionStream(body, {
+        for await (const chunk of client.chatCompletionStream(body, {
           signal: AbortSignal.any([signal, abort.signal]),
         }))
           await out.write(chunk);
@@ -120,7 +122,7 @@ export async function handleBailianAsrChat(
     });
   }
   try {
-    const result = await target.client.chatCompletion(body, { signal });
+    const result = await client.chatCompletion(body, { signal });
     await settle("ok");
     return c.json(result);
   } catch {
