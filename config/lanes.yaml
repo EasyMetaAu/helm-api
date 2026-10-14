@@ -389,3 +389,69 @@ grok-imagine-video:
     require_tools: false
     require_json: false
     require_vision: false
+
+seedream-flash:
+  purpose: Ark dedicated media generation
+  primary: ark/seedream-5.0-flash
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seedream-pro:
+  purpose: Ark dedicated media generation
+  primary: ark/seedream-5.0-pro
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seedance-video:
+  purpose: Ark dedicated media generation
+  primary: ark/seedance-2.5
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+seed3d:
+  purpose: Ark dedicated media generation
+  primary: ark/seed3d-2.0
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+# Native media lanes use a single paid create; never replay via fallback.
+
+qwen-image:
+  primary: bailian/qwen-image-3.0-pro
+  fallback: []
+
+wan-video:
+  primary: bailian/wan3.0-video
+  fallback: []
+
+minimax-video:
+  primary: minimax/MiniMax-H3
+  fallback: []
+
+minimax-speech:
+  primary: minimax/speech-2.8-hd
+  fallback: []
+
+bailian-speech:
+  primary: bailian/qwen-audio-3.1-tts-flash
+  fallback: []
+
+transcription-short:
+  primary: bailian/qwen3-asr-flash
+  fallback: []
+
+transcription-file:
+  primary: bailian/qwen3-asr-flash-filetrans
+  fallback: []

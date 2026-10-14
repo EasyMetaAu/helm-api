@@ -24,6 +24,18 @@ function record(responseId: string, createdAt: number): ResponsesRegistryRecord 
 }
 
 async function verify(store: ResponsesRegistryStore): Promise<void> {
+  for (const kind of ["video", "three-d", "transcription"]) {
+    await store.insertIfAbsent({
+      ...record(`${kind}:paid`, 1),
+      selectedLane: kind,
+      expiresAt: 7 * 86400000,
+    });
+    await store.insertIfAbsent({
+      ...record(`${kind}-create:pending`, 1),
+      selectedLane: kind,
+      expiresAt: 7 * 86400000,
+    });
+  }
   expect(await store.insertIfAbsent(record("video-create:req_1", 500))).toBe(true);
   expect(await store.insertIfAbsent(record("video-create:req_1", 600))).toBe(false);
 
@@ -43,6 +55,19 @@ async function verify(store: ResponsesRegistryStore): Promise<void> {
   await expect(
     store.getOwnedLive({ responseId: "resp_3", ...identity, nowMs: 10_000 }),
   ).resolves.toBeNull();
+  for (const kind of ["video", "three-d", "transcription"]) {
+    for (const responseId of [`${kind}:paid`, `${kind}-create:pending`]) {
+      await expect(
+        store.getOwnedLive({ responseId, ...identity, nowMs: 6 * 86400000 }),
+      ).resolves.toMatchObject({ responseId });
+    }
+  }
+  await store.prune({ nowMs: 7 * 86400000, maxEntries: 2, limit: 1000 });
+  for (const kind of ["video", "three-d", "transcription"]) {
+    await expect(
+      store.getOwnedLive({ responseId: `${kind}:paid`, ...identity, nowMs: 7 * 86400000 }),
+    ).resolves.toBeNull();
+  }
 }
 
 describe("ResponsesRegistryStore contract", () => {

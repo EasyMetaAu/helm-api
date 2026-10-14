@@ -20,6 +20,7 @@
     "@helm/shared": "workspace:*",
     "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
+    "openai": "7.33.0",
     "postgres": "^3.4.9",
     "pxpipe-proxy": "0.8.0",
     "sharp": "0.34.5",

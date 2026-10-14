@@ -26,6 +26,8 @@ export class PgResponsesRegistryStore implements ResponsesRegistryStore {
   }
 
   async prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void> {
+    // Paid media ownership must survive until expiresAt. The ordinary Responses
+    // count cap must not evict active tasks or pre-write reservations.
     const maxEntries = Math.max(1, Math.floor(input.maxEntries));
     const limit = Math.max(1, Math.floor(input.limit));
     await this.db.transaction(async (tx) => {
@@ -39,6 +41,7 @@ export class PgResponsesRegistryStore implements ResponsesRegistryStore {
       await tx.execute(sql`
         DELETE FROM responses_registry WHERE response_id IN (
           SELECT response_id FROM responses_registry
+          WHERE selected_lane IS NULL OR selected_lane NOT IN ('video', 'three-d', 'transcription')
           ORDER BY created_at DESC, response_id DESC
           LIMIT ${limit} OFFSET ${maxEntries}
         )

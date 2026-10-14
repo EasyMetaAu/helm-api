@@ -367,3 +367,76 @@ providers:
   # xAI documents this client/proxy path for Grok CLI, not as a third-party OAuth
   # contract. Connect it in Providers; the runtime synthesizes `xai/<live-model>` aliases from
   # https://cli-chat-proxy.grok.com/v1/models; NO YAML block is required.
+
+  # Optional static Ark media transport. Missing ARK_API_KEY disables these targets.
+  - name: ark
+    type: ark
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+    models:
+      - alias: ark/seedream-5.0-flash
+        provider_model: doubao-seedream-5-0-flash-260915
+      - alias: ark/seedream-5.0-pro
+        provider_model: doubao-seedream-5-0-pro-260628
+      - alias: ark/seedance-2.5
+        provider_model: doubao-seedance-2-5-260628
+      - alias: ark/seed3d-2.0
+        provider_model: doubao-seed3d-2-0-260328
+
+  # Optional native media providers. No client is created until its env key is set.
+  # Replace media_account_id with an operator-owned stable account label before use.
+  # Workspace-specific Ali endpoints must use the same account origin with /api/v1.
+  - name: bailian
+    type: bailian-media
+    base_url: https://dashscope.aliyuncs.com/api/v1
+    api_key_env: BAILIAN_API_KEY
+    media_account_id: bailian-default
+    models:
+      - alias: bailian/qwen-image-3.0-pro
+        provider_model: qwen-image-3.0-pro
+      - alias: bailian/qwen-image-3.0
+        provider_model: qwen-image-3.0
+      - alias: bailian/qwen-image-2.1-pro
+        provider_model: qwen-image-2.1-pro
+      - alias: bailian/qwen-image-2.1-turbo
+        provider_model: qwen-image-2.1-turbo
+      - alias: bailian/wan3.0-video
+        provider_model: wan3.0-video
+      - alias: bailian/wan3.0-video-prime
+        provider_model: wan3.0-video-prime
+      - alias: bailian/qwen3-asr-flash
+        provider_model: qwen3-asr-flash
+      - alias: bailian/qwen3-asr-flash-filetrans
+        provider_model: qwen3-asr-flash-filetrans
+      - alias: bailian/qwen-audio-3.1-asr-flash-filetrans
+        provider_model: qwen-audio-3.1-asr-flash-filetrans
+      - alias: bailian/qwen-audio-3.0-asr-flash-filetrans
+        provider_model: qwen-audio-3.0-asr-flash-filetrans
+      - alias: bailian/fun-asr
+        provider_model: fun-asr
+      - alias: bailian/paraformer-v2
+        provider_model: paraformer-v2
+      - alias: bailian/paraformer-8k-v2
+        provider_model: paraformer-8k-v2
+      - alias: bailian/qwen-audio-3.1-tts-flash
+        provider_model: qwen-audio-3.1-tts-flash
+      - alias: bailian/qwen-audio-3.0-tts-plus
+        provider_model: qwen-audio-3.0-tts-plus
+      - alias: bailian/cosyvoice-v3.5-plus
+        provider_model: cosyvoice-v3.5-plus
+      - alias: bailian/cosyvoice-v3.5-flash
+        provider_model: cosyvoice-v3.5-flash
+  - name: minimax
+    type: minimax-media
+    base_url: https://api.minimax.io
+    api_key_env: MINIMAX_API_KEY
+    media_account_id: minimax-default
+    models:
+      - alias: minimax/MiniMax-H3
+        provider_model: MiniMax-H3
+      - alias: minimax/MiniMax-H3-Max
+        provider_model: MiniMax-H3-Max
+      - alias: minimax/speech-2.8-hd
+        provider_model: speech-2.8-hd
+      - alias: minimax/speech-2.8-turbo
+        provider_model: speech-2.8-turbo

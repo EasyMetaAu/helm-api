@@ -1,4 +1,12 @@
 import {
+  ArkImageGenerationRequestSchema,
+  ArkImageGenerationResponseSchema,
+  ArkPublicTaskResultSchema,
+  ArkThreeDGenerationRequestSchema,
+  ArkVideoGenerationRequestSchema,
+  BailianImageRequestSchema,
+  BailianTranscriptionRequestSchema,
+  BailianVideoRequestSchema,
   DecisionsEnvelopeSchema,
   DecisionsRequestSchema,
   GrokImagineImageGenerationRequestSchema,
@@ -7,6 +15,8 @@ import {
   ImageGenerationResponseSchema,
   InteractionsRequestSchema,
   InteractionsResponseSchema,
+  MediaSpeechRequestSchema,
+  MiniMaxVideoRequestSchema,
   ModelObjectSchema,
   ModelsListSchema,
   OpenAIChatRequestSchema,
@@ -43,6 +53,23 @@ type JsonSchema = Record<string, unknown>;
 
 // Convert a Zod schema to a JSON-Schema component. z.toJSONSchema emits a top-level
 // `$schema` (meta) we strip — OpenAPI components must not carry it.
+// Public model names resolve through configuration before strict wire-model validation.
+function arkRequestComponent(schema: z.ZodType, examples: string[]): JsonSchema {
+  const result = component(schema);
+  const properties = result.properties as Record<string, unknown>;
+  result.properties = {
+    ...properties,
+    model: {
+      type: "string",
+      minLength: 1,
+      examples,
+      description:
+        "Configured media lane, or exact configured alias/wire ID with allow_custom_model.",
+    },
+  };
+  return result;
+}
+
 function component(schema: z.ZodType): JsonSchema {
   const js = z.toJSONSchema(schema, { target: "draft-2020-12" }) as JsonSchema;
   delete js.$schema;
@@ -122,6 +149,23 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         },
       },
       schemas: {
+        BailianImageRequest: arkRequestComponent(BailianImageRequestSchema, ["qwen-image"]),
+        BailianVideoRequest: arkRequestComponent(BailianVideoRequestSchema, ["wan-video"]),
+        MiniMaxVideoRequest: arkRequestComponent(MiniMaxVideoRequestSchema, ["minimax-video"]),
+        BailianTranscriptionRequest: component(BailianTranscriptionRequestSchema),
+        MediaSpeechRequest: component(MediaSpeechRequestSchema),
+        ArkImageGenerationRequest: arkRequestComponent(ArkImageGenerationRequestSchema, [
+          "seedream-flash",
+          "seedream-pro",
+        ]),
+        ArkImageGenerationResponse: component(ArkImageGenerationResponseSchema),
+        ArkVideoGenerationRequest: arkRequestComponent(ArkVideoGenerationRequestSchema, [
+          "seedance-video",
+        ]),
+        ArkThreeDGenerationRequest: arkRequestComponent(ArkThreeDGenerationRequestSchema, [
+          "seed3d",
+        ]),
+        ArkTaskResult: component(ArkPublicTaskResultSchema),
         ModelsList: component(ModelsListSchema),
         ModelObject: component(ModelObjectSchema),
         ChatCompletionRequest: component(OpenAIChatRequestSchema),
@@ -406,10 +450,10 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "Generate images from a text prompt. `model` may be an exact image model id " +
             "(e.g. `gpt-image-2`, `gemini-3.1-flash-image`) or an image lane such as " +
             "`gpt-image` / `gemini-image`; `auto` is not used, and `allow_custom_model` " +
-            "is not required. Helm skips text classification, resolves the ordered image " +
-            "chain, and fails over across image providers on provider faults. Gemini image " +
+            "is required for direct Ark model selection. Ark lanes also enforce allowed_lanes. " +
+            "Helm skips text classification. After a paid create begins it never retries or falls back. Gemini image " +
             "targets are translated to/from `generateContent`. Non-streaming. Per-key " +
-            "budget and rate limits apply.",
+            "budget and rate limits apply. Seedream uses seedream-flash / seedream-pro; image references and layer decomposition use this JSON endpoint. Unknown Ark USD pricing rejects spend-capped keys.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
@@ -417,6 +461,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
               "application/json": {
                 schema: {
                   anyOf: [
+                    { $ref: "#/components/schemas/ArkImageGenerationRequest" },
                     { $ref: "#/components/schemas/GrokImagineImageGenerationRequest" },
                     {
                       allOf: [
@@ -460,20 +505,127 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           },
         },
       },
-      "/v1/videos/generations": {
+      "/v1/audio/speech": {
         post: {
           tags: ["Inference"],
-          summary: "Start Grok Imagine video generation",
+          summary: "Generate speech audio (Bailian or MiniMax)",
           description:
-            "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
-            "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
-            "the paid create is attempted once and returns the upstream request_id.",
+            "OpenAI-style speech fields. stream=true returns raw audio chunks; a failed stream is interrupted. Unknown pricing rejects spend-capped keys. No automatic paid-call replay.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/MediaSpeechRequest" } },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Audio bytes",
+              content: { "audio/mpeg": { schema: { type: "string", format: "binary" } } },
+            },
+            "400": errorResponse("Invalid request"),
+            "401": errorResponse("Invalid key"),
+            "422": errorResponse("Unknown price or unsupported parameter"),
+          },
+        },
+      },
+      "/v1/audio/tts": {
+        get: {
+          tags: ["Inference"],
+          summary: "Upgrade to a Helm bidirectional speech WebSocket",
+          description:
+            "Helm extension, not OpenAI Realtime. Authorization: Bearer is required. Send start (request), append (text), finish; flush/cancel depend on provider capabilities. Server emits sequenced events and binary audio. See docs/native-media.md.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            "101": { description: "Authenticated speech session" },
+            "401": errorResponse("Invalid key"),
+          },
+        },
+      },
+      "/v1/audio/transcription-jobs": {
+        post: {
+          tags: ["Inference"],
+          summary: "Create an asynchronous file transcription job",
+          description:
+            "Native JSON URL input. model is a configured lane or permitted model alias. qwen3-asr-flash-filetrans uses input.file_url; other file models use input.file_urls. Not Whisper multipart. Creation is never retried.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
               "application/json": {
-                schema: { $ref: "#/components/schemas/VideoGenerationRequest" },
+                schema: { $ref: "#/components/schemas/BailianTranscriptionRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Helm request_id and queued status" },
+            "400": errorResponse("Invalid input"),
+            "503": errorResponse("Unknown create outcome; retain error.operation_id"),
+          },
+        },
+      },
+      "/v1/audio/transcription-jobs/{requestId}": {
+        get: {
+          tags: ["Inference"],
+          summary: "Read an owned transcription job",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { in: "path", name: "requestId", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            "200": {
+              description:
+                "Status and per-file results, including materialized transcript JSON and partial_failure",
+            },
+            "404": errorResponse("Unknown or unowned task"),
+            "409": errorResponse("Provider identity changed"),
+            "410": errorResponse("Query window expired"),
+          },
+        },
+      },
+      ...Object.fromEntries(
+        ["/v1/videos", "/v1/audio/transcription-jobs"].map((root) => [
+          `${root}/operations/{operationId}`,
+          {
+            get: {
+              tags: ["Inference"],
+              summary: "Reconcile an owned media create operation without resending",
+              security: [{ bearerAuth: [] }],
+              parameters: [
+                { in: "path", name: "operationId", required: true, schema: { type: "string" } },
+              ],
+              responses: {
+                "200": {
+                  description:
+                    "Operation state; request_id when a known upstream task mapping is recovered",
+                },
+                "404": errorResponse("Unknown or unowned operation"),
+              },
+            },
+          },
+        ]),
+      ),
+      "/v1/videos/generations": {
+        post: {
+          tags: ["Inference"],
+          summary: "Start Grok, Seedance, Wan or MiniMax video generation",
+          description:
+            "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
+            "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
+            "the paid create is attempted once. Seedance uses model seedance-video with Ark content items; its request_id is a Helm-owned UUID retained for seven days. Unknown USD pricing rejects spend-capped keys.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  anyOf: [
+                    { $ref: "#/components/schemas/VideoGenerationRequest" },
+                    { $ref: "#/components/schemas/ArkVideoGenerationRequest" },
+                    { $ref: "#/components/schemas/BailianVideoRequest" },
+                    { $ref: "#/components/schemas/MiniMaxVideoRequest" },
+                  ],
+                },
               },
             },
           },
@@ -528,7 +680,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
       "/v1/videos/{requestId}": {
         get: {
           tags: ["Inference"],
-          summary: "Poll a Grok Imagine video task",
+          summary: "Poll an owned video task",
           description:
             "Polls the original SuperGrok OAuth account selected at creation. " +
             "The same Helm account and API key must own the request id.",
@@ -546,13 +698,76 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
               description: "Current upstream video status.",
               content: {
                 "application/json": {
-                  schema: { $ref: "#/components/schemas/VideoRetrieveResponse" },
+                  schema: {
+                    anyOf: [
+                      { $ref: "#/components/schemas/VideoRetrieveResponse" },
+                      { $ref: "#/components/schemas/ArkTaskResult" },
+                    ],
+                  },
                 },
               },
             },
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Video request not found for this key"),
             "502": errorResponse("Video poll failed"),
+          },
+        },
+      },
+      "/v1/3d/generations": {
+        post: {
+          tags: ["Inference"],
+          summary: "Start Seed3D single-image generation",
+          description:
+            "Use seed3d with one image_url. A paid create is sent once; no automatic retry. Spend-capped keys are rejected until USD pricing can be enforced.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ArkThreeDGenerationRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Task accepted with a Helm-owned request_id.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/VideoGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponse("Invalid request or unknown USD pricing"),
+            "401": errorResponse("Missing or invalid API key"),
+            "503": errorResponse("Provider unavailable or create outcome unknown"),
+          },
+        },
+      },
+      "/v1/3d/{requestId}": {
+        get: {
+          tags: ["Inference"],
+          summary: "Poll an owned Seed3D task",
+          description:
+            "Same key/account only; task association survives restart for seven days. A successful file is a ZIP containing GLB/PBR assets; links expire after 24 hours. artifact_expires_at is Unix milliseconds.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: "requestId",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Normalized task state and optional ZIP result.",
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/ArkTaskResult" } },
+              },
+            },
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Task not found for this key"),
+            "502": errorResponse("Invalid upstream task response"),
           },
         },
       },

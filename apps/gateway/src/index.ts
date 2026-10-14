@@ -8,6 +8,7 @@ import type { Duplex } from "node:stream";
 import { loadConfig } from "@helm/core";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
+import { isAudioTtsWebSocketPath, mountAudioTtsWebSocket } from "./audio-tts-websocket.js";
 import { createJsonLogger } from "./logging.js";
 import {
   installRealtimeWebSocketBridge,
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
 
     let handle: ServerHandle;
     let responsesWebSocket: ResponsesWebSocketBridge | undefined;
+    let audioTtsWebSocket: ReturnType<typeof mountAudioTtsWebSocket> | undefined;
     let realtimeWebSocket: RealtimeWebSocketBridge | undefined;
     let server: ReturnType<typeof serve> | undefined;
     let rejectUnknownUpgrade: ((request: IncomingMessage, socket: Duplex) => void) | undefined;
@@ -117,9 +119,15 @@ async function main(): Promise<void> {
           memoryAdmission: next.websocketIngressAdmission,
         });
       }
+      if (!audioTtsWebSocket && next.audioSpeech)
+        audioTtsWebSocket = mountAudioTtsWebSocket({ server, deps: next.audioSpeech });
       if (!rejectUnknownUpgrade) {
         rejectUnknownUpgrade = (request, socket) => {
-          if (!isResponsesWebSocketPath(request.url) && !isRealtimeWebSocketPath(request.url)) {
+          if (
+            !isResponsesWebSocketPath(request.url) &&
+            !isRealtimeWebSocketPath(request.url) &&
+            !isAudioTtsWebSocketPath(request.url)
+          ) {
             socket.destroy();
           }
         };
@@ -203,6 +211,7 @@ async function main(): Promise<void> {
       try {
         await responsesWebSocket?.close();
         await realtimeWebSocket?.close();
+        await audioTtsWebSocket?.close();
         if (rejectUnknownUpgrade) server?.off("upgrade", rejectUnknownUpgrade);
         await closeServer(server as unknown as ClosableServer, drainMs);
         await handle.dispose?.();

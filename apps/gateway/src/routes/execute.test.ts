@@ -4606,6 +4606,27 @@ describe("createExecute — gateway execution adapter", () => {
     expect(provider.chatCompletion).not.toHaveBeenCalled();
   });
 
+  it("rejects media-only providers even with custom aliases and missing capability metadata", async () => {
+    const provider = {
+      mediaOnly: true,
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ "custom/media": "ark-wire" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["custom/media"]), req());
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe("media_endpoint_required");
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+  });
+
   it("preserves native conversational image output for non-xAI models", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "gemini-image-ok" }),

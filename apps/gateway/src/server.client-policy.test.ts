@@ -71,6 +71,7 @@ it("enforces client policy across HTTP model boundaries while preserving portal 
       "/v1/images/generations",
       "/v1/images/edits",
       "/v1/videos/generations",
+      "/v1/3d/generations",
       "/v1/tts",
       "/v1/realtime/calls",
     ];
@@ -84,7 +85,12 @@ it("enforces client policy across HTTP model boundaries while preserving portal 
       else if (path.startsWith("/v1beta/")) expect(body.error.status).toBe("PERMISSION_DENIED");
       else expect(body.error.code).toBe("client_not_allowed");
     }
-    for (const path of ["/v1/models", "/v1/responses/resp_test", "/v1/videos/vid_test"]) {
+    for (const path of [
+      "/v1/models",
+      "/v1/responses/resp_test",
+      "/v1/videos/vid_test",
+      "/v1/3d/task_test",
+    ]) {
       expect((await server.app.request(path, { headers })).status, path).toBe(403);
     }
     const corruptHeaders = {

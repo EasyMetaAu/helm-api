@@ -1,4 +1,5 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
+import { ArkMediaError } from "@helm/core";
 import { ERROR_CLASS_HTTP_STATUS, type ProviderAttempt } from "@helm/shared";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
@@ -54,7 +55,16 @@ export type ImageAttempt = (target: ImageChainTarget) => Promise<ImageAttemptRes
 // interactions route filters kinds itself). Built in server.ts over the registry +
 // catalog + lanes; returns a 404/503 marker when nothing resolves to an image model.
 export type ResolveImageChain = (model: string) =>
-  | { ok: true; laneName: string; candidateChain: string[]; targets: ImageChainTarget[] }
+  | {
+      ok: true;
+      /** Authoritative selection kind. A direct alias may still have the synthetic
+       * telemetry label "image"; that label must not grant lane permissions.
+       * Optional for existing headless resolvers; legacy lanes use laneName=model. */
+      isLane?: boolean;
+      laneName: string;
+      candidateChain: string[];
+      targets: ImageChainTarget[];
+    }
   // 404 → nothing resolved to a configured image model; 503 → resolved an image
   // model but its provider credential/client is missing (a server-config problem).
   | { ok: false; status: 404 | 503 };
@@ -68,6 +78,7 @@ export interface ImageChainServed {
 export interface ImageChainTerminal {
   ok: false;
   errorClass: string;
+  errorCode?: string;
   httpStatus: number;
   message: string;
   providerRaw: unknown | null;
@@ -177,6 +188,69 @@ export async function runImageChain(
           errorClass: "outcome_unknown",
           httpStatus: 503,
           message: "image create outcome is unknown",
+          providerRaw: null,
+          aborted: false,
+          attempts,
+        };
+      }
+      // Ark transport knows whether the write was rejected, never sent, or has
+      // an uncertain result. Handle it before generic OpenAI shape heuristics.
+      if (err instanceof ArkMediaError) {
+        const rejected = err.outcome === "rejected";
+        const unknown = err.outcome === "unknown";
+        const status = err.upstreamStatus;
+        const invalidRequest = rejected && (status === 400 || status === 413 || status === 422);
+        const errorClass = unknown
+          ? "outcome_unknown"
+          : invalidRequest
+            ? "invalid_request"
+            : "upstream_error";
+        const raw = err.providerRaw;
+        const providerError =
+          typeof raw === "object" && raw !== null && "error" in raw ? raw.error : null;
+        const providerCode =
+          typeof providerError === "object" && providerError !== null && "code" in providerError
+            ? providerError.code
+            : null;
+        // Only a bounded machine code crosses the public boundary. Upstream
+        // messages/raw bodies can contain account identifiers or supplied URLs.
+        const errorCode = unknown
+          ? "outcome_unknown"
+          : !rejected
+            ? "provider_unavailable"
+            : typeof providerCode === "string" &&
+                /^[A-Za-z][A-Za-z0-9_.]{0,127}$/.test(providerCode)
+              ? providerCode
+              : "upstream_rejected";
+        if (unknown) breaker.recordFailure(target.alias);
+        else releaseProbeLock();
+        attempts.push({
+          alias: target.alias,
+          skipped: false,
+          skip_reason: null,
+          status: "error",
+          error_class: errorClass,
+          latency_ms: Date.now() - started,
+          cost_usd: null,
+          error_detail: null,
+        });
+        return {
+          ok: false,
+          errorClass,
+          errorCode,
+          httpStatus:
+            unknown || !rejected
+              ? 503
+              : invalidRequest
+                ? (status ?? 400)
+                : status === 429
+                  ? 429
+                  : 502,
+          message: unknown
+            ? "image create outcome is unknown"
+            : rejected
+              ? "Ark image request was rejected"
+              : "Ark image request was not sent",
           providerRaw: null,
           aborted: false,
           attempts,

@@ -386,6 +386,73 @@ async function readBodyWithLimit(
   return Buffer.concat(chunks);
 }
 
+/** Public transcription artifacts: same DNS pinning boundary as remote Gemini media. */
+export async function fetchPublicResultJson(
+  url: string,
+  options: {
+    fetch?: GeminiMediaFetch;
+    lookup?: HostnameLookup;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    maxBytes?: number;
+  } = {},
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, controller.signal])
+    : controller.signal;
+  const bounded = async <T>(promise: Promise<T>): Promise<T> => {
+    signal.throwIfAborted();
+    let abort: () => void = () => {};
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          abort = () => reject(new UpstreamError("timeout", "media result fetch interrupted"));
+          signal.addEventListener("abort", abort, { once: true });
+        }),
+      ]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  };
+  try {
+    let current = new URL(url);
+    for (let hop = 0; hop <= 3; hop++) {
+      if (current.username || current.password)
+        throw new UpstreamError("upstream_error", "media result URL credentials are forbidden");
+      const pinnedAddress = await bounded(
+        assertPublicHttpsTarget(current, options.lookup ?? defaultDnsLookup),
+      );
+      const response = await bounded(
+        (options.fetch ?? pinnedHttpsMediaFetch)(current, { signal, pinnedAddress }),
+      );
+      if (response.status >= 300 && response.status < 400 && response.headers.has("location")) {
+        await response.body?.cancel();
+        current = new URL(response.headers.get("location") ?? "", current);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new UpstreamError("upstream_error", "media result fetch failed");
+      }
+      const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
+      if (Number(response.headers.get("content-length")) > maxBytes) {
+        await response.body?.cancel();
+        throw new UpstreamError("upstream_error", "media result too large");
+      }
+      const bytes = await bounded(readBodyWithLimit(response, maxBytes, timeoutMs));
+      return JSON.parse(bytes.toString("utf8")) as unknown;
+    }
+    throw new UpstreamError("upstream_error", "media result redirect limit");
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
 async function fetchRemoteMediaInlineData(
   url: string,
   mimeHint: string | undefined,

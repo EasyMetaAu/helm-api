@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type BudgetCaps,
   type BudgetCheckResult,
@@ -27,9 +27,30 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
+import {
+  ARK_TASK_TTL_MS,
+  ARK_THREE_D_MODELS,
+  ARK_VIDEO_MODELS,
+  type ArkTaskKind,
+  decodeArkTaskBinding,
+  encodeArkTaskBinding,
+  isArkTaskRecord,
+  normalizeArkTaskResult,
+  parseArkTaskCreate,
+  parseArkTaskRequest,
+  updateArkTaskState,
+} from "./ark-media-task.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import { PASSTHROUGH_CLASSIFIER } from "./image-telemetry.js";
+import { isNativeMediaTaskRecord } from "./media-task-binding.js";
 import type { MessagesIdentity } from "./messages.js";
+import {
+  createNativeMediaTask,
+  type NativeMediaTaskProfile,
+  pollNativeMediaTask,
+  readNativeMediaOperation,
+  recoverNativeMediaOperation,
+} from "./native-media-tasks.js";
 import {
   captureEnabled,
   type RecordServedDeps,
@@ -37,9 +58,15 @@ import {
   withRequestContentMode,
 } from "./payload-capture.js";
 
+type MediaTaskKind = ArkTaskKind | "transcription";
 const VIDEO_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface VideoCreateTarget {
+  nativeTask?: NativeMediaTaskProfile;
+  providerType?: "ark";
+  laneName?: string;
+  /** Ark tasks default to seven days; shorter TTLs are rejected before create. */
+  registryTtlMs?: number;
   providerAlias: string;
   providerName: string;
   providerModel: string;
@@ -56,6 +83,7 @@ export interface VideoCreateTarget {
 export type VideoCreateOperation = "generation" | "extension";
 
 export interface VideosRouteDeps {
+  isNativeSelection?: (model: string) => boolean;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   registry: AtomicResponsesRegistryPort;
   resolver: {
@@ -65,6 +93,9 @@ export interface VideosRouteDeps {
       operation: VideoCreateOperation,
     ): Promise<VideoCreateTarget | null>;
     poll(record: ResponsesRegistryRecord): Promise<{
+      nativeTask?: NativeMediaTaskProfile;
+      providerType?: "ark";
+      providerModel?: string;
       retrieve(requestId: string, signal: AbortSignal): Promise<Record<string, unknown>>;
     } | null>;
   };
@@ -99,7 +130,7 @@ function errorJson(
 }
 
 function isTerminal(status: unknown): status is string {
-  return status === "done" || status === "failed" || status === "expired";
+  return status === "done" || status === "failed" || status === "expired" || status === "cancelled";
 }
 
 function normalizeVideoCreateBody(
@@ -117,6 +148,7 @@ function registryRecord(
   target: VideoCreateTarget,
   nowMs: number,
   status = "in_progress",
+  kind: MediaTaskKind = "video",
 ): ResponsesRegistryRecord {
   return {
     responseId,
@@ -127,14 +159,19 @@ function registryRecord(
     providerModel: target.providerModel,
     providerProtocol: null,
     providerAccount: target.providerAccount,
-    selectedLane: "video",
+    selectedLane: kind,
     createdAt: nowMs,
-    expiresAt: nowMs + VIDEO_REGISTRY_TTL_MS,
+    expiresAt:
+      nowMs +
+      (target.providerType === "ark"
+        ? (target.registryTtlMs ?? ARK_TASK_TTL_MS)
+        : VIDEO_REGISTRY_TTL_MS),
     status,
   };
 }
 
 function buildVideoDecision(input: {
+  kind: MediaTaskKind;
   requestId: string;
   traceId: string;
   keyPrefix: string | null;
@@ -169,8 +206,11 @@ function buildVideoDecision(input: {
     protocol: null,
     key_prefix: input.keyPrefix,
     classifier: PASSTHROUGH_CLASSIFIER,
-    policy: { matched_policy_id: null, reason: "video_generation" },
-    lane: { selected_lane: "video", candidate_chain: [input.target.providerAlias] },
+    policy: {
+      matched_policy_id: null,
+      reason: input.kind === "video" ? "video_generation" : "three_d_generation",
+    },
+    lane: { selected_lane: input.kind, candidate_chain: [input.target.providerAlias] },
     provider_attempts: [attempt],
     final:
       input.status === "ok"
@@ -244,11 +284,34 @@ async function admit(
 }
 
 export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): void {
-  app.use("/v1/videos/generations", concurrencyReleaseGuard());
-  app.use("/v1/videos/generations", memoryAdmissionReleaseGuard());
-  app.use("/v1/videos/extensions", concurrencyReleaseGuard());
-  app.use("/v1/videos/extensions", memoryAdmissionReleaseGuard());
-  app.use("/v1/videos/:requestId", concurrencyReleaseGuard());
+  registerMediaTaskRoutes(app, deps, "video");
+}
+
+/** Shared admission/reservation pipeline for the two existing asynchronous media shapes. */
+export function registerMediaTaskRoutes(
+  app: Hono<AppEnv>,
+  deps: VideosRouteDeps,
+  kind: MediaTaskKind,
+): void {
+  const root =
+    kind === "video"
+      ? "/v1/videos"
+      : kind === "three-d"
+        ? "/v1/3d"
+        : "/v1/audio/transcription-jobs";
+  const createPath = kind === "transcription" ? root : `${root}/generations`;
+  const knownArkModels =
+    kind === "video"
+      ? ARK_VIDEO_MODELS
+      : kind === "three-d"
+        ? ARK_THREE_D_MODELS
+        : new Set<string>();
+  app.use(createPath, concurrencyReleaseGuard());
+  app.use(createPath, memoryAdmissionReleaseGuard());
+  app.use(`${root}/extensions`, concurrencyReleaseGuard());
+  app.use(`${root}/extensions`, memoryAdmissionReleaseGuard());
+  app.use(`${root}/:requestId`, concurrencyReleaseGuard());
+  app.use(`${root}/operations/:operationId`, concurrencyReleaseGuard());
 
   const createVideo = async (
     c: Context<AppEnv>,
@@ -279,18 +342,13 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       const raw = admitted?.text ?? (await c.req.text());
       requestJson = raw;
       if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
-      const parsed = (
-        operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema
-      ).safeParse(JSON.parse(raw));
-      if (!parsed.success) {
-        return errorJson(
-          c,
-          400,
-          parsed.error.issues[0]?.message ?? "invalid video generation request",
-          "invalid_request",
-        );
-      }
-      body = parsed.data;
+      const rawBody: unknown = JSON.parse(raw);
+      if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody))
+        return errorJson(c, 400, "invalid media request object", "invalid_request");
+      const rawRecord = rawBody as Record<string, unknown>;
+      if (typeof rawRecord.model !== "string" || rawRecord.model.trim().length === 0)
+        return errorJson(c, 400, "media model is required", "invalid_request");
+      body = rawRecord;
       admitted?.materialized();
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
@@ -301,16 +359,95 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     }
 
     const requestedModel = typeof body.model === "string" ? body.model : "";
-    if (requestedModel.includes("/") && identity.caps?.allowCustomModel !== true) {
+    if (
+      requestedModel.includes("/") &&
+      !knownArkModels.has(requestedModel) &&
+      identity.caps?.allowCustomModel !== true
+    ) {
       return errorJson(c, 400, "video model is not available to this key", "model_not_found");
     }
     const target = await deps.resolver.create(body, identity, operation);
-    if (target === null)
+    if (target === null) {
+      if (
+        kind === "video" &&
+        !knownArkModels.has(requestedModel) &&
+        !deps.isNativeSelection?.(requestedModel)
+      ) {
+        const schema =
+          operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema;
+        if (!schema.safeParse(body).success)
+          return errorJson(c, 400, "invalid video request", "invalid_request");
+      }
       return errorJson(c, 503, "video provider is unavailable", "provider_unavailable");
+    }
+    const isArk = target.providerType === "ark";
+    const isNative = target.nativeTask !== undefined;
+    if (kind === "transcription" && !isNative)
+      return errorJson(c, 503, "ASR provider unavailable", "provider_unavailable");
+    const allowed = identity.caps?.allowedLanes;
+    if (target.laneName !== undefined && allowed != null && !allowed.includes(target.laneName))
+      return errorJson(c, 403, "media lane is not allowed for this key", "lane_not_allowed");
+
+    if ((knownArkModels.has(requestedModel) || kind === "three-d") && !isArk)
+      return errorJson(c, 503, "Ark media provider is unavailable", "provider_unavailable");
+    if (target.nativeTask) {
+      if (target.laneName === undefined && identity.caps?.allowCustomModel !== true)
+        return errorJson(c, 403, "direct media model is unavailable", "model_not_found");
+      if (operation !== "generation")
+        return errorJson(c, 400, "media extension unsupported", "invalid_request");
+      try {
+        body = {
+          ...target.nativeTask.validate(body, target.providerModel),
+          model: requestedModel,
+        };
+      } catch {
+        return errorJson(c, 400, "invalid media request", "invalid_request");
+      }
+    }
+    if (isArk && kind !== "transcription") {
+      if (target.laneName === undefined && identity.caps?.allowCustomModel !== true)
+        return errorJson(
+          c,
+          400,
+          "direct media model is not available to this key",
+          "model_not_found",
+        );
+      if (operation === "extension")
+        return errorJson(c, 400, "Ark media extension is unsupported", "invalid_request");
+      const parsed = parseArkTaskRequest(kind, body, target.providerModel);
+      if (!parsed.success)
+        return errorJson(
+          c,
+          400,
+          parsed.error.issues[0]?.message ?? "invalid Ark media request",
+          "invalid_request",
+        );
+      body = { ...parsed.data, model: requestedModel };
+      if (
+        target.registryTtlMs !== undefined &&
+        (!Number.isSafeInteger(target.registryTtlMs) || target.registryTtlMs < ARK_TASK_TTL_MS)
+      )
+        return errorJson(c, 503, "Ark media task retention is unavailable", "provider_unavailable");
+    }
+    if (!isArk && !isNative) {
+      const parsed = (
+        operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema
+      ).safeParse(body);
+      if (!parsed.success)
+        return errorJson(
+          c,
+          400,
+          parsed.error.issues[0]?.message ?? "invalid video generation request",
+          "invalid_request",
+        );
+      body = parsed.data;
+    }
     const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
     if (
       blocked !== null &&
-      (blocked.matches(requestedModel) || blocked.matches(target.providerAlias))
+      (blocked.matches(requestedModel) ||
+        blocked.matches(target.providerAlias) ||
+        blocked.matches(target.providerModel))
     ) {
       return errorJson(c, 400, "video model is blocked for this key", "model_blocked");
     }
@@ -335,7 +472,7 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
 
     const now = deps.now ?? Date.now;
     const startedAt = now();
-    const upstreamBody = normalizeVideoCreateBody(body, operation);
+    const upstreamBody = isArk || isNative ? body : normalizeVideoCreateBody(body, operation);
     const upstreamRequestJson = JSON.stringify({ ...upstreamBody, model: target.providerModel });
     const recordStart = async (
       status: "ok" | "error",
@@ -351,6 +488,7 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
             accountId: identity.accountId,
             apiKeyId: identity.keyId,
             decision: buildVideoDecision({
+              kind,
               requestId: helmRequestId,
               traceId,
               keyPrefix,
@@ -362,8 +500,9 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
               upstreamRequestId:
                 response !== null &&
                 typeof response === "object" &&
-                typeof (response as Record<string, unknown>).request_id === "string"
-                  ? ((response as Record<string, unknown>).request_id as string)
+                typeof (response as Record<string, unknown>)[isArk ? "id" : "request_id"] ===
+                  "string"
+                  ? ((response as Record<string, unknown>)[isArk ? "id" : "request_id"] as string)
                   : undefined,
             }),
             requestJson,
@@ -376,14 +515,19 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
         );
       } catch {
         // Observability is fail-open after a paid or ambiguous provider attempt.
-        deps.log?.("video.telemetry.record_failed", { request_id: helmRequestId });
+        deps.log?.(`${kind}.telemetry.record_failed`, { request_id: helmRequestId });
       }
     };
+    if (isNative && kind !== "three-d") {
+      return createNativeMediaTask(c, deps, target, body, identity, kind, recordStart);
+    }
     const reservation = registryRecord(
-      `video-create:${helmRequestId}`,
+      `${kind}-create:${helmRequestId}`,
       identity,
       target,
       startedAt,
+      "in_progress",
+      kind,
     );
     let reserved: boolean;
     try {
@@ -407,23 +551,56 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
           await deps.registry.put({ ...reservation, providerAccount: account });
         },
       );
-    } catch {
+    } catch (failure) {
+      if (isArk && failure !== null && typeof failure === "object") {
+        const rejected = failure as { outcome?: unknown; upstreamStatus?: unknown };
+        if (
+          rejected.outcome === "rejected" &&
+          typeof rejected.upstreamStatus === "number" &&
+          rejected.upstreamStatus >= 400 &&
+          rejected.upstreamStatus < 500 &&
+          rejected.upstreamStatus !== 408
+        ) {
+          await recordStart("error", "upstream_rejected", null);
+          return errorJson(
+            c,
+            rejected.upstreamStatus as ContentfulStatusCode,
+            "media create was rejected by the provider",
+            "upstream_rejected",
+          );
+        }
+      }
       await recordStart("error", "outcome_unknown", null);
       return errorJson(c, 503, "video create outcome is unknown", "outcome_unknown");
     }
-    const upstreamRequestId = upstream.request_id;
+    const upstreamRequestId = isArk ? parseArkTaskCreate(upstream) : upstream.request_id;
     if (typeof upstreamRequestId !== "string" || upstreamRequestId.length === 0) {
       await recordStart("error", "outcome_unknown", null);
       return errorJson(c, 503, "video create outcome is unknown", "outcome_unknown");
     }
+    const publicId = isArk ? randomUUID() : upstreamRequestId;
     try {
+      const mappedStatus = isArk
+        ? encodeArkTaskBinding({
+            kind: kind === "three-d" ? "three-d" : "video",
+            publicId,
+            providerAlias: target.providerAlias,
+            providerAccount: target.providerAccount,
+            laneName: target.laneName ?? null,
+            upstreamId: upstreamRequestId,
+            providerName: target.providerName,
+            providerModel: target.providerModel,
+            state: "queued",
+          })
+        : String(upstream.status ?? "in_progress");
       const mapped = await deps.registry.putIfAbsent(
         registryRecord(
-          `video:${upstreamRequestId}`,
+          `${kind}:${publicId}`,
           identity,
           target,
-          now(),
-          String(upstream.status ?? "in_progress"),
+          isArk ? startedAt : now(),
+          mappedStatus,
+          kind,
         ),
       );
       if (!mapped) {
@@ -447,13 +624,50 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
         // Budget settlement is explicitly fail-open after a paid provider call.
       }
     }
-    return c.json(upstream);
+    return c.json(isArk ? { request_id: publicId, status: "queued" } : upstream);
   };
 
-  app.post("/v1/videos/generations", (c) => createVideo(c, "generation"));
-  app.post("/v1/videos/extensions", (c) => createVideo(c, "extension"));
+  app.post(createPath, (c) => createVideo(c, "generation"));
+  if (kind === "video") app.post(`${root}/extensions`, (c) => createVideo(c, "extension"));
 
-  app.get("/v1/videos/:requestId", async (c): Promise<Response> => {
+  app.use(`${root}/operations/:operationId`, concurrencyReleaseGuard());
+  app.get(`${root}/operations/:operationId`, async (c): Promise<Response> => {
+    const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
+    if (!identity) return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
+    const denied = clientPolicyRejection(c, identity);
+    if (denied) return denied;
+    const admission = await admit(c, deps, identity);
+    if (admission) return admission;
+    const id = c.req.param("operationId");
+    let record: ResponsesRegistryRecord | null;
+    try {
+      record = await deps.registry.get(`${kind}-create:${id}`, identity);
+    } catch {
+      return errorJson(c, 503, "operation registry unavailable", "registry_unavailable");
+    }
+    if (
+      !record ||
+      record.accountId !== identity.accountId ||
+      record.keyId !== identity.keyId ||
+      record.selectedLane !== kind ||
+      record.expiresAt <= (deps.now ?? Date.now)()
+    )
+      return errorJson(c, 404, "operation not found", "request_not_found");
+    const operation = readNativeMediaOperation(record);
+    if (!operation) return errorJson(c, 404, "operation not found", "request_not_found");
+    try {
+      const requestId = await recoverNativeMediaOperation(record, deps);
+      return c.json({
+        operation_id: id,
+        ...operation,
+        ...(requestId ? { request_id: requestId } : {}),
+      });
+    } catch {
+      return errorJson(c, 503, "operation recovery unavailable", "registry_unavailable");
+    }
+  });
+
+  app.get(`${root}/:requestId`, async (c): Promise<Response> => {
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (identity === null)
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
@@ -464,17 +678,65 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
 
     const requestId = c.req.param("requestId");
     const pollRequestId = c.get("request_id") ?? crypto.randomUUID();
-    const record = await deps.registry.get(`video:${requestId}`, identity);
+    let record: ResponsesRegistryRecord | null;
+    try {
+      record = await deps.registry.get(`${kind}:${requestId}`, identity);
+    } catch {
+      return errorJson(c, 503, "media task registry is unavailable", "registry_unavailable");
+    }
     if (record === null)
       return errorJson(c, 404, "video request was not found", "request_not_found");
+    if (
+      ((isArkTaskRecord(record) || isNativeMediaTaskRecord(record)) &&
+        record.expiresAt <= (deps.now ?? Date.now)()) ||
+      (kind === "three-d" && record.selectedLane !== kind) ||
+      record.accountId !== identity.accountId ||
+      record.keyId !== identity.keyId
+    )
+      return errorJson(c, 404, "media request was not found", "request_not_found");
+    if (isNativeMediaTaskRecord(record) && kind !== "three-d") {
+      return pollNativeMediaTask(c, deps, record, identity, kind, requestId);
+    }
+    if (kind === "transcription")
+      return errorJson(c, 502, "invalid transcription binding", "upstream_error");
+    const arkBinding = decodeArkTaskBinding(record, kind);
+    if (isArkTaskRecord(record) && arkBinding === null)
+      return errorJson(c, 502, "media task binding is invalid", "upstream_error");
+    if (arkBinding !== null) {
+      const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
+      if (
+        blocked !== null &&
+        [record.providerAlias, record.providerModel, arkBinding.laneName].some(
+          (value) => value !== null && blocked.matches(value),
+        )
+      )
+        return errorJson(c, 400, "media model is blocked for this key", "model_blocked");
+      const allowed = identity.caps?.allowedLanes;
+      if (arkBinding.laneName !== null && allowed != null && !allowed.includes(arkBinding.laneName))
+        return errorJson(c, 403, "media lane is not allowed for this key", "lane_not_allowed");
+      if (arkBinding.laneName === null && identity.caps?.allowCustomModel !== true)
+        return errorJson(
+          c,
+          400,
+          "direct media model is not available to this key",
+          "model_not_found",
+        );
+    }
     const client = await deps.resolver.poll(record);
     if (client === null)
       return errorJson(c, 503, "video provider is unavailable", "provider_unavailable");
+    if (
+      arkBinding !== null &&
+      (client.providerType !== "ark" || client.providerModel !== record.providerModel)
+    )
+      return errorJson(c, 502, "media task provider binding differs", "upstream_error");
+    if (arkBinding === null && (client.providerType === "ark" || kind === "three-d"))
+      return errorJson(c, 502, "media task binding is missing", "upstream_error");
     let upstream: Record<string, unknown>;
     try {
-      upstream = await client.retrieve(requestId, requestSignal(c));
+      upstream = await client.retrieve(arkBinding?.upstreamId ?? requestId, requestSignal(c));
     } catch {
-      deps.log?.("video.poll.lifecycle", {
+      deps.log?.(`${kind}.poll.lifecycle`, {
         request_id: pollRequestId,
         video_request_id: requestId,
         provider_alias: record.providerAlias,
@@ -484,9 +746,18 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       });
       return errorJson(c, 502, "video poll failed", "upstream_error");
     }
-    const parsed = VideoRetrieveResponseSchema.safeParse(upstream);
+    const normalized =
+      arkBinding === null
+        ? null
+        : normalizeArkTaskResult(kind, upstream, record, requestId, (deps.now ?? Date.now)());
+    const parsed =
+      arkBinding === null
+        ? VideoRetrieveResponseSchema.safeParse(upstream)
+        : normalized === null
+          ? { success: false as const }
+          : { success: true as const, data: normalized };
     if (!parsed.success) {
-      deps.log?.("video.poll.lifecycle", {
+      deps.log?.(`${kind}.poll.lifecycle`, {
         request_id: pollRequestId,
         video_request_id: requestId,
         provider_alias: record.providerAlias,
@@ -498,7 +769,7 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     }
     upstream = parsed.data;
     const status = upstream.status;
-    deps.log?.("video.poll.lifecycle", {
+    deps.log?.(`${kind}.poll.lifecycle`, {
       request_id: pollRequestId,
       video_request_id: requestId,
       provider_alias: record.providerAlias,
@@ -508,9 +779,13 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     });
     if (isTerminal(upstream.status)) {
       try {
-        await deps.registry.put({ ...record, status: upstream.status });
+        await deps.registry.put(
+          arkBinding === null
+            ? { ...record, status: upstream.status }
+            : updateArkTaskState(record, kind, upstream.status),
+        );
       } catch {
-        deps.log?.("video.poll.terminal_state_update_failed", {
+        deps.log?.(`${kind}.poll.terminal_state_update_failed`, {
           request_id: pollRequestId,
           video_request_id: requestId,
           status,

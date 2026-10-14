@@ -7,6 +7,11 @@ import {
   type ImageEditInput,
 } from "@helm/core";
 import {
+  ArkImageGenerationRequestSchema,
+  ArkImageGenerationResponseSchema,
+  ArkImageModelSchema,
+  ArkThreeDModelSchema,
+  ArkVideoModelSchema,
   GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
@@ -85,6 +90,19 @@ export interface ImagesRouteDeps {
   ) => Promise<void>;
   /** Telemetry + payload recorder. Omitted = record nothing (test doubles). */
   record?: RecordServedDeps;
+}
+
+// Admit omitted prompt only long enough to resolve a possible Seedream layer
+// request. Every resolved target is checked below before budget or upstream work.
+const ImageGenerationIngressSchema = ImageGenerationRequestSchema.extend({
+  prompt: ImageGenerationRequestSchema.shape.prompt.optional(),
+}).refine((body) => body.prompt !== undefined || body.layer_decomposition === true, {
+  path: ["prompt"],
+  message: "Image generation requires a prompt unless using Seedream layer decomposition",
+});
+
+function isArkImageModel(model: string): boolean {
+  return ArkImageModelSchema.safeParse(model).success;
 }
 
 const GROK_IMAGE_MODELS = new Set(["grok-imagine-image", "grok-imagine-image-quality"]);
@@ -293,7 +311,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         });
       } else {
         const raw = JSON.parse(requestJson) as unknown;
-        const parsed = (editing ? ImageEditRequestSchema : ImageGenerationRequestSchema).safeParse(
+        const parsed = (editing ? ImageEditRequestSchema : ImageGenerationIngressSchema).safeParse(
           raw,
         );
         if (!parsed.success) {
@@ -306,7 +324,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           );
         }
         model = parsed.data.model;
-        prompt = parsed.data.prompt;
+        prompt = parsed.data.prompt ?? "";
         if (editing) editInput = { kind: "json", body: parsed.data };
         else generationBody = parsed.data;
       }
@@ -337,6 +355,93 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             `image provider for '${model}' is unavailable (missing credential)`,
             "provider_unavailable",
           );
+    }
+    // A resolver knows whether selection was a real lane or a concrete model.
+    // The legacy convention remains supported, but new resolvers must set isLane
+    // explicitly (especially when the input name is itself "image").
+    const isLane = chain.isLane ?? chain.laneName === model;
+    const allowedLanes = identity.caps?.allowedLanes;
+    const customAllowed = identity.caps?.allowCustomModel === true;
+    if (isLane) {
+      if (allowedLanes != null && !allowedLanes.includes(chain.laneName)) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image lane is not permitted for this key",
+          "lane_not_allowed",
+        );
+      }
+    } else {
+      // Keep legacy bare non-Ark image models available to standard keys. Ark
+      // wire IDs and aliases are concrete selection, regardless of their spelling.
+      const concreteSelection =
+        model.includes("/") ||
+        chain.targets.some((target) => isArkImageModel(target.providerModel));
+      if (concreteSelection && !customAllowed) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image model is not available to this key",
+          "model_not_found",
+        );
+      }
+      if (!customAllowed && allowedLanes != null && !allowedLanes.includes("image")) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "image lane is not permitted for this key",
+          "lane_not_allowed",
+        );
+      }
+    }
+    // Resolve first: checking the public name alone lets arbitrary aliases bypass
+    // model-specific validation. Reject wrong Ark media kinds even if misconfigured.
+    for (const target of chain.targets) {
+      if (
+        ArkVideoModelSchema.safeParse(target.providerModel).success ||
+        ArkThreeDModelSchema.safeParse(target.providerModel).success ||
+        (editing && isArkImageModel(target.providerModel))
+      ) {
+        return errorJson(
+          c,
+          400,
+          "invalid_request_error",
+          "Resolved Ark model does not support this image operation",
+          "unsupported_operation",
+        );
+      }
+      if (!editing && generationBody !== null) {
+        const arkImage = isArkImageModel(target.providerModel);
+        const parsed = (
+          arkImage ? ArkImageGenerationRequestSchema : ImageGenerationRequestSchema
+        ).safeParse({
+          ...generationBody,
+          model: target.providerModel,
+        });
+        if (!parsed.success) {
+          return errorJson(
+            c,
+            400,
+            "invalid_request_error",
+            parsed.error.issues[0]?.message ?? "invalid image generation request",
+          );
+        }
+        if (
+          arkImage &&
+          (target.kind !== "openai" || typeof target.client.imageGeneration !== "function")
+        ) {
+          return errorJson(
+            c,
+            400,
+            "invalid_request_error",
+            "Ark image generation requires the native image transport",
+            "unsupported_operation",
+          );
+        }
+      }
     }
     const operationTargets = editing
       ? chain.targets.filter(
@@ -372,16 +477,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       }
     }
     const blockedModels = createBlockedModelMatcher(identity.caps?.blockedModels);
-    const permittedTargets =
-      blockedModels === null
-        ? operationTargets
-        : operationTargets.filter((target) => !blockedModels.matches(target.alias));
-    const permittedCandidateChain =
-      blockedModels === null
-        ? operationTargets.map((target) => target.alias)
-        : operationTargets
-            .map((target) => target.alias)
-            .filter((alias) => !blockedModels.matches(alias));
+    const permittedTargets = operationTargets.filter(
+      (target) =>
+        blockedModels === null ||
+        ![model, target.alias, target.providerModel].some((name) => blockedModels.matches(name)),
+    );
+    const permittedCandidateChain = permittedTargets.map((target) => target.alias);
     if (permittedTargets.length === 0) {
       const directBlocked = chain.laneName !== model && blockedModels?.matches(model) === true;
       return errorJson(
@@ -395,6 +496,17 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       );
     }
     const spendCapped = (identity.caps?.budget?.spendUsd ?? 0) > 0;
+    // Ark pricing is deliberately unavailable until media-specific accounting is
+    // proven. Never let a missing/stale resolver pricing hook admit a capped key.
+    if (spendCapped && permittedTargets.some((target) => isArkImageModel(target.providerModel))) {
+      return errorJson(
+        c,
+        422,
+        "invalid_request_error",
+        "image pricing is unavailable for this spend-capped key",
+        "media_pricing_unavailable",
+      );
+    }
     const pricedTargets =
       spendCapped && deps.isPriced
         ? permittedTargets.filter((target) => deps.isPriced?.(target.alias) === true)
@@ -510,6 +622,23 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         ? await deps.captureServingAccount(invoke)
         : { result: await invoke(), servingAccount: null };
       const upstream = captured.result;
+      if (isArkImageModel(target.providerModel)) {
+        const validated = ArkImageGenerationResponseSchema.safeParse(upstream);
+        if (!validated.success || validated.data.model !== target.providerModel) {
+          throw new Error("Ark image create returned an invalid or mismatched result");
+        }
+        const layered = generationBody?.layer_decomposition === true;
+        const base64 = generationBody?.response_format === "b64_json";
+        if (
+          validated.data.data.some(
+            (item) =>
+              (layered ? item.z_index === undefined : item.z_index !== undefined) ||
+              (base64 ? item.b64_json === undefined : item.url === undefined),
+          )
+        ) {
+          throw new Error("Ark image result does not match the requested layer or delivery mode");
+        }
+      }
       if (!hasImageResult(upstream)) {
         throw new Error("image create returned no image result");
       }
@@ -517,7 +646,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       return {
         clientBody: upstream,
         usage,
-        cost: deps.costOf(target.alias, upstream),
+        cost: isArkImageModel(target.providerModel) ? null : deps.costOf(target.alias, upstream),
         upstreamRequestJson,
         servingAccount: captured.servingAccount ?? attempted.servingAccount,
       };
@@ -572,11 +701,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         outcome.httpStatus as ContentfulStatusCode,
         outcome.errorClass === "invalid_request" ? "invalid_request_error" : "upstream_error",
         outcome.message,
-        outcome.errorClass === "invalid_request"
-          ? "invalid_request"
-          : outcome.errorClass === "outcome_unknown"
-            ? "outcome_unknown"
-            : null,
+        outcome.errorCode ??
+          (outcome.errorClass === "invalid_request"
+            ? "invalid_request"
+            : outcome.errorClass === "outcome_unknown"
+              ? "outcome_unknown"
+              : null),
       );
     }
 

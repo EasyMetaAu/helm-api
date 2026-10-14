@@ -901,3 +901,230 @@ openrouter/auto:
   supportsStreaming: true
   maxContextTokens: 200000
   maxOutputTokens: 8192
+
+ark/seedream-5.0-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputImage: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seedream-5.0-pro:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputImage: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seedance-2.5:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputVideo: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+ark/seed3d-2.0:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputThreeD: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
+# Native media: dedicated endpoints; no conversational fallback.
+
+bailian/qwen-image-3.0-pro:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputImage: true
+
+bailian/qwen-image-3.0:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputImage: true
+
+bailian/qwen-image-2.1-pro:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputImage: true
+
+bailian/qwen-image-2.1-turbo:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputImage: true
+
+bailian/wan3.0-video:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputVideo: true
+
+bailian/wan3.0-video-prime:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputVideo: true
+
+bailian/qwen3-asr-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/qwen3-asr-flash-filetrans:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/qwen-audio-3.1-asr-flash-filetrans:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/qwen-audio-3.0-asr-flash-filetrans:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/fun-asr:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/paraformer-v2:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/paraformer-8k-v2:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]
+
+bailian/qwen-audio-3.1-tts-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+bailian/qwen-audio-3.0-tts-plus:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+bailian/cosyvoice-v3.5-plus:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+bailian/cosyvoice-v3.5-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+minimax/MiniMax-H3:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputVideo: true
+
+minimax/MiniMax-H3-Max:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputVideo: true
+
+minimax/speech-2.8-hd:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+minimax/speech-2.8-turbo:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true

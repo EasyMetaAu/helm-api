@@ -733,3 +733,391 @@ describe("registerVideosRoute", () => {
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+type ArkPublicTestBody = {
+  request_id: string;
+  status: string;
+  video?: unknown;
+  file?: unknown;
+  error: { code: string };
+};
+const arkModel = "doubao-seedance-2-5-260628";
+function setupArk(
+  options: { identity?: MessagesIdentity; providerName?: string; now?: () => number } = {},
+) {
+  const who = options.identity ?? { ...identity, caps: { allowCustomModel: true } };
+  const records = new Map<string, ResponsesRegistryRecord>();
+  const now = options.now ?? (() => 1_000_000);
+  const create = vi.fn().mockResolvedValue({ id: "shared-upstream-id" });
+  const retrieve = vi.fn().mockResolvedValue({
+    id: "shared-upstream-id",
+    model: arkModel,
+    status: "succeeded",
+    updated_at: now() / 1000,
+    content: { video_url: "https://cdn.example.test/movie.mp4" },
+    error: null,
+    usage: null,
+  });
+  const registry: VideosRouteDeps["registry"] = {
+    put: async (row) => {
+      records.set(row.responseId, structuredClone(row));
+    },
+    putIfAbsent: async (row) => {
+      if (records.has(row.responseId)) return false;
+      records.set(row.responseId, structuredClone(row));
+      return true;
+    },
+    get: async (id, owner) => {
+      const row = records.get(id);
+      return row &&
+        row.accountId === owner.accountId &&
+        row.keyId === owner.keyId &&
+        row.expiresAt > now()
+        ? structuredClone(row)
+        : null;
+    },
+  };
+  const resolver: VideosRouteDeps["resolver"] = {
+    create: vi.fn(async (body) => ({
+      providerType: "ark" as const,
+      laneName: body.model === "seedance-video" ? "seedance-video" : undefined,
+      providerAlias: "ark/seedance-2.5",
+      providerName: options.providerName ?? "ark-main",
+      providerModel: arkModel,
+      providerAccount: "account-a",
+      client: { create },
+    })),
+    poll: vi.fn(async () => ({ providerType: "ark" as const, providerModel: arkModel, retrieve })),
+  };
+  const deps: VideosRouteDeps = {
+    auth: { resolve: async (key) => (key === "k" ? who : null) },
+    registry,
+    resolver,
+    now,
+  };
+  const restart = (over: Partial<VideosRouteDeps> = {}) => {
+    const app = new Hono<AppEnv>();
+    registerVideosRoute(app, { ...deps, ...over });
+    return app;
+  };
+  return { app: restart(), restart, create, retrieve, records, deps, resolver };
+}
+const arkBody = (model = "seedance-video") => ({
+  model,
+  content: [{ type: "text", text: "a red kite" }],
+  duration: 4,
+  resolution: "720p",
+  output_format: "mp4",
+});
+const pollArk = (app: Hono<AppEnv>, id: string) =>
+  app.request(`/v1/videos/${id}`, { headers: { Authorization: "Bearer k" } });
+
+describe("Ark video tasks", () => {
+  it.each([
+    "seedance-video",
+    "ark/seedance-2.5",
+    "custom/seedance",
+    arkModel,
+  ])("validates and forwards %s with a public UUID and 7-day owner mapping", async (model) => {
+    const { app, create, records } = setupArk();
+    const response = await post(app, arkBody(model));
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as ArkPublicTestBody;
+    expect(data.request_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(data.request_id).not.toBe("shared-upstream-id");
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0]?.[0]).toEqual({ ...arkBody(model), model: arkModel });
+    const row = records.get(`video:${data.request_id}`);
+    expect(row).toBeDefined();
+    expect((row?.expiresAt ?? 0) - (row?.createdAt ?? 0)).toBe(7 * 86400000);
+  });
+  it("polls after route restart through the persisted provider/account and original upstream ID", async () => {
+    const { app, restart, retrieve, resolver } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const response = await pollArk(restart(), request_id);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      request_id,
+      status: "done",
+      video: { url: "https://cdn.example.test/movie.mp4" },
+    });
+    expect(retrieve).toHaveBeenCalledWith("shared-upstream-id", expect.any(AbortSignal));
+    expect(resolver.poll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: "ark-main",
+        providerAccount: "account-a",
+        providerModel: arkModel,
+      }),
+    );
+  });
+  it("rejects another owner or key before upstream polling", async () => {
+    const { app, restart, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    for (const who of [
+      { ...identity, keyId: "other" },
+      { ...identity, accountId: "other" },
+    ]) {
+      expect(
+        (await pollArk(restart({ auth: { resolve: async () => who } }), request_id)).status,
+      ).toBe(404);
+    }
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+  it("separates repeated provider task IDs by public UUID and fixed provider binding", async () => {
+    const { app, records, restart, resolver } = setupArk();
+    const first = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const secondProvider = restart({
+      resolver: {
+        ...resolver,
+        create: async (body, who, operation) => {
+          const target = await resolver.create(body, who, operation);
+          return target ? { ...target, providerName: "ark-second" } : null;
+        },
+      },
+    });
+    const second = (await (await post(secondProvider, arkBody())).json()) as ArkPublicTestBody;
+    expect(first.request_id).not.toBe(second.request_id);
+    expect(records.has(`video:${first.request_id}`)).toBe(true);
+    expect(records.has(`video:${second.request_id}`)).toBe(true);
+  });
+  it.each([
+    "model",
+    "id",
+    "status",
+  ])("fails closed on mismatched/unknown upstream %s", async (field) => {
+    const { app, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    retrieve.mockResolvedValue({
+      id: "shared-upstream-id",
+      model: arkModel,
+      status: "succeeded",
+      content: { video_url: "https://cdn.example.test/v.mp4" },
+      [field]: "wrong",
+    });
+    const response = await pollArk(app, request_id);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ error: { code: "upstream_error" } });
+  });
+  it.each([
+    "failed",
+    "cancelled",
+    "expired",
+  ])("maps terminal %s without leaking provider error text", async (status) => {
+    const { app, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    retrieve.mockResolvedValue({
+      id: "shared-upstream-id",
+      model: arkModel,
+      status,
+      error:
+        status === "failed"
+          ? { code: "SetLimitExceeded", message: "secret-bearer prompt-private" }
+          : null,
+      content: null,
+      usage: null,
+    });
+    const response = await pollArk(app, request_id);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ArkPublicTestBody;
+    expect(body.status).toBe(status);
+    if (status === "failed") expect(body.error.code).toBe("SetLimitExceeded");
+    expect(JSON.stringify(body)).not.toContain("secret-bearer");
+    expect(body.video).toBeUndefined();
+  });
+  it("does not return expired artifact URLs or extend the task's 7-day retention", async () => {
+    let now = 1_000_000;
+    const { app, retrieve, records } = setupArk({ now: () => now });
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const expiresAt = records.get(`video:${request_id}`)?.expiresAt;
+    now += 25 * 3600000;
+    const response = await pollArk(app, request_id);
+    expect(await response.json()).toMatchObject({ status: "expired" });
+    expect(records.get(`video:${request_id}`)?.expiresAt).toBe(expiresAt);
+    now += 7 * 86400000;
+    expect((await pollArk(app, request_id)).status).toBe(404);
+    expect(retrieve).toHaveBeenCalledTimes(1);
+  });
+  it("denies spend caps, blocked wire models and invalid frame combinations before create", async () => {
+    for (const caps of [{ budget: { spendUsd: 1 } }, { blockedModels: [arkModel] }]) {
+      const { app, create } = setupArk({ identity: { ...identity, caps } as MessagesIdentity });
+      expect((await post(app, arkBody())).status).toBeGreaterThanOrEqual(400);
+      expect(create).not.toHaveBeenCalled();
+    }
+    const { app, create } = setupArk();
+    expect(
+      (
+        await post(app, {
+          ...arkBody(),
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: "https://example.test/last.png" },
+              role: "last_frame",
+            },
+          ],
+        })
+      ).status,
+    ).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("keeps explicit rejections separate from ambiguous creates without retry", async () => {
+    const { UpstreamError } = await import("@helm/core");
+    for (const outcome of ["rejected", "unknown"] as const) {
+      const { app, create } = setupArk();
+      create.mockRejectedValue(
+        Object.assign(
+          new UpstreamError("upstream_error", "secret", null, outcome === "rejected" ? 429 : 503),
+          { outcome },
+        ),
+      );
+      const response = await post(app, arkBody());
+      expect(response.status).toBe(outcome === "rejected" ? 429 : 503);
+      expect(await response.json()).toMatchObject({
+        error: { code: outcome === "rejected" ? "upstream_rejected" : "outcome_unknown" },
+      });
+      expect(create).toHaveBeenCalledOnce();
+    }
+  });
+});
+
+describe("Ark media boundary regressions", () => {
+  it.each([
+    {
+      ratio: "adaptive",
+      content: [
+        { type: "text", text: "pan slowly" },
+        {
+          type: "image_url",
+          image_url: { url: "https://input.example.test/first.png" },
+          role: "first_frame",
+        },
+        {
+          type: "image_url",
+          image_url: { url: "https://input.example.test/last.png" },
+          role: "last_frame",
+        },
+      ],
+    },
+    {
+      omni_reference_task_type: "reference",
+      content: [
+        { type: "text", text: "combine the references" },
+        {
+          type: "image_url",
+          image_url: { url: "https://input.example.test/i.png" },
+          role: "reference_image",
+        },
+        {
+          type: "video_url",
+          video_url: { url: "https://input.example.test/v.mp4" },
+          role: "reference_video",
+        },
+        {
+          type: "audio_url",
+          audio_url: { url: "https://input.example.test/a.wav" },
+          role: "reference_audio",
+        },
+      ],
+    },
+  ])("preserves pinned frames and mixed reference order through the route", async (changes) => {
+    const { app, create } = setupArk();
+    const body = { ...arkBody(), ...changes };
+    expect((await post(app, body)).status).toBe(200);
+    expect(create.mock.calls[0]?.[0]).toEqual({ ...body, model: arkModel });
+  });
+  it("rejects a stale resolver's provider type/model before polling", async () => {
+    const { app, restart, retrieve, resolver } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const stale = restart({
+      resolver: {
+        ...resolver,
+        poll: async () => ({ providerType: "ark", providerModel: "wrong", retrieve }),
+      },
+    });
+    expect((await pollArk(stale, request_id)).status).toBe(502);
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+  it("fails closed on tampered persisted provider binding", async () => {
+    const { app, records, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const row = records.get(`video:${request_id}`);
+    if (!row) throw new Error("missing mapping");
+    row.providerName = "other-provider";
+    expect((await pollArk(app, request_id)).status).toBe(502);
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+  it("refuses a newly blocked task model on poll", async () => {
+    const { app, restart, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const blocked = restart({
+      auth: {
+        resolve: async () =>
+          ({ ...identity, caps: { blockedModels: [arkModel] } }) as MessagesIdentity,
+      },
+    });
+    expect((await pollArk(blocked, request_id)).status).toBe(400);
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+  it("returns a safe error when durable lookup fails", async () => {
+    const { app, restart, deps, retrieve } = setupArk();
+    const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;
+    const unavailable = restart({
+      registry: {
+        ...deps.registry,
+        get: async () => {
+          throw new Error("secret backend connection");
+        },
+      },
+    });
+    const response = await pollArk(unavailable, request_id);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "registry_unavailable" } });
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+});
+
+describe("Ark lane permissions", () => {
+  it.each([
+    "ark/seedance-2.5",
+    arkModel,
+  ])("requires custom-model permission for direct %s", async (name) => {
+    const { app, create } = setupArk({
+      identity: { ...identity, caps: { allowCustomModel: false } } as MessagesIdentity,
+    });
+    expect((await post(app, arkBody(name))).status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("rejects a lane outside allowedLanes, including an empty allowance", async () => {
+    for (const allowedLanes of [[], ["balanced"]]) {
+      const { app, create } = setupArk({
+        identity: {
+          ...identity,
+          caps: { allowedLanes, allowCustomModel: false },
+        } as MessagesIdentity,
+      });
+      expect((await post(app, arkBody())).status).toBe(403);
+      expect(create).not.toHaveBeenCalled();
+    }
+  });
+  it("allows an authorized lane without custom-model permission", async () => {
+    const { app, create } = setupArk({
+      identity: {
+        ...identity,
+        caps: { allowedLanes: ["seedance-video"], allowCustomModel: false },
+      } as MessagesIdentity,
+    });
+    expect((await post(app, arkBody())).status).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+  });
+});
+it("keeps the legacy invalid-model boundary when a non-native target is unavailable", async () => {
+  const { app } = setup({
+    auth: {
+      resolve: async () => ({ accountId: "a", keyId: "k", caps: { allowCustomModel: true } }),
+    },
+    resolver: { create: async () => null, poll: async () => null },
+  });
+  const response = await post(app, { model: "static/video", prompt: "bird" });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+});

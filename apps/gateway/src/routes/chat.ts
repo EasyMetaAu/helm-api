@@ -90,6 +90,7 @@ import { isUpstreamTimeout } from "./stream-error.js";
 // use()s auth, so `identity` is present.
 
 export interface ChatRouteDeps {
+  nativeMediaChat?: (c: Context<AppEnv>, raw: unknown) => Promise<Response | null>;
   /** Machine-derived request-body budget shared by every AI ingress surface. */
   memoryAdmission?: BodyMemoryAdmission;
   /** Bound core orchestrator: routeRequest(req, coreDeps) with deps closed over.
@@ -533,6 +534,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     }
     if (pathModel !== undefined && raw !== null && typeof raw === "object") {
       raw = { ...(raw as Record<string, unknown>), model: decodeURIComponent(pathModel) };
+    }
+    const nativeMedia = await deps.nativeMediaChat?.(c, raw);
+    if (nativeMedia) {
+      requestBodyMaterialized?.();
+      return nativeMedia;
     }
     const parsed = OpenAIChatRequestSchema.safeParse(raw);
     if (!parsed.success) {

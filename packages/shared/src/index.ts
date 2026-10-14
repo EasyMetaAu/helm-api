@@ -18,6 +18,8 @@ export {
   type GeneratedCatalogEntry,
   GeneratedCatalogEntrySchema,
   GeneratedCatalogSchema,
+  type MediaOutputKind,
+  MediaOutputKindSchema,
   type Pricing,
   type PricingOverride,
   PricingOverrideSchema,
@@ -321,6 +323,12 @@ export {
   unpackCodexQuotaMetadata,
 } from "./oauth/usage-schema.js";
 export {
+  type ArkPublicTaskResult,
+  ArkPublicTaskResultSchema,
+} from "./request/ark-media-public-schema.js";
+export * from "./request/ark-media-schema.js";
+export * from "./request/bailian-media.js";
+export {
   type GrokImagineImageGenerationRequest,
   GrokImagineImageGenerationRequestSchema,
   type ImageEditRequest,
@@ -341,6 +349,8 @@ export {
   type InteractionsResponse,
   InteractionsResponseSchema,
 } from "./request/interactions-schema.js";
+export * from "./request/media-speech-schema.js";
+export * from "./request/minimax-video.js";
 export {
   type RealtimeSession,
   RealtimeSessionSchema,
