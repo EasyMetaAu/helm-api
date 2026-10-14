@@ -61,6 +61,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 
 相较 2.1.295，新增 `x-claude-code-wiggly-dove`，由默认关闭的 `tengu_wiggly_dove` 开关控制，生成过程涉及 query/permission 上下文，并进入 default headers（已校验二进制偏移分别为 191091637、191095319、191106429）。服务端语义未公开，不能据此认定它是必要字段或可以向 relay 转发。Helm 保持白名单不变，继续删除该未知字段，不生成或仿造其值；定向测试明确验证删除行为。既有 `x-anthropic-additional-protection` 保留规则不变。这是已知兼容性限制，本次审核不证明完整的 2.1.296 协议兼容或生产账户验收。
 
+2026-10-14 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.299`。下载包通过 npm SHA512 integrity 校验，二进制 SHA256 为 `ba5ab7b8c195fa03ab8d5bf3915c76153b576a2c40e79a5c46e265e7ed9744b3`，内嵌 SDK 仍为 `0.128.0`（偏移 197470796）。同时重新验证 2.1.296 包及二进制哈希并比较可读字段；全程只做静态分析，没有执行下载的 CLI 或访问账户。
+
+- [官方发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21299)说明 Claude apps gateway 的归因块新增字段。二进制确认 `cc_gateway=1/env` 位于原生 system 归因文本（偏移 197364116）；Helm 原样保留客户端提供的文本，不生成或仿造该字段。定向测试验证原生正文保留。
+- 相较 2.1.296，扫描到新增 `x-claude-code-upload-lane`；它出现在 OAuth `/api/oauth/file_upload` 的 multipart 请求头构造中（偏移 229306824），不是 Messages 请求的新增必需字段。Helm 不扩展上传接口或头白名单，定向测试验证该字段不会转发到 Messages 上游。
+- `x-claude-code-wiggly-dove` 仍受默认关闭的开关控制（偏移 197792242），保护字段仍由客户端选项生成（偏移 197798438）。维持既有未知字段、远程租户凭证及签名隔离，不扩大信任边界。官方协议文档本次访问返回 403；以上增量结论基于官方发布记录与完整性校验后的包，不能视为完整协议兼容或生产账户安全证明。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。
