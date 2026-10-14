@@ -174,6 +174,14 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  shortAsr?: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream">;
+  streamSpeech?: import("./media-speech.js").SpeechClient["streamSpeech"];
+  openSpeechSession?: import("./media-speech.js").SpeechClient["openSpeechSession"];
+  transcriptionCreate?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>>;
+  transcriptionRetrieve?(id: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   /** Dedicated media transport: never eligible for conversational execution. */
   mediaOnly?: boolean;
   nativeProtocolProfile?: NativeProtocolProfile;

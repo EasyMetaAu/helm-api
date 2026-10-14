@@ -1,5 +1,5 @@
+import { MediaSpeechRequestSchema } from "@helm/shared";
 import { z } from "zod";
-import { MediaSpeechRequestSchema } from "../../../shared/src/request/media-speech-schema.js";
 import {
   type SpeechClient,
   SpeechParameterError,

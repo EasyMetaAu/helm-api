@@ -1,8 +1,5 @@
+import { MediaSpeechRequestSchema, MediaSpeechUsageSchema } from "@helm/shared";
 import { z } from "zod";
-import {
-  MediaSpeechRequestSchema,
-  MediaSpeechUsageSchema,
-} from "../../../shared/src/request/media-speech-schema.js";
 import { readSSE } from "../protocol/streaming.js";
 import {
   decodeSpeechHex,

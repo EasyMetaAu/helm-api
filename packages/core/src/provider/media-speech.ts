@@ -1,9 +1,9 @@
-import { z } from "zod";
 import {
   type MediaSpeechRequest,
   type MediaSpeechUsage,
   MediaSpeechUsageSchema,
-} from "../../../shared/src/request/media-speech-schema.js";
+} from "@helm/shared";
+import { z } from "zod";
 import type { ProviderCallOptions } from "./openai.js";
 
 const sequence = { sequence: z.number().int().nonnegative() };

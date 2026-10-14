@@ -35,6 +35,17 @@ function setup(caps: Record<string, unknown> = {}) {
   return { call, speech, release, resolve, identity, deps };
 }
 describe("audio speech route", () => {
+  it("preserves successful paid audio when accounting fails", async () => {
+    const x = setup();
+    x.deps.record = async () => {
+      throw new Error("telemetry unavailable");
+    };
+    const response = await x.call();
+    expect(response.status).toBe(200);
+    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, 2]);
+    expect(x.speech).toHaveBeenCalledTimes(1);
+    expect(x.release).toHaveBeenCalledTimes(1);
+  });
   it("resolves lane with identity and invokes wire model", async () => {
     const x = setup();
     const result = await x.call();

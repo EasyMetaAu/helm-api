@@ -506,6 +506,9 @@ export {
   anthropicRequestAccountUuid,
 } from "./provider/anthropic-identity.js";
 export { ArkMediaError, type ArkMediaOutcome, createArkMediaClient } from "./provider/ark.js";
+export * from "./provider/bailian-asr.js";
+export * from "./provider/bailian-media.js";
+export { createBailianSpeechClient } from "./provider/bailian-speech.js";
 export {
   type ChunkClass,
   guardPreOutputFailure,
@@ -518,6 +521,10 @@ export {
   type GeminiClientConfig,
   type GeminiClientDeps,
 } from "./provider/gemini.js";
+export * from "./provider/media-speech.js";
+export { speechQueue } from "./provider/media-speech-session.js";
+export { createMiniMaxSpeechClient } from "./provider/minimax-speech.js";
+export * from "./provider/minimax-video.js";
 // Interactive OAuth subscription-provider kit (issue #38): authorization-code +
 // PKCE / device-code login flows, built-in provider registry (anthropic,
 // github-copilot), and the flow primitives. Ported from openclaw (MIT).

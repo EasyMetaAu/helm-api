@@ -49,6 +49,7 @@ import {
   type NativeMediaTaskProfile,
   pollNativeMediaTask,
   readNativeMediaOperation,
+  recoverNativeMediaOperation,
 } from "./native-media-tasks.js";
 import {
   captureEnabled,
@@ -309,6 +310,7 @@ export function registerMediaTaskRoutes(
   app.use(`${root}/extensions`, concurrencyReleaseGuard());
   app.use(`${root}/extensions`, memoryAdmissionReleaseGuard());
   app.use(`${root}/:requestId`, concurrencyReleaseGuard());
+  app.use(`${root}/operations/:operationId`, concurrencyReleaseGuard());
 
   const createVideo = async (
     c: Context<AppEnv>,
@@ -641,7 +643,16 @@ export function registerMediaTaskRoutes(
       return errorJson(c, 404, "operation not found", "request_not_found");
     const operation = readNativeMediaOperation(record);
     if (!operation) return errorJson(c, 404, "operation not found", "request_not_found");
-    return c.json({ operation_id: id, ...operation });
+    try {
+      const requestId = await recoverNativeMediaOperation(record, deps);
+      return c.json({
+        operation_id: id,
+        ...operation,
+        ...(requestId ? { request_id: requestId } : {}),
+      });
+    } catch {
+      return errorJson(c, 503, "operation recovery unavailable", "registry_unavailable");
+    }
   });
 
   app.get(`${root}/:requestId`, async (c): Promise<Response> => {

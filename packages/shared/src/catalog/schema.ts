@@ -91,6 +91,7 @@ export const CapabilitiesSchema = z.object({
   outputVideo: z.boolean().optional(),
   // Asynchronous 3D assets use their own task endpoint, never conversational routing.
   outputThreeD: z.boolean().optional(),
+  outputAudio: z.boolean().optional(),
   reasoningEffort: ReasoningEffortCapabilitySchema.optional(),
   // Explicit wire exceptions, keyed by routing alias in capabilities.yaml.
   // Omitted means preserve the request; model names never imply a rewrite.

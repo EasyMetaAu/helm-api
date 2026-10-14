@@ -1128,3 +1128,80 @@ xai/grok-imagine-video:
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
   videoOutputPerSecondUsd: 0.05
+
+# Native media rates are not verified USD token rates. Null never means free.
+ark/seedream-5.0-flash:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+ark/seedream-5.0-pro:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+ark/seedance-2.5:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+ark/seed3d-2.0:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-image-3.0-pro:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-image-3.0:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-image-2.1-pro:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-image-2.1-turbo:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/wan3.0-video:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/wan3.0-video-prime:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen3-asr-flash:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen3-asr-flash-filetrans:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-audio-3.1-asr-flash-filetrans:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-audio-3.0-asr-flash-filetrans:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/fun-asr:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/paraformer-v2:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/paraformer-8k-v2:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-audio-3.1-tts-flash:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/qwen-audio-3.0-tts-plus:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/cosyvoice-v3.5-plus:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+bailian/cosyvoice-v3.5-flash:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+minimax/MiniMax-H3:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+minimax/MiniMax-H3-Max:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+minimax/speech-2.8-hd:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+minimax/speech-2.8-turbo:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null

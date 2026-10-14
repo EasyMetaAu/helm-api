@@ -178,4 +178,39 @@ describe("native media task route", () => {
     expect(writes).toBeGreaterThan(1);
     expect(JSON.stringify([...t.records.values()])).toContain("upstream-1");
   });
+  it("retains a task ID from a malformed upstream acceptance without replay", async () => {
+    const t = setup();
+    t.create.mockRejectedValueOnce({
+      outcome: "unknown",
+      providerRaw: { response: { output: { task_id: "recovery-id" } } },
+    });
+    const response = await t.post();
+    expect(response.status).toBe(503);
+    expect(JSON.stringify([...t.records.values()])).toContain("recovery-id");
+    expect(t.create).toHaveBeenCalledTimes(1);
+  });
+  it("releases operation-query concurrency even for missing operations", async () => {
+    const t = setup();
+    const release = vi.fn(async () => {});
+    t.deps.concurrencyGate = { acquire: async () => ({ ok: true, release }) };
+    expect((await t.app.request(`${t.root}/operations/missing`)).status).toBe(404);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a known paid task after public mapping persistence fails", async () => {
+    const t = setup();
+    const original = t.deps.registry.putIfAbsent;
+    let fail = true;
+    t.deps.registry.putIfAbsent = async (record) => {
+      if (record.responseId.startsWith("video:") && fail) throw new Error("disk");
+      return original(record);
+    };
+    const response = await t.post();
+    const failed = Failed.parse(await response.json());
+    fail = false;
+    const recovered = await t.app.request(`${t.root}/operations/${failed.error.operation_id}`);
+    const result = z.object({ request_id: z.string() }).parse(await recovered.json());
+    expect((await t.app.request(`${t.root}/${result.request_id}`)).status).toBe(200);
+    expect(t.create).toHaveBeenCalledTimes(1);
+  });
 });

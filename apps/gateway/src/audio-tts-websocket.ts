@@ -1,15 +1,9 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import type { SpeechSession, SpeechSocketConnector } from "@helm/core";
+import { speechQueue } from "@helm/core";
+import { MediaSpeechCommandSchema, type MediaSpeechUsage } from "@helm/shared";
 import WebSocket, { WebSocketServer } from "ws";
-import type {
-  SpeechSession,
-  SpeechSocketConnector,
-} from "../../../packages/core/src/provider/media-speech.js";
-import { speechQueue } from "../../../packages/core/src/provider/media-speech-session.js";
-import {
-  MediaSpeechCommandSchema,
-  type MediaSpeechUsage,
-} from "../../../packages/shared/src/request/media-speech-schema.js";
 import { codexWebSocketAgent } from "./codex-responses-websocket.js";
 import type { RealtimeWebSocketUpgradeServer } from "./realtime-websocket.js";
 import {
@@ -181,6 +175,10 @@ export function mountAudioTtsWebSocket({
               );
             await deps.record?.({ identity, selection, usage, status, traceId });
           }
+        } catch {
+          console.warn(
+            JSON.stringify({ event: "media.speech_accounting_failed", trace_id: traceId }),
+          );
         } finally {
           await lease?.release();
         }

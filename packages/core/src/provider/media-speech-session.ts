@@ -1,4 +1,4 @@
-import type { MediaSpeechRequest } from "../../../shared/src/request/media-speech-schema.js";
+import type { MediaSpeechRequest } from "@helm/shared";
 import type { SpeechEvent, SpeechEventData, SpeechSession, SpeechSocket } from "./media-speech.js";
 
 /** One-consumer queue; overflow stops the producer instead of retaining audio. */

@@ -12,6 +12,8 @@
 - 使用明确的 bailian-media / minimax-media 配置，不将 mediaOnly 当作 Ark 协议。图片复用 OpenAI SDK；原生异步任务及语音保留供应商协议。
 - 创建任务前持久化 operation ID；创建不自动重试。超时或映射写入失败保留 outcome_unknown / 已知上游任务 ID，避免重复收费。任务绑定 key、账户、模型、endpoint 与凭证指纹，凭证变更保守拒绝续查。
 - 任务记录保留与查询期限独立：阿里查询 24 小时，MiniMax 7 天；不推测产物 URL 有效期。不明价格保留 null，并拒绝受费用上限约束的调用。
+- 短 ASR 使用现有 Chat 入口的专用 hook，保留 URL/Data URL/asr_options，跳过通用 IR 与聊天 fallback；流接管并发与请求内存直到完成。语音为独立 HTTP/WS 入口，不改变 xAI /v1/tts。
+- 独立验收补齐：操作记录保存完整恢复绑定，已知上游 ID 可通过 operation 查询恢复公开任务；成功产物不因后续辅助结算/遥测失败而丢失。
 - 开发与离线验收不包含生产部署或新的付费实测；详细任务状态与验收证据见 docs/media-provider-task-tracker.md。
 
 ## 2026-10-14 · Ark 多媒体集成（docs/04、05、06、07、10）

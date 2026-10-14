@@ -1,10 +1,10 @@
-import { z } from "zod";
 import {
   type MediaSpeechRequest,
   MediaSpeechRequestSchema,
   type MediaSpeechUsage,
   MediaSpeechUsageSchema,
-} from "../../../shared/src/request/media-speech-schema.js";
+} from "@helm/shared";
+import { z } from "zod";
 import { decodeSpeechHex, type SpeechSocketConnector } from "./media-speech.js";
 import { runSpeechSession } from "./media-speech-session.js";
 

@@ -1,12 +1,9 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
+import type { SpeechEvent, SpeechSession } from "@helm/core";
+import { speechQueue } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import type {
-  SpeechEvent,
-  SpeechSession,
-} from "../../../packages/core/src/provider/media-speech.js";
-import { speechQueue } from "../../../packages/core/src/provider/media-speech-session.js";
 import { mountAudioTtsWebSocket } from "./audio-tts-websocket.js";
 
 describe("speech websocket boundary", () => {

@@ -2,7 +2,7 @@ import {
   MiniMaxVideoCreateResponseSchema,
   MiniMaxVideoTaskResponseSchema,
   parseMiniMaxVideoRequest,
-} from "../../../shared/src/request/minimax-video.js";
+} from "@helm/shared";
 import { createMediaHttpTransport, mediaTaskPath, parseMediaInput } from "./media-http.js";
 import type { OpenAIClientDeps, ProviderCallOptions } from "./openai.js";
 

@@ -10,6 +10,7 @@ import {
   encodeMediaTaskBinding,
   MEDIA_TASK_RETENTION_MS,
   type MediaTaskBinding,
+  MediaTaskBindingSchema,
 } from "./media-task-binding.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { VideoCreateTarget, VideosRouteDeps } from "./videos.js";
@@ -52,28 +53,62 @@ function error(
     status,
   );
 }
-function operationStatus(state: string, upstreamId: string | null): string {
-  return "helm-media-create:v1:" + JSON.stringify({ state, upstreamId });
+const OperationSchema = z.strictObject({
+  state: z.enum(["dispatching", "accepted", "rejected", "not_sent", "outcome_unknown"]),
+  upstreamId: z.string().max(1024).nullable(),
+  binding: MediaTaskBindingSchema.optional(),
+});
+function operationStatus(
+  state: string,
+  upstreamId: string | null,
+  binding?: MediaTaskBinding,
+): string {
+  return `helm-media-create:v1:${JSON.stringify({ state, upstreamId, binding })}`;
 }
-export function readNativeMediaOperation(
-  record: ResponsesRegistryRecord,
-): { state: string; upstream_task_known: boolean } | null {
+function parseOperation(record: ResponsesRegistryRecord) {
   const prefix = "helm-media-create:v1:";
-  if (!record.status.startsWith(prefix) || record.status.length > 4096) return null;
+  if (!record.status.startsWith(prefix) || record.status.length > 16384) return null;
   try {
-    const value = z
-      .strictObject({
-        state: z.enum(["dispatching", "accepted", "rejected", "not_sent", "outcome_unknown"]),
-        upstreamId: z.string().max(1024).nullable(),
-      })
-      .parse(JSON.parse(record.status.slice(prefix.length)));
-    return {
-      state: value.state === "dispatching" ? "outcome_unknown" : value.state,
-      upstream_task_known: value.upstreamId !== null,
-    };
+    return OperationSchema.parse(JSON.parse(record.status.slice(prefix.length)));
   } catch {
     return null;
   }
+}
+export function readNativeMediaOperation(record: ResponsesRegistryRecord) {
+  const value = parseOperation(record);
+  if (!value) return null;
+  return {
+    state: value.state === "dispatching" ? "outcome_unknown" : value.state,
+    upstream_task_known: value.upstreamId !== null,
+  };
+}
+/** Recover only a durably known upstream ID; this operation never issues a paid POST. */
+export async function recoverNativeMediaOperation(
+  record: ResponsesRegistryRecord,
+  deps: VideosRouteDeps,
+): Promise<string | null> {
+  const value = parseOperation(record);
+  if (!value?.binding || !value.upstreamId || ["not_sent", "rejected"].includes(value.state))
+    return null;
+  const binding = { ...value.binding, upstreamId: value.upstreamId };
+  if (record.responseId !== `${binding.kind}-create:${binding.operationId}`) return null;
+  const recovered = {
+    ...record,
+    responseId: `${binding.kind}:${binding.publicId}`,
+    status: encodeMediaTaskBinding(binding),
+  };
+  if (!decodeMediaTaskBinding(recovered)) return null;
+  if (await deps.registry.putIfAbsent(recovered)) return binding.publicId;
+  const existing = await deps.registry.get(recovered.responseId, {
+    keyId: record.keyId,
+    accountId: record.accountId,
+  });
+  return existing &&
+    existing.keyId === record.keyId &&
+    existing.accountId === record.accountId &&
+    decodeMediaTaskBinding(existing)?.operationId === binding.operationId
+    ? binding.publicId
+    : null;
 }
 export async function createNativeMediaTask(
   c: Context<AppEnv>,
@@ -101,6 +136,23 @@ export async function createNativeMediaTask(
   const startedAt = now();
   const operationId = randomUUID();
   const publicId = randomUUID();
+  const binding: MediaTaskBinding = {
+    version: 1,
+    kind,
+    publicId,
+    operationId,
+    providerAlias: target.providerAlias,
+    providerName: target.providerName,
+    providerModel: target.providerModel,
+    providerAccount: target.providerAccount,
+    laneName: target.laneName ?? null,
+    profile: profile.profile,
+    endpointIdentity: profile.endpointIdentity,
+    upstreamId: "pending",
+    state: "queued",
+    queryExpiresAt: startedAt + profile.queryTtlMs,
+    artifactExpiresAt: null,
+  };
   const reservation: ResponsesRegistryRecord = {
     responseId: `${kind}-create:${operationId}`,
     accountId: identity.accountId,
@@ -113,7 +165,7 @@ export async function createNativeMediaTask(
     selectedLane: kind,
     createdAt: startedAt,
     expiresAt: startedAt + MEDIA_TASK_RETENTION_MS,
-    status: operationStatus("dispatching", null),
+    status: operationStatus("dispatching", null, binding),
   };
   try {
     if (!(await deps.registry.putIfAbsent(reservation)))
@@ -129,24 +181,11 @@ export async function createNativeMediaTask(
     );
     upstreamId = profile.parseCreated(raw);
     if (!upstreamId || upstreamId.length > 1024) throw new Error("invalid accepted task");
-    await deps.registry.put({ ...reservation, status: operationStatus("accepted", upstreamId) });
-    const binding: MediaTaskBinding = {
-      version: 1,
-      kind,
-      publicId,
-      operationId,
-      providerAlias: target.providerAlias,
-      providerName: target.providerName,
-      providerModel: target.providerModel,
-      providerAccount: target.providerAccount,
-      laneName: target.laneName ?? null,
-      profile: profile.profile,
-      endpointIdentity: profile.endpointIdentity,
-      upstreamId,
-      state: "queued",
-      queryExpiresAt: startedAt + profile.queryTtlMs,
-      artifactExpiresAt: null,
-    };
+    binding.upstreamId = upstreamId;
+    await deps.registry.put({
+      ...reservation,
+      status: operationStatus("accepted", upstreamId, binding),
+    });
     const mapped = await deps.registry.putIfAbsent({
       ...reservation,
       responseId: `${kind}:${publicId}`,
@@ -168,6 +207,21 @@ export async function createNativeMediaTask(
     }
     return c.json({ request_id: publicId, status: "queued" });
   } catch (cause) {
+    const evidence = z
+      .object({
+        providerRaw: z.object({
+          response: z.object({
+            task_id: z.string().min(1).max(1024).optional(),
+            output: z.object({ task_id: z.string().min(1).max(1024) }).optional(),
+          }),
+        }),
+      })
+      .safeParse(cause);
+    if (upstreamId === null && evidence.success)
+      upstreamId =
+        evidence.data.providerRaw.response.output?.task_id ??
+        evidence.data.providerRaw.response.task_id ??
+        null;
     const rejected =
       cause !== null &&
       typeof cause === "object" &&
@@ -184,6 +238,7 @@ export async function createNativeMediaTask(
         status: operationStatus(
           rejected ? "rejected" : notSent ? "not_sent" : "outcome_unknown",
           upstreamId,
+          binding,
         ),
       });
     } catch {

@@ -4,6 +4,9 @@ import {
   ArkPublicTaskResultSchema,
   ArkThreeDGenerationRequestSchema,
   ArkVideoGenerationRequestSchema,
+  BailianImageRequestSchema,
+  BailianTranscriptionRequestSchema,
+  BailianVideoRequestSchema,
   DecisionsEnvelopeSchema,
   DecisionsRequestSchema,
   GrokImagineImageGenerationRequestSchema,
@@ -12,6 +15,8 @@ import {
   ImageGenerationResponseSchema,
   InteractionsRequestSchema,
   InteractionsResponseSchema,
+  MediaSpeechRequestSchema,
+  MiniMaxVideoRequestSchema,
   ModelObjectSchema,
   ModelsListSchema,
   OpenAIChatRequestSchema,
@@ -144,6 +149,11 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         },
       },
       schemas: {
+        BailianImageRequest: arkRequestComponent(BailianImageRequestSchema, ["qwen-image"]),
+        BailianVideoRequest: arkRequestComponent(BailianVideoRequestSchema, ["wan-video"]),
+        MiniMaxVideoRequest: arkRequestComponent(MiniMaxVideoRequestSchema, ["minimax-video"]),
+        BailianTranscriptionRequest: component(BailianTranscriptionRequestSchema),
+        MediaSpeechRequest: component(MediaSpeechRequestSchema),
         ArkImageGenerationRequest: arkRequestComponent(ArkImageGenerationRequestSchema, [
           "seedream-flash",
           "seedream-pro",
@@ -495,10 +505,110 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           },
         },
       },
+      "/v1/audio/speech": {
+        post: {
+          tags: ["Inference"],
+          summary: "Generate speech audio (Bailian or MiniMax)",
+          description:
+            "OpenAI-style speech fields. stream=true returns raw audio chunks; a failed stream is interrupted. Unknown pricing rejects spend-capped keys. No automatic paid-call replay.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/MediaSpeechRequest" } },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Audio bytes",
+              content: { "audio/mpeg": { schema: { type: "string", format: "binary" } } },
+            },
+            "400": errorResponse("Invalid request"),
+            "401": errorResponse("Invalid key"),
+            "422": errorResponse("Unknown price or unsupported parameter"),
+          },
+        },
+      },
+      "/v1/audio/tts": {
+        get: {
+          tags: ["Inference"],
+          summary: "Upgrade to a Helm bidirectional speech WebSocket",
+          description:
+            "Helm extension, not OpenAI Realtime. Authorization: Bearer is required. Send start (request), append (text), finish; flush/cancel depend on provider capabilities. Server emits sequenced events and binary audio. See docs/native-media.md.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            "101": { description: "Authenticated speech session" },
+            "401": errorResponse("Invalid key"),
+          },
+        },
+      },
+      "/v1/audio/transcription-jobs": {
+        post: {
+          tags: ["Inference"],
+          summary: "Create an asynchronous file transcription job",
+          description:
+            "Native JSON URL input. model is a configured lane or permitted model alias. qwen3-asr-flash-filetrans uses input.file_url; other file models use input.file_urls. Not Whisper multipart. Creation is never retried.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/BailianTranscriptionRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Helm request_id and queued status" },
+            "400": errorResponse("Invalid input"),
+            "503": errorResponse("Unknown create outcome; retain error.operation_id"),
+          },
+        },
+      },
+      "/v1/audio/transcription-jobs/{requestId}": {
+        get: {
+          tags: ["Inference"],
+          summary: "Read an owned transcription job",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { in: "path", name: "requestId", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            "200": {
+              description:
+                "Status and per-file results, including materialized transcript JSON and partial_failure",
+            },
+            "404": errorResponse("Unknown or unowned task"),
+            "409": errorResponse("Provider identity changed"),
+            "410": errorResponse("Query window expired"),
+          },
+        },
+      },
+      ...Object.fromEntries(
+        ["/v1/videos", "/v1/audio/transcription-jobs"].map((root) => [
+          `${root}/operations/{operationId}`,
+          {
+            get: {
+              tags: ["Inference"],
+              summary: "Reconcile an owned media create operation without resending",
+              security: [{ bearerAuth: [] }],
+              parameters: [
+                { in: "path", name: "operationId", required: true, schema: { type: "string" } },
+              ],
+              responses: {
+                "200": {
+                  description:
+                    "Operation state; request_id when a known upstream task mapping is recovered",
+                },
+                "404": errorResponse("Unknown or unowned operation"),
+              },
+            },
+          },
+        ]),
+      ),
       "/v1/videos/generations": {
         post: {
           tags: ["Inference"],
-          summary: "Start Grok Imagine or Seedance video generation",
+          summary: "Start Grok, Seedance, Wan or MiniMax video generation",
           description:
             "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
             "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
@@ -512,6 +622,8 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
                   anyOf: [
                     { $ref: "#/components/schemas/VideoGenerationRequest" },
                     { $ref: "#/components/schemas/ArkVideoGenerationRequest" },
+                    { $ref: "#/components/schemas/BailianVideoRequest" },
+                    { $ref: "#/components/schemas/MiniMaxVideoRequest" },
                   ],
                 },
               },

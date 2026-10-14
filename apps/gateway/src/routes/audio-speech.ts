@@ -3,21 +3,19 @@ import {
   type BudgetCheckResult,
   type BudgetProbe,
   createBlockedModelMatcher,
-  UpstreamError,
-} from "@helm/core";
-import { evaluateClientPolicy } from "@helm/shared";
-import type { Hono } from "hono";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
-import {
   type SpeechClient,
   type SpeechEvent,
   SpeechParameterError,
   speechMime,
-} from "../../../../packages/core/src/provider/media-speech.js";
+  UpstreamError,
+} from "@helm/core";
 import {
+  evaluateClientPolicy,
   MediaSpeechRequestSchema,
   type MediaSpeechUsage,
-} from "../../../../packages/shared/src/request/media-speech-schema.js";
+} from "@helm/shared";
+import type { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import type { ConcurrencyGatePort } from "../middleware/concurrency.js";
 import { requestSignal } from "../middleware/limits.js";
@@ -233,6 +231,8 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
               Date.now(),
             );
           await deps.record?.({ identity, selection, usage, status, traceId });
+        } catch {
+          c.get("logger")?.log("error", "media.speech_accounting_failed", { trace_id: traceId });
         } finally {
           await activeLease.release();
         }

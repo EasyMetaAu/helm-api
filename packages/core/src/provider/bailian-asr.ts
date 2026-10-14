@@ -1,5 +1,5 @@
+import { BailianShortAsrRequestSchema } from "@helm/shared";
 import { z } from "zod";
-import { BailianShortAsrRequestSchema } from "../../../shared/src/request/bailian-media.js";
 import {
   createMediaHttpTransport,
   MediaHttpError,

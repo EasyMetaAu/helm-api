@@ -4,7 +4,8 @@ import {
   parseBailianImageRequest,
   parseBailianTranscriptionRequest,
   parseBailianVideoRequest,
-} from "../../../shared/src/request/bailian-media.js";
+} from "@helm/shared";
+import { fetchPublicResultJson } from "./gemini.js";
 import { createMediaHttpTransport, mediaTaskPath, parseMediaInput } from "./media-http.js";
 import type { OpenAIClientDeps, ProviderCallOptions } from "./openai.js";
 
@@ -201,4 +202,24 @@ export function createBailianMediaClient(deps: OpenAIClientDeps) {
       return retrieve("transcription", id, opts);
     },
   };
+}
+
+/** Result downloads never carry provider Authorization and reuse DNS-pinned HTTPS. */
+export async function materializeBailianTranscription(
+  value: Record<string, unknown>,
+  signal?: AbortSignal,
+  download: typeof import("./gemini.js").fetchPublicResultJson = fetchPublicResultJson,
+) {
+  const raw = parseBailianTask(value, "transcription");
+  if (raw.output.task_status !== "SUCCEEDED") return raw;
+  const results = raw.output.results ?? (raw.output.result ? [raw.output.result] : []);
+  if (results.length > 100) throw new Error("too many transcription results");
+  for (const result of results) {
+    if (result.subtask_status === "FAILED" || !result.transcription_url) continue;
+    const transcript = await download(result.transcription_url, { signal });
+    if (!transcript || typeof transcript !== "object" || Array.isArray(transcript))
+      throw new Error("invalid transcription result JSON");
+    result.transcript = transcript;
+  }
+  return raw;
 }
