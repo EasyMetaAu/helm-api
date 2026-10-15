@@ -67,6 +67,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 相较 2.1.296，扫描到新增 `x-claude-code-upload-lane`；它出现在 OAuth `/api/oauth/file_upload` 的 multipart 请求头构造中（偏移 229306824），不是 Messages 请求的新增必需字段。Helm 不扩展上传接口或头白名单，定向测试验证该字段不会转发到 Messages 上游。
 - `x-claude-code-wiggly-dove` 仍受默认关闭的开关控制（偏移 197792242），保护字段仍由客户端选项生成（偏移 197798438）。维持既有未知字段、远程租户凭证及签名隔离，不扩大信任边界。官方协议文档本次访问返回 403；以上增量结论基于官方发布记录与完整性校验后的包，不能视为完整协议兼容或生产账户安全证明。
 
+2026-10-15 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.300`。重新核对 npm SHA512 integrity，二进制 SHA256 为 `475517caa611e3318a2f298fa071287ec98955538df78c58f709ecc01e5ae2d3`，内嵌 SDK 仍为 `0.128.0`（可读 JavaScript 偏移 198503091）。同时重新校验 2.1.299 包并比较 `x-claude-code-*`／`x-anthropic-*` 字符串集合，未发现新增或删除；字符串集合相同不等于完整协议相同，因此继续核对实际构造位置。
+
+- [官方 2.1.300 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21300)包含遥测、代理与会话修复；Helm 不复制客户端遥测，不扩展信任头白名单。`x-claude-code-upload-lane` 仍位于 multipart 上传头构造（229385806）；`x-anthropic-additional-protection` 仍由客户端配置生成（198874727）；`cc_gateway` 仍位于 system 归因文本（198333610）。原生保留／未知字段删除策略及其定向回归保持有效。
+- 本次环境时区检查确认 user 消息中的日期 reminder、Codex 环境块与 Grok 日期前缀；相关转换只作用于已验证环境字段。Claude `output_config.timing.now` 实现受 `nr.CLAUDE_CODE_PER_TURN_TIMING` 控制（197473594），调查制品中未启用，不据此增加 beta 或伪造字段。完整边界见 `docs/subscription-timezones.md`。
+- 全程只读取官方发布材料及二进制中的 JavaScript，没有执行下载的 CLI、访问账号或扩大凭证转发范围。此审核不是完整协议兼容或账号安全保证。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。
