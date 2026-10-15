@@ -1,3 +1,7 @@
+import {
+  applyEnvironmentTimezone,
+  type EnvironmentTimezoneResolver,
+} from "./environment-timezone.js";
 // Native OpenAI Responses executor (issue #38, Codex) — routes Helm's internal
 // OpenAI-Chat IR to the ChatGPT Codex backend (`/backend-api/codex/responses`),
 // used by ChatGPT Plus/Pro (Codex) SUBSCRIPTION (OAuth) providers. Implements the
@@ -128,6 +132,7 @@ export interface CodexResponsesClientConfig {
 }
 
 export interface CodexResponsesClientDeps {
+  resolveEnvironmentTimezone?: EnvironmentTimezoneResolver;
   config: CodexResponsesClientConfig;
   fetch?: typeof globalThis.fetch;
   responseWorkAdmission?: ResponseWorkAdmission;
@@ -136,6 +141,7 @@ export interface CodexResponsesClientDeps {
 }
 
 export interface GenericOpenAIResponsesClientDeps {
+  resolveEnvironmentTimezone?: EnvironmentTimezoneResolver;
   // Explicit Helm relays preserve the authenticated ingress WebSocket lifetime.
   responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
   config: ProviderConfig;
@@ -2443,7 +2449,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     prepared: PreparedNativePassthroughRequest;
     turnKey: string | undefined;
   }> {
-    const canonicalInput = canonicalizeCodexNativeInput(input, modelInfo, forceStore);
+    const environmentInput = await applyEnvironmentTimezone(input, deps.resolveEnvironmentTimezone);
+    const canonicalInput = canonicalizeCodexNativeInput(environmentInput, modelInfo, forceStore);
     const tieredInput = withCodexServiceTier(canonicalInput, cfg.fastMode === true, modelInfo);
     const boundInput = withCodexInstallationId(tieredInput, cfg.installationId);
     const wireInput = stripNativePassthroughHeader(boundInput, "openai-beta");
@@ -3916,6 +3923,7 @@ export function createGenericOpenAIResponsesClient(
   async function applyResponsesRequestContract(
     body: NativePassthroughInput,
   ): Promise<NativePassthroughInput> {
+    body = await applyEnvironmentTimezone(body, deps.resolveEnvironmentTimezone);
     const contract = requestContract;
     if (
       contract?.forceSse !== true &&
@@ -4347,7 +4355,9 @@ export function createGenericOpenAIResponsesClient(
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
         ? await applyResponsesRequestContract(init.body)
-        : init.body;
+        : init.body === undefined
+          ? undefined
+          : await applyEnvironmentTimezone(init.body, deps.resolveEnvironmentTimezone);
     const finalBody =
       requestBody === undefined
         ? undefined

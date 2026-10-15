@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import type { EnvironmentTimezoneResolver } from "@helm/core";
 import {
   type AnthropicSSEEvent,
   AUTO_VACUUM_CHECK_INTERVAL_MS,
@@ -191,6 +192,7 @@ import {
   saveAccountXaiDiscoveredModels,
   selectAccountModels,
 } from "./oauth/account-settings.js";
+import { getAccountTimezone } from "./oauth/account-timezone.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { runResetCreditAttempt, weeklySaturated } from "./oauth/auto-reset.js";
 import { loadBundledCodexModels } from "./oauth/codex-bundled-models.js";
@@ -430,6 +432,7 @@ type ProviderCredential =
 // root (principle 7) and threaded into buildCredential so the preset token manager
 // can read/decrypt the stored credential the admin login wrote.
 export interface OAuthRuntimeCtx {
+  config?: ConfigStore;
   store: OAuthTokenStore;
   encKey: Buffer;
 }
@@ -969,6 +972,7 @@ async function buildOAuthAccountClient(
     fastMode,
     accountCodexRuntime,
     xaiRuntime,
+    accountEnvironmentResolver(accountConfig, oauthCtx, proxy),
   );
 }
 
@@ -1664,7 +1668,18 @@ export function buildProviderClients(
       (p.type === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : fallbackBaseUrl);
     clients.set(
       p.name,
-      createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy, undefined, undefined, fastMode),
+      createProviderClient(
+        p,
+        { baseUrl, timeoutMs },
+        cred,
+        proxy,
+        undefined,
+        undefined,
+        fastMode,
+        undefined,
+        undefined,
+        accountEnvironmentResolver(p, oauthCtx, proxy),
+      ),
     );
   }
   return clients;
@@ -1675,6 +1690,28 @@ export function buildProviderClients(
 // Claude-Code identity headers; everything else is OpenAI-compatible. Copilot is
 // OpenAI-shaped, so it reuses the OpenAI client (with its editor headers injected
 // at wiring time via base_url derived from the token).
+function accountEnvironmentResolver(
+  p: ProviderConfigShared,
+  ctx: OAuthRuntimeCtx | undefined,
+  proxy?: ProxyConfig,
+): EnvironmentTimezoneResolver | undefined {
+  if (
+    !ctx?.config ||
+    !p.oauth ||
+    !isOAuthPreset(p.oauth) ||
+    !["anthropic", "openai-codex", "xai"].includes(p.oauth.provider)
+  )
+    return undefined;
+  const config = ctx.config;
+  const providerId = p.oauth.provider;
+  const account = p.oauth.account ?? "default";
+  // Read override live: a timezone edit must not replace a Codex pool or lose its
+  // WS/previous_response_id state. Automatic detection follows this client's
+  // pinned egress, including an older connection still draining after proxy edits.
+  return async () =>
+    (await getAccountTimezone(config, ctx.encKey, providerId, account, proxy)).effective;
+}
+
 function createProviderClient(
   p: ProviderConfigShared,
   base: { baseUrl: string; timeoutMs: number },
@@ -1700,6 +1737,7 @@ function createProviderClient(
   // Account-scoped xAI catalog metadata keyed by the actual inference wire model.
   // Omitted for static providers and connectivity probes that did no discovery.
   xaiRuntime?: XaiAccountRuntime,
+  resolveEnvironmentTimezone?: EnvironmentTimezoneResolver,
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
@@ -1741,6 +1779,7 @@ function createProviderClient(
 
   if (p.type === "anthropic") {
     return createAnthropicClient({
+      resolveEnvironmentTimezone,
       config: {
         ...base,
         ...cred,
@@ -1756,6 +1795,7 @@ function createProviderClient(
   // the dynamic OAuth header; a static key never drives this path.
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
     const client = createCodexResponsesClient({
+      resolveEnvironmentTimezone,
       config: {
         ...base,
         ...cred,
@@ -1911,6 +1951,7 @@ function createProviderClient(
     const isXaiOAuth =
       p.oauth !== undefined && isOAuthPreset(p.oauth) && p.oauth.provider === "xai";
     const responsesClient = createGenericOpenAIResponsesClient({
+      resolveEnvironmentTimezone,
       config: { ...base, ...cred },
       // A Helm upstream accepts Codex native items and applies its own provider policy.
       ...(p.type === "helm"
@@ -2256,7 +2297,7 @@ export async function buildServer(
   // The runtime context threaded into buildCredential (preset token managers) and
   // the admin login surface. Present only when an enc key is available.
   const oauthCtx: OAuthRuntimeCtx | undefined = oauthEncKey
-    ? { store: store.oauthTokens, encKey: oauthEncKey }
+    ? { store: store.oauthTokens, encKey: oauthEncKey, config: store.config }
     : undefined;
   let rebuildOAuthPool:
     | ((options?: OAuthMutationOptions) => Promise<{ applied: boolean }>)
@@ -3160,7 +3201,18 @@ export async function buildServer(
   // SAME dynamic-header client backs the eval/classify path below, so eval auth
   // never silently fails (acceptance criterion 9).
   const provider = primaryCred
-    ? createProviderClient(first, { baseUrl, timeoutMs }, primaryCred, primaryProxy)
+    ? createProviderClient(
+        first,
+        { baseUrl, timeoutMs },
+        primaryCred,
+        primaryProxy,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        accountEnvironmentResolver(first, oauthCtx, primaryProxy),
+      )
     : createUnavailableProviderClient(first.name);
   // Per-provider clients keyed by provider NAME. Only the CONFIGURED providers go
   // through buildProviderClients (one static/OAuth client each). When

@@ -24,6 +24,25 @@ const XAI = {
 };
 
 describe('ConnectProviderDialog device-code polling', () => {
+  it('sends a manual timezone override with the bind session', async () => {
+    oauth.startManualPaste.mockResolvedValue({ sessionId: 's', authorizeUrl: 'https://auth.test' });
+    render(ConnectProviderDialog, {
+      providers: [{ id: 'anthropic', name: 'Claude', flow: 'manual_paste', accounts: [] }],
+      onconnected: vi.fn(),
+      onclose: vi.fn(),
+    });
+    await fireEvent.input(screen.getByLabelText('Timezone override'), {
+      target: { value: 'America/Los_Angeles' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Start sign-in' }));
+    expect(oauth.startManualPaste).toHaveBeenCalledWith(
+      'anthropic',
+      undefined,
+      undefined,
+      'America/Los_Angeles',
+    );
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);

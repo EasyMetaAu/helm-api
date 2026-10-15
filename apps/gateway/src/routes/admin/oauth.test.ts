@@ -2847,3 +2847,69 @@ describe("admin OAuth routes — Anthropic reset grants", () => {
     expect(fetchAnthropicQuota).toHaveBeenCalledWith({ account: "sibling", force: true });
   });
 });
+
+describe("account timezone routes", () => {
+  it("validates bind-time overrides before starting login", async () => {
+    const oauth = fullSeam();
+    const api = app({ oauth });
+    for (const path of ["manual", "device"]) {
+      const bad = await api.request(`/admin/api/oauth/anthropic/${path}/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ timezone: "US" }),
+      });
+      expect(bad.status).toBe(400);
+    }
+    expect(oauth.startManualPaste).not.toHaveBeenCalled();
+    expect(oauth.startDeviceCode).not.toHaveBeenCalled();
+    await api.request("/admin/api/oauth/anthropic/manual/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ timezone: "America/New_York" }),
+    });
+    expect(oauth.startManualPaste).toHaveBeenCalledWith(
+      expect.objectContaining({ timezone: "America/New_York" }),
+    );
+  });
+  it("reads effective timezone and validates, saves or clears overrides", async () => {
+    const view = {
+      override: null,
+      effective: "America/New_York",
+      source: "ipapi.is" as const,
+      checkedAt: 1,
+    };
+    const getAccountTimezone = vi.fn(async () => view);
+    const setAccountTimezone = vi.fn(async () => {});
+    const api = app({ oauth: fullSeam({ getAccountTimezone, setAccountTimezone }) });
+    const read = await api.request("/admin/api/oauth/xai/timezone?account=a");
+    expect(await read.json()).toEqual(view);
+    for (const timezone of ["PST", 123, {}, undefined]) {
+      expect(
+        (
+          await api.request("/admin/api/oauth/xai/timezone", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ account: "a", timezone }),
+          })
+        ).status,
+      ).toBe(400);
+    }
+    expect(setAccountTimezone).not.toHaveBeenCalled();
+    for (const timezone of ["Asia/Tokyo", null]) {
+      expect(
+        (
+          await api.request("/admin/api/oauth/xai/timezone", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ account: "a", timezone }),
+          })
+        ).status,
+      ).toBe(204);
+      expect(setAccountTimezone).toHaveBeenLastCalledWith({
+        providerId: "xai",
+        account: "a",
+        timezone,
+      });
+    }
+  });
+});

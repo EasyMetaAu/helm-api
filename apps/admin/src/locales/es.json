@@ -1138,5 +1138,12 @@
   "Select at least one allowed client.": "Selecciona al menos un cliente permitido.",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "Selecciona al menos un cliente. Los clientes desconocidos se rechazan. El enrutamiento y la conmutación por error no cambian.",
   "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "Las cabeceras User-Agent se pueden falsificar. Esta opción evita el uso accidental desde otros clientes; no verifica la identidad de la aplicación.",
-  "No clients allowed. Select a client or disable the restriction.": "No se permite ningún cliente. Selecciona uno o desactiva la restricción."
+  "No clients allowed. Select a client or disable the restriction.": "No se permite ningún cliente. Selecciona uno o desactiva la restricción.",
+  "Timezone": "Zona horaria",
+  "Timezone override": "Zona horaria manual",
+  "Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.": "Déjalo en blanco para detectar la zona horaria de la IP de salida. La zona IANA indicada manualmente tiene prioridad.",
+  "Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.": "La detección automática usa IPWho.is e ipapi.is a través del proxy de esta cuenta. No se envían credenciales ni mensajes.",
+  "Effective timezone": "Zona horaria aplicada",
+  "Not detected": "No detectada",
+  "Only verified client environment fields are converted. Business times and generated responses stay unchanged.": "Solo se convierten los campos de entorno del cliente verificados. Las fechas de negocio y las respuestas generadas no se modifican."
 }

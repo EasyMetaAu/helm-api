@@ -1138,5 +1138,12 @@
   "Select at least one allowed client.": "허용할 클라이언트를 하나 이상 선택하세요.",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "클라이언트를 하나 이상 선택하세요. 알 수 없는 클라이언트는 거부됩니다. 라우팅과 폴백은 변경되지 않습니다.",
   "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent 헤더는 위조할 수 있습니다. 이 설정은 다른 클라이언트의 실수로 인한 사용을 방지하며, 앱의 실제 신원을 확인하지는 않습니다.",
-  "No clients allowed. Select a client or disable the restriction.": "허용된 클라이언트가 없습니다. 클라이언트를 선택하거나 제한을 해제하세요."
+  "No clients allowed. Select a client or disable the restriction.": "허용된 클라이언트가 없습니다. 클라이언트를 선택하거나 제한을 해제하세요.",
+  "Timezone": "시간대",
+  "Timezone override": "시간대 직접 지정",
+  "Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.": "비워 두면 발신 IP의 시간대를 감지합니다. 직접 지정한 IANA 시간대가 우선 적용됩니다.",
+  "Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.": "자동 감지는 이 계정의 프록시를 통해 IPWho.is와 ipapi.is를 사용합니다. 계정 인증 정보나 메시지는 전송하지 않습니다.",
+  "Effective timezone": "적용 중인 시간대",
+  "Not detected": "감지되지 않음",
+  "Only verified client environment fields are converted. Business times and generated responses stay unchanged.": "확인된 클라이언트 환경 필드만 변환합니다. 업무상의 시간과 생성된 응답은 그대로 유지됩니다."
 }

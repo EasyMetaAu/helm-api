@@ -1138,5 +1138,12 @@
   "Select at least one allowed client.": "許可するクライアントを1つ以上選択してください。",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "クライアントを1つ以上選択してください。不明なクライアントは拒否されます。ルーティングとフォールバックは変更されません。",
   "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent ヘッダーは偽装できます。この設定は他のクライアントの誤使用を防ぐもので、アプリの身元を証明するものではありません。",
-  "No clients allowed. Select a client or disable the restriction.": "許可されたクライアントがありません。クライアントを選択するか制限を無効にしてください。"
+  "No clients allowed. Select a client or disable the restriction.": "許可されたクライアントがありません。クライアントを選択するか制限を無効にしてください。",
+  "Timezone": "タイムゾーン",
+  "Timezone override": "タイムゾーンの手動指定",
+  "Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.": "空欄の場合は送信元 IP のタイムゾーンを検出します。手動で指定した IANA タイムゾーンが優先されます。",
+  "Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.": "自動検出では、このアカウントのプロキシ経由で IPWho.is と ipapi.is にアクセスします。アカウントの認証情報やメッセージは送信しません。",
+  "Effective timezone": "適用中のタイムゾーン",
+  "Not detected": "未検出",
+  "Only verified client environment fields are converted. Business times and generated responses stay unchanged.": "確認済みのクライアント環境フィールドのみ変換します。業務上の日時や生成された応答は変更しません。"
 }

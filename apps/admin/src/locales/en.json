@@ -1138,5 +1138,12 @@
   "Select at least one allowed client.": "Select at least one allowed client.",
   "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.": "Select at least one client. Unknown clients are rejected. Routing and fallback remain unchanged.",
   "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.": "User-Agent headers can be spoofed. This setting prevents accidental use by other clients; it does not verify the application identity.",
-  "No clients allowed. Select a client or disable the restriction.": "No clients allowed. Select a client or disable the restriction."
+  "No clients allowed. Select a client or disable the restriction.": "No clients allowed. Select a client or disable the restriction.",
+  "Timezone": "Timezone",
+  "Timezone override": "Timezone override",
+  "Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.": "Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.",
+  "Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.": "Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.",
+  "Effective timezone": "Effective timezone",
+  "Not detected": "Not detected",
+  "Only verified client environment fields are converted. Business times and generated responses stay unchanged.": "Only verified client environment fields are converted. Business times and generated responses stay unchanged."
 }

@@ -3171,3 +3171,43 @@ describe("createOAuthAdmin > codex reset credit", () => {
     );
   });
 });
+
+describe("bind-time timezone", () => {
+  it("persists override before binding, inherits on reconnect, and clears explicitly", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      makeFetch: () =>
+        routeFetch([
+          [
+            /oauth\/token/,
+            () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 }),
+          ],
+        ]),
+    });
+    for (const timezone of ["America/New_York", undefined, null]) {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+        account: "work",
+        timezone,
+      });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account: "work",
+      });
+      const saved = getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work");
+      expect(saved.timezone).toBe(timezone === null ? undefined : "America/New_York");
+    }
+  });
+  it("rejects invalid bind-time timezone before device login network call", async () => {
+    const { tokens, config } = makeStores();
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const admin = createOAuthAdmin({ store: tokens, config, encKey: KEY, makeFetch: () => fetch });
+    await expect(admin.startDeviceCode({ providerId: "xai", timezone: "US" })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});

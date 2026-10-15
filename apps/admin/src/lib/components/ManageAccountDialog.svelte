@@ -4,6 +4,8 @@
     type AccountProxyInput,
     type ProxyType,
     getAccountModels,
+    getAccountTimezone,
+    setAccountTimezone,
     getAccountProxy,
     getAccountSchedule,
     setAccountModels,
@@ -36,7 +38,7 @@
     onclose: () => void;
   } = $props();
 
-  type Section = 'models' | 'proxy' | 'schedule';
+  type Section = 'models' | 'proxy' | 'schedule' | 'timezone';
   let section = $state<Section>('models');
   // Set once a section persists, so the parent invalidates exactly when needed.
   let dirty = false;
@@ -44,6 +46,42 @@
   function close(): void {
     if (dirty) onsaved();
     else onclose();
+  }
+
+  let timezone = $state('');
+  let timezoneEffective = $state<string | null>(null);
+  let timezoneSource = $state('');
+  let timezoneBusy = $state(false);
+  let timezoneError = $state<string | null>(null);
+  let timezoneSaved = $state(false);
+  async function loadTimezone(): Promise<void> {
+    timezoneBusy = true;
+    timezoneError = null;
+    try {
+      const result = await getAccountTimezone(providerId, account);
+      timezone = result.override ?? '';
+      timezoneEffective = result.effective;
+      timezoneSource = result.source;
+    } catch (e) {
+      timezoneError = e instanceof Error ? e.message : String(e);
+    } finally {
+      timezoneBusy = false;
+    }
+  }
+  async function saveTimezone(): Promise<void> {
+    timezoneBusy = true;
+    timezoneSaved = false;
+    timezoneError = null;
+    try {
+      await setAccountTimezone(providerId, account, timezone.trim() || null);
+      dirty = true;
+      timezoneSaved = true;
+      await loadTimezone();
+    } catch (e) {
+      timezoneError = e instanceof Error ? e.message : String(e);
+    } finally {
+      timezoneBusy = false;
+    }
   }
 
   // ── Models ──────────────────────────────────────────────────────────────────
@@ -341,9 +379,69 @@
         aria-selected={section === 'schedule'}
         onclick={() => (section = 'schedule')}>{$t('Schedule')}</button
       >
+      {#if ['anthropic', 'openai-codex', 'xai'].includes(providerId)}
+        <button
+          type="button"
+          role="tab"
+          class="tab-btn"
+          aria-selected={section === 'timezone'}
+          onclick={() => {
+            section = 'timezone';
+            timezoneSaved = false;
+            void loadTimezone();
+          }}>{$t('Timezone')}</button
+        >
+      {/if}
     </div>
 
-    {#if section === 'models'}
+    {#if section === 'timezone'}
+      <div class="flex flex-col gap-3">
+        {#if timezoneError}<p role="alert" class="text-sm text-red-600">{timezoneError}</p>{/if}
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Timezone override')}</span>
+          <input
+            class="input"
+            bind:value={timezone}
+            disabled={timezoneBusy}
+            placeholder="America/Los_Angeles"
+            autocomplete="off"
+            oninput={() => (timezoneSaved = false)}
+          />
+        </label>
+        <p class="text-xs text-ink-muted">
+          {$t(
+            'Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.',
+          )}
+        </p>
+        <p class="text-xs text-ink-muted">
+          {$t(
+            'Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.',
+          )}
+        </p>
+        <p class="text-sm" role="status">
+          {$t('Effective timezone')}: {timezoneBusy
+            ? $t('Loading…')
+            : (timezoneEffective ?? $t('Not detected'))}{timezoneSource &&
+          timezoneSource !== 'unknown'
+            ? ` (${timezoneSource})`
+            : ''}
+        </p>
+        <p class="text-xs text-ink-muted">
+          {$t(
+            'Only verified client environment fields are converted. Business times and generated responses stay unchanged.',
+          )}
+        </p>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="btn-primary-sm"
+            disabled={timezoneBusy}
+            onclick={saveTimezone}>{timezoneBusy ? $t('Saving…') : $t('Save')}</button
+          >
+          {#if timezoneSaved}<span class="badge-ok" role="status">{$t('Saved')}</span>{/if}
+        </div>
+      </div>
+    {:else if section === 'models'}
       <div class="flex flex-col gap-3">
         {#if modelsError}
           <p class="alert-error" role="alert">{modelsError}</p>

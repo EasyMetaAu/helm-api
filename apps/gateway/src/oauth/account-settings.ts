@@ -7,6 +7,7 @@ import {
   parseXaiOAuthModels,
   type XaiOAuthModel,
 } from "@helm/core";
+import { IanaTimezoneSchema } from "@helm/shared";
 
 // Per-account OAuth subscription SETTINGS (issue #38 follow-up). These are
 // OPERATOR choices that live ALONGSIDE the stored credential but must NOT ride in
@@ -40,6 +41,8 @@ const mutationQueues = new WeakMap<ConfigStore, Promise<void>>();
 // priority unset = the scheduler default; schedulable unset = true; proxy unset =
 // direct connection). Later stages (proxy / priority pool) read the same blob.
 export interface AccountSettings {
+  // IANA timezone override; absent means resolve the pinned outbound IP.
+  timezone?: string;
   // Codex defaults to auto so newly entitled models appear without an operator
   // edit. Manual preserves an explicit enabledModels allowlist. Legacy rows with
   // an enabledModels list remain manual so an upgrade cannot widen operator access.
@@ -247,6 +250,7 @@ export async function setAccountSettings(
   account: string,
   patch: AccountSettings,
 ): Promise<void> {
+  if (patch.timezone !== undefined) IanaTimezoneSchema.parse(patch.timezone);
   await serializeSettingsMutation(config, async () => {
     const map = await loadAccountSettingsForMutation(config, encKey);
     const key = composite(providerId, account);

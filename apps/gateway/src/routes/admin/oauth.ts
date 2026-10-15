@@ -9,6 +9,7 @@ import {
   windowsToUsageLimit,
 } from "@helm/core";
 import {
+  AccountTimezoneInputSchema,
   AnthropicResetRequestSchema,
   isCodexQuotaWindowPlaceholder,
   type OAuthQuotaWindow,
@@ -1062,6 +1063,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const body = (await c.req.json().catch(() => ({}))) as {
       account?: unknown;
       proxy?: unknown;
+      timezone?: unknown;
     };
     if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
       return c.json({ error: "account must be a non-empty string" }, 400);
@@ -1080,6 +1082,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             ? { account: body.account }
             : {}),
           proxy: proxy ?? undefined,
+          ...(body.timezone !== undefined
+            ? AccountTimezoneInputSchema.parse({ timezone: body.timezone })
+            : {}),
         }),
       );
     } catch (e) {
@@ -1129,6 +1134,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       account?: unknown;
       enterprise?: unknown;
       proxy?: unknown;
+      timezone?: unknown;
     };
     if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
       return c.json({ error: "account must be a non-empty string" }, 400);
@@ -1148,6 +1154,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             : {}),
           enterprise: typeof body.enterprise === "string" ? body.enterprise : undefined,
           proxy: proxy ?? undefined,
+          ...(body.timezone !== undefined
+            ? AccountTimezoneInputSchema.parse({ timezone: body.timezone })
+            : {}),
         }),
       );
     } catch (e) {
@@ -1223,6 +1232,42 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         models: body.models as string[],
       });
       if (!(await afterMutation())) return c.json(notApplied, 503);
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  app.get("/admin/api/oauth/:provider/timezone", async (c) => {
+    const s = seam();
+    if (!s?.getAccountTimezone) return c.json({ error: "oauth timezone not configured" }, 503);
+    try {
+      return c.json(
+        await s.getAccountTimezone({
+          providerId: c.req.param("provider"),
+          account: c.req.query("account") || DEFAULT_ACCOUNT,
+        }),
+      );
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+  app.put("/admin/api/oauth/:provider/timezone", async (c) => {
+    const s = seam();
+    if (!s?.setAccountTimezone) return c.json({ error: "oauth timezone not configured" }, 503);
+    try {
+      const body: unknown = await c.req.json();
+      const parsed = AccountTimezoneInputSchema.parse(body);
+      const account =
+        typeof body === "object" && body !== null && "account" in body ? body.account : undefined;
+      if (account !== undefined && (typeof account !== "string" || !account.trim()))
+        return c.json({ error: "account must be a non-empty string" }, 400);
+      await s.setAccountTimezone({
+        providerId: c.req.param("provider"),
+        account: typeof account === "string" ? account : DEFAULT_ACCOUNT,
+        timezone: parsed.timezone,
+      });
+      // The runtime getter is live; rebuilding would discard stateful sessions.
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
