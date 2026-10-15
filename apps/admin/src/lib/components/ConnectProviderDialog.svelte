@@ -47,6 +47,7 @@
   // Optional egress proxy entered up-front (issue #38). Pinned to the login session
   // server-side so the VERY FIRST network call of the flow — and the persisted
   // account — already egress through it, never the operator's real IP. Off ⇒ direct.
+  let timezone = $state('');
   let useProxy = $state<boolean>(false);
   let proxyType = $state<ProxyType>('http');
   let proxyHost = $state<string>('');
@@ -157,7 +158,12 @@
     const acct = reconnect?.account ?? (account.trim() || suggestion);
     try {
       if (selected?.flow === 'manual_paste') {
-        const s = await startManualPaste(providerId, proxy ?? undefined, reconnect?.account);
+        const s = await startManualPaste(
+          providerId,
+          proxy ?? undefined,
+          reconnect?.account,
+          ...(timezone.trim() ? ([timezone.trim()] as const) : []),
+        );
         if (closed) return;
         sessionId = s.sessionId;
         authorizeUrl = s.authorizeUrl;
@@ -170,6 +176,7 @@
           enterprise.trim() || undefined,
           proxy ?? undefined,
           reconnect?.account,
+          ...(timezone.trim() ? ([timezone.trim()] as const) : []),
         );
         if (closed) return;
         sessionId = s.sessionId;
@@ -315,6 +322,28 @@
               autocomplete="off"
             />
           </label>
+        {/if}
+
+        {#if ['anthropic', 'openai-codex', 'xai'].includes(providerId) && !reconnect}
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="field-label">{$t('Timezone override')}</span>
+            <input
+              class="input"
+              bind:value={timezone}
+              placeholder="America/Los_Angeles"
+              autocomplete="off"
+            />
+          </label>
+          <p class="text-xs text-ink-muted">
+            {$t(
+              'Leave blank to detect the outbound IP timezone. A manual IANA timezone takes priority.',
+            )}
+          </p>
+          <p class="text-xs text-ink-muted">
+            {$t(
+              'Automatic detection uses IPWho.is and ipapi.is through this account’s proxy. No account credentials or messages are sent.',
+            )}
+          </p>
         {/if}
 
         <!-- Egress proxy (issue #38): collected up-front so the FIRST sign-in call

@@ -3012,3 +3012,41 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     if (held.ok) held.release();
   });
 });
+
+it("configured subscription clients read timezone changes live without replacing the client", async () => {
+  const { ctx, config } = oauthStores();
+  ctx.config = config;
+  await seedAnthropic(ctx, "default");
+  const fetchSpy = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
+    Response.json({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "Asia/Shanghai" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchSpy);
+  const p = provider({
+    name: "anthropic",
+    type: "anthropic",
+    base_url: "https://provider.test",
+    oauth: { provider: "anthropic", account: "default" },
+    transport_profile: "default",
+    models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+  });
+  const client = buildProviderClients([p], "https://provider.test", 60_000, ctx).get("anthropic");
+  const content =
+    "<environment_context>\n<current_date>2026-10-15</current_date>\n<timezone>Asia/Shanghai</timezone>\n</environment_context>";
+  for (const timezone of ["America/Los_Angeles", "America/New_York"]) {
+    await setAccountSettings(config, ENC_KEY, "anthropic", "default", { timezone });
+    const result = await client?.chatCompletion({
+      model: "claude-opus",
+      messages: [{ role: "user", content }],
+    });
+    expect(String(fetchSpy.mock.calls.at(-1)?.[1]?.body)).toContain(timezone);
+    expect(JSON.stringify(result)).toContain("Asia/Shanghai");
+  }
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
+});

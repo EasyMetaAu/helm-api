@@ -1,3 +1,4 @@
+import { AccountTimezoneViewSchema, type AccountTimezoneView } from '@helm/shared';
 // Admin OAuth-login API client (issue #38). The admin UI is a PURE consumer of
 // the gateway's /admin/api/oauth surface (CLAUDE.md Principle 1) — no core logic,
 // no secrets ever cross this boundary. Two flows: manual_paste (Anthropic /
@@ -308,11 +309,12 @@ export async function startManualPaste(
   provider: string,
   proxy?: AccountProxyInput,
   account?: string,
+  timezone?: string | null,
 ): Promise<{ sessionId: string; authorizeUrl: string }> {
   const res = await fetch(`${BASE}/${provider}/manual/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ proxy, ...(account ? { account } : {}) }),
+    body: JSON.stringify({ proxy, timezone, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }
@@ -337,6 +339,7 @@ export async function startDeviceCode(
   enterprise?: string,
   proxy?: AccountProxyInput,
   account?: string,
+  timezone?: string | null,
 ): Promise<{
   sessionId: string;
   userCode: string;
@@ -348,7 +351,7 @@ export async function startDeviceCode(
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enterprise, proxy, ...(account ? { account } : {}) }),
+    body: JSON.stringify({ enterprise, proxy, timezone, ...(account ? { account } : {}) }),
   });
   return asJson(res);
 }
@@ -685,4 +688,24 @@ export async function setSelectionStrategy(
     body: JSON.stringify({ selectionStrategy }),
   });
   if (!res.ok && res.status !== 204) await asJson(res);
+}
+
+export async function getAccountTimezone(
+  provider: string,
+  account: string,
+): Promise<AccountTimezoneView> {
+  const res = await fetch(`${BASE}/${provider}/timezone?account=${encodeURIComponent(account)}`);
+  return AccountTimezoneViewSchema.parse(await asJson<unknown>(res));
+}
+export async function setAccountTimezone(
+  provider: string,
+  account: string,
+  timezone: string | null,
+): Promise<void> {
+  const res = await fetch(`${BASE}/${provider}/timezone`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ account, timezone }),
+  });
+  if (!res.ok) await asJson(res);
 }

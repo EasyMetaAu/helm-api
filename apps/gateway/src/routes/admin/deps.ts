@@ -15,6 +15,7 @@ import type {
   TelemetryStore,
 } from "@helm/core";
 import type {
+  AccountTimezoneView,
   AnthropicPlanType,
   AnthropicResetRequest,
   AnthropicResetResult,
@@ -154,6 +155,12 @@ export interface OAuthAdminStatusResponse {
 }
 
 export interface OAuthAdminAccess {
+  getAccountTimezone?(input: { providerId: string; account: string }): Promise<AccountTimezoneView>;
+  setAccountTimezone?(input: {
+    providerId: string;
+    account: string;
+    timezone: string | null;
+  }): Promise<void>;
   // Cache-only status is the providers page read path: local token/settings/model
   // snapshots only, with no token refresh or upstream model discovery.
   listCachedStatus(): Promise<OAuthAdminStatusResponse>;
@@ -171,6 +178,7 @@ export interface OAuthAdminAccess {
   startManualPaste(input: {
     providerId: string;
     account?: string;
+    timezone?: string | null;
     proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; authorizeUrl: string }>;
   completeManualPaste(input: {
@@ -185,6 +193,7 @@ export interface OAuthAdminAccess {
   startDeviceCode(input: {
     providerId: string;
     account?: string;
+    timezone?: string | null;
     enterprise?: string;
     proxy?: AccountProxyInput;
   }): Promise<{

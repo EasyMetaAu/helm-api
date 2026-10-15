@@ -2,6 +2,10 @@ import {
   anthropicRequestAccountUuid,
   assertAnthropicAccountIdentity,
 } from "./anthropic-identity.js";
+import {
+  applyEnvironmentTimezone,
+  type EnvironmentTimezoneResolver,
+} from "./environment-timezone.js";
 import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 // Native Anthropic Messages executor (issue #38) — routes Helm's internal
 // OpenAI-Chat IR to the Anthropic /v1/messages API, used by Claude Pro/Max
@@ -95,6 +99,7 @@ export interface AnthropicClientConfig {
 }
 
 export interface AnthropicClientDeps {
+  resolveEnvironmentTimezone?: EnvironmentTimezoneResolver;
   config: AnthropicClientConfig;
   fetch?: typeof globalThis.fetch;
   responseWorkAdmission?: ResponseWorkAdmission;
@@ -1644,9 +1649,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
     sourceIdentity?: Record<string, unknown>,
   ): Promise<AnthropicRequestResult> {
-    const wireInput = normalizeAnthropicModelParameters(
-      cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
-      compatibility,
+    const wireInput = await applyEnvironmentTimezone(
+      normalizeAnthropicModelParameters(
+        cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
+        compatibility,
+      ),
+      deps.resolveEnvironmentTimezone,
     );
     const body = nativePassthroughBody(wireInput);
     const prepared = prepareNativePassthroughRequest(

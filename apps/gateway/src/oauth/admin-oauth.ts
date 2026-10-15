@@ -43,7 +43,12 @@ import {
   XAI_GROK_OAUTH_BASE_URL,
   type XaiDeviceStart,
 } from "@helm/core";
-import { CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
+import {
+  AccountTimezoneInputSchema,
+  CodexOAuthUsageSchema,
+  IanaTimezoneSchema,
+  type OAuthQuotaWindow,
+} from "@helm/shared";
 import type {
   AccountPoolStrategyView,
   AccountProxyInput,
@@ -76,6 +81,7 @@ import {
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
+import { getAccountTimezone } from "./account-timezone.js";
 import { createAnthropicPlanAccess } from "./anthropic-plan.js";
 import { createAnthropicResetAccess } from "./anthropic-reset.js";
 import type { CodexModelCacheKey } from "./codex-model-cache.js";
@@ -281,6 +287,7 @@ type Session =
       verifier: string;
       state: string;
       proxy?: ProxyConfig;
+      timezone?: string | null;
       createdAt: number;
     }
   | {
@@ -292,6 +299,7 @@ type Session =
       tokenEndpoint?: string;
       enterpriseDomain?: string;
       proxy?: ProxyConfig;
+      timezone?: string | null;
       createdAt: number;
       expiresAt: number;
     };
@@ -466,9 +474,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     providerId: string,
     account: string,
     proxy?: ProxyConfig,
+    timezone?: string | null,
   ): Promise<void> {
-    if (!proxy) return;
-    await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy });
+    if (!proxy && timezone === undefined) return;
+    await setAccountSettings(deps.config, deps.encKey, providerId, account, {
+      ...(proxy ? { proxy } : {}),
+      ...(timezone !== undefined ? { timezone: timezone ?? undefined } : {}),
+    });
   }
   // Project a stored proxy into the REDACTED admin view (principle 7): the password
   // is NEVER echoed, only whether one is set. Shared by listStatus (folds it onto
@@ -1000,7 +1012,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       });
     },
 
-    async startManualPaste({ providerId, account, proxy }) {
+    async startManualPaste({ providerId, account, proxy, timezone }) {
+      if (timezone != null) IanaTimezoneSchema.parse(timezone);
       const flow = MANUAL_FLOWS[providerId];
       if (!flow) {
         throw new Error(`provider '${providerId}' does not support the manual-paste flow`);
@@ -1020,6 +1033,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         verifier,
         state,
         proxy: pinned,
+        timezone,
         createdAt: now(),
       });
       return { sessionId, authorizeUrl };
@@ -1043,13 +1057,14 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // ending up with an account routed directly despite picking a proxy. A token
       // write that fails afterward leaves only an orphan proxy setting (no token =
       // not routable) — harmless, and overwritten by the next successful bind.
-      await persistProxy(s.providerId, account, s.proxy);
+      await persistProxy(s.providerId, account, s.proxy, s.timezone);
       await persist(s.providerId, account, creds);
       await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
       sessions.delete(sessionId);
     },
 
-    async startDeviceCode({ providerId, account, enterprise, proxy }) {
+    async startDeviceCode({ providerId, account, enterprise, proxy, timezone }) {
+      if (timezone != null) IanaTimezoneSchema.parse(timezone);
       if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
@@ -1092,6 +1107,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
                 enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
               }),
           proxy: pinned,
+          timezone,
           createdAt: now(),
           expiresAt: start.expiresAt,
         });
@@ -1124,7 +1140,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           now,
         );
         if (xai.status !== "done") return { status: xai.status };
-        await persistProxy(s.providerId, account, s.proxy);
+        await persistProxy(s.providerId, account, s.proxy, s.timezone);
         await persist(s.providerId, account, xai.credentials);
         await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
         sessions.delete(sessionId);
@@ -1144,7 +1160,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       );
       // Proxy BEFORE token (fail-closed ordering — see completeManualPaste): the
       // account is never bound without its proxy, so it can't later route directly.
-      await persistProxy(s.providerId, account, s.proxy);
+      await persistProxy(s.providerId, account, s.proxy, s.timezone);
       await persist(s.providerId, account, creds);
       await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
       sessions.delete(sessionId);
@@ -1191,6 +1207,21 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       await setAccountSettings(deps.config, deps.encKey, providerId, account, {
         modelsMode: mode,
         enabledModels: mode === "manual" ? models : undefined,
+      });
+    },
+
+    async getAccountTimezone({ providerId, account }) {
+      const settings = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      );
+      return getAccountTimezone(deps.config, deps.encKey, providerId, account, settings.proxy);
+    },
+    async setAccountTimezone({ providerId, account, timezone }) {
+      const parsed = AccountTimezoneInputSchema.parse({ timezone });
+      await setAccountSettings(deps.config, deps.encKey, providerId, account, {
+        timezone: parsed.timezone ?? undefined,
       });
     },
 
