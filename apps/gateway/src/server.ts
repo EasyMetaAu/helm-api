@@ -220,6 +220,7 @@ import {
   recordObservedQuotaResetPeriods,
   recordQuotaResetCreditPeriods,
 } from "./oauth/quota-reset-period.js";
+import { boundedOAuthFetch } from "./oauth/refresh-fetch.js";
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
 import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { createResponsesRegistry } from "./responses-registry.js";
@@ -538,7 +539,7 @@ async function loadCodexAccountCatalog(input: {
       isFedramp: currentIdentity.isFedramp,
       clientVersion,
       userAgent,
-      fetchImpl: input.proxyFetch,
+      fetchImpl: boundedOAuthFetch(input.proxyFetch ?? fetch),
       signal,
     });
   };
@@ -1216,7 +1217,7 @@ export async function synthesizeOAuthProviders(
         accountCodexRuntime = loaded?.runtime;
       } else {
         const discoverExact = () =>
-          discoverOAuthModels(providerId, accessToken, proxyFetch, {
+          discoverOAuthModels(providerId, accessToken, boundedOAuthFetch(proxyFetch ?? fetch), {
             fallbackToCurated: false,
           });
         const exact = modelDiscoveryCache

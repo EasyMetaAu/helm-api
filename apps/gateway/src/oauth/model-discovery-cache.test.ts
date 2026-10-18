@@ -1,9 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
+import { boundedOAuthFetch } from "./refresh-fetch.js";
 
 const KEY = { providerId: "anthropic", account: "default" };
 
 describe("createOAuthModelDiscoveryCache", () => {
+  it("releases a hung discovery and ignores its late result", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = createOAuthModelDiscoveryCache();
+      await cache.load(KEY, async () => ["known"]);
+      let release!: (response: Response) => void;
+      const pending = cache.load(
+        KEY,
+        async () => {
+          const response = await boundedOAuthFetch(
+            async () =>
+              new Promise<Response>((resolve) => {
+                release = resolve;
+              }),
+          )("https://models.test");
+          return (await response.json()) as string[];
+        },
+        { force: true },
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await pending).toEqual(["known"]);
+      expect(await cache.load(KEY, async () => ["fresh"], { force: true })).toEqual(["fresh"]);
+      release(new Response(JSON.stringify(["late"])));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cache.snapshot(KEY)).toEqual(["fresh"]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("exposes the last-known-good snapshot without running discovery", async () => {
     const discover = vi.fn(async () => ["claude-fable-5"]);
     const cache = createOAuthModelDiscoveryCache();

@@ -169,6 +169,7 @@ export interface OAuthAdminAccess {
   listStatus(options?: {
     forceRefresh?: boolean;
     serial?: boolean;
+    signal?: AbortSignal;
   }): Promise<OAuthAdminStatusResponse>;
   // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
   // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
