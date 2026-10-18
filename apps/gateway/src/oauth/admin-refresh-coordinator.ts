@@ -25,7 +25,8 @@ export interface OAuthAdminRefreshCoordinator {
 }
 
 export interface OAuthAdminRefreshCoordinatorOptions {
-  refresh: () => Promise<void>;
+  refresh: (signal: AbortSignal) => Promise<void>;
+  timeoutMs?: number;
   runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   cooldownMs?: number;
   now?: () => number;
@@ -33,6 +34,7 @@ export interface OAuthAdminRefreshCoordinatorOptions {
 }
 
 const DEFAULT_COOLDOWN_MS = 60_000;
+const DEFAULT_REFRESH_TIMEOUT_MS = 120_000;
 
 function cloneStatus(status: OAuthAdminRefreshStatus): OAuthAdminRefreshStatus {
   return { ...status };
@@ -100,10 +102,24 @@ export function createOAuthAdminRefreshCoordinator(
         settle = resolve;
       });
       active = pending;
+      const controller = new AbortController();
       const accepted = runInBackground(async () => {
+        const timer = setTimeout(() => {
+          const finishedAt = now();
+          current = {
+            ...current,
+            state: "failed",
+            finishedAt,
+            nextAllowedAt: finishedAt + cooldownMs,
+            error: "provider refresh timed out",
+          };
+          controller.abort(new Error("provider refresh timed out"));
+        }, options.timeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS);
         try {
           current = { ...current, state: "running", startedAt: now() };
-          await options.refresh();
+          await options.refresh(controller.signal);
+          // A late completion must not turn an expired job into a success.
+          controller.signal.throwIfAborted();
           const finishedAt = now();
           current = {
             ...current,
@@ -114,6 +130,7 @@ export function createOAuthAdminRefreshCoordinator(
             error: null,
           };
         } catch (error: unknown) {
+          if (controller.signal.aborted) return;
           const finishedAt = now();
           current = {
             ...current,
@@ -123,6 +140,8 @@ export function createOAuthAdminRefreshCoordinator(
             error: safeErrorMessage(error),
           };
         } finally {
+          clearTimeout(timer);
+          // Drain in-flight mutations before releasing the single-flight guard.
           if (active === pending) active = null;
           settle();
         }

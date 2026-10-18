@@ -17,6 +17,43 @@ function deferred(): {
 }
 
 describe("OAuth admin refresh coordinator", () => {
+  it("marks a timed out refresh failed, drains cleanup, and permits a later retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const cleanup = deferred();
+      let signal: AbortSignal | undefined;
+      const refresh = vi.fn(async (jobSignal: AbortSignal) => {
+        signal = jobSignal;
+        await cleanup.promise;
+      });
+      const coordinator = createOAuthAdminRefreshCoordinator({
+        refresh,
+        timeoutMs: 100,
+        cooldownMs: 50,
+      });
+      coordinator.enqueue();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(signal?.aborted).toBe(true);
+      expect(coordinator.status()).toMatchObject({
+        state: "failed",
+        error: "provider refresh timed out",
+      });
+      // Do not replay mutations while an old quota write or credit reset is draining.
+      await vi.advanceTimersByTimeAsync(50);
+      expect(coordinator.enqueue().coalesced).toBe(true);
+      cleanup.resolve();
+      await coordinator.waitForIdle();
+      expect(coordinator.status().state).toBe("failed");
+      refresh.mockResolvedValueOnce(undefined);
+      expect(coordinator.enqueue().accepted).toBe(true);
+      await coordinator.waitForIdle();
+      expect(coordinator.status().state).toBe("succeeded");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("registers refresh work so maintenance waits after enqueue returns", async () => {
     const background = createTrackedBackgroundTasks();
     const gate = deferred();

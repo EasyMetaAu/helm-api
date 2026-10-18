@@ -6,6 +6,7 @@ import type {
   CodexModelCacheKey,
 } from "./codex-model-cache.js";
 import { createCodexModelCatalog } from "./codex-model-catalog.js";
+import { boundedOAuthFetch } from "./refresh-fetch.js";
 
 const KEY: CodexModelCacheKey = {
   providerId: "openai-codex",
@@ -89,6 +90,38 @@ function remote(models: CodexModelInfo[], etag = '"v2"'): () => Promise<OpenAICo
 }
 
 describe("createCodexModelCatalog", () => {
+  it("releases a hung catalog fetch without persisting its late result", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = fakeCache(null);
+      const catalog = createCodexModelCatalog({ cache, bundledModels: [model("gpt-5.6-sol")] });
+      let release!: (response: Response) => void;
+      const pending = catalog.load(
+        KEY,
+        async () => {
+          const response = await boundedOAuthFetch(
+            async () =>
+              new Promise<Response>((resolve) => {
+                release = resolve;
+              }),
+          )("https://models.test");
+          return (await response.json()) as OpenAICodexModelsResult;
+        },
+        { force: true },
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await pending)?.source).toBe("bundled");
+      await catalog.load(KEY, remote([model("gpt-5.6-sol")]), { force: true });
+      expect(cache.upsert).toHaveBeenCalledOnce();
+      release(new Response(JSON.stringify({ models: [model("gpt-5.6-terra")] })));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cache.upsert).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts from the bundled Codex catalog when cache and network are unavailable", async () => {
     const bundled = [model("gpt-5.6-sol"), model("gpt-5.6-terra", 2)];
     const catalog = createCodexModelCatalog({

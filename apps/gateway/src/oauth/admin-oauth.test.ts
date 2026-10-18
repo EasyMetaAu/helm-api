@@ -15,6 +15,7 @@ import {
 } from "@helm/core";
 import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createTrackedBackgroundTasks } from "../runtime/maintenance-gate.js";
 import {
   type AccountSettings,
   getAccountSettings,
@@ -702,6 +703,65 @@ describe("createOAuthAdmin", () => {
       /upstream failed/,
     );
     expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS + 1);
+  });
+
+  it("keeps credential rotation persistence tracked beyond the network deadline", async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error("test timeout")), ms);
+      return controller.signal;
+    });
+    try {
+      const { tokens: store, config } = makeStores();
+      await store.upsert({
+        providerId: "github-copilot",
+        account: "rotation-test",
+        accessEnc: encryptSecret("expired;proxy-ep=proxy.test;", KEY),
+        refreshEnc: encryptSecret("gho_test", KEY),
+        expiresAt: 1,
+        meta: null,
+        updatedAt: 1,
+      });
+      await setAccountSettings(config, KEY, "github-copilot", "rotation-test", {
+        modelsMode: "manual",
+        enabledModels: ["test-model"],
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const save = store.upsert.bind(store);
+      const upsert = vi.spyOn(store, "upsert").mockImplementationOnce(async (record) => {
+        await gate;
+        await save(record);
+      });
+      const admin = createOAuthAdmin({
+        store,
+        config,
+        encKey: KEY,
+        makeFetch: () => async () =>
+          json({ token: "rotated;proxy-ep=proxy.test;", expires_at: Date.now() / 1000 + 3600 }),
+      });
+      const background = createTrackedBackgroundTasks();
+      background.run(() => admin.listStatus());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(upsert).toHaveBeenCalledOnce();
+      let drained = false;
+      const draining = background.pauseAndWait().then(() => {
+        drained = true;
+      });
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(drained).toBe(false);
+      release();
+      await draining;
+      expect(
+        decryptSecret((await store.get("github-copilot", "rotation-test"))?.accessEnc ?? "", KEY),
+      ).toContain("rotated");
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("listStatus AUTO-RENEWS an expired account on view (openclaw-style lazy refresh)", async () => {

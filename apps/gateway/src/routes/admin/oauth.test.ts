@@ -2,6 +2,10 @@ import type { OAuthQuotaWindow } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
+import type {
+  OAuthAdminRefreshEnqueueResult,
+  OAuthAdminRefreshStatus,
+} from "../../oauth/admin-refresh-coordinator.js";
 import { createTrackedBackgroundTasks } from "../../runtime/maintenance-gate.js";
 import type { AdminApiDeps, OAuthAdminAccess } from "./deps.js";
 import { registerOAuthRoutes } from "./oauth.js";
@@ -103,6 +107,119 @@ describe("admin OAuth routes — 503 when the seam is not configured", () => {
 });
 
 describe("admin OAuth routes — read endpoints", () => {
+  it("marks stalled discovery failed, drains it safely, then allows a retry", async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: Awaited<ReturnType<OAuthAdminAccess["listStatus"]>>) => void;
+      const status = { selectionStrategy: "balanced" as const, providers: [] };
+      const listStatus = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              release = resolve;
+            }),
+        )
+        .mockResolvedValue(status);
+      const upsert = vi.fn(async () => {});
+      const onOAuthMutation = vi.fn(async () => ({ applied: true }));
+      const api = app({
+        oauth: fullSeam({ listStatus, listCachedStatus: vi.fn(async () => status) }),
+        oauthQuota: {
+          getAll: vi.fn(async () => []),
+          upsert,
+          delete: vi.fn(),
+        } as unknown as AdminApiDeps["oauthQuota"],
+        onOAuthMutation,
+      });
+      await api.request("/admin/api/oauth/refresh", { method: "POST" });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const readStatus = async () =>
+        (await (await api.request("/admin/api/oauth/overview")).json()) as {
+          refresh: OAuthAdminRefreshStatus;
+        };
+      let body = await readStatus();
+      expect(body.refresh.state).toBe("failed");
+      expect(body.refresh.error).toContain("timed out");
+      expect(onOAuthMutation).not.toHaveBeenCalled();
+      const draining = (await (
+        await api.request("/admin/api/oauth/refresh", { method: "POST" })
+      ).json()) as OAuthAdminRefreshEnqueueResult;
+      expect(draining.accepted).toBe(false);
+      release(status);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onOAuthMutation).toHaveBeenCalledWith({ xaiMediaEmergency: "disable" });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const retry = (await (
+        await api.request("/admin/api/oauth/refresh", { method: "POST" })
+      ).json()) as OAuthAdminRefreshEnqueueResult;
+      expect(retry.accepted).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      body = await readStatus();
+      expect(body.refresh.state).toBe("succeeded");
+      expect(upsert).not.toHaveBeenCalled();
+      expect((await readStatus()).refresh.jobId).toBe(retry.status.jobId);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not persist a late quota result or spend a reset credit after timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: { windows: OAuthQuotaWindow[]; resetCredits: number }) => void;
+      const fetchCodexQuota = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const upsert = vi.fn(async () => {});
+      const onCodexQuotaSaturated = vi.fn(async () => true);
+      const applyQuotaSnapshot = vi.fn();
+      const seam = fullSeam({
+        listStatus: vi.fn(async () => ({
+          selectionStrategy: "balanced",
+          providers: [{ id: "openai-codex", accounts: [{ account: "default" }] }],
+        })) as never,
+        fetchCodexQuota: fetchCodexQuota as never,
+      });
+      const api = app({
+        oauth: seam,
+        oauthQuota: {
+          getAll: vi.fn(async () => []),
+          upsert,
+        } as unknown as AdminApiDeps["oauthQuota"],
+        onCodexQuotaSaturated,
+        applyQuotaSnapshot,
+      });
+      await api.request("/admin/api/oauth/refresh", { method: "POST" });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetchCodexQuota).toHaveBeenCalledOnce();
+      release({
+        windows: [
+          {
+            key: "primary",
+            usedPercent: 100,
+            resetsAtMs: Date.now() + 86_400_000,
+            windowMinutes: 10080,
+          },
+        ],
+        resetCredits: 3,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(upsert).not.toHaveBeenCalled();
+      expect(applyQuotaSnapshot).not.toHaveBeenCalled();
+      expect(onCodexQuotaSaturated).not.toHaveBeenCalled();
+      const body = (await (await api.request("/admin/api/oauth/overview")).json()) as {
+        refresh: OAuthAdminRefreshStatus;
+      };
+      expect(body.refresh.state).toBe("failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("GET /oauth returns the provider catalog", async () => {
     const res = await app({ oauth: fullSeam() }).request("/admin/api/oauth");
     expect(res.status).toBe(200);

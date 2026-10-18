@@ -94,6 +94,7 @@ import {
   createOAuthModelDiscoveryCache,
   type OAuthModelDiscoveryCache,
 } from "./model-discovery-cache.js";
+import { boundedOAuthFetch } from "./refresh-fetch.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
 // OAuthAdminAccess seam the /admin/api/oauth routes call. Owns the ephemeral
@@ -433,8 +434,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   const log = deps.log ?? (() => {});
   // Resolve the egress fetch for a (possibly absent) proxy. ONE place so the whole
   // flow — begin/complete/poll + token-manager refresh + quota — egresses alike.
-  const makeFetch =
+  const transportFor =
     deps.makeFetch ?? ((proxy?: ProxyConfig) => (proxy ? makeProxyFetch(proxy) : fetch));
+  const makeFetch = (proxy?: ProxyConfig) => boundedOAuthFetch(transportFor(proxy));
   const modelDiscoveryCache = deps.modelDiscoveryCache ?? createOAuthModelDiscoveryCache({ now });
   // Normalize + fail-closed-validate a connect-dialog proxy into a ProxyConfig held
   // for the whole login (issue #38). Mirrors setAccountProxy's field handling so the
@@ -659,7 +661,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         };
         const snapshot = await deps.codexCatalog.load(
           key,
-          async () => {
+          async (signal) => {
             const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
             const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
             return listOpenAICodexModels(currentAccess, {
@@ -668,6 +670,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
               clientVersion,
               userAgent,
               fetchImpl: accountFetch,
+              signal,
             });
           },
           { force: forceRefresh },
@@ -815,11 +818,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     refresh: boolean;
     forceRefresh: boolean;
     serial: boolean;
+    signal?: AbortSignal;
   }): Promise<OAuthAdminStatusResponse> {
     const rows = await deps.store.list();
     const settings = await loadAccountSettings(deps.config, deps.encKey);
     const globalSettings = await loadGlobalOAuthSettings(deps.config, deps.encKey);
     const project = async (r: (typeof rows)[number]) => {
+      options.signal?.throwIfAborted();
       const sch = getAccountSettings(settings, r.providerId, r.account);
       const hasCredentialFailure = typeof sch.credentialFailedAt === "number";
       const fresh =
@@ -832,6 +837,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
               healthy: !hasCredentialFailure,
               credentialFailed: hasCredentialFailure,
             };
+      options.signal?.throwIfAborted();
       const { credentialFailed, ...freshView } = fresh;
       const modelsMode = resolveAccountModelsMode(r.providerId, sch);
       let discovered: { available: string[]; entitled: string[] };
@@ -864,6 +870,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       } else {
         discovered = { available: [], entitled: [] };
       }
+      options.signal?.throwIfAborted();
       const models = enabledAccountModels(r.providerId, sch, discovered);
       const identity = await statusCodexIdentity(deps.store, deps.encKey, r.providerId, r.account);
       const plan =
@@ -1009,6 +1016,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         refresh: true,
         forceRefresh: options.forceRefresh === true,
         serial: options.serial === true,
+        signal: options.signal,
       });
     },
 

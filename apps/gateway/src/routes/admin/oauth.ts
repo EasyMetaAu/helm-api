@@ -428,7 +428,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
 
   // Explicit refresh job body. All upstream work lives here, behind the refresh
   // coordinator; cache-only GET routes never call it.
-  const refreshQuota = async (): Promise<void> => {
+  const refreshQuota = async (signal: AbortSignal): Promise<void> => {
     const store = deps.oauthQuota;
     if (!store) return;
     const s = seam();
@@ -490,7 +490,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       });
     if (s) {
       try {
-        const status = await s.listStatus({ forceRefresh: true, serial: true });
+        const status = await s.listStatus({ forceRefresh: true, serial: true, signal });
+        signal.throwIfAborted();
         bound = new Set(
           status.providers.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))),
         );
@@ -515,11 +516,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
               label: `anthropic/${a.account}`,
               run: async () => {
                 const windows = await fetchAnthropic({ account: a.account, force: true });
+                signal.throwIfAborted();
                 if (!windows || windows.length === 0) {
                   throw new Error("quota refresh returned no windows");
                 }
                 const capturedAt = Date.now();
                 await recordResetBoundaries("anthropic", a.account, windows);
+                signal.throwIfAborted();
                 await store.upsert({
                   providerId: "anthropic",
                   account: a.account,
@@ -527,6 +530,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                   capturedAt,
                   source: "anthropic",
                 });
+                signal.throwIfAborted();
                 deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
                 await syncCooldownFromWindows("anthropic", a.account, windows);
               },
@@ -546,11 +550,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
               run: async () => {
                 try {
                   const windows = await fetchXai({ account: a.account, force: true });
+                  signal.throwIfAborted();
                   if (!windows || windows.length === 0) {
                     throw new Error("quota refresh returned no windows");
                   }
                   const capturedAt = Date.now();
                   await recordResetBoundaries("xai", a.account, windows);
+                  signal.throwIfAborted();
                   await store.upsert({
                     providerId: "xai",
                     account: a.account,
@@ -559,6 +565,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     source: "xai",
                   });
                   xaiEntitlementsPersisted += 1;
+                  signal.throwIfAborted();
                   deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
                   await syncCooldownFromWindows("xai", a.account, windows);
                 } catch (error) {
@@ -592,6 +599,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                   };
                   const capturedAt = Date.now();
                   await recordResetBoundaries("openai-codex", a.account, activeResult.windows);
+                  signal.throwIfAborted();
                   await store.upsert({
                     providerId: "openai-codex",
                     account: a.account,
@@ -609,6 +617,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     additionalLimits: activeResult.additionalLimits,
                     rateLimitReachedType: activeResult.rateLimitReachedType,
                   });
+                  signal.throwIfAborted();
                   deps.applyQuotaSnapshot?.(
                     "openai-codex",
                     a.account,
@@ -623,8 +632,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                 };
 
                 const result = await fetchCodex({ account: a.account, force: true });
+                signal.throwIfAborted();
                 if (!result) throw new Error("quota refresh returned no snapshot");
                 const { activeResult, capturedAt } = await persistCodexQuota(result);
+                signal.throwIfAborted();
                 if (weeklySaturated(activeResult.windows)) {
                   const consumed =
                     (await deps.onCodexQuotaSaturated?.(
@@ -634,8 +645,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                       capturedAt,
                       activeResult.rateLimitReachedType ?? null,
                     )) ?? false;
+                  signal.throwIfAborted();
                   if (consumed) {
                     const refreshed = await fetchCodex({ account: a.account, force: true });
+                    signal.throwIfAborted();
                     if (!refreshed) {
                       throw new Error("post-reset quota refresh returned no snapshot");
                     }
@@ -647,6 +660,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           }
         }
         for (const task of tasks) {
+          signal.throwIfAborted();
           try {
             await task.run();
           } catch (error) {
@@ -663,7 +677,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (xaiEntitlementUncertain) xaiEntitlementCleanupFailed = true;
       return [];
     });
-    if (xaiEntitlementUncertain && bound === null) {
+    if ((xaiEntitlementUncertain && bound === null) || signal.aborted) {
       const results = await Promise.allSettled(
         all
           .filter((snapshot) => snapshot.providerId === "xai")
@@ -673,6 +687,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         xaiEntitlementCleanupFailed = true;
         failures.push("xAI entitlement cleanup: durable snapshot deletion failed");
       }
+    }
+    if (signal.aborted) {
+      // A cancelled read must never restore stale positive media entitlement.
+      // Keep this local fail-closed mutation tracked until it finishes.
+      await afterMutation({ xaiMediaEmergency: "disable" });
+      signal.throwIfAborted();
     }
     if (bound) {
       // Best-effort prune so orphans don't accumulate. A delete failure does not
@@ -694,6 +714,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       xaiAccountsToRefresh > 0 &&
       xaiEntitlementsPersisted === xaiAccountsToRefresh &&
       !xaiEntitlementUncertain;
+    signal.throwIfAborted();
     const rebuilt = await afterMutation(
       restoreXaiMedia ? { xaiMediaEmergency: "restore" } : undefined,
     );
@@ -792,8 +813,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   };
 
   const refreshCoordinator = createOAuthAdminRefreshCoordinator({
-    refresh: async () => {
-      await refreshQuota();
+    refresh: async (signal) => {
+      await refreshQuota(signal);
     },
     ...(deps.runInBackground !== undefined ? { runInBackground: deps.runInBackground } : {}),
   });
