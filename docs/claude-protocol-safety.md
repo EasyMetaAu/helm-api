@@ -73,6 +73,13 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 本次环境时区检查确认 user 消息中的日期 reminder、Codex 环境块与 Grok 日期前缀；相关转换只作用于已验证环境字段。Claude `output_config.timing.now` 实现受 `nr.CLAUDE_CODE_PER_TURN_TIMING` 控制（197473594），调查制品中未启用，不据此增加 beta 或伪造字段。完整边界见 `docs/subscription-timezones.md`。
 - 全程只读取官方发布材料及二进制中的 JavaScript，没有执行下载的 CLI、访问账号或扩大凭证转发范围。此审核不是完整协议兼容或账号安全保证。
 
+2026-10-20 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.304`。平台包通过 npm SHA512 integrity 校验，二进制 SHA256 为 `b9ac5374839f14abf3f1f45610637c332b5daee5ce0d1634726cef87aab78e6a`。与重新校验的 2.1.300 比较，内嵌 SDK 仍为 `0.128.0`（JavaScript 字节偏移 218950886），可读 JavaScript 中三组 Claude/Anthropic/remote 请求头名称集合未变。整个二进制中的新片段 `x-anthropic-E`（105103616）没有可读请求头构造证据，不加入白名单。
+
+- [官方 2.1.304 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21304)与静态构造确认原生 system 新增 `cc_project`、`cc_project_src`（218853298），受有效 tagged ID/source 和功能开关约束。Helm 仅保留实际客户端文本，不生成这些归因；既有原生正文测试补充精确保留验证。
+- 自定义 `ANTHROPIC_BASE_URL` 默认启用 tool search，并可在部分 400/422 后回退（226461352）；context management 拒绝后的恢复与条件请求字段位于 225255814、226496158、226477254。沿用现有请求往返与流式回归，不新增网关重试或推断能力。
+- 保护字段（219295838）、远程标识（219294800–219295470）、默认关闭的未知遥测（219284320）、上传字段（250585538）边界保持不变。凭证、签名、未知和远程字段仍不放行；SSE 定向检查保留 text/citation/JSON-input/thinking/signature/compaction delta 分支（219137900），不声称完整等价。
+- 审查全程只读官方制品，没有执行下载的 CLI 或访问账号。这是有限静态兼容审查；生产真实账号验收另行记录。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。

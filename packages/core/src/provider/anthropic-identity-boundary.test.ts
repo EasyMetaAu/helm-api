@@ -309,7 +309,7 @@ describe("Anthropic adapter header semantics", () => {
     const system = [
       {
         type: "text",
-        text: "x-anthropic-billing-header: cc_version=2.1.299.test; cc_entrypoint=cli; cc_gateway=env;",
+        text: "x-anthropic-billing-header: cc_version=2.1.304.test; cc_entrypoint=cli; cc_gateway=env; cc_project=test-project; cc_project_src=git;",
       },
     ];
     const review = JSON.parse(readFileSync("config/claude-protocol-review.json", "utf8")) as {
