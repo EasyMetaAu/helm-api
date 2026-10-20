@@ -2850,7 +2850,13 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>> {
     const requestBody = buildCodexImageRequest(action, input, imageControllerModel);
-    const modelInfo = await resolveModelInfo(imageControllerModel);
+    const catalogModelInfo = await resolveModelInfo(imageControllerModel);
+    // Hosted image tools require top-level tools + tool_choice. The catalog's
+    // text-only Lite dialect moves tools into additional_tools, which the image
+    // endpoint rejects. Keep other account model metadata, but use standard Responses.
+    const modelInfo = catalogModelInfo
+      ? { ...catalogModelInfo, use_responses_lite: false }
+      : undefined;
     // A subscription image create/edit is billable and may have succeeded before a
     // disconnect. Deliberately bypass connection, overload, and 401 replay here.
     const result = await request(requestBody.body, modelInfo, {

@@ -5718,6 +5718,45 @@ describe("createCodexResponsesClient — Images API bridge", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    "generate",
+    "edit",
+  ] as const)("keeps hosted image %s tools in standard Responses even for a Lite catalog model", async (action) => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.tools).toEqual([
+        expect.objectContaining({ type: "image_generation", model: "gpt-image-2", action }),
+      ]);
+      expect(body.tool_choice).toEqual({ type: "image_generation" });
+      expect(body.input.some((item: { type?: string }) => item.type === "additional_tools")).toBe(
+        false,
+      );
+      expect(new Headers(init?.headers).get("x-openai-internal-codex-responses-lite")).toBeNull();
+      return sseResponse([
+        {
+          type: "response.completed",
+          response: { output: [{ type: "image_generation_call", result: "aW1hZ2U=" }] },
+        },
+      ]);
+    });
+    const client = clientFor(fetchMock as typeof fetch, undefined, () =>
+      codexModelInfo({ use_responses_lite: true }),
+    );
+    if (action === "generate") {
+      await client.imageGeneration?.({ model: "gpt-image-2", prompt: "draw" });
+    } else {
+      await client.imageEdit?.({
+        kind: "json",
+        body: {
+          model: "gpt-image-2",
+          prompt: "edit",
+          images: [{ image_url: "data:image/png;base64,AA==" }],
+        },
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("maps generation to the image_generation tool and maps the completed image back", async () => {
     let sent: Record<string, unknown> = {};
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
