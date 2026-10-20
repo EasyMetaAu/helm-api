@@ -674,6 +674,7 @@ export {
 export {
   aggregateResponsesStream,
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  CodexImageControllerModelSchema,
   CodexResponsesBeforeSendError,
   type CodexResponsesClientConfig,
   type CodexResponsesClientDeps,

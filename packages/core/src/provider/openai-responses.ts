@@ -29,6 +29,7 @@ import {
   type NativePassthroughInput,
 } from "@helm/shared";
 import sharp from "sharp";
+import { z } from "zod";
 import {
   createSSEIncompleteFrameGuard,
   nextSSEFrameBoundary,
@@ -96,6 +97,8 @@ export interface CodexResponsesClientConfig {
   // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
   // accepted by the backend; the real first-party value is not required).
   userAgent?: string;
+  /** Text model driving the image tool; independent of the requested image model. */
+  imageControllerModel?: string;
   // Per-account Fast mode for ChatGPT/Codex subscription traffic. When enabled the
   // account forces OpenAI Responses `service_tier: "priority"` on every request it
   // serves, including native passthrough bodies that already supplied another tier.
@@ -2133,7 +2136,13 @@ function canonicalizeCodexNativeInput(
   return carrier;
 }
 
-const CODEX_IMAGE_CONTROLLER_MODEL = "gpt-5.4-mini";
+export const CodexImageControllerModelSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+  .default("gpt-6-luna");
 const CODEX_IMAGE_INSTRUCTIONS = "Use the user's image prompt exactly as provided.";
 const CODEX_IMAGE_STRING_TOOL_FIELDS = [
   "size",
@@ -2210,6 +2219,7 @@ function codexImageInput(
 function buildCodexImageRequest(
   action: "generate" | "edit",
   req: Record<string, unknown> | ImageEditInput,
+  controllerModel: string,
 ): { body: Record<string, unknown>; responseFormat: string } {
   const input = codexImageInput(req, action === "edit");
   const prompt = imageString(input.body.prompt) ?? "";
@@ -2234,7 +2244,7 @@ function buildCodexImageRequest(
   return {
     responseFormat: imageString(input.body.response_format) ?? "b64_json",
     body: {
-      model: CODEX_IMAGE_CONTROLLER_MODEL,
+      model: controllerModel,
       instructions: CODEX_IMAGE_INSTRUCTIONS,
       input: [
         {
@@ -2325,6 +2335,7 @@ async function readCodexImageResponse(
 export function createCodexResponsesClient(deps: CodexResponsesClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
+  const imageControllerModel = CodexImageControllerModelSchema.parse(cfg.imageControllerModel);
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const autoCompactRequestBytes = Math.max(
     1,
@@ -2838,8 +2849,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     input: Record<string, unknown> | ImageEditInput,
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>> {
-    const requestBody = buildCodexImageRequest(action, input);
-    const modelInfo = await resolveModelInfo(CODEX_IMAGE_CONTROLLER_MODEL);
+    const requestBody = buildCodexImageRequest(action, input, imageControllerModel);
+    const modelInfo = await resolveModelInfo(imageControllerModel);
     // A subscription image create/edit is billable and may have succeeded before a
     // disconnect. Deliberately bypass connection, overload, and 401 replay here.
     const result = await request(requestBody.body, modelInfo, {

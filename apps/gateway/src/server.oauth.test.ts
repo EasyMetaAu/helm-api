@@ -1809,7 +1809,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     }
   });
 
-  it("exposes the ChatGPT image alias without treating Codex catalog tool metadata as admission", async () => {
+  it("does not add a hidden ChatGPT image alias to an auto-mode account", async () => {
     const variants = [
       { slug: "gpt-5.4-mini", tool: true, lite: false },
       { slug: "gpt-5.4-mini", tool: false, lite: false },
@@ -2545,7 +2545,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(result.poolClients.get("openai-codex")?.hasAvailableModel("gpt-6-astra")).toBe(true);
   });
 
-  it("keeps ChatGPT image routable when an auto-mode account catalog is unavailable", async () => {
+  it("does not expose ChatGPT images when an auto-mode account catalog is unavailable", async () => {
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({
       providerId: "openai-codex",

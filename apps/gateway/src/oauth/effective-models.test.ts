@@ -204,7 +204,7 @@ describe("effectiveOAuthAliases", () => {
 });
 
 describe("effectiveOAuthModelOptions", () => {
-  it("projects the ChatGPT image alias without requiring catalog tool metadata", async () => {
+  it("does not project a hidden ChatGPT image alias for auto-mode accounts", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
 

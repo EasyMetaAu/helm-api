@@ -283,6 +283,44 @@ export async function runImageChain(
           attempts,
         };
       }
+      // A Helm relay can reject before it reaches a paid provider. Preserve these
+      // explicit denials, without leaking arbitrary upstream messages or replaying.
+      const rejection = errorDetailOf(err);
+      const raw = rejection.provider_raw;
+      const rawError = typeof raw === "object" && raw !== null && "error" in raw ? raw.error : null;
+      const code =
+        typeof rawError === "object" && rawError !== null && "code" in rawError
+          ? rawError.code
+          : null;
+      if (
+        (rejection.upstream_status === 403 && code === "client_not_allowed") ||
+        (rejection.upstream_status === 404 && code === "model_not_found")
+      ) {
+        releaseProbeLock();
+        attempts.push({
+          alias: target.alias,
+          skipped: false,
+          skip_reason: null,
+          status: "error",
+          error_class: "upstream_error",
+          latency_ms: Date.now() - started,
+          cost_usd: null,
+          error_detail: rejection,
+        });
+        return {
+          ok: false,
+          errorClass: "upstream_error",
+          errorCode: code,
+          httpStatus: rejection.upstream_status,
+          message:
+            code === "client_not_allowed"
+              ? "upstream does not allow this client"
+              : "image model is not available on the upstream",
+          providerRaw: null,
+          aborted: false,
+          attempts,
+        };
+      }
       // The paid write may already have been accepted. Fault the breaker, but never
       // advance to another provider: doing so could create and bill a duplicate.
       breaker.recordFailure(target.alias);

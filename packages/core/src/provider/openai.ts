@@ -50,6 +50,8 @@ export interface ProviderConfig {
   // requires editor identity headers (Copilot-Integration-Id, Editor-Version…) on
   // each chat call; this is the generic seam for them.
   extraHeaders?: () => Record<string, string>;
+  /** Helm relays preserve client policy identity on image calls only. */
+  forwardImageClientUserAgent?: boolean;
   // Per-request base URL resolver (issue #38). When set, the chat URL is computed
   // fresh on EACH request from this (so it tracks a rotating value) instead of the
   // static `baseUrl`. Copilot derives its API host from the current token's
@@ -133,6 +135,8 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Inbound identity, forwarded only by explicitly configured Helm image relays. */
+  clientUserAgent?: string;
   /** Resolved alias policy; never inferred from the upstream model name. */
   requestCompatibility?: Capabilities["requestCompatibility"];
   /** Opt-in atomic Codex delivery; may repeat inference once, never hosted tools. */
@@ -605,6 +609,20 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return next;
   }
 
+  async function imageHeaders(
+    opts: ProviderCallOptions | undefined,
+    multipart = false,
+  ): Promise<Record<string, string>> {
+    const next = multipart ? await headersWithoutContentType() : await headers();
+    if (cfg.forwardImageClientUserAgent && opts?.clientUserAgent) {
+      for (const name of Object.keys(next)) {
+        if (name.toLowerCase() === "user-agent") delete next[name];
+      }
+      next["User-Agent"] = opts.clientUserAgent;
+    }
+    return next;
+  }
+
   function prepareRequest(req: ChatCompletionRequest): ChatCompletionRequest {
     if (!cfg.mapDeveloperRoleToSystem || !Array.isArray(req.messages)) return req;
     let changed = false;
@@ -939,7 +957,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const res = await mediaWriteRequest({
         url: imagesUrl,
         body: () => bodyText,
-        headers,
+        headers: () => imageHeaders(opts),
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
@@ -973,7 +991,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const res = await mediaWriteRequest({
         url: imageEditsUrl,
         body,
-        headers: req.kind === "json" ? headers : headersWithoutContentType,
+        headers: () => imageHeaders(opts, req.kind === "multipart"),
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);

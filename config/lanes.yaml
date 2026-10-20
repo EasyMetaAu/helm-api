@@ -337,11 +337,11 @@ grok-fast:
 # the verbatim request params are uniform across providers (a 4xx param-shape error is
 # terminal and would mask a healthy fallback). Request the LANE NAME as `model`.
 #
-# `gpt-image` deliberately uses only the ZenMux relay because official OpenAI is
-# excluded from shipped lanes for cost. `gemini-image` still leads with Google direct
+# `gpt-image` uses a ChatGPT subscription account with gpt-image-2 explicitly enabled
+# in its manual model list when absent from the official catalog. `gemini-image` leads with Google direct
 # and falls over to ZenMux. See docs/05 (image generation) + README.
 gpt-image:
-  purpose: OpenAI gpt-image-2 through ZenMux relay — official API excluded for cost
+  purpose: ChatGPT gpt-image-2 — requires an account with the image model enabled
   primary: openai-codex/gpt-image-2
   fallback: []
   constraints:

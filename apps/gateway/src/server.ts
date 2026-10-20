@@ -10,6 +10,7 @@ import {
   bootstrapRootKey,
   buildOpenAICodexUserAgent,
   COPILOT_HEADERS,
+  CodexImageControllerModelSchema,
   type CodexRateLimitReachedType,
   type CodexResponsesWebSocketConnector,
   type ConfigStore,
@@ -1805,6 +1806,7 @@ function createProviderClient(
         onResponseMeta,
         fastMode,
         userAgent: codexRuntime?.userAgent,
+        imageControllerModel: process.env.HELM_CODEX_IMAGE_CONTROLLER_MODEL,
         getAccountIdentity: () => ({
           ...codexRuntime?.accountIdentity,
           ...codexIdentityFromMetadata(cred.currentMetadata()),
@@ -2065,6 +2067,7 @@ function createProviderClient(
       ...base,
       ...cred,
       realtimeProxy: proxy,
+      forwardImageClientUserAgent: p.type === "helm",
       mapDeveloperRoleToSystem: p.map_developer_role_to_system,
       normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
     },
@@ -2195,6 +2198,8 @@ export async function buildServer(
     >;
   } = {},
 ): Promise<ServerHandle> {
+  // Validate even when no OAuth account is currently eligible for synthesis.
+  CodexImageControllerModelSchema.parse(process.env.HELM_CODEX_IMAGE_CONTROLLER_MODEL);
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
   const memoryBudget = runtimeMemoryBudget();
