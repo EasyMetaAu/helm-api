@@ -13,6 +13,7 @@
 - **错误边界**：上游明确返回 `403 client_not_allowed` 或 `404 model_not_found` 时保留状态和有限错误码，不泄露原始正文、不重试、不切换 provider、不计为熔断故障。真正结果不明的写入仍返回 `outcome_unknown`，保持单次发送。
 - **配置限制**：Codex auto 模式严格跟随官方目录，不自动补图片工具模型。要使用 `gpt-image`，可在一个可调度账号的 manual 清单中明确加入 `gpt-image-2` 并保留原文本模型；该账号后续新增文本模型需手动维护。上游仍裁决实际支持，不从套餐推断图片权限。
 - **图片驱动模型**：移除已被上游拒绝的固定 `gpt-5.4-mini`，使用 `HELM_CODEX_IMAGE_CONTROLLER_MODEL`（默认 `gpt-6-luna`），由 Zod 验证；与图片工具模型 `gpt-image-2` 分开，切换驱动模型无需改代码。
+- **发布前置**（docs/10）：v0.30.49 同步 Claude 2.1.304、Codex 0.163.0 与同 tag 目录、Grok 1.0.62；Claude 经完整性校验及独立静态审核，保留原生项目归因但不扩展头白名单。审核限制见 `docs/claude-protocol-safety.md`。
 - **正式链路补充**：Luna 官方目录标记 `use_responses_lite=true`，通用 Lite 转换会移走顶层图片 `tools`，上游返回 400。Images API 强制标准 Responses 方言并保留其余目录元数据；文本路径继续遵循目录。新增生成/编辑回归，确保工具、tool_choice 与请求头一致。
 
 ## 2026-10-18 · 订阅提供商刷新期限与恢复（docs/06、11）
