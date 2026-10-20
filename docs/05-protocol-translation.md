@@ -104,19 +104,29 @@ Image generation is routed separately from the four-protocol text IR:
 | Gemini `:generateContent` with an output-image model | Native Gemini | Uses native Gemini generation, including `responseModalities` and returned `inlineData`. |
 
 Image model/lane requests skip text classification. The image chain uses the
-normal breaker and fallback categories: breaker-open candidates are skipped;
-network, timeout, and eligible upstream failures can advance; client errors and
-client aborts are terminal. A lane must not mix OpenAI-Images and Gemini member
+breaker to skip unavailable candidates before a write. Once a paid write starts,
+errors never advance to another provider or replay the request. A lane must not mix OpenAI-Images and Gemini member
 kinds because their verbatim parameter surfaces differ.
 
-With a schedulable ChatGPT OAuth account, Helm publishes
-`openai-codex/gpt-image-2` through the `chatgpt-image` lane. Codex catalog tool
-metadata is advisory rather than an admission gate; the client-requested upstream
-call determines actual account support. Generation and editing keep the public
+The `gpt-image` lane targets `openai-codex/gpt-image-2`. A schedulable ChatGPT OAuth
+account must explicitly include `gpt-image-2` in its manual model list when the
+official catalog omits it. Preserve the account's existing text models when switching
+to manual mode; that account will no longer automatically include new catalog models.
+Auto mode follows the official catalog and never adds a hidden image alias. The
+upstream call determines actual account support. Generation and editing keep the public
 Images routes above; the provider adapter converts both operations to one Responses
 tool call (`action: generate|edit`) and maps the completed base64 result back to
-`data[].b64_json`. This paid POST is sent once: transport errors, overload responses,
+`data[].b64_json`. Set `HELM_CODEX_IMAGE_CONTROLLER_MODEL` to the account's supported
+text model that drives this tool (default `gpt-6-luna`); this does not change the
+requested image model, `gpt-image-2`. Invalid controller configuration fails startup.
+This paid POST is sent once: transport errors, overload responses,
 and 401s are not replayed or moved to a sibling OAuth account.
+
+Helm-to-Helm image generation and editing preserve the inbound User-Agent for the
+upstream key's client policy. This request-scoped forwarding never changes upstream
+authentication and is disabled for third-party image providers. Explicit upstream
+`403 client_not_allowed` and `404 model_not_found` remain terminal rejections with
+their status and code; they are not reported as `503 outcome_unknown`.
 
 ## Protocol behavior
 

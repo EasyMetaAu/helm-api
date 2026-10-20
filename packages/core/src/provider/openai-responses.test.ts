@@ -5767,7 +5767,7 @@ describe("createCodexResponsesClient — Images API bridge", () => {
     });
 
     expect(sent).toMatchObject({
-      model: "gpt-5.4-mini",
+      model: "gpt-6-luna",
       store: false,
       stream: true,
       input: [
@@ -5799,6 +5799,59 @@ describe("createCodexResponsesClient — Images API bridge", () => {
         output_tokens_details: { image_tokens: 1_056 },
       },
     });
+  });
+
+  it("uses the configured image controller for both the request and catalog lookup", async () => {
+    const resolveModelInfo = vi.fn();
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        {
+          type: "response.completed",
+          response: { output: [{ type: "image_generation_call", result: "aW1hZ2U=" }] },
+        },
+      ]),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        imageControllerModel: "gpt-6-sol",
+        resolveModelInfo,
+      },
+      fetch: fetchMock as typeof fetch,
+    });
+    await client.imageEdit?.({
+      kind: "json",
+      body: {
+        model: "gpt-image-2",
+        prompt: "edit",
+        images: [{ image_url: "data:image/png;base64,AA==" }],
+      },
+    });
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: "gpt-6-sol",
+      tools: [{ model: "gpt-image-2", action: "edit" }],
+    });
+    expect(resolveModelInfo).toHaveBeenCalledWith("gpt-6-sol");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "",
+    " ",
+    "bad model",
+    "bad\nmodel",
+  ])("rejects invalid image controller config %j", (model) => {
+    expect(() =>
+      createCodexResponsesClient({
+        config: {
+          baseUrl: "https://upstream.test",
+          getAuthHeader: async () => "Bearer fixture",
+          imageControllerModel: model,
+        },
+      }),
+    ).toThrow();
   });
 
   it("preserves duplicate image payloads when the upstream returns n > 1", async () => {

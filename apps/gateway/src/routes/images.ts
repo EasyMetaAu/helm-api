@@ -598,6 +598,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
                 };
           return await target.client.imageEdit(providerInput, {
             signal: requestSignal(c),
+            clientUserAgent: c.req.header("user-agent"),
             captureUpstream,
             onAccountSelected,
           });
@@ -615,7 +616,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         }
         return (await target.client.imageGeneration?.(
           { ...generationBody, model: target.providerModel },
-          { signal: requestSignal(c), captureUpstream, onAccountSelected },
+          {
+            signal: requestSignal(c),
+            clientUserAgent: c.req.header("user-agent"),
+            captureUpstream,
+            onAccountSelected,
+          },
         )) as Record<string, unknown>;
       };
       const captured = deps.captureServingAccount
