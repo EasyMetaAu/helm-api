@@ -21,6 +21,7 @@ import type {
   Reflection,
   ReflectionScope,
   ReflectionUpsertInput,
+  ResponsesToolTranslation,
   RoutingSignal,
 } from "@helm/shared";
 import type { ScoreConfig } from "../memory/forgetting/score.js";
@@ -1507,6 +1508,7 @@ export interface ResponsesRegistryRecord {
   providerProtocol: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini" | null;
   providerAccount?: string | null;
   selectedLane?: string | null;
+  toolTranslation?: ResponsesToolTranslation | null;
   createdAt: number;
   expiresAt: number;
   status: string;

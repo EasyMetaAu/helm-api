@@ -245,7 +245,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     )) as {
       rows: Array<Record<string, number | string | null>>;
     };
-    expect(result.rows).toEqual([
+    expect("rows" in result ? result.rows : result).toEqual([
       {
         message_count: 2,
         last_message_at: 2000,
@@ -418,12 +418,51 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v54 preserves legacy Responses ownership and adds nullable tool translation state", async () => {
+    const db = await createPgliteDb();
+    try {
+      await db.execute(sql.raw("ALTER TABLE responses_registry DROP COLUMN tool_translation"));
+      await db.execute(sql.raw("DELETE FROM _migrations WHERE version = 54"));
+      await db.execute(
+        sql.raw(`
+        INSERT INTO responses_registry
+          (response_id, account_id, key_id, provider_alias, created_at, expires_at, status)
+        VALUES ('legacy', 'account', 'key', 'deepseek-responses', 1, 2, 'completed')
+      `),
+      );
+      await runPgMigrations(db);
+      await runPgMigrations(db);
+      const result = await db.execute(
+        sql.raw(`
+        SELECT response_id, account_id, key_id, provider_alias, tool_translation
+        FROM responses_registry WHERE response_id = 'legacy'
+      `),
+      );
+      expect("rows" in result ? result.rows : result).toEqual([
+        {
+          response_id: "legacy",
+          account_id: "account",
+          key_id: "key",
+          provider_alias: "deepseek-responses",
+          tool_translation: null,
+        },
+      ]);
+      const ledger = await db.execute(
+        sql.raw("SELECT version FROM _migrations WHERE version = 54"),
+      );
+      expect("rows" in ledger ? ledger.rows : ledger).toEqual([{ version: 54 }]);
+    } finally {
+      await db.$close();
+    }
+  });
+
   it("v43 adds a nullable per-key request-content override", async () => {
     const client = new PGlite();
     const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
     await db.execute(
       sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
     );
+    await db.execute(sql.raw("CREATE TABLE responses_registry (response_id TEXT PRIMARY KEY)"));
     await db.execute(sql.raw("CREATE TABLE api_keys (key_id TEXT PRIMARY KEY)"));
     await db.execute(sql.raw("INSERT INTO api_keys (key_id) VALUES ('legacy')"));
     for (let version = 1; version <= 42; version++) {
@@ -447,6 +486,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.execute(
       sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
     );
+    await db.execute(sql.raw("CREATE TABLE responses_registry (response_id TEXT PRIMARY KEY)"));
     await db.execute(
       sql.raw(`
         CREATE TABLE sessions (
@@ -610,7 +650,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
       FROM memory_threads ORDER BY id
     `),
     )) as { rows: Array<Record<string, unknown>> };
-    expect(result.rows).toEqual([
+    expect("rows" in result ? result.rows : result).toEqual([
       {
         id: quarantinedParentThreadId("a", "empty"),
         message_count: 0,
@@ -998,15 +1038,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
         sql.raw("SELECT COUNT(*) FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = 'acct'"),
       ),
     ).resolves.toBeDefined();
-    const orphanCount = (await db.execute(
-      sql.raw(`
-        SELECT COUNT(*)::integer AS n
-          FROM memory_messages AS child
-          LEFT JOIN memory_threads AS parent ON parent.id = child.thread_id
-         WHERE parent.id IS NULL
-      `),
-    )) as { rows: Array<{ n: number }> };
-    expect(orphanCount.rows).toEqual([{ n: 0 }]);
+    // Reuse the single-table snapshots from this quiescent synthetic fixture.
+    const parentIds = new Set(threads.rows.map((row) => row.id));
+    expect(messages.rows.every((row) => parentIds.has(row.thread_id))).toBe(true);
     await db.$close();
   });
 

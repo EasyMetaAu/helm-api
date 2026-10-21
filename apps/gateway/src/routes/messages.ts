@@ -7,6 +7,7 @@ import {
   type RateLimitResult,
   UpstreamError,
 } from "@helm/core";
+import type { ResponsesToolTranslationCapture } from "@helm/shared";
 import { effectiveMemoryProjectId } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -178,6 +179,7 @@ export interface PipelineRunResult {
   readonly servingAccount?: ServingAccount | null;
   /** Safe request-scoped upstream response metadata for protocol-native clients. */
   readonly responseMetadata?: Readonly<Record<string, string>>;
+  readonly responsesToolTranslation?: ResponsesToolTranslationCapture;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic

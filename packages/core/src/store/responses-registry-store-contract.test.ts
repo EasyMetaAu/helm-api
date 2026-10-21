@@ -47,6 +47,15 @@ async function verify(store: ResponsesRegistryStore): Promise<void> {
     store.getOwnedLive({ responseId: "resp_2", accountId: "other", keyId: "key", nowMs: 3_000 }),
   ).resolves.toBeNull();
 
+  const toolTranslation = { toolNames: ["exec"], pendingCallIds: ["call_2"] };
+  await store.upsert({ ...record("resp_2", 2_000), toolTranslation });
+  await expect(
+    store.getOwnedLive({ responseId: "resp_2", ...identity, nowMs: 3_000 }),
+  ).resolves.toMatchObject({ toolTranslation });
+  await expect(
+    store.getOwnedLive({ responseId: "resp_2", accountId: "acct", keyId: "other", nowMs: 3_000 }),
+  ).resolves.toBeNull();
+
   await store.upsert(record("resp_3", 3_000));
   await store.prune({ nowMs: 3_000, maxEntries: 2, limit: 1_000 });
   await expect(

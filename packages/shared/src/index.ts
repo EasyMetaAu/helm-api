@@ -395,6 +395,7 @@ export {
   type VideoRetrieveResponse,
   VideoRetrieveResponseSchema,
 } from "./request/videos-schema.js";
+export * from "./responses-tool-translation.js";
 // Read-side session transcript reconstruction (shared by gateway + admin browser).
 export {
   restoreSessionRequestJson,

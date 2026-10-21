@@ -1,3 +1,4 @@
+import type { ResponsesToolTranslation } from "@helm/shared";
 import {
   blob,
   index,
@@ -245,6 +246,7 @@ export const responsesRegistry = sqliteTable(
     providerProtocol: text("provider_protocol"),
     providerAccount: text("provider_account"),
     selectedLane: text("selected_lane"),
+    toolTranslation: text("tool_translation", { mode: "json" }).$type<ResponsesToolTranslation>(),
     createdAt: integer("created_at").notNull(),
     expiresAt: integer("expires_at").notNull(),
     status: text("status").notNull(),

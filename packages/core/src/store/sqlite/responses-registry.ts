@@ -1,3 +1,4 @@
+import { ResponsesToolTranslationSchema } from "@helm/shared";
 import { and, eq, gt, ne } from "drizzle-orm";
 import type { ResponsesRegistryRecord, ResponsesRegistryStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
@@ -75,12 +76,20 @@ export class SqliteResponsesRegistryStore implements ResponsesRegistryStore {
       ...record,
       providerAccount: record.providerAccount ?? null,
       selectedLane: record.selectedLane ?? null,
+      toolTranslation:
+        record.toolTranslation == null
+          ? null
+          : ResponsesToolTranslationSchema.parse(record.toolTranslation),
     };
   }
 
   private record(row: Row): ResponsesRegistryRecord {
     return {
       ...row,
+      toolTranslation:
+        row.toolTranslation === null
+          ? null
+          : ResponsesToolTranslationSchema.parse(row.toolTranslation),
       providerProtocol: row.providerProtocol as ResponsesRegistryRecord["providerProtocol"],
     };
   }
