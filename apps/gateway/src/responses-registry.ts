@@ -1,4 +1,5 @@
 import type { ConfigStore, ResponsesRegistryStore } from "@helm/core";
+import { ResponsesToolTranslationSchema } from "@helm/shared";
 import type { MessagesIdentity } from "./routes/messages.js";
 import type { ResponsesRegistryPort, ResponsesRegistryRecord } from "./routes/responses.js";
 
@@ -53,6 +54,10 @@ function parseRecord(value: unknown): ResponsesRegistryRecord | null {
     providerProtocol: row.providerProtocol,
     providerAccount: stringOrNull(row.providerAccount),
     selectedLane: stringOrNull(row.selectedLane),
+    toolTranslation:
+      row.toolTranslation == null
+        ? null
+        : ResponsesToolTranslationSchema.parse(row.toolTranslation),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     status: row.status,

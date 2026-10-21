@@ -425,6 +425,7 @@ function responsesRegistryRecord(args: {
       ? (servingAccount?.account ?? null)
       : null,
     selectedLane: typeof selectedLane === "string" ? selectedLane : null,
+    toolTranslation: args.result.responsesToolTranslation?.state ?? null,
     createdAt: now,
     expiresAt: now + 86_400_000,
     status: args.status,
@@ -1361,6 +1362,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           ? { stateful_provider_account: previous.providerAccount }
           : {}),
         ...(previous.selectedLane ? { stateful_lane: previous.selectedLane } : {}),
+        ...(previous.toolTranslation
+          ? { stateful_tool_translation: previous.toolTranslation }
+          : {}),
       };
     }
 

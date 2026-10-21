@@ -4,6 +4,7 @@
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
 import { Buffer } from "node:buffer";
+import type { ResponsesToolTranslation } from "@helm/shared";
 import {
   type Capabilities,
   type NativePassthroughInput,
@@ -152,6 +153,8 @@ export interface ProviderCallOptions {
   providerAccount?: string;
   /** Trusted persisted account pin for opaque stateful Responses continuations. */
   statefulAccount?: string;
+  previousToolTranslation?: ResponsesToolTranslation;
+  onToolTranslation?: (state: ResponsesToolTranslation) => void;
   captureUpstream?: (wireBody: string) => void;
   /** Request-scoped Anthropic defensive recovery switch. The gateway owns the live
    * runtime setting and passes its current value per attempt; provider clients keep

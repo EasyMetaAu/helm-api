@@ -1441,6 +1441,10 @@ CREATE TABLE request_payload_response_chunks (
       }
     },
   },
+  {
+    version: 55,
+    sql: "ALTER TABLE responses_registry ADD COLUMN tool_translation TEXT;",
+  },
 ];
 
 function sqliteTableHasColumns(

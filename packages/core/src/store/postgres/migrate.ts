@@ -1399,6 +1399,10 @@ CREATE TABLE request_payload_response_chunks (
       }
     },
   },
+  {
+    version: 54,
+    sql: "ALTER TABLE responses_registry ADD COLUMN tool_translation JSONB;",
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

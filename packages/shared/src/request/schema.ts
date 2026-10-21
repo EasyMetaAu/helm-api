@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ResponsesToolTranslationSchema } from "../responses-tool-translation.js";
 
 // Internal request structure — the normalized input contract for the whole
 // pipeline. Protocol Adapters map every client protocol to THIS shape. Per
@@ -112,6 +113,7 @@ export const RequestMetadataSchema = z.object({
   // The lane that originally served the response, retained so current allowed_lanes
   // can still fail closed before the continuation is provider-pinned.
   stateful_lane: z.string().min(1).optional(),
+  stateful_tool_translation: ResponsesToolTranslationSchema.optional(),
   // The inbound client's Claude-Code billing-attribution prefix —
   // "cc_version=<v>.<3hex>; cc_entrypoint=<entry>" with the per-request `cch` dropped
   // — captured at the Anthropic route from the real CLI's system[0] block before it

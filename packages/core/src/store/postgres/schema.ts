@@ -1,4 +1,4 @@
-import type { ClientPolicy } from "@helm/shared";
+import type { ClientPolicy, ResponsesToolTranslation } from "@helm/shared";
 import {
   bigint,
   boolean,
@@ -371,6 +371,7 @@ export const responsesRegistry = pgTable(
     providerProtocol: text("provider_protocol"),
     providerAccount: text("provider_account"),
     selectedLane: text("selected_lane"),
+    toolTranslation: jsonb("tool_translation").$type<ResponsesToolTranslation>(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
     status: text("status").notNull(),

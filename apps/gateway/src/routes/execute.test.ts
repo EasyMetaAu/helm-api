@@ -189,6 +189,103 @@ function clock() {
 }
 
 describe("createExecute — gateway execution adapter", () => {
+  it.each([
+    false,
+    true,
+  ])("carries custom-tool continuation state through the real provider (stream=%s)", async (stream) => {
+    const sent: Record<string, unknown>[] = [];
+    const provider = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://deepseek.test/v1", apiKey: "synthetic" },
+      requestContract: { translateUnsupportedCustomTools: true, acceptsResponsesNativeItems: true },
+      fetch: async (_url, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        const id = `call_${sent.length}`;
+        const response = {
+          id: `resp_${sent.length}`,
+          status: "completed",
+          output: [
+            { type: "function_call", id, call_id: id, name: "exec", arguments: '{"input":"true"}' },
+          ],
+        };
+        return stream
+          ? new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
+              headers: { "content-type": "text/event-stream" },
+            })
+          : Response.json(response);
+      },
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["deepseek", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "deepseek",
+          providerModel: "deepseek-flash",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const body = {
+      model: "deepseek-flash",
+      tools: [{ type: "custom", name: "exec" }],
+      input: [{ role: "user", content: "test" }],
+    };
+    const first = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        stream,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body,
+          headers: {},
+        }),
+      }),
+    );
+    if (first.stream)
+      for await (const _chunk of first.stream) {
+        /* drain */
+      }
+    expect(first.final.status).toBe("ok");
+    expect(first.responsesToolTranslation?.state).toEqual({
+      toolNames: ["exec"],
+      pendingCallIds: ["call_1"],
+    });
+    const secondBody = {
+      model: "deepseek-flash",
+      previous_response_id: "resp_1",
+      input: [{ type: "custom_tool_call_output", call_id: "call_1", output: "ok" }],
+    };
+    const next = req({
+      protocol: "openai_responses",
+      stream,
+      provider_raw: secondBody,
+      native_request: createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        body: secondBody,
+        headers: {},
+      }),
+    });
+    next.metadata.stateful_provider_alias = "r";
+    next.metadata.stateful_tool_translation = first.responsesToolTranslation?.state;
+    const second = await execute(plan(["r"]), next);
+    if (second.stream)
+      for await (const _chunk of second.stream) {
+        /* drain */
+      }
+    expect(second.final.status).toBe("ok");
+    expect(sent[1]?.input).toMatchObject([{ type: "function_call_output", call_id: "call_1" }]);
+    expect(second.responsesToolTranslation?.state).toEqual({
+      toolNames: ["exec"],
+      pendingCallIds: ["call_2"],
+    });
+  });
+
   it("invokes the head candidate and returns the non-stream body", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),

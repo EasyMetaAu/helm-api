@@ -1,3 +1,4 @@
+import type { ResponsesToolTranslationCapture } from "@helm/shared";
 import {
   type AttemptErrorDetail,
   type DecisionRecord,
@@ -148,6 +149,7 @@ export interface ExecuteOutcome {
   upstreamRequest?: string | null;
   // Safe request-scoped upstream response headers captured on the served attempt.
   responseMetadata?: Readonly<Record<string, string>>;
+  responsesToolTranslation?: ResponsesToolTranslationCapture;
 }
 
 // The orchestrator's return value: the executor outcome enriched with the
@@ -168,6 +170,7 @@ export interface ExecutionResult {
   upstreamRequest?: string | null;
   // Forwarded request-scoped response headers from the served attempt.
   responseMetadata?: Readonly<Record<string, string>>;
+  responsesToolTranslation?: ResponsesToolTranslationCapture;
 }
 
 export interface RouteDeps {
@@ -1209,6 +1212,7 @@ export async function routeRequest(
       // payload table (what the model actually received, post inject + translation).
       upstreamRequest: outcome.upstreamRequest,
       responseMetadata: outcome.responseMetadata,
+      responsesToolTranslation: outcome.responsesToolTranslation,
     };
   }
   return {

@@ -1508,9 +1508,47 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     );
   });
 
+  it.each([
+    false,
+    true,
+  ])("persists request-local translation state after consumption (stream=%s)", async (stream) => {
+    const state = { toolNames: ["exec"], pendingCallIds: ["call_1"] };
+    const capture: { state?: typeof state } = {};
+    const put = vi.fn();
+    const body = { id: "resp_tools", object: "response", status: "completed", output: [] };
+    const { deps } = makeDeps({
+      transformRequestOut: (native) => ({ stream, __native: native }),
+      run: async () => ({
+        decision: fakeDecision(),
+        responsesToolTranslation: capture,
+        nativePassthrough: !stream,
+        collect: async () => {
+          capture.state = state;
+          return body;
+        },
+        streamIR: async function* () {
+          capture.state = state;
+          yield { type: "response.completed", response: body };
+        },
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream }),
+    });
+    await res.text();
+    expect(res.status).toBe(200);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_tools", toolTranslation: state, keyId: "k1" }),
+    );
+  });
+
   it("pins previous_response_id continuations to the provider that created the response", async () => {
     const registryRecord = {
       responseId: "resp_previous",
+      toolTranslation: { toolNames: ["exec"], pendingCallIds: ["call_1"] },
       accountId: "acct",
       keyId: "k1",
       providerAlias: "openai-codex/gpt-5.6-sol",
@@ -1529,13 +1567,22 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const res = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify({ ...REQ, previous_response_id: "resp_previous" }),
+      body: JSON.stringify({
+        ...REQ,
+        previous_response_id: "resp_previous",
+        metadata: {
+          stateful_tool_translation: { toolNames: ["forged"], pendingCallIds: ["forged"] },
+        },
+      }),
     });
 
     expect(res.status).toBe(200);
     expect(get).toHaveBeenCalledWith("resp_previous", { keyId: "k1", accountId: "acct" });
     expect(harness.pipelineSawIR).toMatchObject({
-      metadata: { stateful_provider_alias: "openai-codex/gpt-5.6-sol" },
+      metadata: {
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        stateful_tool_translation: registryRecord.toolTranslation,
+      },
     });
   });
 

@@ -40,6 +40,7 @@ import type {
   NativePassthroughCarrier,
   Protocol,
   ReasoningEffortWireCapability,
+  ResponsesToolTranslationCapture,
   TargetProviderProtocol,
   VisualContextCompressionMode,
 } from "@helm/shared";
@@ -1927,6 +1928,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const captureUpstream = (wireBody: string): void => {
             capturedUpstream = wireBody;
           };
+          const responsesToolTranslation: ResponsesToolTranslationCapture = {};
+          const toolTranslationOptions = {
+            previousToolTranslation: req.metadata.stateful_tool_translation,
+            onToolTranslation: (state: NonNullable<ResponsesToolTranslationCapture["state"]>) => {
+              responsesToolTranslation.state = state;
+            },
+          };
           let capturedResponseMetadata: Record<string, string> | undefined;
           const onResponseMeta = (headers: Headers): void => {
             capturedResponseMetadata = safeResponseMetadata(headers);
@@ -2004,6 +2012,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
                       requestCompatibility: caps?.requestCompatibility,
+                      ...toolTranslationOptions,
                       captureUpstream,
                       onResponseMeta,
                       codexBufferedStreamRecovery,
@@ -2071,6 +2080,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               nativePassthrough: true,
               upstreamRequest: capturedUpstream,
               responseMetadata: capturedResponseMetadata,
+              responsesToolTranslation,
             };
           }
           if (req.stream) {
@@ -2105,6 +2115,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
                       requestCompatibility: caps?.requestCompatibility,
+                      ...toolTranslationOptions,
                       captureUpstream,
                       onResponseMeta,
                       optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
@@ -2136,6 +2147,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               stream,
               upstreamRequest: capturedUpstream,
               responseMetadata: capturedResponseMetadata,
+              responsesToolTranslation,
             };
           }
           if (passthrough.passthrough_used) {
@@ -2187,6 +2199,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                     ? { statefulAccount: req.metadata.stateful_provider_account }
                     : {}),
                   requestCompatibility: caps?.requestCompatibility,
+                  ...toolTranslationOptions,
                   captureUpstream,
                   onResponseMeta,
                   toolCallXmlRecovery:
@@ -2213,6 +2226,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               nativePassthrough: true,
               upstreamRequest: capturedUpstream,
               responseMetadata: capturedResponseMetadata,
+              responsesToolTranslation,
             };
           }
           const bodyReq = stripInternal(

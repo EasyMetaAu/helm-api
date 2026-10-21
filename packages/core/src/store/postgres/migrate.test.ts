@@ -998,15 +998,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
         sql.raw("SELECT COUNT(*) FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = 'acct'"),
       ),
     ).resolves.toBeDefined();
-    const orphanCount = (await db.execute(
-      sql.raw(`
-        SELECT COUNT(*)::integer AS n
-          FROM memory_messages AS child
-          LEFT JOIN memory_threads AS parent ON parent.id = child.thread_id
-         WHERE parent.id IS NULL
-      `),
-    )) as { rows: Array<{ n: number }> };
-    expect(orphanCount.rows).toEqual([{ n: 0 }]);
+    // Reuse the single-table snapshots from this quiescent synthetic fixture.
+    const parentIds = new Set(threads.rows.map((row) => row.id));
+    expect(messages.rows.every((row) => parentIds.has(row.thread_id))).toBe(true);
     await db.$close();
   });
 

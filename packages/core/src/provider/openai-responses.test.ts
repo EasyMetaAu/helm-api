@@ -7109,11 +7109,14 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       });
       const input = [{ type: "function_call_output", call_id: "call_previous", output: "ok" }];
 
-      await client.nativePassthrough?.({
-        model: "deepseek-flash",
-        previous_response_id: "previous-response",
-        input,
-      });
+      await client.nativePassthrough?.(
+        {
+          model: "deepseek-flash",
+          previous_response_id: "previous-response",
+          input,
+        },
+        { previousToolTranslation: { toolNames: [], pendingCallIds: [] } },
+      );
 
       expect(seen.input).toEqual(input);
       expect(seen.previous_response_id).toBe("previous-response");

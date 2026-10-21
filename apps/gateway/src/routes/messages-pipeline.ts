@@ -1063,6 +1063,7 @@ export function createMessagesPipeline(
         // configured/non-OAuth provider. Routes stamp it just before telemetry write.
         servingAccount,
         responseMetadata: result.responseMetadata,
+        responsesToolTranslation: result.responsesToolTranslation,
         async collect(): Promise<unknown> {
           if (failure !== null) throw failure;
           // Native passthrough (#217): the upstream's response is already in the

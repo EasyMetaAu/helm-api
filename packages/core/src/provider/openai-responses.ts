@@ -27,6 +27,8 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughCarrier,
   type NativePassthroughInput,
+  type ResponsesToolTranslation,
+  ResponsesToolTranslationSchema,
 } from "@helm/shared";
 import sharp from "sharp";
 import { z } from "zod";
@@ -800,9 +802,13 @@ function shouldDisableThinkingForOpaqueReasoning(body: Record<string, unknown>):
  * declarations. A `custom_tool_call_output` carries no tool name, so it is keyed
  * off the call it answers.
  */
-function translateCustomToolCallHistory(input: unknown, translated: Set<string>): unknown {
+function translateCustomToolCallHistory(
+  input: unknown,
+  translated: Set<string>,
+  previousCallIds: readonly string[] = [],
+): unknown {
   if (!Array.isArray(input)) return input;
-  const translatedCallIds = new Set<string>();
+  const translatedCallIds = new Set(previousCallIds);
   return input.map((item) => {
     if (!isRecord(item)) return item;
     if (item.type === "custom_tool_call") {
@@ -933,6 +939,7 @@ function untranslateCustomToolResponse(
 async function* untranslateCustomToolSSE(
   frames: AsyncGenerator<string>,
   translated: Set<string>,
+  observe?: (event: Record<string, unknown>) => void,
 ): AsyncGenerator<string> {
   // item_id -> output_index, for the in-flight calls that need translating.
   const pending = new Map<string, number>();
@@ -946,7 +953,12 @@ async function* untranslateCustomToolSSE(
   function translateFrame(rawFrame: string, frameBody: string): string {
     const event = parseResponsesSSEFrame(frameBody);
     if (!event) return rawFrame;
+    observe?.(event);
     const type = event.type;
+    if (isRecord(event.response)) {
+      const response = untranslateCustomToolResponse(event.response, translated);
+      if (response !== event.response) return encode({ ...event, response });
+    }
     if (type === "response.output_item.added" || type === "response.output_item.done") {
       const item = event.item;
       const translatedItem = untranslateFunctionCallItem(item, translated);
@@ -3930,15 +3942,98 @@ export function createGenericOpenAIResponsesClient(
    * BEFORE the contract rewrites it — the response side needs the original names
    * to translate the upstream's function calls back.
    */
-  function translatedCustomToolNames(body: NativePassthroughInput): Set<string> {
+  function translatedCustomToolNames(
+    body: NativePassthroughInput,
+    previous?: ResponsesToolTranslation,
+  ): Set<string> {
     if (requestContract?.translateUnsupportedCustomTools !== true) return new Set<string>();
     const source = isNativePassthroughCarrier(body) ? body.body : body;
     if (!isRecord(source)) return new Set<string>();
-    return unsupportedCustomToolNames(collectDeclaredTools(source));
+    const hasDeclarations =
+      Array.isArray(source.tools) ||
+      (Array.isArray(source.input) &&
+        source.input.some((item) => isRecord(item) && item.type === "additional_tools"));
+    return hasDeclarations
+      ? unsupportedCustomToolNames(collectDeclaredTools(source))
+      : new Set(previous?.toolNames ?? []);
+  }
+
+  function toolTranslationTurn(body: NativePassthroughInput, opts?: ProviderCallOptions) {
+    if (requestContract?.translateUnsupportedCustomTools !== true) return undefined;
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    const hasParent =
+      typeof source.previous_response_id === "string" && source.previous_response_id.length > 0;
+    const previous =
+      hasParent && opts?.previousToolTranslation !== undefined
+        ? ResponsesToolTranslationSchema.parse(opts.previousToolTranslation)
+        : undefined;
+    if (hasParent && previous === undefined) {
+      const message =
+        "Tool translation state for previous_response_id is unavailable; send the full conversation input instead";
+      throw new UpstreamError(
+        "upstream_error",
+        message,
+        {
+          error: {
+            type: "invalid_request_error",
+            code: "responses_tool_translation_state_unavailable",
+            message,
+          },
+        },
+        400,
+      );
+    }
+    const translated = translatedCustomToolNames(body, previous);
+    const pending = new Set(previous?.pendingCallIds ?? []);
+    // Retain only unanswered calls. Each branch receives its own immutable
+    // snapshot, so sibling continuations cannot consume one another's results.
+    if (Array.isArray(source.input))
+      for (const item of source.input) {
+        if (!isRecord(item) || typeof item.call_id !== "string") continue;
+        if (
+          item.type === "custom_tool_call" &&
+          typeof item.name === "string" &&
+          translated.has(item.name)
+        )
+          pending.add(item.call_id);
+        if (item.type === "custom_tool_call_output" || item.type === "function_call_output")
+          pending.delete(item.call_id);
+      }
+    const addCall = (item: unknown) => {
+      if (
+        isRecord(item) &&
+        item.type === "function_call" &&
+        typeof item.name === "string" &&
+        translated.has(item.name) &&
+        typeof item.call_id === "string"
+      )
+        pending.add(item.call_id);
+    };
+    const capture = (response: Record<string, unknown>) => {
+      if (Array.isArray(response.output)) for (const item of response.output) addCall(item);
+      if (response.status === "completed" || response.status === "incomplete") {
+        opts?.onToolTranslation?.(
+          ResponsesToolTranslationSchema.parse({
+            toolNames: [...translated],
+            pendingCallIds: [...pending],
+          }),
+        );
+      }
+    };
+    const observe = (event: Record<string, unknown>) => {
+      if (event.type === "response.output_item.done") addCall(event.item);
+      if (
+        (event.type === "response.completed" || event.type === "response.incomplete") &&
+        isRecord(event.response)
+      )
+        capture(event.response);
+    };
+    return { previous, translated, capture, observe };
   }
 
   async function applyResponsesRequestContract(
     body: NativePassthroughInput,
+    previous?: ResponsesToolTranslation,
   ): Promise<NativePassthroughInput> {
     body = await applyEnvironmentTimezone(body, deps.resolveEnvironmentTimezone);
     const contract = requestContract;
@@ -4037,16 +4132,20 @@ export function createGenericOpenAIResponsesClient(
     let opaqueReasoningThinkingDisabled = false;
     if (contract.translateUnsupportedCustomTools === true) {
       const declared = collectDeclaredTools(next);
-      const translated = unsupportedCustomToolNames(declared);
-      if (translated.size > 0) {
+      const translated = translatedCustomToolNames(next, previous);
+      if (translated.size > 0 || (previous?.pendingCallIds.length ?? 0) > 0) {
         // Hoist EVERY declared tool to the top level, not just the translated one:
         // the tools a code-mode client sends live inside an `additional_tools` item
         // that DeepSeek ignores, so leaving the siblings there would declare `exec`
         // alone while the transcript also replays calls to its namespace peers.
         // The original item is left in place — the upstream ignores it, and dropping
         // it would discard client data we have no reason to touch.
-        next.tools = translateCustomToolDeclarations(declared, translated);
-        next.input = translateCustomToolCallHistory(next.input, translated);
+        if (declared.length > 0) next.tools = translateCustomToolDeclarations(declared, translated);
+        next.input = translateCustomToolCallHistory(
+          next.input,
+          translated,
+          previous?.pendingCallIds,
+        );
         customToolsTranslated = true;
         customToolsHoisted =
           declared.length > (Array.isArray(source.tools) ? source.tools.length : 0);
@@ -4366,12 +4465,13 @@ export function createGenericOpenAIResponsesClient(
       overloadRetry?: ProviderCallOptions["overloadRetry"];
       captureUpstream?: (wireBody: string) => void;
       applyRequestContract?: boolean;
+      previousToolTranslation?: ResponsesToolTranslation;
     },
   ): Promise<Response> {
     init.overloadRetry ??= { attempt: 0 };
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
-        ? await applyResponsesRequestContract(init.body)
+        ? await applyResponsesRequestContract(init.body, init.previousToolTranslation)
         : init.body === undefined
           ? undefined
           : await applyEnvironmentTimezone(init.body, deps.resolveEnvironmentTimezone);
@@ -4510,7 +4610,8 @@ export function createGenericOpenAIResponsesClient(
     },
 
     async nativePassthrough(body, opts) {
-      const translated = translatedCustomToolNames(body);
+      const turn = toolTranslationTurn(body, opts);
+      const translated = turn?.translated ?? translatedCustomToolNames(body);
       const res = await requestJson("responses", {
         method: "POST",
         body,
@@ -4518,23 +4619,22 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        previousToolTranslation: turn?.previous,
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
         try {
-          return untranslateCustomToolResponse(
-            await aggregateNativeResponsesStream(res, timeoutMs),
-            translated,
-          );
+          const response = await aggregateNativeResponsesStream(res, timeoutMs);
+          turn?.capture(response);
+          return untranslateCustomToolResponse(response, translated);
         } catch (error) {
           throwAcceptedResponseError(error, opts?.signal);
         }
       }
-      return untranslateCustomToolResponse(
-        await readUnaryJson(res, true, opts?.signal),
-        translated,
-      );
+      const response = await readUnaryJson(res, true, opts?.signal);
+      turn?.capture(response);
+      return untranslateCustomToolResponse(response, translated);
     },
 
     closeResponsesWebSocketSession: closeWebSocketSession,
@@ -4569,7 +4669,8 @@ export function createGenericOpenAIResponsesClient(
           // first-turn body is therefore safe to send once through HTTP/SSE.
         }
       }
-      const translated = translatedCustomToolNames(body);
+      const turn = toolTranslationTurn(body, opts);
+      const translated = turn?.translated ?? translatedCustomToolNames(body);
       const res = await requestJson("responses", {
         method: "POST",
         body,
@@ -4577,16 +4678,17 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        previousToolTranslation: turn?.previous,
         overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       try {
         const frames = readResponsesSSERaw(res, timeoutMs);
-        if (translated.size === 0) {
+        if (translated.size === 0 && turn === undefined) {
           yield* frames;
           return;
         }
-        yield* untranslateCustomToolSSE(frames, translated);
+        yield* untranslateCustomToolSSE(frames, translated, turn?.observe);
       } catch (error) {
         throwAcceptedResponseError(error, opts?.signal);
       }
