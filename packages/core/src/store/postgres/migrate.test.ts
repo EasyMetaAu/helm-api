@@ -245,7 +245,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     )) as {
       rows: Array<Record<string, number | string | null>>;
     };
-    expect(result.rows).toEqual([
+    expect("rows" in result ? result.rows : result).toEqual([
       {
         message_count: 2,
         last_message_at: 2000,
@@ -438,7 +438,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
         FROM responses_registry WHERE response_id = 'legacy'
       `),
       );
-      expect(result.rows).toEqual([
+      expect("rows" in result ? result.rows : result).toEqual([
         {
           response_id: "legacy",
           account_id: "account",
@@ -450,7 +450,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
       const ledger = await db.execute(
         sql.raw("SELECT version FROM _migrations WHERE version = 54"),
       );
-      expect(ledger.rows).toEqual([{ version: 54 }]);
+      expect("rows" in ledger ? ledger.rows : ledger).toEqual([{ version: 54 }]);
     } finally {
       await db.$close();
     }
@@ -650,7 +650,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
       FROM memory_threads ORDER BY id
     `),
     )) as { rows: Array<Record<string, unknown>> };
-    expect(result.rows).toEqual([
+    expect("rows" in result ? result.rows : result).toEqual([
       {
         id: quarantinedParentThreadId("a", "empty"),
         message_count: 0,
