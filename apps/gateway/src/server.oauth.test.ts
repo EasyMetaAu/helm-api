@@ -329,6 +329,79 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     expect(clients.has("claude-sub")).toBe(false);
   });
 
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])("requires full-history recovery before a DeepSeek continuation is sent (stream=%s, savedState=%s)", async (stream, savedState) => {
+    ADDED_KEYS.push(...setEnv({ DEEPSEEK_API_KEY: "synthetic" }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        id: "resp_full",
+        status: "completed",
+        output: [],
+      }),
+    );
+    const clients = buildProviderClients(
+      [
+        provider({
+          name: "deepseek-responses",
+          type: "deepseek-responses",
+          base_url: "https://api.deepseek.com/v1",
+          api_key_env: "DEEPSEEK_API_KEY",
+          models: [
+            { alias: "deepseek-responses/deepseek-flash", provider_model: "deepseek-flash" },
+          ],
+        }),
+      ],
+      "https://fallback/v1",
+      60_000,
+    );
+    const client = clients.get("deepseek-responses");
+    const body = {
+      model: "deepseek-flash",
+      previous_response_id: "old_response",
+      input: [{ type: "custom_tool_call_output", call_id: "call_1", output: "real result" }],
+    };
+    const options = savedState
+      ? { previousToolTranslation: { toolNames: ["exec"], pendingCallIds: ["call_1"] } }
+      : undefined;
+    const run = async () => {
+      if (stream) {
+        for await (const _ of client?.nativePassthroughStream?.(body, options) ?? []) {
+          /* drain */
+        }
+      } else await client?.nativePassthrough?.(body, options);
+    };
+    await expect(run()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_not_sent" },
+        recovery: {
+          safe_to_replay: true,
+          lifecycle_phase: "before_send",
+          reason: "provider_requires_full_history",
+        },
+      },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await client?.nativePassthrough?.({
+      model: "deepseek-flash",
+      tools: [{ type: "custom", name: "exec" }],
+      input: [
+        { role: "user", content: "synthetic" },
+        { type: "custom_tool_call", call_id: "call_1", name: "exec", input: "echo" },
+        ...body.input,
+      ],
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body)).input).toMatchObject([
+      { role: "user" },
+      { type: "function_call", call_id: "call_1" },
+      { type: "function_call_output", call_id: "call_1", output: "real result" },
+    ]);
+  });
+
   it("threads the provider developer-role compatibility flag into OpenAI-compatible clients", async () => {
     ADDED_KEYS.push(...setEnv({ DEEPSEEK_API_KEY: "sk-deepseek" }));
     const fetchSpy = vi
