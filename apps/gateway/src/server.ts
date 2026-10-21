@@ -1935,6 +1935,7 @@ function createProviderClient(
     return createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
       requestContract: {
+        previousResponseIdRequiresFullHistory: true,
         dropBuiltInSearchCallItems: true,
         translateUnsupportedCustomTools: true,
         fillMissingFunctionCallOutputCallId: true,

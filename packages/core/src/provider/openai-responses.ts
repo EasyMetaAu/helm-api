@@ -183,6 +183,9 @@ export interface GenericOpenAIResponsesRequestContract {
   // continuation. Reject deterministically before network I/O instead of surfacing
   // the proxy's eventual 404 as an all-providers-failed 502.
   rejectPreviousResponseId?: boolean;
+  // Stateless Responses providers require the client to replay its full history.
+  // Prove the incremental request was not sent so the WebSocket bridge can recover.
+  previousResponseIdRequiresFullHistory?: boolean;
   // Some providers accept only the Responses item sequence form; reject the
   // proven object form locally instead of sending a deterministic upstream 422.
   rejectObjectInput?: boolean;
@@ -3958,7 +3961,18 @@ export function createGenericOpenAIResponsesClient(
       : new Set(previous?.toolNames ?? []);
   }
 
+  function requireFullHistory(body: NativePassthroughInput): void {
+    if (requestContract?.previousResponseIdRequiresFullHistory !== true) return;
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    if (typeof source.previous_response_id === "string" && source.previous_response_id.length > 0)
+      throw new CodexResponsesBeforeSendError(
+        "This provider does not store response state; resend the full conversation input",
+        { reason: "provider_requires_full_history" },
+      );
+  }
+
   function toolTranslationTurn(body: NativePassthroughInput, opts?: ProviderCallOptions) {
+    requireFullHistory(body);
     if (requestContract?.translateUnsupportedCustomTools !== true) return undefined;
     const source = isNativePassthroughCarrier(body) ? body.body : body;
     const hasParent =
@@ -4035,6 +4049,7 @@ export function createGenericOpenAIResponsesClient(
     body: NativePassthroughInput,
     previous?: ResponsesToolTranslation,
   ): Promise<NativePassthroughInput> {
+    requireFullHistory(body);
     body = await applyEnvironmentTimezone(body, deps.resolveEnvironmentTimezone);
     const contract = requestContract;
     if (
