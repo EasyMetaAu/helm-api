@@ -32,6 +32,46 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("v55 preserves legacy Responses ownership and adds nullable tool translation state", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v55-responses-"));
+    const path = join(dir, "helm.db");
+    try {
+      runMigrations(path);
+      const seed = new Database(path);
+      seed.exec(`
+        ALTER TABLE responses_registry DROP COLUMN tool_translation;
+        DELETE FROM _migrations WHERE version = 55;
+        INSERT INTO responses_registry
+          (response_id, account_id, key_id, provider_alias, created_at, expires_at, status)
+        VALUES ('legacy', 'account', 'key', 'deepseek-responses', 1, 2, 'completed');
+      `);
+      seed.close();
+      runMigrations(path);
+      runMigrations(path);
+      const after = new Database(path);
+      expect(
+        after
+          .prepare(`
+        SELECT response_id, account_id, key_id, provider_alias, tool_translation
+        FROM responses_registry WHERE response_id = 'legacy'
+      `)
+          .get(),
+      ).toEqual({
+        response_id: "legacy",
+        account_id: "account",
+        key_id: "key",
+        provider_alias: "deepseek-responses",
+        tool_translation: null,
+      });
+      expect(after.prepare("SELECT version FROM _migrations WHERE version = 55").all()).toEqual([
+        { version: 55 },
+      ]);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("v49 reconciles stale Memory counters without skipping uncovered legacy raw history", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v49-memory-frontier-"));
     const path = join(dir, "helm.db");
@@ -400,6 +440,7 @@ describe("sqlite schema + migrations", () => {
       const seed = new Database(path);
       seed.exec(`
         CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE responses_registry (response_id TEXT PRIMARY KEY);
         CREATE TABLE api_keys (key_id TEXT PRIMARY KEY);
         INSERT INTO api_keys (key_id) VALUES ('legacy');
       `);
@@ -428,6 +469,7 @@ describe("sqlite schema + migrations", () => {
       seed.exec(`
         PRAGMA foreign_keys = ON;
         CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE responses_registry (response_id TEXT PRIMARY KEY);
         CREATE TABLE sessions (
           session_ref TEXT PRIMARY KEY,
           account_id TEXT NOT NULL,
