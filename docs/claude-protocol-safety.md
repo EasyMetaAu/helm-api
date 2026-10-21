@@ -80,6 +80,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 保护字段（219295838）、远程标识（219294800–219295470）、默认关闭的未知遥测（219284320）、上传字段（250585538）边界保持不变。凭证、签名、未知和远程字段仍不放行；SSE 定向检查保留 text/citation/JSON-input/thinking/signature/compaction delta 分支（219137900），不声称完整等价。
 - 审查全程只读官方制品，没有执行下载的 CLI 或访问账号。这是有限静态兼容审查；生产真实账号验收另行记录。
 
+2026-10-21 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.306`：校验 npm SHA512 integrity 后，只读检查 ARM64 Mach-O 制品，二进制 SHA256 为 `b5d795b7760032d79954b55a9cd1876dcf3a8dc9608fd6bb9f618593f69fd44b`。重新校验 2.1.304 制品后，对比可读 JavaScript 中 19 个 `x-claude-code-*`、`x-claude-remote-*`、`x-anthropic-*` 引号内字段名，集合未变；内嵌 SDK 仍为 `0.128.0`（字节偏移 220250997）。
+
+- [官方 2.1.305/2.1.306 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21306)包含网关拒绝 tool search 后的客户端回退、MCP 工具较多时保留原始 API 错误，以及云会话凭证加载修复。静态构造确认客户端在对应拒绝后移除 deferred tools 重试，并记住该会话的拒绝状态（227776391–227777469）；Helm 不新增重试或推断上游能力。
+- 保护字段仍由客户端选项生成（220596152），上传字段仍属于 multipart 上传（253627807），项目归因仍受有效 tagged ID/source 与功能开关约束（220140691）。继续只保留实际客户端提供的已审查字段和正文；未知遥测、远程身份与凭证字段不扩大放行。
+- SSE 静态分支仍包含 text、citation、JSON-input、thinking、signature 和 compaction delta（220436100–220437100）；沿用定向原生正文、请求头隔离、身份、流式与发布门禁回归。全程未执行下载的 CLI、未访问账号；以上是有限静态兼容审查，真实账户验收在发布后另行记录。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。
