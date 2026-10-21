@@ -1,10 +1,14 @@
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  createCircuitBreaker,
+  createGenericOpenAIResponsesClient,
   createRuntimeMemoryCoordinator,
   type DecisionRecord,
   deriveSafeWorkingMemoryCapacity,
   type ExecutionResult,
   hashKey,
+  type ProviderRegistry,
+  type ResponsesRegistryRecord,
   responsesTransformer,
   type TelemetryStore,
   type UpsertSessionRevisionInput,
@@ -18,6 +22,7 @@ import {
   trackResponsesWebSocketRequest,
 } from "../responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
+import { createExecute } from "./execute.js";
 import { capsFromRecord, type MessagesIdentity } from "./messages.js";
 import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
 import type { RecordServedDeps, SseCapture } from "./payload-capture.js";
@@ -1543,6 +1548,149 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(put).toHaveBeenCalledWith(
       expect.objectContaining({ responseId: "resp_tools", toolTranslation: state, keyId: "k1" }),
     );
+  });
+
+  it.each([
+    false,
+    true,
+  ])("preserves three-turn translation through HTTP, pipeline and executor (stream=%s)", async (stream) => {
+    const alias = "deepseek-responses/deepseek-flash";
+    const records = new Map<string, ResponsesRegistryRecord>();
+    const sent: Record<string, unknown>[] = [];
+    const provider = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://deepseek.test/v1", apiKey: "synthetic" },
+      requestContract: { translateUnsupportedCustomTools: true, acceptsResponsesNativeItems: true },
+      fetch: async (_url, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        const n = sent.length;
+        const response = {
+          id: `response_${n}`,
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: `item_${n}`,
+              call_id: `call_${n}`,
+              name: "exec",
+              arguments: '{"input":"synthetic"}',
+            },
+          ],
+        };
+        return stream
+          ? new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
+              headers: { "content-type": "text/event-stream" },
+            })
+          : Response.json(response);
+      },
+    });
+    const registry: ProviderRegistry = {
+      list: () => [alias],
+      resolve: () => ({
+        ok: true,
+        value: {
+          alias,
+          providerName: "deepseek-responses",
+          providerModel: "deepseek-flash",
+          baseUrl: "https://deepseek.test/v1",
+          apiKeyEnv: "SYNTHETIC",
+          targetProviderProtocol: "openai_responses",
+          providerRequiresCompatibilityRewrite: false,
+        },
+      }),
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["deepseek-responses", provider]]),
+      registry,
+      breaker: createCircuitBreaker({
+        config: { failureThreshold: 5, cooldownMs: 1000 },
+        now: () => Date.now(),
+      }),
+      catalog: new Map(),
+      now: () => Date.now(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const route: RouteFn = async (request) => {
+      const result = await execute(
+        { selected_lane: "balanced", candidate_chain: [alias], explicit_model: alias },
+        request,
+      );
+      if (result.final.status !== "ok") throw new Error(JSON.stringify(result.final));
+      return {
+        ...result,
+        final: { status: "ok", alias },
+        error: null,
+        decision: { ...(fakeDecision() as DecisionRecord), provider_attempts: result.attempts },
+      };
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const { deps } = makeDeps({
+      transformRequestOut: (native) =>
+        responsesTransformer.transformRequestOut(native) as {
+          stream?: boolean;
+          metadata?: Record<string, unknown>;
+        },
+      run: pipeline.run,
+      registry: {
+        put: (record) => {
+          records.set(record.responseId, structuredClone(record));
+        },
+        get: (id, identity) => {
+          const record = records.get(id);
+          return record?.accountId === identity.accountId && record.keyId === identity.keyId
+            ? structuredClone(record)
+            : null;
+        },
+      },
+    });
+    const app = buildApp(deps);
+    for (let turn = 1; turn <= 3; turn++) {
+      const body =
+        turn === 1
+          ? {
+              model: alias,
+              stream,
+              tools: [{ type: "custom", name: "exec", format: { type: "text" } }],
+              input: [{ role: "user", content: "synthetic tool test" }],
+            }
+          : {
+              model: alias,
+              stream,
+              previous_response_id: `response_${turn - 1}`,
+              input: [
+                { type: "custom_tool_call_output", call_id: `call_${turn - 1}`, output: "ok" },
+              ],
+              metadata: {
+                stateful_tool_translation: { toolNames: ["forged"], pendingCallIds: ["forged"] },
+              },
+            };
+      const res = await app.request("/v1/responses", {
+        method: "POST",
+        headers: AUTH,
+        body: JSON.stringify(body),
+      });
+      const wire = await res.text();
+      expect(res.status, `turn=${turn} sent=${JSON.stringify(sent)} wire=${wire}`).toBe(200);
+      const response = stream
+        ? parseSSE(wire)
+            .map((frame) => JSON.parse(frame.data))
+            .find((event) => event.type === "response.completed")?.response
+        : JSON.parse(wire);
+      expect(response?.output, `turn=${turn} wire=${wire}`).toMatchObject([
+        { type: "custom_tool_call", call_id: `call_${turn}` },
+      ]);
+      expect(records.get(`response_${turn}`)?.toolTranslation).toEqual({
+        toolNames: ["exec"],
+        pendingCallIds: [`call_${turn}`],
+      });
+      if (turn > 1)
+        expect(sent[turn - 1]?.input).toEqual([
+          { type: "function_call_output", call_id: `call_${turn - 1}`, output: "ok" },
+        ]);
+    }
+    expect(sent).toHaveLength(3);
   });
 
   it("pins previous_response_id continuations to the provider that created the response", async () => {
