@@ -38,6 +38,7 @@ import {
   isEmptyNativeResponsesPrewarm,
   isNativePassthroughCarrier,
   nativePassthroughBody,
+  ResponsesToolTranslationSchema,
 } from "@helm/shared";
 import {
   markStartedStreamCancellation,
@@ -311,6 +312,13 @@ function toInternalRequest(
         : {}),
       ...(typeof ir.metadata?.stateful_lane === "string" && ir.metadata.stateful_lane.length > 0
         ? { stateful_lane: ir.metadata.stateful_lane }
+        : {}),
+      ...(ir.metadata?.stateful_tool_translation !== undefined
+        ? {
+            stateful_tool_translation: ResponsesToolTranslationSchema.parse(
+              ir.metadata.stateful_tool_translation,
+            ),
+          }
         : {}),
       // The CLI's captured billing identity (anthropic route stamps it; absent on the
       // OpenAI/Gemini surfaces). The native-Anthropic executor reads it to re-emit the

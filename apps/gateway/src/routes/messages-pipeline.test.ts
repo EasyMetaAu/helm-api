@@ -2018,6 +2018,7 @@ describe("createMessagesPipeline — toInternalRequest metadata branches", () =>
         metadata: {
           trace_id: "t1",
           stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+          stateful_tool_translation: { toolNames: ["exec"], pendingCallIds: ["call_1"] },
         },
       }),
       IDENTITY,
@@ -2027,6 +2028,10 @@ describe("createMessagesPipeline — toInternalRequest metadata branches", () =>
     expect((seen as InternalRequest | null)?.metadata.stateful_provider_alias).toBe(
       "openai-codex/gpt-5.6-sol",
     );
+    expect((seen as InternalRequest | null)?.metadata.stateful_tool_translation).toEqual({
+      toolNames: ["exec"],
+      pendingCallIds: ["call_1"],
+    });
   });
 
   it("forwards conversation_id when it is a non-empty string (line 172 truthy branch)", async () => {
