@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-10-26 · Codex 旧 turn-state 发送前换账号（docs/04、05、06、07）
+
+- **原因与边界**：原账号冷却时，即使 HTTP 请求携带完整历史，旧 `x-codex-turn-state` 仍强制绑定原账号。本次只在零发送、原账号已知且不可调度、有其他可用账号时恢复：验证完整 input 与工具配对，删除该请求副本的旧 header，保留所有正文并重新选择账号；不清除账号配额或修改用户设置。
+- **状态更新**：请求级 reset 跳过所选账号的旧 turnKey 缓存，上游返回的新状态正常回传并记录。后续携带新状态继续绑定新账号；旧客户端对象、其他会话与原账号续接映射不批量清空。变更在 mutation ledger 记录 `codex_turn_state_recovered`。
+- **限制**：`previous_response_id`、conversation、item/file 引用、不完整工具对、未知 input 类型以及内部 WebSocket session 不走本次恢复；继续要求完整历史或原会话恢复。POST 后结果未知、已有输出及容量三次重试耗尽不触发此类换号。
+- **发布准备**：v0.30.55 已通过 `pnpm release:prepare 0.30.55`，客户端与模型目录保持已验证的 Grok 1.0.70、Claude 2.1.310、Codex 0.164.0 快照。
+- **真实协议证据**：通过公网发送三轮极短合成请求，生产读回账号 A → B → B；第二轮无旧状态但保留历史，收到新 turn-state，第三轮携带新状态成功且不必再次获得状态头。没有重放用户原始任务或主动修改生产账号冷却；测试 Key 均撤销。
+
 ## 2026-10-26 · Codex 容量重试、账号冷却与断流证据（docs/02、04、05、07）
 
 - **容量拒绝**：仅对 Codex 在产生实际输出前明确返回的 `Selected model is at capacity. Please try a different model.` 重试同账号、同模型；首次加最多 3 次重试，共享现有 HTTP/SSE 重试预算，默认等待 1、3、5 秒，沿用有界 Retry-After。耗尽后返回 `codex_model_capacity_exhausted` 并建议手动更换账号，不自动切换账号或后续候选。
@@ -79,15 +87,9 @@
 - **真实验收修复**：北京 Qwen3 文件识别实际返回 HTTP OSS 签名链接，仅将精确官方结果域名升级 HTTPS；继续使用公网 DNS/IP、固定连接、逐跳重定向与大小/超时边界。固定 IP 下载显式关闭 Node 地址族自动选择，并按已验证 IP 设置 family，修复默认 lookup(all:true) 与标量回调不兼容。
 - 用户授权后已通过本地 Helm 调用真实上游；型号、次数与未验收范围见 docs/media-provider-task-tracker.md。未部署生产。
 
-## 2026-10-14 · Ark 多媒体集成（docs/04、05、06、07、10）
-
-- **SDK 与范围**：使用官方 OpenAI Node SDK 7.33.0 的兼容 Images 与自定义 post/get，maxRetries=0；没有证据需要重写官方 Ark SDK，条件任务 T03 不适用。独立 type: ark 客户端只支持媒体，媒体模型从聊天执行和聊天连通性测试中拒绝。
-- **权限与单写**：真实 lane 检查 allowed_lanes，直接 Ark alias／wire ID 要求 allow_custom_model；wire ID 仅在唯一配置映射时解析。集成测试发现旧图片接口未检查 lane 白名单，补齐后保留历史非 Ark 裸模型行为。付费创建一旦发出不重试、不跨 provider 回退；上游 ID 与 Helm UUID 分离，保存 key/account/provider/model/kind 绑定并在轮询核验。
-- **成本与恢复**：尚无可靠 USD 媒体结算上界，金额预算 key 预先拒绝，未知成本仍为 null。任务保存 7 天，结果 URL 24 小时；SQLite/Postgres 的条数清理排除未过期媒体任务与预写保留记录，仍按 TTL 清理，因此媒体记录可能使总行数超过普通 Responses 的 10,000 条软上限；3D 返回 ZIP 内 GLB/PBR，未新增资产托管。媒体 catalog 的 maxContextTokens=0 表示不适用聊天 token context，不是宣称上游零输入额度。
-- **实测修正**：Seed3D 的 running 响应还包含 service_tier、execution_expires_after、draft、priority；新增严格字段校验与真实形状回归，修复 Helm 误报 502，未放开未知字段。
-- **限制**：组合参考显式要求 omni_reference_task_type=reference，避免默认自动选入未支持的编辑/延长任务。本轮四次批准实测：3D 基础产物通过，Flash/Pro/Seedance 额度受限；3D 请求 low、上游回传 medium，档位语义尚未验收，不盲目改字段或重试付费创建。实际账单、生产未验收。任务明细与证据见 docs/ark-media-development-plan.md。
-
 ## 更早历史总览
+
+2026-10-14：Ark 多媒体按提供商契约处理图片/视频/语音输入、费用与异步任务，任务身份和数据边界不变，完整实现决定见 Git 历史。
 
 2026-10-13：API key 客户端策略在鉴权后按入口校验，模型发现按家族过滤；损坏策略拒绝且保留账号、权限与续接隔离，UA 不作为可信身份，完整范围与决定见 Git 历史。
 

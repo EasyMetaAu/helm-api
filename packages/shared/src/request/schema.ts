@@ -53,6 +53,7 @@ export const NativePassthroughMutationLedgerSchema = z
     codex_installation_id: z.string().optional(),
     codex_installation_id_client: z.string().optional(),
     codex_installation_id_source: z.enum(["rebound", "client", "absent"]).optional(),
+    codex_turn_state_recovered: z.boolean().optional(),
     codex_stream_recovery_eligible: z.boolean().optional(),
     codex_stream_recovery_skip_reason: z.string().optional(),
     codex_stream_recovery_attempts: z.number().int().positive().optional(),
