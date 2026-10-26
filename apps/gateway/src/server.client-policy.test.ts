@@ -135,20 +135,27 @@ it("enforces client policy across HTTP model boundaries while preserving portal 
     await expect(server.resolveRealtimeKey?.("test-only-key", "curl/8")).rejects.toMatchObject({
       helm: { http_status: 403 },
     });
-    expect(await server.resolveRealtimeKey?.("test-only-key", "Codex Desktop/0.162.0")).toBe(
-      "restricted",
-    );
+    for (const userAgent of ["Codex Desktop/0.162.0", "codex_desktop/dev", "Codex Desktop"]) {
+      expect(await server.resolveRealtimeKey?.("test-only-key", userAgent)).toBe("restricted");
+      expect(
+        (
+          await server.app.request("/v1/models", {
+            headers: { ...headers, "user-agent": userAgent },
+          })
+        ).status,
+      ).toBe(200);
+    }
     expect(
       (
         await server.app.request("/v1/models", {
-          headers: { ...headers, "user-agent": "Codex Desktop/0.162.0" },
+          headers: { ...headers, "user-agent": "codex_exec/dev" },
         })
       ).status,
-    ).toBe(200);
+    ).toBe(403);
     expect((await server.app.request("/portal/api/me", { headers })).status).toBe(200);
     const invalid = await server.app.request("/v1/responses", {
       method: "POST",
-      headers: { Authorization: "Bearer invalid" },
+      headers: { Authorization: "Bearer invalid", "user-agent": "codex_desktop/dev" },
       body: "{}",
     });
     expect(invalid.status).toBe(401);
@@ -258,7 +265,7 @@ it.each([
       headers: {
         Authorization: "Bearer fallback-key",
         "Content-Type": "application/json",
-        "User-Agent": "Codex Desktop/0.162.0",
+        "User-Agent": "codex_desktop/dev",
       },
       body: JSON.stringify({
         model: "balanced",

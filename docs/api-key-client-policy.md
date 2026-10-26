@@ -16,12 +16,12 @@ Codex 的 `client_version` 专用列表继续返回其原生格式并过滤具�
 
 ## 识别依据与限制
 
-使用有长度上限的确定性 User-Agent 产品标记匹配。缺失、畸形、未知或多客户端冲突标记在开启限制时拒绝。不固定版本号，不接受用户自定义正则。
+使用有长度上限的确定性 User-Agent 产品标记匹配。缺失、畸形、未知或多客户端冲突标记在开启限制时拒绝。不固定版本号，不接受用户自定义正则。Codex 只依据产品身份识别：忽略产品名大小写，桌面端兼容显示名称与下划线／连字符名称；版本字段可省略，存在时按 HTTP token 读取，不要求数字或语义版本格式。日期、nightly、预发布标签变化不会改变客户端类型。
 
 | 客户端 ID | 产品标记 | 证据范围 |
 | --- | --- | --- |
-| `codex_app` | `Codex Desktop/<version>` | Remote 入口实际 GPT Responses 请求 |
-| `codex_cli` | `codex-tui`、`codex_exec`、`codex_cli_rs` | 当前 TUI/exec 实测，旧 rs 标记兼容 |
+| `codex_app` | `Codex Desktop`、`codex_desktop`、`codex-desktop`，可带 `/version` | 入口实际请求的显示名称与桌面端初始化的机器名称；连字符为相同名称的兼容写法 |
+| `codex_cli` | `codex-tui`、`codex_exec`、`codex_cli_rs`，可带 `/version` | 当前 TUI/exec 实测，旧 rs 标记兼容 |
 | `claude_cli` | `claude-cli/<version> (external, cli 或 sdk-cli)` | print 实测，交互标记兼容 |
 | `claude_desktop` | `Claude/<version>` | Desktop 连接测试；不代表 Code/Cowork 已验证 |
 | `grok_cli` | `grok-shell/<version>` | CLI 实测，不代表 Grok Bot.app |
