@@ -86,6 +86,13 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 保护字段仍由客户端选项生成（220596152），上传字段仍属于 multipart 上传（253627807），项目归因仍受有效 tagged ID/source 与功能开关约束（220140691）。继续只保留实际客户端提供的已审查字段和正文；未知遥测、远程身份与凭证字段不扩大放行。
 - SSE 静态分支仍包含 text、citation、JSON-input、thinking、signature 和 compaction delta（220436100–220437100）；沿用定向原生正文、请求头隔离、身份、流式与发布门禁回归。全程未执行下载的 CLI、未访问账号；以上是有限静态兼容审查，真实账户验收在发布后另行记录。
 
+2026-10-26 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.310`：旧 2.1.306 与新包均通过 npm SHA512 integrity 校验；新二进制 SHA256 为 `ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`，内嵌 SDK 仍为 `0.128.0`（字节偏移 220268369）。仅静态读取公开发行制品，没有执行下载的 CLI 或访问账号。
+
+- [官方 2.1.307–2.1.310 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21310)包含自定义网关 beta 发送修正，以及 effort beta／对话中 system 消息被拒后的客户端回退。Helm 不据此新增重试、猜测能力或放宽协议字段。
+- 引号内 `x-claude-code-*`、`x-claude-remote-*`、`x-anthropic-*` 字段从 19 个增至 20 个。新增 `x-claude-code-route-final-answer` 在路由错误处理中读取响应头（220610170、227886520），并非新增的必需推理请求身份；Helm 不生成或新增转发。
+- 扩大到所有引号内 `x-*`／`anthropic-*` 字符串的比较后，另见自托管来源 IP／签名（220626950）、runner capability（230494649）、MCP（256874603）、工具隧道（238689235）和账号设置 OS 标记（236224544）；均不进入 Messages 入站头白名单。新增定向测试验证这些字段仍被剥离。另有额度响应状态字符串及 signed-key 脱敏规则 ID，不能误当成推理身份头。
+- 保护字段仍由客户端配置产生（220629824），上传 lane 仍属于 multipart（249608217），gateway／project 归因仍留在原生 system 文本（219983990）。SSE 文本、citation、JSON-input、thinking、signature、compaction 分支仍存在（220467150–220470700）。保留已有原生正文、身份隔离、协议和流式测试；本次有限静态审查不表示支持全部新客户端功能，也不能替代真实账户验收。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。
