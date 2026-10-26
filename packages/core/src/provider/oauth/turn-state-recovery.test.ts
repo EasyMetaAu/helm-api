@@ -61,8 +61,10 @@ async function setup(stream: boolean, extra: Record<string, unknown> = {}) {
     now: () => 1000,
   });
   const call = async (c: typeof a, input: NativePassthroughCarrier) => {
-    if (stream) await drain(c.nativePassthroughStream!(input, { onResponseMeta: meta }));
-    else await c.nativePassthrough!(input, { onResponseMeta: meta });
+    if (!c.nativePassthroughStream || !c.nativePassthrough)
+      throw new Error("Missing native methods");
+    if (stream) await drain(c.nativePassthroughStream(input, { onResponseMeta: meta }));
+    else await c.nativePassthrough(input, { onResponseMeta: meta });
   };
   const seed = carrier();
   delete seed.headers["X-Codex-Turn-State"];
@@ -132,11 +134,9 @@ describe("Codex unavailable turn-state account recovery", () => {
       },
       400,
     );
-    const send = vi.fn(() =>
-      (async function* (): AsyncGenerator<string> {
-        throw failure;
-      })(),
-    );
+    const send = vi.fn(async function* () {
+      yield await Promise.reject<string>(failure);
+    });
     s.b.nativePassthroughStream = send;
     await expect(s.call(s.pool, s.input)).rejects.toBe(failure);
     expect(send).toHaveBeenCalledTimes(1);
