@@ -322,6 +322,17 @@ describe("Anthropic adapter header semantics", () => {
       expect(headers.get("x-unrelated-token")).toBeNull();
       expect(headers.get("x-claude-code-wiggly-dove")).toBeNull();
       expect(headers.get("x-claude-code-upload-lane")).toBeNull();
+      for (const name of [
+        "x-claude-code-route-final-answer",
+        "x-ssr-client-ip",
+        "x-ssr-client-ip-sig",
+        "x-self-hosted-runner-capabilities",
+        "x-tunnel-peer",
+        "x-mcp-features",
+        "anthropic-client-os",
+      ]) {
+        expect(headers.get(name), name).toBeNull();
+      }
       expect(headers.get("cookie")).toBeNull();
       expect(headers.get("x-claude-remote-container-id")).toBeNull();
       expect(JSON.parse(String(init?.body)).system).toEqual(system);
@@ -339,6 +350,13 @@ describe("Anthropic adapter header semantics", () => {
         "x-unrelated-token": "secret",
         "x-claude-code-wiggly-dove": "opaque-client-value",
         "x-claude-code-upload-lane": "private-upload-route",
+        "x-claude-code-route-final-answer": "private-route",
+        "x-ssr-client-ip": "192.0.2.1",
+        "x-ssr-client-ip-sig": "private-signature",
+        "x-self-hosted-runner-capabilities": "private-capability",
+        "x-tunnel-peer": "tool-server",
+        "x-mcp-features": "private-feature",
+        "anthropic-client-os": "private-platform",
         cookie: "secret",
         "x-claude-remote-container-id": "private",
       },
