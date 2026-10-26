@@ -11,6 +11,13 @@ describe("client access policy", () => {
     ["codex-tui/0.159.0 (Mac OS 26.6.2; arm64) xterm-256color (codex-tui; 0.159.0)", "codex_cli"],
     ["codex_exec/0.159.0 (Mac OS 26.6.2; arm64) dumb", "codex_cli"],
     ["codex_cli_rs/0.100.0 (linux; x86_64)", "codex_cli"],
+    ["codex_desktop/dev (macOS; arm64)", "codex_app"],
+    ["CODEX-DESKTOP/20261026 (Windows; x64)", "codex_app"],
+    ["Codex Desktop (macOS; arm64)", "codex_app"],
+    ["Codex Desktop/next+build (macOS; arm64)", "codex_app"],
+    ["codex-tui/nightly (linux; x86_64)", "codex_cli"],
+    ["CODEX_EXEC/dev", "codex_cli"],
+    ["codex_cli_rs (linux; x86_64)", "codex_cli"],
     ["claude-cli/2.1.295 (external, sdk-cli)", "claude_cli"],
     ["claude-cli/2.2.0 (external, cli)", "claude_cli"],
     ["grok-shell/1.0.50 (macos; aarch64)", "grok_cli"],
@@ -26,7 +33,12 @@ describe("client access policy", () => {
     "",
     "curl/8",
     "not-Codex Desktop/1.0",
-    "codex-tui/not-a-version",
+    "codex_desktop_helper/dev",
+    "not-codex_desktop/dev",
+    "codex-desktop-evil/dev",
+    "Codex Desktop/",
+    "Codex Desktop/dev/extra",
+    "codex-tui/",
     "Mozilla/5.0 Electron/44.0",
     "claude-cli/2.1.0 (external, unknown)",
     "Codex Desktop/1.0\r\nInjected: yes",
@@ -37,6 +49,18 @@ describe("client access policy", () => {
   });
   it("rejects conflicting recognized products", () => {
     expect(classifyClient("Mozilla/5.0 Claude/2.0 Codex Desktop/1.0")).toBeNull();
+    expect(classifyClient("codex_desktop/dev claude-cli/2.0 (external, cli)")).toBeNull();
+    expect(classifyClient("codex_desktop/dev codex_exec/nightly")).toBeNull();
+  });
+  it("recognizes Codex identity independently of release numbering", () => {
+    for (const version of ["1", "20261026", "nightly", "next+build", "vNext", "0.0.0-alpha.1"]) {
+      const ua = `codex_desktop/${version} (Mac OS; arm64)`;
+      expect(evaluateClientPolicy({ allowed_clients: ["codex_app"] }, ua)).toMatchObject({
+        allowed: true,
+        client: "codex_app",
+      });
+      expect(evaluateClientPolicy({ allowed_clients: ["codex_cli"] }, ua).allowed).toBe(false);
+    }
   });
   it("keeps disabled and legacy policies unrestricted, but malformed policies fail closed", () => {
     expect(evaluateClientPolicy(null, undefined).allowed).toBe(true);

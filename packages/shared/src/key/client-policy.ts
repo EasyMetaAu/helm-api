@@ -45,11 +45,14 @@ export function readStoredClientPolicyJson(value: string): ClientPolicy {
   }
 }
 
-// These are observed product tokens, not authentication proofs. Versions are
-// deliberately not pinned; ambiguity and malformed headers fail closed.
+// These are product tokens, not authentication proofs. Codex's display name and
+// machine name identify the same client. Its optional version is an opaque HTTP
+// token, not a semantic-version gate: nightly/date/build formats do not change
+// client identity. Product boundaries, ambiguity and malformed headers still fail closed.
 const profiles: Record<ClientId, RegExp> = {
-  codex_app: /(?:^| )Codex Desktop\/\d+\.\d+[\w.+-]*(?= |$)/,
-  codex_cli: /(?:^| )(?:codex-tui|codex_exec|codex_cli_rs)\/\d+\.\d+[\w.+-]*(?= |$)/,
+  codex_app: /(?:^| )codex[ _-]desktop(?:\/[!#$%&'*+.^_`|~0-9A-Za-z-]+)?(?= |$)/i,
+  codex_cli:
+    /(?:^| )(?:codex-tui|codex_exec|codex_cli_rs)(?:\/[!#$%&'*+.^_`|~0-9A-Za-z-]+)?(?= |$)/i,
   claude_cli: /(?:^| )claude-cli\/\d+\.\d+[\w.+-]* \(external, (?:sdk-cli|cli)\)(?= |$)/,
   claude_desktop: /(?:^| )Claude\/\d+\.\d+[\w.+-]*(?= |$)/,
   grok_cli: /(?:^| )grok-shell\/\d+\.\d+[\w.+-]*(?= |$)/,
