@@ -1059,6 +1059,7 @@ export function createMessagesPipeline(
         // in the stream finally below), exposed so the route records the FINAL
         // decision after consumption. Present even on a routing failure.
         decision: result.decision,
+        routingFailure: failure,
         // Native-protocol-passthrough flag (#217): true when route() forwarded the
         // request untranslated and `result.body` is the upstream's VERBATIM native
         // response. The route reads this to BYPASS transformResponseOut and hand the

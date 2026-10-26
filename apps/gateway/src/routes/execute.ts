@@ -16,6 +16,7 @@ import {
   anthropicRequestAccountUuid,
   applyForcedAnthropicThinking,
   applyForcedReasoningToNativeBody,
+  CodexCapacityRetryExhaustedError,
   canUseNativePassthrough,
   checkCapability,
   correlationTraceId,
@@ -2379,7 +2380,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const postSendFailure =
             err instanceof UpstreamError &&
             isCodexResponsesPostSendFailureCode(upstreamErrorCode(err.providerRaw));
-          if (beforeSendRecovery || postSendFailure) {
+          const capacityExhausted = err instanceof CodexCapacityRetryExhaustedError;
+          if (beforeSendRecovery || postSendFailure || capacityExhausted) {
             // A stalled first-output deadline is an upstream health fault even
             // though its unknown execution outcome prohibits replay.
             settleBreaker(
@@ -2391,7 +2393,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               skipped: false,
               skip_reason: null,
               status: "error",
-              error_class: "lane_unavailable",
+              error_class: capacityExhausted ? "upstream_error" : "lane_unavailable",
               latency_ms: elapsed(),
               cost_usd: null,
               error_detail: detail,
@@ -2402,7 +2404,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               final: {
                 status: "error",
                 error: makeHelmError({
-                  error_class: "lane_unavailable",
+                  error_class: capacityExhausted ? "upstream_error" : "lane_unavailable",
                   message: detail.message,
                   trace_id: correlationTraceId(req),
                   provider_raw: detail.provider_raw,

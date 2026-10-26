@@ -166,6 +166,8 @@ export interface PipelineRunResult {
    *  the stream/collect has drained it carries the final cost. Present even on a
    *  routing failure (final.status === "error"), so a failed face still records. */
   readonly decision: DecisionRecord;
+  /** Structured routing failure available before committing streaming headers. */
+  readonly routingFailure?: Error | null;
   /** Native protocol passthrough (#217): true when the routing core forwarded the
    *  request untranslated and `collect()` returns the upstream's VERBATIM native
    *  response. The route reads this to BYPASS transformResponseOut and hand the

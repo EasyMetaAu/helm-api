@@ -336,6 +336,31 @@ export const DecisionRecordSchema = z.object({
     .enum(["completed", "incomplete", "failed", "client_aborted", "truncated"])
     .nullable()
     .default(null),
+  // Lifecycle evidence only: never payloads, arbitrary abort reasons or credentials.
+  // A successful write is not an acknowledgement from the remote client.
+  stream_diagnostics: z
+    .object({
+      gateway_revision: z.string().max(64).nullable(),
+      downstream_transport: z.enum(["http", "websocket"]),
+      abort_source: z
+        .enum([
+          "downstream_disconnect",
+          "request_signal",
+          "request_timeout",
+          "concurrency_lease_lost",
+          "unattributed_abort",
+        ])
+        .nullable(),
+      terminal_event: z.string().max(64).nullable(),
+      terminal_write_succeeded: z.boolean(),
+      received_events: z.number().int().nonnegative(),
+      written_events: z.number().int().nonnegative(),
+      last_event_elapsed_ms: z.number().nonnegative().nullable(),
+      last_write_elapsed_ms: z.number().nonnegative().nullable(),
+      failure_phase: z.enum(["upstream_read", "registry_commit", "downstream_write"]).nullable(),
+      transport_error_code: z.string().max(64).nullable(),
+    })
+    .optional(),
   // Wall-clock generation window of the SERVED stream (ms): the span from the
   // first to the last forwarded chunk. Stamped by the GATEWAY post-stream (same
   // place as `usage`, via backfillCompletionCost) — the routing core stays

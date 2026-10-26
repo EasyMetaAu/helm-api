@@ -40,6 +40,157 @@ function pool(account: OAuthPoolMember) {
 }
 afterEach(() => vi.useRealTimers());
 
+describe("Codex explicit model capacity rejection", () => {
+  const message = "Selected model is at capacity. Please try a different model.";
+  const capacity = `data: ${JSON.stringify({
+    type: "response.failed",
+    response: {
+      error: { message },
+      status: "failed",
+    },
+  })}\n\n`;
+  const completed =
+    'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n';
+
+  it.each([
+    "sse",
+    "http429",
+    "http503",
+    "http529",
+    "mixed",
+  ])("retries %s three times on the original account and then suggests switching", async (transport) => {
+    vi.useFakeTimers();
+    let sends = 0;
+    const sibling = vi.fn(async function* () {
+      yield output + completed;
+    });
+    const a = member(async function* () {});
+    a.client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => "Bearer test",
+      },
+      fetch: async () => {
+        sends += 1;
+        return transport.startsWith("http") || (transport === "mixed" && sends % 2 === 1)
+          ? new Response(JSON.stringify({ error: { message } }), {
+              status: transport.startsWith("http") ? Number(transport.slice(4)) : 429,
+            })
+          : new Response(preamble + capacity, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const client = createOAuthPoolClient({
+      members: [a, { ...member(sibling), account: "b" }],
+      codexCapacityRetries: true,
+      nativeStreamPreambleClassifier: preOutputClassifierFor("openai_responses"),
+    });
+    const run = drain(client.nativePassthroughStream!(body));
+    const rejected = expect(run).rejects.toThrow(
+      "Retried 3 times on the same account. Try another account manually.",
+    );
+    await vi.advanceTimersByTimeAsync(9_000);
+    await rejected;
+    expect(sends).toBe(4);
+    expect(sibling).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stateful continuation on its account and stops on the first successful retry", async () => {
+    vi.useFakeTimers();
+    const open = vi.fn(async function* () {
+      yield open.mock.calls.length === 1 ? preamble + capacity : output + completed;
+    });
+    const sibling = vi.fn(async function* () {
+      yield output + completed;
+    });
+    const client = createOAuthPoolClient({
+      members: [member(open), { ...member(sibling), account: "b" }],
+      codexCapacityRetries: true,
+      nativeStreamPreambleClassifier: preOutputClassifierFor("openai_responses"),
+    });
+    const run = drain(
+      client.nativePassthroughStream!(
+        { ...body, previous_response_id: "resp_owned" },
+        {
+          statefulAccount: "a",
+        },
+      ),
+    );
+    const succeeded = expect(run).resolves.toContain(output + completed);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await succeeded;
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(sibling).not.toHaveBeenCalled();
+  });
+
+  it("does not retry capacity failures after meaningful output", async () => {
+    const open = vi.fn(async function* () {
+      yield output;
+      yield capacity;
+    });
+    const client = createOAuthPoolClient({
+      members: [member(open)],
+      codexCapacityRetries: true,
+      nativeStreamPreambleClassifier: preOutputClassifierFor("openai_responses"),
+    });
+    expect((await drain(client.nativePassthroughStream!(body))).join("")).toContain(message);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops capacity backoff on cancellation without sending again", async () => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    const open = vi.fn(async function* () {
+      yield preamble + capacity;
+    });
+    const client = createOAuthPoolClient({
+      members: [member(open)],
+      codexCapacityRetries: true,
+      nativeStreamPreambleClassifier: preOutputClassifierFor("openai_responses"),
+    });
+    const run = drain(client.nativePassthroughStream!(body, { signal: abort.signal }));
+    const cancelled = expect(run).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(100);
+    abort.abort();
+    await cancelled;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    output,
+    'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"write_file","call_id":"call_1","arguments":""}}\n\n',
+  ])("does not retry unary aggregation after output or tool work: %s", async (prefix) => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(
+      async () =>
+        new Response(prefix + capacity, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const account = member(async function* () {});
+    account.client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => "Bearer test",
+      },
+      fetch,
+    });
+    const client = createOAuthPoolClient({ members: [account], codexCapacityRetries: true });
+    const run = client.chatCompletion({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const rejected = expect(run).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(9_000);
+    await rejected;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("bounded pre-output overload recovery", () => {
   it("shares two retries between HTTP rejection and in-band failure", async () => {
     vi.useFakeTimers();

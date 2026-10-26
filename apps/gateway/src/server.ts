@@ -1397,6 +1397,7 @@ export async function synthesizeOAuthProviders(
     // serving account (Stage 3 telemetry) — a non-secret structured log line.
     let pool = createOAuthPoolClient({
       members,
+      codexCapacityRetries: providerId === "openai-codex",
       now: () => Date.now(),
       selectionStrategy,
       onSelect: (account, selection) => {

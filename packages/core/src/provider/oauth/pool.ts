@@ -24,6 +24,11 @@ import {
 } from "@helm/shared";
 import { isUserMessageRequest } from "../../queue/user-turn.js";
 import { AnthropicIdentityError, anthropicRequestAccountUuid } from "../anthropic-identity.js";
+import {
+  CodexCapacityRetryExhaustedError,
+  isCodexCapacityRejection,
+  waitForCodexCapacityRetry,
+} from "../codex-capacity.js";
 import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
@@ -222,6 +227,8 @@ export type OAuthRateLimitScope =
 
 export interface OAuthPoolDeps {
   members: OAuthPoolMember[];
+  /** Codex's explicit model-capacity refusal: three same-account retries, then advice only. */
+  codexCapacityRetries?: boolean;
   // Injected clock (default Date.now) so the LRU cursor is testable.
   now?: () => number;
   // Native CLI safety: bind repeated requests with the same client/session
@@ -1214,13 +1221,27 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       }
       tried.add(entry.member.account);
       try {
-        const result = await call(entry.member.client, entry);
+        const capacityBudget = overloadRetry ?? { attempt: 0 };
+        const result = await (async () => {
+          for (;;) {
+            try {
+              return await call(entry.member.client, entry);
+            } catch (error) {
+              if (!deps.codexCapacityRetries || !isCodexCapacityRejection(error)) throw error;
+              await waitForCodexCapacityRetry(error, capacityBudget, signal, sleep);
+              if (!eligibleEntries(now(), undefined, model).includes(entry)) {
+                throw new CodexCapacityRetryExhaustedError(error, capacityBudget.attempt - 1, true);
+              }
+            }
+          }
+        })();
         if (stickyKey?.startsWith("previous_response_id:")) {
           rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
         }
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
+        if (err instanceof CodexCapacityRetryExhaustedError) throw err;
         if (overloadRetry?.exhausted) throw err;
         if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
@@ -1298,6 +1319,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         if (iterator) await iterator.return?.().catch(() => {});
         const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
         signal?.throwIfAborted();
+        if (deps.codexCapacityRetries && isCodexCapacityRejection(err)) {
+          await waitForCodexCapacityRetry(err, budget, signal, sleep);
+          if (!eligibleEntries(now(), undefined, model).includes(entry)) {
+            throw new CodexCapacityRetryExhaustedError(err, budget.attempt - 1, true);
+          }
+          // Explicit rejection before meaningful output: preserve the same account
+          // and continuation, including strict affinity. Never select a sibling.
+          continue;
+        }
+        if (err instanceof CodexCapacityRetryExhaustedError) throw err;
         if (budget.exhausted) throw err;
         if (isInBandOverload(err) && !statefulContinuation) {
           if (!(await waitForOverloadRetry(budget, { reason: "in_band_overload", signal })))

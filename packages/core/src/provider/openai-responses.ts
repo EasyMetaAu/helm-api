@@ -48,7 +48,8 @@ import {
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
 import { type CodexRecoveryHistory, createCodexBufferedTurn } from "./codex-buffered-recovery.js";
-import { CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE } from "./failover-guard.js";
+import { isCodexCapacityRejection } from "./codex-capacity.js";
+import { CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE, preOutputClassifierFor } from "./failover-guard.js";
 import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
@@ -400,6 +401,7 @@ function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never
     error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
   if (
     signal?.aborted ||
+    (isRecord(raw?.error) && raw.error.code === CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE) ||
     raw?.type === "error" ||
     raw?.type === "response.failed" ||
     raw?.type === "response.incomplete"
@@ -3546,6 +3548,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             let fallbackToHttp = false;
             let sendingRequest = false;
             let outputStarted = false;
+            let bufferedOutputObserved = false;
             let receivedAnyFrame = false;
             const preambleFrames: string[] = [];
             const retryBufferedClose = async (error?: unknown): Promise<boolean> => {
@@ -3666,6 +3669,12 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   }
                   if (event.kind === "error") {
                     fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                    if (bufferedOutputObserved && isCodexCapacityRejection(event.error)) {
+                      throw responseCreateOutcomeUnknown(
+                        lease.connection,
+                        "after_send_after_output",
+                      );
+                    }
                     if (replayFailure) throw replayFailure;
                     if (
                       !outputStarted &&
@@ -3713,6 +3722,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                     rememberResponseWebSocketSession(event.responseId, sessionId);
                   }
                   if (buffered) {
+                    bufferedOutputObserved ||=
+                      preOutputClassifierFor("openai_responses")?.classify(received.text) ===
+                      "output";
                     try {
                       buffered.append(event.frame, event.data);
                     } catch (error) {
@@ -5341,6 +5353,8 @@ export async function aggregateResponsesStream(
     let cacheCreation = 0;
     let reasoning = "";
     let completed = false;
+    let outputObserved = false;
+    const outputClassifier = preOutputClassifierFor("openai_responses");
     // call_id -> accumulated arguments, preserving first-seen order.
     const toolOrder: string[] = [];
     const toolById = new Map<string, { id: string; name: string; arguments: string }>();
@@ -5381,12 +5395,17 @@ export async function aggregateResponsesStream(
       options.signal,
     )) {
       const type = evt.type;
+      outputObserved ||= outputClassifier?.classify(JSON.stringify(evt)) === "output";
       if (
         type === "error" ||
         type === "response.failed" ||
         (type === "response.incomplete" && !allowIncomplete)
       ) {
-        throw responseEventError(evt);
+        const error = responseEventError(evt);
+        if (outputObserved && isCodexCapacityRejection(error)) {
+          throw httpResponseOutcomeUnknown(error, "after_response_after_output");
+        }
+        throw error;
       }
       if (type === "response.created") {
         const response = (evt.response ?? {}) as Record<string, unknown>;

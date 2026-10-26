@@ -509,6 +509,7 @@ export { ArkMediaError, type ArkMediaOutcome, createArkMediaClient } from "./pro
 export * from "./provider/bailian-asr.js";
 export * from "./provider/bailian-media.js";
 export { createBailianSpeechClient } from "./provider/bailian-speech.js";
+export { CodexCapacityRetryExhaustedError } from "./provider/codex-capacity.js";
 export type { EnvironmentTimezoneResolver } from "./provider/environment-timezone.js";
 export {
   type ChunkClass,
