@@ -14,6 +14,7 @@ import {
   type UpsertSessionRevisionInput,
   UpstreamError,
 } from "@helm/core";
+import { makeHelmError } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import {
@@ -235,6 +236,247 @@ function makeRecord(over: { capturePayloads?: boolean } = {}): {
 }
 
 const REQ = { model: "auto", input: "Say hello", max_output_tokens: 16 };
+
+describe("Responses incident recovery boundaries", () => {
+  it.each([
+    true,
+    false,
+  ])("returns cooldown headers for a real pipeline routing failure (stream=%s)", async (stream) => {
+    const release = vi.fn().mockResolvedValue(undefined);
+    const { record, insert } = makeRecord();
+    const coordinator = createRuntimeMemoryCoordinator({ capacityBytes: () => 1_000_000 });
+    const memoryAdmission = createBodyMemoryAdmission({
+      coordinator,
+      activeRequestBytes: 1,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+    });
+    const route: RouteFn = async () => ({
+      body: null,
+      stream: null,
+      final: { status: "error" },
+      decision: {
+        ...(fakeDecision() as DecisionRecord),
+        final: {
+          model_alias: null,
+          provider_model: null,
+          status: "error",
+          error_reason: "lane_unavailable",
+        },
+      },
+      error: makeHelmError({
+        error_class: "lane_unavailable",
+        message: "original account unavailable",
+        trace_id: "trace-1",
+        provider_raw: {
+          error: { code: "response_create_not_sent" },
+          recovery: {
+            safe_to_replay: true,
+            lifecycle_phase: "before_send",
+            reason: "oauth_affinity_unavailable",
+            retry_after_ms: 265_383,
+          },
+        },
+      }),
+    });
+    const { deps } = makeDeps({
+      record,
+      memoryAdmission,
+      transformRequestOut: () => ({
+        stream,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      run: createMessagesPipeline(route, "openai_responses").run,
+      concurrencyGate: { acquire: async () => ({ ok: true, release }) },
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream }),
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("266");
+    await response.text();
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+    expect(coordinator.reservedBytes).toBe(0);
+  });
+  it.each([
+    true,
+    false,
+  ])("returns a standard cooldown response before sending stream=%s", async (stream) => {
+    const release = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockRejectedValue(
+      new PipelineError("lane_unavailable", "original account is unavailable", "trace-1", {
+        error: { code: "response_create_not_sent" },
+        recovery: {
+          safe_to_replay: true,
+          lifecycle_phase: "before_send",
+          reason: "oauth_affinity_unavailable",
+          retry_after_ms: 265_383,
+        },
+      }),
+    );
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({ stream, model: "auto", metadata: {} }),
+      run,
+      concurrencyGate: { acquire: async () => ({ ok: true, release }) },
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream }),
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("266");
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "response_create_not_sent",
+        recovery: {
+          safe_to_replay: true,
+          lifecycle_phase: "before_send",
+          reason: "oauth_affinity_unavailable",
+          retry_after_ms: 265_383,
+        },
+      },
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not advertise cooldown recovery for a post-send outcome unknown", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      run: async () => {
+        throw new PipelineError("lane_unavailable", "outcome unknown", "trace-1", {
+          error: { code: "response_create_outcome_unknown" },
+          recovery: { reason: "oauth_affinity_unavailable", retry_after_ms: 200_000 },
+        });
+      },
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(await response.text()).toContain("response_create_outcome_unknown");
+  });
+
+  it("records upstream terminal observation separately from downstream writing", async () => {
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await response.text();
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: {
+        stream_diagnostics: {
+          downstream_transport: "http",
+          abort_source: null,
+          terminal_event: "response.completed",
+          terminal_write_succeeded: true,
+          received_events: 2,
+          written_events: 2,
+          failure_phase: null,
+        },
+      },
+    });
+  });
+
+  it("records a downstream disconnect without persisting an arbitrary abort reason", async () => {
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      run: async (_ir, _identity, signal) => ({
+        decision: fakeDecision(),
+        collect: async () => ({}),
+        streamIR: async function* () {
+          yield { type: "response.created", sequence_number: 0 };
+          await new Promise<void>((_resolve, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      }),
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel("private abort text must not be stored");
+    await vi.waitFor(() => expect(insert).toHaveBeenCalledTimes(1));
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: {
+        stream_diagnostics: {
+          abort_source: "downstream_disconnect",
+          terminal_event: null,
+          terminal_write_succeeded: false,
+        },
+      },
+    });
+    expect(JSON.stringify(insert.mock.calls)).not.toContain("private abort text");
+  });
+
+  it.each([
+    ["request_timeout", "request_timeout", "timeout"],
+    ["concurrency_lease_lost", "concurrency_lease_lost", "concurrency_lease_lost"],
+    ["private request cancellation", "request_signal", "client_abort"],
+    ["unattributed", "unattributed_abort", "client_abort"],
+    ["reset", null, "upstream_error"],
+  ])("preserves stream failure evidence for %s", async (reason, source, errorReason) => {
+    const abort = new AbortController();
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        if (reason === "reset") {
+          throw new Error("upstream disconnected", {
+            cause: Object.assign(new Error("private transport detail"), { code: "ECONNRESET" }),
+          });
+        }
+        if (reason !== "unattributed") abort.abort(reason);
+        throw new DOMException("stream stopped", "AbortError");
+      },
+    });
+    const response = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      signal: abort.signal,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await response.text();
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: {
+        final: { status: "error", error_reason: errorReason },
+        stream_diagnostics: {
+          abort_source: source,
+          terminal_event: null,
+          terminal_write_succeeded: false,
+          failure_phase: "upstream_read",
+          transport_error_code: reason === "reset" ? "ECONNRESET" : null,
+        },
+      },
+    });
+    expect(JSON.stringify(insert.mock.calls)).not.toContain("private ");
+  });
+});
 
 function expectNativeCarrier(
   value: unknown,

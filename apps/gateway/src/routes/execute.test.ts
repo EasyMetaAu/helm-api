@@ -1,6 +1,7 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import {
   AnthropicIdentityError,
+  CodexCapacityRetryExhaustedError,
   CodexResponsesBeforeSendError,
   createAnthropicClient,
   createCircuitBreaker,
@@ -56,6 +57,75 @@ function req(over: Partial<InternalRequest> = {}): InternalRequest {
     ...over,
   };
 }
+
+it("preserves exhausted Codex capacity advice without switching account or candidate", async () => {
+  const error = new CodexCapacityRetryExhaustedError(
+    new UpstreamError(
+      "upstream_error",
+      "Selected model is at capacity. Please try a different model.",
+    ),
+    3,
+  );
+  const head: ProviderClient = {
+    chatCompletion: vi.fn().mockRejectedValue(error),
+    chatCompletionStream: vi.fn(),
+    // biome-ignore lint/correctness/useYield: failure before output
+    nativePassthroughStream: async function* () {
+      throw error;
+    },
+  };
+  const tail: ProviderClient = {
+    chatCompletion: vi.fn(),
+    chatCompletionStream: vi.fn(),
+    nativePassthroughStream: vi.fn(),
+  };
+  const execute = createExecute({
+    defaultProvider: head,
+    providers: new Map([
+      ["codex-a", head],
+      ["codex-b", tail],
+    ]),
+    registry: protocolRegistry({
+      a: {
+        providerName: "codex-a",
+        providerModel: "gpt-6-astra",
+        targetProviderProtocol: "openai_responses",
+      },
+      b: {
+        providerName: "codex-b",
+        providerModel: "gpt-6.1-sol",
+        targetProviderProtocol: "openai_responses",
+      },
+    }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => true,
+  });
+  const result = await execute(
+    plan(["a", "b"]),
+    req({
+      protocol: "openai_responses",
+      stream: true,
+      native_request: createNativePassthroughCarrier({
+        protocol: "openai_responses",
+        body: { model: "auto", input: [], stream: true },
+        headers: {},
+      }),
+    }),
+  );
+  expect(result.final).toMatchObject({
+    status: "error",
+    error: {
+      error_class: "upstream_error",
+      message: error.message,
+      provider_raw: { retry_count: 3, advice: "switch_account" },
+    },
+  });
+  expect(result.attempts).toHaveLength(1);
+  expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+});
 
 describe("detectRequestModalities — remote media-as-document routing (GEM-02)", () => {
   it("routes an audio/* document part to the audio modality, not document", () => {

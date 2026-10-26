@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-10-26 · Codex 容量重试、账号冷却与断流证据（docs/02、04、05、07）
+
+- **容量拒绝**：仅对 Codex 在产生实际输出前明确返回的 `Selected model is at capacity. Please try a different model.` 重试同账号、同模型；首次加最多 3 次重试，共享现有 HTTP/SSE 重试预算，默认等待 1、3、5 秒，沿用有界 Retry-After。耗尽后返回 `codex_model_capacity_exhausted` 并建议手动更换账号，不自动切换账号或后续候选。
+- **不可重放边界**：文本、推理或工具工作已经出现、发送结果不明、认证/配额/请求错误均不因容量文案重试；覆盖流式首输出守卫、WebSocket 缓冲与非流式聚合。请求取消会中断退避，账号在等待中失去可用资格时提前停止。
+- **账号冷却**：只对可信的发送前 `oauth_affinity_unavailable` 返回 HTTP 429、向上取整的 `Retry-After` 和原恢复字段；真实 pipeline 在提交流响应头前暴露路由失败。错误仍记录遥测，准入资源释放一次；不放宽续接账号约束，不保证外部客户端遵循等待时间。
+- **断流证据**：DecisionRecord 新增可选 `stream_diagnostics`，记录部署 revision、HTTP/WS、取消来源、上游终态、写出结果、阶段、事件计数及允许的传输错误码；不记录任意取消原因、正文或凭证，无数据库迁移。写入成功不证明客户端收到，历史 `client_abort` 也不能据此反推为用户主动取消。
+- **发布准备**：v0.30.54 已执行 `pnpm release:prepare 0.30.54`，官方稳定快照仍为 Grok 1.0.70、Claude Code 2.1.310、Codex 0.164.0 及对应 tag 模型目录；没有扩展协议或身份白名单。
+- **验证与限制**：先复现失败再修复，并以真实 pipeline、模拟上游和协议回归验证；此条记录本地修复，不代表生产部署或网络故障消失。无终态且执行结果不明的请求继续拒绝自动重放，完整历史恢复继续遵循现有协议。
+
 ## 2026-10-26 · Codex 客户端身份与版本解耦（docs/06、07）
 
 - **决定**：Codex 入站限制只匹配完整产品标记，忽略大小写；Desktop 的空格、下划线、连字符写法归为同一客户端。版本是可选的 HTTP token，不按数字、日期或 semver 判断准入，不维护版本白名单。
@@ -78,16 +87,9 @@
 - **实测修正**：Seed3D 的 running 响应还包含 service_tier、execution_expires_after、draft、priority；新增严格字段校验与真实形状回归，修复 Helm 误报 502，未放开未知字段。
 - **限制**：组合参考显式要求 omni_reference_task_type=reference，避免默认自动选入未支持的编辑/延长任务。本轮四次批准实测：3D 基础产物通过，Flash/Pro/Seedance 额度受限；3D 请求 low、上游回传 medium，档位语义尚未验收，不盲目改字段或重试付费创建。实际账单、生产未验收。任务明细与证据见 docs/ark-media-development-plan.md。
 
-## 2026-10-13 · API key 客户端入口限制（docs/06、07、11）
-
-- **家族 lane 修正**：模型家族命名的 lane 也按当前客户端过滤；auto、通用档位、任务与自定义通用名称保留。只依公共 lane 名判断家族，不沿执行链推断；未知命名仍按通用 lane，操作者自定义别名应遵循家族前缀。详情与列表一致，不改路由链和 fallback。
-- **模型发现补充**：按用户确认的客户端→模型家族规则过滤具体模型，保留 auto/lane 和内部 fallback；以真实 wire model 识别别名。此为展示规则，不新增手工模型调用权限。过滤在基础列表缓存之后执行，Codex 原生列表内容与 ETag 同步；受限的非 Codex 请求不获取 Codex 专用目录。
-- **Opus 审查修正**：无效或新版未知策略读取为只读空名单，单 key 拒绝而非全站启动失败，管理员可修复；严格写入校验不变。Postgres 区分 SQL NULL 与 JSON null。拒绝日志不收集任意 UA 原文；MCP embedding 明确在策略范围外。
-- **独立策略**：`client_policy` 默认为 null；开启须选择非空客户端集合。仅在鉴权后校验入口 User-Agent，不绑定模型、provider 或账号，不改分类与执行 fallback。策略严格校验，损坏存储不自动降级为不限。
-- **生效范围**：模型发现、所有已实现推理/计数/生命周期接口及 WebSocket 握手；Responses 每轮重查。已接纳流与 Realtime session 不强制中断；跨进程更新受鉴权缓存 TTL（默认 30 秒）约束。
-- **证据边界**：UA 可伪造，不承诺防封号。Claude Desktop 仅连接测试取样，Code/Cowork 未完整验证；Grok 标记仅覆盖 CLI。部署不替既有 key 开启。详见 `docs/api-key-client-policy.md`。
-
 ## 更早历史总览
+
+2026-10-13：API key 客户端策略在鉴权后按入口校验，模型发现按家族过滤；损坏策略拒绝且保留账号、权限与续接隔离，UA 不作为可信身份，完整范围与决定见 Git 历史。
 
 2026-10-12：Grok 价格目录按官方模型卡区分缓存与高上下文档位；媒体费用与历史重计价仍按既有边界处理，完整记录见 Git 历史。
 

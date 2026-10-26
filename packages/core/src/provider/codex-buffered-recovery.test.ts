@@ -91,6 +91,31 @@ function setup(turns: object[][][], capacityBytes = 1_000_000) {
 }
 
 describe("Codex buffered stream recovery", () => {
+  it("does not expose a retryable capacity rejection after buffered output", async () => {
+    const s = setup([
+      [
+        [
+          created("started"),
+          text("already generated"),
+          {
+            type: "error",
+            status: 503,
+            error: {
+              message: "Selected model is at capacity. Please try a different model.",
+            },
+          },
+        ],
+      ],
+    ]);
+    await expect(s.run()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+      },
+    });
+    expect(s.sockets[0]?.sent).toHaveLength(1);
+    await s.client.closeResponsesWebSocketSession!("session");
+    expect(s.admission.reservedBytes).toBe(0);
+  });
   it("rejects incomplete additional_tools declarations", () => {
     const admission = createResponseWorkAdmission({
       capacityBytes: 1000,

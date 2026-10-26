@@ -150,9 +150,10 @@ export function overloadRetryDelayMs(args: {
   status: number;
   attempt: number;
   retryAfter?: string | null;
+  backoffMs?: readonly number[];
 }): number | null {
   if (!OVERLOAD_STATUSES.has(args.status)) return null;
-  const fallback = OVERLOAD_BACKOFF_MS[args.attempt];
+  const fallback = (args.backoffMs ?? OVERLOAD_BACKOFF_MS)[args.attempt];
   if (fallback === undefined) return null;
   const retryAfterMs = numericRetryAfterMs(args.retryAfter);
   if (retryAfterMs !== null) return Math.min(retryAfterMs, OVERLOAD_MAX_DELAY_MS);
@@ -213,6 +214,7 @@ export async function waitForOverloadRetry(
     signal?: AbortSignal;
     sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
     retryAfter?: string | null;
+    backoffMs?: readonly number[];
   },
 ): Promise<boolean> {
   opts.signal?.throwIfAborted();
@@ -220,9 +222,10 @@ export async function waitForOverloadRetry(
     status: 503,
     attempt: budget.attempt,
     retryAfter: opts.retryAfter,
+    backoffMs: opts.backoffMs,
   });
-  if (delay === null) budget.exhausted = true;
-  else budget.attempt += 1;
+  budget.exhausted = delay === null;
+  if (delay !== null) budget.attempt += 1;
   try {
     budget.onRetry?.({
       reason: opts.reason,

@@ -642,6 +642,64 @@ function codexResponsesRecovery(providerRaw: unknown): Record<string, unknown> |
   };
 }
 
+// Only a trusted, proven pre-send affinity refusal can advertise safe retry.
+// Never turn a post-send failure or arbitrary upstream marker into HTTP 429.
+function affinityCooldown(err: unknown): Record<string, unknown> | undefined {
+  const raw =
+    err instanceof PipelineError && err.error_class === "lane_unavailable"
+      ? err.provider_raw
+      : err instanceof UpstreamError && isCodexResponsesBeforeSendError(err)
+        ? err.providerRaw
+        : null;
+  if (codexResponsesLifecycleFailureCode(raw) !== "response_create_not_sent") return undefined;
+  const recovery = codexResponsesRecovery(raw);
+  return recovery?.reason === "oauth_affinity_unavailable" ? recovery : undefined;
+}
+
+function cooldownResponse(c: Context<AppEnv>, err: unknown): Response | null {
+  const recovery = affinityCooldown(err);
+  if (recovery === undefined) return null;
+  const seconds = Math.ceil((recovery.retry_after_ms as number) / 1000);
+  c.header("retry-after", String(seconds));
+  c.header("cache-control", "no-store");
+  return c.json(
+    {
+      error: {
+        type: "rate_limit_error",
+        code: "response_create_not_sent",
+        message: `The original Codex account is temporarily unavailable. Retry after ${seconds} seconds; this request was not sent.`,
+        trace_id: c.get("trace_id"),
+        recovery,
+      },
+    },
+    429,
+  );
+}
+
+function streamTransportErrorCode(error: unknown): string | null {
+  const allowed = new Set([
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "ERR_HTTP2_STREAM_ERROR",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "EPIPE",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+  ]);
+  let current = error;
+  let code: string | null = null;
+  for (let depth = 0; depth < 6 && current !== null && typeof current === "object"; depth += 1) {
+    const item = current as { code?: unknown; cause?: unknown };
+    if (typeof item.code === "string" && allowed.has(item.code)) code = item.code;
+    current = item.cause;
+  }
+  return code;
+}
+
 function scrubUntrustedRecoveryCode(data: string): string | null {
   let changed = false;
   try {
@@ -1440,11 +1498,42 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       } catch (err) {
         initialError = err;
       }
+      const cooldown = cooldownResponse(c, initialError ?? initialResult?.routingFailure);
+      if (cooldown !== null) {
+        try {
+          if (captureRecord && initialResult !== null) {
+            stampServingAccount(initialResult.decision, initialResult.servingAccount ?? null);
+            await recordServed(
+              captureRecord,
+              {
+                requestId,
+                accountId: identity.accountId,
+                apiKeyId: identity.keyId,
+                decision: initialResult.decision,
+                requestJson,
+                responseJson: null,
+                timedOut: requestTimedOut(c),
+                upstreamRequestJson: initialResult.upstreamRequest ?? null,
+              },
+              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+            );
+          }
+        } finally {
+          try {
+            await releaseConcurrency?.();
+          } finally {
+            await releaseMemory?.();
+          }
+        }
+        return cooldown;
+      }
       return streamSSE(c, async (sse) => {
         const releaseConcurrencyOnce = onceAsync(releaseConcurrency);
         const releaseMemoryOnce = onceAsync(releaseMemory);
         let releaseCaptureOnAbort = () => {};
+        let downstreamAborted = false;
         sse.onAbort(() => {
+          downstreamAborted = true;
           streamAbort.abort();
           // The callback can remain blocked in a provider read; make admission
           // capacity available immediately and let the stream finally do the rest.
@@ -1477,6 +1566,27 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           sessionTerminalCapture?.release();
         };
         const result = initialResult;
+        const streamStartedAt = performance.now();
+        const revision = process.env.HELM_GIT_SHA;
+        const diagnostics: NonNullable<DecisionRecord["stream_diagnostics"]> = {
+          gateway_revision: revision && /^[a-f0-9]{7,64}$/i.test(revision) ? revision : null,
+          downstream_transport:
+            deps.responsesWebSocketSessionProof !== undefined &&
+            c.req.header(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER) ===
+              deps.responsesWebSocketSessionProof
+              ? "websocket"
+              : "http",
+          abort_source: null,
+          terminal_event: null,
+          terminal_write_succeeded: false,
+          received_events: 0,
+          written_events: 0,
+          last_event_elapsed_ms: null,
+          last_write_elapsed_ms: null,
+          failure_phase: null,
+          transport_error_code: null,
+        };
+        let streamPhase: NonNullable<typeof diagnostics.failure_phase> = "upstream_read";
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
         // Gated on an event boundary so it can never split a verbatim-relayed frame.
@@ -1540,8 +1650,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             if (scrubbedData !== null) frame.data = scrubbedData;
             const raw = scrubbedData === null ? frame.raw : undefined;
             const serializedFrame = raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`;
+            diagnostics.received_events += 1;
+            diagnostics.last_event_elapsed_ms = performance.now() - streamStartedAt;
             captured?.push(serializedFrame);
             const terminalEvent = isResponsesTerminalEvent(frame.event);
+            if (terminalEvent) diagnostics.terminal_event = frame.event;
             if (terminalEvent) sessionTerminalCapture?.push(serializedFrame);
             const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
             if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
@@ -1562,7 +1675,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                   streamStatus === "cancelled" ? "failed" : (streamStatus ?? "truncated"),
                 )
               : null;
+            streamPhase = "registry_commit";
             await terminalCommit;
+            streamPhase = "downstream_write";
             if (raw !== undefined) {
               await sse.write(raw);
               lastWrite = raw;
@@ -1570,6 +1685,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               await sse.writeSSE({ event: frame.event, data: frame.data });
               lastWrite = "\n\n"; // writeSSE emits a complete frame — always a boundary
             }
+            // Hono may resolve a write after its writer has been cancelled.
+            if (!sse.aborted) {
+              diagnostics.written_events += 1;
+              diagnostics.last_write_elapsed_ms = performance.now() - streamStartedAt;
+              if (terminalEvent) diagnostics.terminal_write_succeeded = true;
+            }
+            streamPhase = "upstream_read";
           }
         } catch (err) {
           // A client disconnect / abort is benign (docs/02): emit NO error frame.
@@ -1578,6 +1700,20 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // error event DIRECTLY into the stream. We CANNOT throw here (the stream
           // has already started; onError would never see it).
           cancellationReason = requestCancellationReason(streamAbort.signal, err);
+          diagnostics.failure_phase = streamPhase;
+          diagnostics.transport_error_code = streamTransportErrorCode(err);
+          diagnostics.abort_source =
+            cancellationReason === REQUEST_TIMEOUT_REASON
+              ? "request_timeout"
+              : cancellationReason === CONCURRENCY_LEASE_LOST_REASON
+                ? "concurrency_lease_lost"
+                : downstreamAborted
+                  ? "downstream_disconnect"
+                  : requestSignal(c).aborted
+                    ? "request_signal"
+                    : cancellationReason === "client_abort"
+                      ? "unattributed_abort"
+                      : null;
           if (cancellationReason !== null) {
             // Cancellation ends the wire without a fabricated terminal event.
           } else {
@@ -1639,6 +1775,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           }
         } finally {
           await releaseConcurrencyOnce();
+          if (result !== null) result.decision.stream_diagnostics = diagnostics;
           const streamOutcome =
             result === null
               ? null
@@ -1706,6 +1843,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
       stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
     } catch (err) {
+      const cooldown = cooldownResponse(c, err);
+      if (cooldown !== null) return cooldown;
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
@@ -1750,6 +1889,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
         );
       }
+      const cooldown = cooldownResponse(c, err);
+      if (cooldown !== null) return cooldown;
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
