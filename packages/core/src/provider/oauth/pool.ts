@@ -17,6 +17,7 @@
 
 import { createHash } from "node:crypto";
 import {
+  appendMutationList,
   isNativePassthroughCarrier,
   type NativePassthroughInput,
   nativePassthroughBody,
@@ -29,6 +30,7 @@ import {
   isCodexCapacityRejection,
   waitForCodexCapacityRetry,
 } from "../codex-capacity.js";
+import { hasStandaloneCodexHistory } from "../codex-turn-state-recovery.js";
 import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
@@ -915,6 +917,42 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     };
   }
 
+  // Only a known unavailable routing hint is recoverable, before any member call.
+  // The old account remains excluded for this request even if its timer expires.
+  function recoverNativeTurnState(
+    input: NativePassthroughInput,
+    opts: ProviderCallOptions | undefined,
+  ) {
+    const unchanged = { input, opts, excluded: undefined as ReadonlySet<string> | undefined };
+    if (
+      nativeProtocolProfile !== "codex_responses" ||
+      !isNativePassthroughCarrier(input) ||
+      input.protocol !== "openai_responses" ||
+      opts?.statefulAccount ||
+      headerValue(input.headers, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER) !== null ||
+      !hasStandaloneCodexHistory(input.body)
+    )
+      return unchanged;
+    const key = stickyKeyFromNative(input);
+    if (!key?.startsWith("x-codex-turn-state:")) return unchanged;
+    const sticky = stickySessions.get(key),
+      nowMs = now();
+    if (!sticky || sticky.expiresAt <= nowMs) return unchanged;
+    const eligible = eligibleEntries(nowMs, undefined, modelFromNative(input));
+    if (eligible.some((entry) => entry.member.account === sticky.account) || eligible.length === 0)
+      return unchanged;
+    const headers = Object.fromEntries(
+      Object.entries(input.headers).filter(([name]) => name.toLowerCase() !== "x-codex-turn-state"),
+    );
+    appendMutationList(input.mutations, "headers_dropped", ["x-codex-turn-state"]);
+    input.mutations.codex_turn_state_recovered = true;
+    return {
+      input: { ...input, headers },
+      opts: { ...opts, resetCodexTurnState: true },
+      excluded: new Set([sticky.account]),
+    };
+  }
+
   function stickyUnavailableError(
     source: string,
     retryAfterMs: number,
@@ -1200,8 +1238,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     retryForbiddenWithoutParking = false,
     overloadRetry?: ProviderCallOptions["overloadRetry"],
     signal?: AbortSignal,
+    excluded?: ReadonlySet<string>,
   ): Promise<R> {
-    const tried = new Set<string>();
+    const tried = new Set<string>(excluded);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
     let lastErr: unknown;
     let waitedForStickyAccount = false;
@@ -1298,8 +1337,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // first raw chunk" into "commit on first real output", so the in-band failure fails
     // over to a sibling account instead of committing the doomed stream.
     preambleClassifier?: PreOutputClassifier | null,
+    excluded?: ReadonlySet<string>,
   ): AsyncIterable<string> {
-    const tried = new Set<string>([firstEntry.member.account]);
+    const tried = new Set<string>([...(excluded ?? []), firstEntry.member.account]);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
     let entry = firstEntry;
     let lastErr: unknown;
@@ -1527,6 +1567,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // rotation + onSelect fire on the call turn exactly like the other methods. A member
       // missing the method throws a NON-transient error → surfaced at once (fail-closed,
       // never silently routed to a translating sibling), not retried.
+      const recovery = recoverNativeTurnState(body, opts);
+      body = recovery.input;
+      opts = recovery.opts;
       const stickyKey = stickyKeyFromNative(body);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       opts = { ...opts, overloadRetry: opts?.overloadRetry ?? { attempt: 0 } };
@@ -1544,6 +1587,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         false,
         opts?.overloadRetry,
         opts?.signal,
+        recovery.excluded,
       );
     },
     // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
@@ -1555,6 +1599,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       body: NativePassthroughInput,
       opts?: ProviderCallOptions,
     ): AsyncIterable<string> {
+      const recovery = recoverNativeTurnState(body, opts);
+      body = recovery.input;
+      opts = recovery.opts;
       const stickyKey = stickyKeyFromNative(body);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
@@ -1567,7 +1614,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         return client.nativePassthroughStream(body, callOptionsForEntry(opts, entry));
       };
       try {
-        const first = select(stickyKey, undefined, { avoidBusy, model });
+        const first = select(stickyKey, recovery.excluded, { avoidBusy, model });
         if (!first.member.client.nativePassthroughStream) {
           throw new Error("oauth pool member does not support native passthrough streaming");
         }
@@ -1579,6 +1626,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           opts,
           open,
           deps.nativeStreamPreambleClassifier,
+          recovery.excluded,
         );
       } catch (err) {
         const waitMs = stickyAccountWaitMs(err);
@@ -1586,7 +1634,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         return (async function* waitThenStream() {
           await sleep(waitMs, opts?.signal);
           opts?.signal?.throwIfAborted();
-          const first = select(stickyKey, undefined, { avoidBusy, model });
+          const first = select(stickyKey, recovery.excluded, { avoidBusy, model });
           if (!first.member.client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");
           }
@@ -1598,6 +1646,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
             opts,
             open,
             deps.nativeStreamPreambleClassifier,
+            recovery.excluded,
           );
         })();
       }

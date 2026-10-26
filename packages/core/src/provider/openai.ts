@@ -142,6 +142,8 @@ export interface ProviderCallOptions {
   requestCompatibility?: Capabilities["requestCompatibility"];
   /** Opt-in atomic Codex delivery; may repeat inference once, never hosted tools. */
   codexBufferedStreamRecovery?: boolean;
+  /** Trusted pool-only reset for a standalone HTTP request reselected before send. */
+  resetCodexTurnState?: boolean;
   onStreamRecoveryEligibility?: (event: { eligible: boolean; reason?: string }) => void;
   onStreamRecovery?: (event: { attempt: number; reason: string }) => void;
   overloadRetry?: OverloadRetryBudget;

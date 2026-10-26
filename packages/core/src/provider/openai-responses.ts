@@ -2473,6 +2473,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     modelInfo: CodexModelInfo | undefined,
     accept: "application/json" | "text/event-stream",
     forceStore: boolean,
+    resetTurnState = false,
   ): Promise<{
     prepared: PreparedNativePassthroughRequest;
     turnKey: string | undefined;
@@ -2481,13 +2482,21 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const canonicalInput = canonicalizeCodexNativeInput(environmentInput, modelInfo, forceStore);
     const tieredInput = withCodexServiceTier(canonicalInput, cfg.fastMode === true, modelInfo);
     const boundInput = withCodexInstallationId(tieredInput, cfg.installationId);
-    const wireInput = stripNativePassthroughHeader(boundInput, "openai-beta");
+    const wireInput = stripNativePassthroughHeader(
+      resetTurnState
+        ? stripNativePassthroughHeader(boundInput, CODEX_TURN_STATE_HEADER)
+        : boundInput,
+      "openai-beta",
+    );
     const useResponsesLite = nativeInputUsesResponsesLite(wireInput, modelInfo);
     const turnKey = nativeHeader(input, CODEX_TURN_METADATA_HEADER);
-    const explicitTurnState = nativeHeader(input, CODEX_TURN_STATE_HEADER);
+    const explicitTurnState = resetTurnState
+      ? undefined
+      : nativeHeader(input, CODEX_TURN_STATE_HEADER);
     rememberTurnState(turnKey, explicitTurnState);
     const providerHeaders = await headers(useResponsesLite, accept);
-    const turnState = explicitTurnState ?? (turnKey ? turnStates.get(turnKey) : undefined);
+    const turnState =
+      explicitTurnState ?? (!resetTurnState && turnKey ? turnStates.get(turnKey) : undefined);
     if (turnState) providerHeaders[CODEX_TURN_STATE_HEADER] = turnState;
     const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
       forwardCodexMetadata: true,
@@ -2529,6 +2538,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       timeoutThroughBody?: boolean;
       retry?: boolean;
       outcomeUnknownOnTransport?: boolean;
+      resetCodexTurnState?: boolean;
     },
   ): Promise<CodexHttpResponse> {
     const { prepared, turnKey } = await prepareRequest(
@@ -2536,6 +2546,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       modelInfo,
       init.accept,
       init.endpoint !== compactUrl,
+      init.resetCodexTurnState,
     );
     // The exact Responses-native bytes POSTed upstream (translate path: OpenAI→Responses
     // re-serialization; native passthrough: verbatim, model patched) — surfaced for capture.
@@ -2663,8 +2674,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     }
   }
 
-  function captureTurnState(result: CodexHttpResponse): void {
+  function captureTurnState(result: CodexHttpResponse, reset = false): void {
     const state = result.response.headers.get(CODEX_TURN_STATE_HEADER) ?? undefined;
+    if (reset && result.turnKey) turnStates.delete(result.turnKey);
     rememberTurnState(result.turnKey, state);
   }
 
@@ -2679,6 +2691,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       capture?: (wireBody: string) => void;
       onResponseMeta?: (headers: Headers) => void;
       timeoutThroughBody?: boolean;
+      resetCodexTurnState?: boolean;
     },
   ): Promise<CodexHttpResponse> {
     const requestInit = {
@@ -2689,6 +2702,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       capture: init.capture,
       timeoutThroughBody: init.timeoutThroughBody,
       outcomeUnknownOnTransport: true,
+      resetCodexTurnState: init.resetCodexTurnState,
     };
     const first = await request(body, modelInfo, requestInit);
     if (first.response.status === 401 && cfg.onUnauthorized !== undefined) {
@@ -2696,11 +2710,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       first.bodyTimeout?.cleanup();
       cfg.onUnauthorized();
       const retried = await request(body, modelInfo, requestInit);
-      captureTurnState(retried);
+      captureTurnState(retried, init.resetCodexTurnState);
       fireResponseMeta(retried.response, init.onResponseMeta);
       return retried;
     }
-    captureTurnState(first);
+    captureTurnState(first, init.resetCodexTurnState);
     fireResponseMeta(first.response, init.onResponseMeta);
     return first;
   }
@@ -3432,6 +3446,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         accept: "application/json",
         signal: opts?.signal,
         overloadRetry: opts?.overloadRetry,
+        resetCodexTurnState: opts?.resetCodexTurnState,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
@@ -3829,6 +3844,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const result = await requestWithRetry(outboundBody, modelInfo, {
         signal: opts?.signal,
         overloadRetry: opts?.overloadRetry,
+        resetCodexTurnState: opts?.resetCodexTurnState,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,
       });
