@@ -14,7 +14,7 @@
 # (connect it in admin → Providers). Official OpenAI GPT API aliases are deliberately
 # absent from every shipped lane because their per-token cost is too high. They remain
 # defined in providers/capabilities/pricing for explicit custom-model use. Helm routes
-# Astra/Terra/Luna lanes to their concrete subscription slugs. DeepSeek/OpenRouter/ZenMux
+# Astra/Sol/Terra/Luna lanes to their concrete subscription slugs. DeepSeek/OpenRouter/ZenMux
 # remain static lower fallbacks so lanes degrade gracefully when subscriptions
 # are unavailable. An unconnected candidate
 # fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each
@@ -42,7 +42,7 @@ economy:
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   reasoning_effort: medium
-  primary: gpt-6.1-terra
+  primary: gpt-6.1-sol
   fallback:
     - claude-sonnet
     - grok
@@ -67,7 +67,7 @@ premium:
     require_json: false
     require_vision: false
 
-# —— GPT-6 model lanes: Astra → Terra → Luna ——
+# —— GPT-6 model lanes: Astra → Sol / Terra → Luna ——
 # Subscription first, then DeepSeek Responses and the matching quality tier.
 gpt-6-astra:
   purpose: OpenAI GPT-6 Astra — flagship reasoning/coding
@@ -75,6 +75,17 @@ gpt-6-astra:
   fallback:
     - deepseek-responses/deepseek-flash
     - premium
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
+gpt-6.1-sol:
+  purpose: OpenAI GPT-6.1 Sol — complex coding and agentic workflows
+  primary: openai-codex/gpt-6.1-sol
+  fallback:
+    - deepseek-responses/deepseek-flash
+    - balanced
   constraints:
     require_tools: false
     require_json: false
@@ -120,9 +131,9 @@ coding:
 
 json:
   purpose: Strict structured-output (JSON) responses
-  # Terra supports JSON schema on Responses. The capability filter prunes
+  # Sol supports JSON schema on Responses. The capability filter prunes
   # incompatible fallbacks and the */auto tails for strict JSON requests.
-  primary: gpt-6.1-terra
+  primary: gpt-6.1-sol
   fallback:
     - claude-sonnet
     - openrouter/deepseek-v4-flash
@@ -134,10 +145,10 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  # Subscription-first: Terra specializes in visual reasoning; Grok
+  # Subscription-first: Sol handles everyday vision requests; Grok
   # image input has also been verified live. Claude subscriptions cover structured
   # and long-context vision without automatically invoking a paid ZenMux model.
-  primary: gpt-6.1-terra
+  primary: gpt-6.1-sol
   fallback:
     - grok
     - claude-sonnet
