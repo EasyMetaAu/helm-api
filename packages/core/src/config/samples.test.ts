@@ -42,19 +42,18 @@ describe("checked-in config samples", () => {
     const lanes = cfg.lanes ?? {};
     const aliases = cfg.model_aliases ?? {};
     const replacements = {
-      "gpt-6-sol": "gpt-6.1-sol",
-      "gpt-5.6": "gpt-6-astra",
-      "gpt-5.6-sol": "gpt-6-astra",
-      "gpt-5.6-terra": "gpt-6.1-sol",
-      "gpt-5.6-luna": "gpt-6-luna",
-      "gpt-5.4-mini": "gpt-6-luna",
+      "gpt-6-sol": "gpt-sol",
+      "gpt-5.6": "gpt-astra",
+      "gpt-5.6-sol": "gpt-astra",
+      "gpt-5.6-terra": "gpt-sol",
+      "gpt-5.6-luna": "gpt-luna",
+      "gpt-5.4-mini": "gpt-luna",
     };
-    expect(Object.keys(lanes).filter((name) => /^gpt-6[.-]/.test(name))).toEqual([
-      "gpt-6-astra",
-      "gpt-6.1-sol",
-      "gpt-6.1-terra",
-      "gpt-6-luna",
-    ]);
+    expect(
+      Object.keys(lanes).filter((name) =>
+        ["gpt-astra", "gpt-luna", "gpt-sol", "gpt-terra"].includes(name),
+      ),
+    ).toEqual(["gpt-astra", "gpt-luna", "gpt-sol", "gpt-terra"]);
     for (const [old, current] of Object.entries(replacements)) {
       expect(lanes).not.toHaveProperty(old);
       expect(resolveModelAlias(old, aliases)).toBe(current);
@@ -63,14 +62,39 @@ describe("checked-in config samples", () => {
         expect(resolveModelAlias(`openai.${old}`, aliases)).toBe(current);
         expect(resolveModelAlias(`openai.${old}-20260101`, aliases)).toBe(current);
       }
-      expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${current}`);
+      const upstreamModels: Record<string, string> = {
+        "gpt-astra": "gpt-6-astra",
+        "gpt-luna": "gpt-6-luna",
+        "gpt-sol": "gpt-6.1-sol",
+      };
+      const upstream = upstreamModels[current];
+      expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${upstream}`);
+    }
+    expect(Object.keys(lanes)).toEqual(Object.keys(lanes).sort());
+    for (const [model, lane] of Object.entries({
+      "gpt-6-astra": "gpt-astra",
+      "gpt-6-luna": "gpt-luna",
+      "gpt-6.1-sol": "gpt-sol",
+      "gpt-6.1-terra": "gpt-terra",
+    })) {
+      expect(lanes).not.toHaveProperty(model);
+      for (const alias of [
+        model,
+        `${model}-20261027`,
+        `openai.${model}`,
+        `openai.${model}-20261027`,
+        lane,
+      ]) {
+        expect(resolveModelAlias(alias, aliases)).toBe(lane);
+      }
+      expect(expandLaneChain(lane, lanes)[0]).toBe(`openai-codex/${model}`);
     }
     expect(lanes).not.toHaveProperty("gpt-5.4");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("premium");
     for (const name of Object.keys(lanes)) {
       const chain = expandLaneChain(name, lanes);
       expect(chain.some((model) => /gpt-5\.(4|6)/.test(model))).toBe(false);
-      if (name !== "gpt-6.1-terra") {
+      if (name !== "gpt-terra") {
         expect(chain).not.toContain("openai-codex/gpt-6.1-terra");
       }
       expect(new Set(chain).size).toBe(chain.length);
@@ -135,7 +159,7 @@ describe("checked-in config samples", () => {
     expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-opus-4.8");
     expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
     expect(JSON.stringify(lanes)).not.toContain("openai/gpt-5");
-    expect(lanes.economy?.primary).toBe("gpt-6-luna");
+    expect(lanes.economy?.primary).toBe("gpt-luna");
     expect(lanes.economy?.fallback.slice(0, 5)).toEqual([
       "claude-haiku",
       "grok",
@@ -143,7 +167,7 @@ describe("checked-in config samples", () => {
       "openrouter/auto",
       "zenmux/auto",
     ]);
-    expect(lanes.balanced?.primary).toBe("gpt-6.1-sol");
+    expect(lanes.balanced?.primary).toBe("gpt-sol");
     expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
       "claude-sonnet",
       "grok",
@@ -152,7 +176,7 @@ describe("checked-in config samples", () => {
       "openrouter/auto",
     ]);
     expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
-    expect(lanes.premium?.primary).toBe("gpt-6-astra");
+    expect(lanes.premium?.primary).toBe("gpt-astra");
     expect(lanes.premium?.fallback).toEqual(["grok", "claude-opus", "balanced"]);
     expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.6", fallback: [] });
     expect(lanes["grok-fast"]).toMatchObject({ primary: "xai/grok-4.7-build-fast", fallback: [] });
@@ -161,14 +185,14 @@ describe("checked-in config samples", () => {
     expect(lanes.json?.constraints.require_json).toBe(true);
     // JSON stays subscription-first, with schema-capable fallbacks and a
     // capability filter that prunes incompatible candidates and auto tails.
-    expect(lanes.json?.primary).toBe("gpt-6.1-sol");
+    expect(lanes.json?.primary).toBe("gpt-sol");
     expect(lanes.json?.fallback).toEqual([
       "claude-sonnet",
       "openrouter/deepseek-v4-flash",
       "balanced",
     ]);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
-    expect(lanes.vision?.primary).toBe("gpt-6.1-sol");
+    expect(lanes.vision?.primary).toBe("gpt-sol");
     expect(lanes.vision?.fallback).toEqual(["grok", "claude-sonnet", "claude-opus"]);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });
@@ -196,25 +220,25 @@ describe("checked-in config samples", () => {
     // GPT families route to their dedicated vendor-family lanes. The cheap mini must
     // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
     // wins): a dated mini id still lands on the cheap GPT-6 Luna lane.
-    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-6.1-sol");
-    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-6.1-sol");
-    expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
-    expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-6-luna");
-    expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-6.1-sol");
-    expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
-    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
+    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-sol");
+    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-sol");
+    expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-luna");
+    expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-luna");
+    expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-astra");
+    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-sol");
+    expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-luna");
+    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-astra");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("premium");
     // RETIRED gpt-5.5 has no mapping of its own, so a client still pinning it falls
     // through `gpt-5*` onto premium — degraded, never a 400 unknown model.
     expect(resolveModelAlias("gpt-5.5", aliases)).toBe("premium");
-    expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-6-luna");
-    expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-6-luna");
+    expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-luna");
+    expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-luna");
     // The shipped aliases must validate against the SHIPPED lanes (no drift): every
     // target is a configured lane or "auto", or the gateway would refuse to boot.
     expect(validateModelAliasTargets(aliases, laneNames)).toEqual([]);
@@ -233,14 +257,14 @@ describe("checked-in config samples", () => {
     // and types the call out in its own notation. The fix is the provider's
     // `translateUnsupportedCustomTools` contract, not removing the rung.
     const deepseek = "deepseek-responses/deepseek-flash";
-    expect(lanes["gpt-6.1-sol"]?.primary).toBe("openai-codex/gpt-6.1-sol");
-    expect(lanes["gpt-6.1-sol"]?.fallback).toEqual([deepseek, "balanced"]);
-    expect(lanes["gpt-6.1-terra"]?.primary).toBe("openai-codex/gpt-6.1-terra");
-    expect(lanes["gpt-6.1-terra"]?.fallback).toEqual([deepseek, "balanced"]);
-    expect(lanes["gpt-6-luna"]?.primary).toBe("openai-codex/gpt-6-luna");
-    expect(lanes["gpt-6-luna"]?.fallback).toEqual([deepseek, "economy"]);
-    expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
-    expect(lanes["gpt-6-astra"]?.fallback).toEqual([deepseek, "premium"]);
+    expect(lanes["gpt-sol"]?.primary).toBe("openai-codex/gpt-6.1-sol");
+    expect(lanes["gpt-sol"]?.fallback).toEqual([deepseek, "balanced"]);
+    expect(lanes["gpt-terra"]?.primary).toBe("openai-codex/gpt-6.1-terra");
+    expect(lanes["gpt-terra"]?.fallback).toEqual([deepseek, "balanced"]);
+    expect(lanes["gpt-luna"]?.primary).toBe("openai-codex/gpt-6-luna");
+    expect(lanes["gpt-luna"]?.fallback).toEqual([deepseek, "economy"]);
+    expect(lanes["gpt-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
+    expect(lanes["gpt-astra"]?.fallback).toEqual([deepseek, "premium"]);
     // Always `deepseek-flash`: `deepseek-v4-pro` has no image input, so a vision
     // request skips the rung entirely and the fallback silently does nothing.
     expect(JSON.stringify(lanes)).not.toContain("deepseek-responses/deepseek-v4-pro");

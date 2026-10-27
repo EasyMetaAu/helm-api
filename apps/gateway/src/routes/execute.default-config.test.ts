@@ -169,10 +169,10 @@ function providerClients(client: ProviderClient): Map<string, ProviderClient> {
 
 describe("default config activates capability filter + cost (alias-namespace alignment)", () => {
   it.each([
-    "gpt-6-astra",
-    "gpt-6.1-sol",
-    "gpt-6.1-terra",
-    "gpt-6-luna",
+    "gpt-astra",
+    "gpt-sol",
+    "gpt-terra",
+    "gpt-luna",
   ])("the shipped %s model lane preserves the Codex client's reasoning effort", (lane) => {
     expect(lanes[lane]?.reasoning_effort).toBeUndefined();
   });
@@ -182,16 +182,23 @@ describe("default config activates capability filter + cost (alias-namespace ali
     "gpt-6.1-terra",
     "gpt-6-luna",
   ])("routes shipped %s aliases and registers its official upstream", (model) => {
-    expect(lanes[model]?.primary).toBe(`openai-codex/${model}`);
-    expect(lanes[model]?.reasoning_effort).toBeUndefined();
-    expect(expandChain(model)[1]).toBe("deepseek-responses/deepseek-flash");
+    const laneNames: Record<string, string> = {
+      "gpt-6.1-sol": "gpt-sol",
+      "gpt-6.1-terra": "gpt-terra",
+      "gpt-6-luna": "gpt-luna",
+    };
+    const lane = laneNames[model];
+    if (!lane) throw new Error(`Missing lane mapping for ${model}`);
+    expect(lanes[lane]?.primary).toBe(`openai-codex/${model}`);
+    expect(lanes[lane]?.reasoning_effort).toBeUndefined();
+    expect(expandChain(lane)[1]).toBe("deepseek-responses/deepseek-flash");
     for (const alias of [
       model,
       `${model}-2026-09-25`,
       `openai.${model}`,
       `openai.${model}-2026-09-25`,
     ]) {
-      expect(resolveModelAlias(alias, config.model_aliases)).toBe(model);
+      expect(resolveModelAlias(alias, config.model_aliases)).toBe(lane);
     }
     expect(
       config.providers.find(
