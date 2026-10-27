@@ -9,12 +9,12 @@
 # gateway refuses to boot (fail-closed, principle 2). `balanced` is REQUIRED: it
 # is the terminal of the classification fallback.
 #
-# PROVIDER MIX (2026-09-28, GPT-6): quality lanes lead with verified
-# `openai-codex` SUBSCRIPTION slugs where the ChatGPT/Codex backend accepts them
+# PROVIDER MIX (2026-10-27, GPT-6): quality lanes lead with
+# `openai-codex` SUBSCRIPTION slugs when live account discovery exposes them
 # (connect it in admin → Providers). Official OpenAI GPT API aliases are deliberately
 # absent from every shipped lane because their per-token cost is too high. They remain
 # defined in providers/capabilities/pricing for explicit custom-model use. Helm routes
-# Astra/Sol/Luna lanes to their concrete subscription slugs. DeepSeek/OpenRouter/ZenMux
+# Astra/Terra/Luna lanes to their concrete subscription slugs. DeepSeek/OpenRouter/ZenMux
 # remain static lower fallbacks so lanes degrade gracefully when subscriptions
 # are unavailable. An unconnected candidate
 # fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each
@@ -42,7 +42,7 @@ economy:
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   reasoning_effort: medium
-  primary: gpt-6.1-sol
+  primary: gpt-6.1-terra
   fallback:
     - claude-sonnet
     - grok
@@ -67,7 +67,7 @@ premium:
     require_json: false
     require_vision: false
 
-# —— GPT-6 model lanes: Astra → Sol → Luna ——
+# —— GPT-6 model lanes: Astra → Terra → Luna ——
 # Subscription first, then DeepSeek Responses and the matching quality tier.
 gpt-6-astra:
   purpose: OpenAI GPT-6 Astra — flagship reasoning/coding
@@ -80,9 +80,9 @@ gpt-6-astra:
     require_json: false
     require_vision: false
 
-gpt-6.1-sol:
-  purpose: OpenAI gpt-6.1-sol — complex coding and agentic workflows
-  primary: openai-codex/gpt-6.1-sol
+gpt-6.1-terra:
+  purpose: OpenAI GPT-6.1 Terra — visual reasoning, computer use, and writing
+  primary: openai-codex/gpt-6.1-terra
   fallback:
     - deepseek-responses/deepseek-flash
     - balanced
@@ -120,13 +120,9 @@ coding:
 
 json:
   purpose: Strict structured-output (JSON) responses
-  # The capability filter discriminates by request shape against each candidate's
-  # `jsonOutput` tier (none<object<schema): a json_OBJECT request is served cheaply by
-  # the official-DeepSeek primary (jsonOutput:object); a strict json_SCHEMA request
-  # PRUNES that primary (no_response_schema_support) and lands on the cheap, natively
-  # schema-capable openrouter mirror (jsonOutput:schema), only then dropping through
-  # balanced whose `*/auto` tail (jsonOutput:none) is pruned for any JSON request.
-  primary: gpt-6.1-sol
+  # Terra supports JSON schema on Responses. The capability filter prunes
+  # incompatible fallbacks and the */auto tails for strict JSON requests.
+  primary: gpt-6.1-terra
   fallback:
     - claude-sonnet
     - openrouter/deepseek-v4-flash
@@ -138,10 +134,10 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  # Subscription-first: Sol has the best everyday quality/quota balance; Grok
+  # Subscription-first: Terra specializes in visual reasoning; Grok
   # image input has also been verified live. Claude subscriptions cover structured
   # and long-context vision without automatically invoking a paid ZenMux model.
-  primary: gpt-6.1-sol
+  primary: gpt-6.1-terra
   fallback:
     - grok
     - claude-sonnet

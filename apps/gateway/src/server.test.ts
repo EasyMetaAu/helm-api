@@ -103,7 +103,10 @@ describe("buildInternalLlmKeyInput", () => {
 });
 
 describe("buildProviderClients provider dispatch", () => {
-  it("sends configured GPT-6.1 Sol tools and reasoning through Responses", async () => {
+  it.each([
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+  ])("sends configured %s tools and reasoning through Responses", async (model) => {
     const config = loadConfig({
       configDir: fileURLToPath(new URL("../../../config", import.meta.url)),
       env: {},
@@ -121,7 +124,7 @@ describe("buildProviderClients provider dispatch", () => {
       );
       expect(client?.nativeProtocolProfile).toBe("generic_openai_responses");
       await client?.chatCompletion({
-        model: "gpt-6.1-sol",
+        model,
         messages: [{ role: "user", content: "Check the weather" }],
         reasoning_effort: "high",
         tools: [
@@ -132,7 +135,7 @@ describe("buildProviderClients provider dispatch", () => {
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
       expect(JSON.parse(String(init.body))).toMatchObject({
-        model: "gpt-6.1-sol",
+        model,
         reasoning: { effort: "high" },
         tools: [{ type: "function", name: "weather", parameters: { type: "object" } }],
       });

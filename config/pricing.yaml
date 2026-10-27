@@ -193,6 +193,59 @@ openai-codex/gpt-6.1-sol:
           outputPerMTokUsd: 30
           cacheReadPerMTokUsd: 0.4
           cacheWritePerMTokUsd: 10
+# GPT-6.1 Terra: https://developers.openai.com/api/docs/pricing (2026-10-27).
+# Standard / Flex / Fast; >272K full-request context surcharge. Codex rates are
+# API-equivalent estimates, not subscription charges. Cache writes use 30m rates;
+# 12h retention ($2.50/MTok standard short context) is not separately modeled.
+openai-codex/gpt-6.1-terra:
+  inputPerMTokUsd: 1.0
+  outputPerMTokUsd: 5.0
+  cacheReadPerMTokUsd: 0.05
+  cacheWritePerMTokUsd: 1.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 7.5
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 2.5
+      cacheReadPerMTokUsd: 0.025
+      cacheWritePerMTokUsd: 0.625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 1.0
+          outputPerMTokUsd: 3.75
+          cacheReadPerMTokUsd: 0.05
+          cacheWritePerMTokUsd: 1.25
+    priority:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 10.0
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 4.0
+          outputPerMTokUsd: 15.0
+          cacheReadPerMTokUsd: 0.2
+          cacheWritePerMTokUsd: 5.0
+    fast:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 10.0
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 4.0
+          outputPerMTokUsd: 15.0
+          cacheReadPerMTokUsd: 0.2
+          cacheWritePerMTokUsd: 5.0
 openai-codex/gpt-6-sol:
   inputPerMTokUsd: 2
   outputPerMTokUsd: 10
@@ -593,6 +646,59 @@ openai/gpt-6.1-sol:
           outputPerMTokUsd: 30
           cacheReadPerMTokUsd: 0.4
           cacheWritePerMTokUsd: 10
+# GPT-6.1 Terra: https://developers.openai.com/api/docs/pricing (2026-10-27).
+# Standard / Flex / Fast; >272K full-request context surcharge. Codex rates are
+# API-equivalent estimates, not subscription charges. Cache writes use 30m rates;
+# 12h retention ($2.50/MTok standard short context) is not separately modeled.
+openai/gpt-6.1-terra:
+  inputPerMTokUsd: 1.0
+  outputPerMTokUsd: 5.0
+  cacheReadPerMTokUsd: 0.05
+  cacheWritePerMTokUsd: 1.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 7.5
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 2.5
+      cacheReadPerMTokUsd: 0.025
+      cacheWritePerMTokUsd: 0.625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 1.0
+          outputPerMTokUsd: 3.75
+          cacheReadPerMTokUsd: 0.05
+          cacheWritePerMTokUsd: 1.25
+    priority:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 10.0
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 4.0
+          outputPerMTokUsd: 15.0
+          cacheReadPerMTokUsd: 0.2
+          cacheWritePerMTokUsd: 5.0
+    fast:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 10.0
+      cacheReadPerMTokUsd: 0.1
+      cacheWritePerMTokUsd: 2.5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 4.0
+          outputPerMTokUsd: 15.0
+          cacheReadPerMTokUsd: 0.2
+          cacheWritePerMTokUsd: 5.0
 openai/gpt-6-sol:
   inputPerMTokUsd: 2
   outputPerMTokUsd: 10

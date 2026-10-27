@@ -93,6 +93,13 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 扩大到所有引号内 `x-*`／`anthropic-*` 字符串的比较后，另见自托管来源 IP／签名（220626950）、runner capability（230494649）、MCP（256874603）、工具隧道（238689235）和账号设置 OS 标记（236224544）；均不进入 Messages 入站头白名单。新增定向测试验证这些字段仍被剥离。另有额度响应状态字符串及 signed-key 脱敏规则 ID，不能误当成推理身份头。
 - 保护字段仍由客户端配置产生（220629824），上传 lane 仍属于 multipart（249608217），gateway／project 归因仍留在原生 system 文本（219983990）。SSE 文本、citation、JSON-input、thinking、signature、compaction 分支仍存在（220467150–220470700）。保留已有原生正文、身份隔离、协议和流式测试；本次有限静态审查不表示支持全部新客户端功能，也不能替代真实账户验收。
 
+2026-10-27 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.311`：旧 2.1.310 与新平台包均通过 npm SHA512 integrity 校验，新二进制 SHA256 为 `85d8c08707fcfd1e78ffa0204eefbc6ec9e4fe22f375fb2767ef85d957ed3161`，内嵌 SDK 仍为 `0.128.0`（字节偏移 221636107）。独立只读审查使用官方制品与可读 JavaScript，没有执行下载的 CLI 或访问账户。
+
+- 新增 `x-claude-code-sandy-plover` 是受 feature gate、first-party 条件限制的 `/v1/messages` 工具使用列表（222016494、222052661），并非已证实的必需身份。`x-cowork-enrollment` 来自 host launch 配置（217098680、222045647），服务端契约未知。两者继续剥离，不生成替代值。
+- `x-ccr-upload-attempt` 属于远程 worker 上传（244144107、244178178）；`x-gateway-upstream-cloud-request-id` 是网关从 `apim-request-id` 派生的响应关联字段（247456573），均不加入推理入站头白名单。新增四个定向剥离断言，已审查可信字段清单不扩展。
+- 账号归因构造（旧 223417922–223418611／新 224732589–224733278）、保护字段（222035212–222035673）及 SSE 文本、citation、JSON-input、thinking、signature、compaction 分支（221868377–221869917）在审查片段中结构一致。保留既有账号隔离和流式测试；有限静态审查不证明全部客户端兼容，也不代替真实上游验收。
+- [官方发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21311)中的 `x-should-retry:false`、隐藏推理空闲检测和断连说明，不构成本次修改 Helm 重试或协议策略的理由。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。

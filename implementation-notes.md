@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-10-27 · GPT-6.1 Terra 替换 Sol lane（docs/04、06、07）
+
+- **范围与兼容**：所有原 `gpt-6.1-sol` lane 名称及引用改为 `gpt-6.1-terra`，原 Sol 客户端别名转到 Terra，保留 Sol 显式 provider 配置和价格。档位、reasoning effort 与 fallback 顺序不变；新 Terra 官方 API 注册到 Responses，避免 Chat Completions 不支持工具调用。
+- **官方依据**：[模型页](https://developers.openai.com/api/docs/models/gpt-6.1-terra)与[价目表](https://developers.openai.com/api/docs/pricing)，2026-10-27 核对：API context 1,050,000、最大输入 922,000、最大输出 128,000；reasoning 为 none/low/medium（API 默认）/high/xhigh/max。标准每百万 token 输入 $1、输出 $5、缓存读取 $0.05，30 分钟写入 $1.25；超过 272K 输入时整次请求输入/缓存 2 倍、输出 1.5 倍；Flex 半价、Fast 两倍，区域处理 1.1 倍。
+- **订阅边界**：[官方 Codex 目录](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json)同日含 Terra：默认 context 500K、最大 context 872K、默认 low、Responses Lite。静态能力取 500K，账号实时目录继续决定可用性、推理等级、上下文与协议。当前固定 Codex 0.164.0 离线快照不含 Terra，本次不手改官方快照；只有离线旧目录时会走现有 fallback，manual 清单也需由运营方启用 Terra。未调用真实账号验证权限。
+- **计费限制**：订阅价格为 API 等价估算。现有 schema 不区分 OpenAI 12 小时缓存写入（标准短上下文 $2.50/MTok），也没有独立 max-input 字段；本次不扩展计费或请求模型，不将 12 小时价冒充 1 小时缓存价。发布准备按用户后续授权升级至 v0.30.56；Claude 2.1.311 已通过独立静态协议检查，新增四个字段继续剥离，详见 `docs/claude-protocol-safety.md`。Grok、Codex 稳定版按发布工具同步；部署与真实上游结果另行核验。
+
 ## 2026-10-26 · Codex 旧 turn-state 发送前换账号（docs/04、05、06、07）
 
 - **原因与边界**：原账号冷却时，即使 HTTP 请求携带完整历史，旧 `x-codex-turn-state` 仍强制绑定原账号。本次只在零发送、原账号已知且不可调度、有其他可用账号时恢复：验证完整 input 与工具配对，删除该请求副本的旧 header，保留所有正文并重新选择账号；不清除账号配额或修改用户设置。
@@ -77,17 +84,9 @@
 - **目录生效**：运行时 catalog 与 `/v1/models` 的具体模型项返回完整价卡。普通 lane 不暴露内部价格；原有 `*Usd` 字段不会接收人民币价格。万相七折作为限时促销单列，官网未公布结束日期，不能视作永久价格。
 - **边界**：本次完成模型价格配置与目录下发；不扩展实际用量计算、异步任务结算、金额预算预留或汇率换算。媒体费用遥测仍可为 null，spend-capped key 仍按原规则拒绝；重复 GET 不产生扣款。真实账单以供应商为准。详见 `docs/media-pricing.md`。
 
-## 2026-10-14 · 阿里与 MiniMax 媒体任务（docs/04、05、06、07、10）
-
-- 使用明确的 bailian-media / minimax-media 配置，不将 mediaOnly 当作 Ark 协议。图片复用 OpenAI SDK；原生异步任务及语音保留供应商协议。
-- 创建任务前持久化 operation ID；创建不自动重试。超时或映射写入失败保留 outcome_unknown / 已知上游任务 ID，避免重复收费。任务绑定 key、账户、模型、endpoint 与凭证指纹，凭证变更保守拒绝续查。
-- 任务记录保留与查询期限独立：阿里查询 24 小时，MiniMax 7 天；不推测产物 URL 有效期。不明价格保留 null，并拒绝受费用上限约束的调用。
-- 短 ASR 使用现有 Chat 入口的专用 hook，保留 URL/Data URL/asr_options，跳过通用 IR 与聊天 fallback；流接管并发与请求内存直到完成。语音为独立 HTTP/WS 入口，不改变 xAI /v1/tts。
-- 独立验收补齐：操作记录保存完整恢复绑定，已知上游 ID 可通过 operation 查询恢复公开任务；成功产物不因后续辅助结算/遥测失败而丢失。
-- **真实验收修复**：北京 Qwen3 文件识别实际返回 HTTP OSS 签名链接，仅将精确官方结果域名升级 HTTPS；继续使用公网 DNS/IP、固定连接、逐跳重定向与大小/超时边界。固定 IP 下载显式关闭 Node 地址族自动选择，并按已验证 IP 设置 family，修复默认 lookup(all:true) 与标量回调不兼容。
-- 用户授权后已通过本地 Helm 调用真实上游；型号、次数与未验收范围见 docs/media-provider-task-tracker.md。未部署生产。
-
 ## 更早历史总览
+
+2026-10-14：阿里与 MiniMax 媒体任务保留异步 operation ID、权限与下载边界；真实验收修正 Qwen3 OSS HTTPS 和固定 IP 连接，详见 Git 历史及 docs/media-provider-task-tracker.md。
 
 2026-10-14：Ark 多媒体按提供商契约处理图片/视频/语音输入、费用与异步任务，任务身份和数据边界不变，完整实现决定见 Git 历史。
 

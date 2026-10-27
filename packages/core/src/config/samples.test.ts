@@ -42,22 +42,27 @@ describe("checked-in config samples", () => {
     const lanes = cfg.lanes ?? {};
     const aliases = cfg.model_aliases ?? {};
     const replacements = {
-      "gpt-6-sol": "gpt-6.1-sol",
+      "gpt-6.1-sol": "gpt-6.1-terra",
+      "gpt-6-sol": "gpt-6.1-terra",
       "gpt-5.6": "gpt-6-astra",
       "gpt-5.6-sol": "gpt-6-astra",
-      "gpt-5.6-terra": "gpt-6.1-sol",
+      "gpt-5.6-terra": "gpt-6.1-terra",
       "gpt-5.6-luna": "gpt-6-luna",
       "gpt-5.4-mini": "gpt-6-luna",
     };
     expect(Object.keys(lanes).filter((name) => /^gpt-6[.-]/.test(name))).toEqual([
       "gpt-6-astra",
-      "gpt-6.1-sol",
+      "gpt-6.1-terra",
       "gpt-6-luna",
     ]);
     for (const [old, current] of Object.entries(replacements)) {
       expect(lanes).not.toHaveProperty(old);
       expect(resolveModelAlias(old, aliases)).toBe(current);
       expect(resolveModelAlias(`${old}-20260101`, aliases)).toBe(current);
+      if (old === "gpt-6.1-sol" || old === "gpt-6-sol") {
+        expect(resolveModelAlias(`openai.${old}`, aliases)).toBe(current);
+        expect(resolveModelAlias(`openai.${old}-20260101`, aliases)).toBe(current);
+      }
       expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${current}`);
     }
     expect(lanes).not.toHaveProperty("gpt-5.4");
@@ -65,6 +70,7 @@ describe("checked-in config samples", () => {
     for (const name of Object.keys(lanes)) {
       const chain = expandLaneChain(name, lanes);
       expect(chain.some((model) => /gpt-5\.(4|6)/.test(model))).toBe(false);
+      expect(chain.some((model) => model.endsWith("/gpt-6.1-sol"))).toBe(false);
       expect(new Set(chain).size).toBe(chain.length);
     }
     expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
@@ -135,7 +141,7 @@ describe("checked-in config samples", () => {
       "openrouter/auto",
       "zenmux/auto",
     ]);
-    expect(lanes.balanced?.primary).toBe("gpt-6.1-sol");
+    expect(lanes.balanced?.primary).toBe("gpt-6.1-terra");
     expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
       "claude-sonnet",
       "grok",
@@ -151,17 +157,16 @@ describe("checked-in config samples", () => {
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(lanes.json?.constraints.require_json).toBe(true);
-    // json lane: official deepseek (cheap json_object) → cheap native-schema openrouter
-    // mirror (where a strict json_schema request lands after the filter prunes official
-    // deepseek) → balanced. Locks the json_schema routing fix into the shipped config.
-    expect(lanes.json?.primary).toBe("gpt-6.1-sol");
+    // JSON stays subscription-first, with schema-capable fallbacks and a
+    // capability filter that prunes incompatible candidates and auto tails.
+    expect(lanes.json?.primary).toBe("gpt-6.1-terra");
     expect(lanes.json?.fallback).toEqual([
       "claude-sonnet",
       "openrouter/deepseek-v4-flash",
       "balanced",
     ]);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
-    expect(lanes.vision?.primary).toBe("gpt-6.1-sol");
+    expect(lanes.vision?.primary).toBe("gpt-6.1-terra");
     expect(lanes.vision?.fallback).toEqual(["grok", "claude-sonnet", "claude-opus"]);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });
@@ -192,14 +197,14 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-6-astra");
     expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
     expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-6.1-sol");
-    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-6.1-sol");
+    expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-6.1-terra");
+    expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-6.1-terra");
     expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
     expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-6-luna");
     expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
     expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-6-astra");
     expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-6-astra");
-    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-6.1-sol");
+    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-6.1-terra");
     expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-6-luna");
     expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-6-astra");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("premium");
@@ -226,8 +231,8 @@ describe("checked-in config samples", () => {
     // and types the call out in its own notation. The fix is the provider's
     // `translateUnsupportedCustomTools` contract, not removing the rung.
     const deepseek = "deepseek-responses/deepseek-flash";
-    expect(lanes["gpt-6.1-sol"]?.primary).toBe("openai-codex/gpt-6.1-sol");
-    expect(lanes["gpt-6.1-sol"]?.fallback).toEqual([deepseek, "balanced"]);
+    expect(lanes["gpt-6.1-terra"]?.primary).toBe("openai-codex/gpt-6.1-terra");
+    expect(lanes["gpt-6.1-terra"]?.fallback).toEqual([deepseek, "balanced"]);
     expect(lanes["gpt-6-luna"]?.primary).toBe("openai-codex/gpt-6-luna");
     expect(lanes["gpt-6-luna"]?.fallback).toEqual([deepseek, "economy"]);
     expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");

@@ -200,6 +200,25 @@ openai-codex/gpt-6-astra:
   maxOutputTokens: 128000
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
+# GPT-6.1 Terra: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+# Checked 2026-10-27; tool calling uses Responses, not Chat Completions.
+# Codex fallback context: 500K, from openai/codex main models.json (2026-10-27).
+# https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
+# Live account metadata controls availability, reasoning, context and Responses Lite.
+openai-codex/gpt-6.1-terra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+  maxContextTokens: 500000
+  maxOutputTokens: 128000
 # GPT-6.1 Sol: Responses for tools, no none/minimal reasoning.
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
 # Codex fallback context is 272K from rust-v0.159.2; API context is 1.05M.
@@ -437,6 +456,22 @@ openai/gpt-6-astra:
   maxOutputTokens: 128000
 # GPT-6 Sol/Luna: official model pages checked 2026-09-28.
 # Codex live account metadata remains authoritative over these fallbacks.
+# GPT-6.1 Terra: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+# Checked 2026-10-27; tool calling uses Responses, not Chat Completions.
+openai/gpt-6.1-terra:
+  requestCompatibility:
+    openaiChat:
+      maxTokensField: max_completion_tokens
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
 # GPT-6.1 Sol: Responses for tools, no none/minimal reasoning.
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
 # Codex fallback context is 272K from rust-v0.159.2; API context is 1.05M.

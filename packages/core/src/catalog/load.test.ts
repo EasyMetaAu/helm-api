@@ -452,6 +452,7 @@ describe("loadRuntimeCatalog", () => {
 
   it.each([
     ["gpt-6.1-sol", 2, 10],
+    ["gpt-6.1-terra", 1, 5],
     ["gpt-6-luna", 0.1, 0.5],
   ] as const)("loads %s capabilities and official context/service prices", (model, input, output) => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
@@ -463,19 +464,23 @@ describe("loadRuntimeCatalog", () => {
         supportsVision: true,
         supportsStreaming: true,
         maxContextTokens:
-          model === "gpt-6.1-sol" && provider === "openai-codex" ? 272_000 : 1_050_000,
+          provider === "openai-codex" && model !== "gpt-6-luna"
+            ? model === "gpt-6.1-terra"
+              ? 500_000
+              : 272_000
+            : 1_050_000,
         maxOutputTokens: 128_000,
         reasoningEffort: {
           openaiReasoning: {
             supported: true,
             levels:
-              model === "gpt-6.1-sol"
+              model === "gpt-6.1-sol" || (model === "gpt-6.1-terra" && provider === "openai-codex")
                 ? ["low", "medium", "high", "xhigh", "max"]
                 : ["none", "low", "medium", "high", "xhigh", "max"],
           },
         },
       });
-      if (model === "gpt-6.1-sol") {
+      if (model !== "gpt-6-luna") {
         expect(
           entry?.capabilities.requestCompatibility?.openaiChat?.toolReasoningEffort,
         ).toBeUndefined();
@@ -501,7 +506,7 @@ describe("loadRuntimeCatalog", () => {
             }),
           ).toBeCloseTo(
             ((prompt - 300) * i +
-              200 * i * (model === "gpt-6.1-sol" ? 0.05 : 0.1) +
+              200 * i * (model !== "gpt-6-luna" ? 0.05 : 0.1) +
               100 * i * 1.25 +
               50 * o) /
               1_000_000,
