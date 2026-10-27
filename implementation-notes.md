@@ -7,11 +7,11 @@
 
 ---
 
-## 2026-10-27 · GPT lane 去版本化并按名称排序（docs/04、06、11）
+## 2026-10-27 · GPT lane 去版本化并按优先档位排序（docs/04、06、11）
 
-- **命名**：`gpt-6-astra`、`gpt-6-luna`、`gpt-6.1-sol`、`gpt-6.1-terra` lane 分别改成 `gpt-astra`、`gpt-luna`、`gpt-sol`、`gpt-terra`；lane 配置按名称字母顺序排列。旧模型名、日期及 `openai.` 客户端别名继续映射到新 lane。
+- **命名**：`gpt-6-astra`、`gpt-6-luna`、`gpt-6.1-sol`、`gpt-6.1-terra` lane 分别改成 `gpt-astra`、`gpt-luna`、`gpt-sol`、`gpt-terra`；lane 配置先按 `economy`、`balanced`、`premium` 排列，其余按名称字母顺序排列。旧模型名、日期及 `openai.` 客户端别名继续映射到新 lane。
 - **边界**：只改 lane 名和引用，不改真实上游 model ID、价格、能力、reasoning effort 或 fallback 顺序。Admin、Portal 与模型发现继续读取配置；192.168.8.4 的 Helm 串联模型与目录键同步改名，避免把新 lane 名直接发送给真实模型上游。
-- **部署**：检查所有配置引用与现役 key 的 lane 作用域，保留无关自定义配置。v0.30.58 按发布工具同步稳定快照，分别读回两台服务器的排序与路由，并验证新名称及旧别名的真实流式响应。
+- **部署**：检查所有配置引用与现役 key 的 lane 作用域，保留无关自定义配置。v0.30.58 按发布工具同步稳定快照，分别读回两台服务器的排序与路由，并验证新名称及旧别名的真实流式响应。后续显示顺序修正直接更新现役配置，保持 v0.30.58 镜像与路由内容不变。
 
 ## 2026-10-27 · 恢复 Sol 默认路由并保留独立 Terra lane（docs/04、06）
 

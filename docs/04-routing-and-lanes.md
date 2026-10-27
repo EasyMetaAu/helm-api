@@ -294,8 +294,9 @@ The version-independent GPT lanes are `gpt-astra`, `gpt-luna`, `gpt-sol`, and
 `gpt-terra`. They currently target `gpt-6-astra`, `gpt-6-luna`, `gpt-6.1-sol`,
 and `gpt-6.1-terra` upstream models respectively. Versioned client model IDs,
 including dated and `openai.` variants, remain compatible through
-`model-aliases.yaml`. Lane entries are listed alphabetically; execution order
-still follows each lane's primary and fallback list.
+`model-aliases.yaml`. Lane entries show `economy`, `balanced`, and `premium` first, in that order,
+then the remaining lanes alphabetically. Execution order still follows each
+lane's primary and fallback list.
 
 Vendor-family lanes
 exist so a client that pins a fixed vendor id lands on that family's real model
