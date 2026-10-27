@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-10-27 · 恢复 Sol 默认路由并保留独立 Terra lane（docs/04、06）
+
+- **用户修正**：保留 `gpt-6.1-sol` 与 `gpt-6.1-terra` 两个独立 lane；balanced、json、vision 及旧 Sol／GPT-5.6 Terra 客户端别名恢复指向 Sol。只有明确请求 `gpt-6.1-terra` 及其命名变体时进入 Terra lane，不把 Terra 作为其他 lane 的候选。
+- **范围**：Sol、Terra 的 provider、能力和价格均保留，原 reasoning effort 与 fallback 顺序不变。此次是 v0.30.56 默认路由选择的修正，不删除 Terra 支持、不更改账户权限或数据库结构；发布工具准备 v0.30.57 并重新核验稳定客户端快照。
+- **部署**：remote 保留订阅优先链；192.168.8.4 保留经过 remote Helm 的串联结构，分别恢复 Sol lane 并保留 Terra lane。部署时检查最新配置和 key 作用域，不覆盖无关运营设置。v0.30.56 已验证的 Codex 流式约束与 12 小时缓存计费限制继续适用。
+
 ## 2026-10-27 · GPT-6.1 Terra 替换 Sol lane（docs/04、06、07）
 
 - **范围与兼容**：所有原 `gpt-6.1-sol` lane 名称及引用改为 `gpt-6.1-terra`，原 Sol 客户端别名转到 Terra，保留 Sol 显式 provider 配置和价格。档位、reasoning effort 与 fallback 顺序不变；新 Terra 官方 API 注册到 Responses，避免 Chat Completions 不支持工具调用。
@@ -78,13 +84,9 @@
 - **验证与限制**：定向回归覆盖超时分类、取消竞争、真实 socket 两轮复用和兜底时密钥撤销。目录本身较慢的上游原因不在本次修复内；未添加缓存、后台刷新或延长超时。
 - **发布前置**（docs/10）：v0.30.47 使用 `release:prepare` 同步官方稳定快照；Claude 2.1.299 经完整性校验和独立静态审查。新增上传字段不进入推理白名单，原生 `cc_gateway` 归因保留但不仿造；Grok 1.0.52、Codex 0.162.1 与同 tag 模型目录保持最新。详情见 `docs/claude-protocol-safety.md`。
 
-## 2026-10-14 · 原币媒体价卡配置（docs/07、10）
-
-- **配置落地**：`config/pricing.yaml` 为全部 25 个 Ark、百炼、MiniMax 模型配置 57 个正式计费分档；使用 `pricing.media`，保留原币种、地域、wire model、计费方向/单位、档位条件、免费数量、条件声线费、官方来源与核验日期。严格校验嵌套字段；旧配置兼容，手动价卡整体覆盖生成价卡。
-- **目录生效**：运行时 catalog 与 `/v1/models` 的具体模型项返回完整价卡。普通 lane 不暴露内部价格；原有 `*Usd` 字段不会接收人民币价格。万相七折作为限时促销单列，官网未公布结束日期，不能视作永久价格。
-- **边界**：本次完成模型价格配置与目录下发；不扩展实际用量计算、异步任务结算、金额预算预留或汇率换算。媒体费用遥测仍可为 null，spend-capped key 仍按原规则拒绝；重复 GET 不产生扣款。真实账单以供应商为准。详见 `docs/media-pricing.md`。
-
 ## 更早历史总览
+
+2026-10-14：原币媒体价卡覆盖 25 个模型、57 个分档，保留原币和地域语义，未扩展结算或汇率换算；完整记录见 Git 历史及 docs/media-pricing.md。
 
 2026-10-14：阿里与 MiniMax 媒体任务保留异步 operation ID、权限与下载边界；真实验收修正 Qwen3 OSS HTTPS 和固定 IP 连接，详见 Git 历史及 docs/media-provider-task-tracker.md。
 

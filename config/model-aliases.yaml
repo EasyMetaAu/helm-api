@@ -54,15 +54,15 @@
 "gpt-6.1-terra-*": gpt-6.1-terra
 "openai.gpt-6.1-terra": gpt-6.1-terra
 "openai.gpt-6.1-terra-*": gpt-6.1-terra
-"gpt-6.1-sol": gpt-6.1-terra
-"gpt-6.1-sol-*": gpt-6.1-terra
-"openai.gpt-6.1-sol": gpt-6.1-terra
-"openai.gpt-6.1-sol-*": gpt-6.1-terra
-# Legacy Sol clients follow the Terra replacement lane.
-"gpt-6-sol": gpt-6.1-terra
-"gpt-6-sol-*": gpt-6.1-terra
-"openai.gpt-6-sol": gpt-6.1-terra
-"openai.gpt-6-sol-*": gpt-6.1-terra
+"gpt-6.1-sol": gpt-6.1-sol
+"gpt-6.1-sol-*": gpt-6.1-sol
+"openai.gpt-6.1-sol": gpt-6.1-sol
+"openai.gpt-6.1-sol-*": gpt-6.1-sol
+# Legacy Sol clients follow the current Sol lane.
+"gpt-6-sol": gpt-6.1-sol
+"gpt-6-sol-*": gpt-6.1-sol
+"openai.gpt-6-sol": gpt-6.1-sol
+"openai.gpt-6-sol-*": gpt-6.1-sol
 "gpt-6-luna": gpt-6-luna
 "gpt-6-luna-*": gpt-6-luna
 "openai.gpt-6-luna": gpt-6-luna
@@ -70,16 +70,16 @@
 "gpt-5.6": gpt-6-astra
 "gpt-5.6-sol": gpt-6-astra
 "gpt-5.6-sol-*": gpt-6-astra
-"gpt-5.6-terra": gpt-6.1-terra
-"gpt-5.6-terra-*": gpt-6.1-terra
+"gpt-5.6-terra": gpt-6.1-sol
+"gpt-5.6-terra-*": gpt-6.1-sol
 "gpt-5.6-luna": gpt-6-luna
 "gpt-5.6-luna-*": gpt-6-luna
 "gpt-5.6-*": gpt-6-astra
 "openai.gpt-5.6": gpt-6-astra
 "openai.gpt-5.6-sol": gpt-6-astra
 "openai.gpt-5.6-sol-*": gpt-6-astra
-"openai.gpt-5.6-terra": gpt-6.1-terra
-"openai.gpt-5.6-terra-*": gpt-6.1-terra
+"openai.gpt-5.6-terra": gpt-6.1-sol
+"openai.gpt-5.6-terra-*": gpt-6.1-sol
 "openai.gpt-5.6-luna": gpt-6-luna
 "openai.gpt-5.6-luna-*": gpt-6-luna
 "openai.gpt-5.6-*": gpt-6-astra
