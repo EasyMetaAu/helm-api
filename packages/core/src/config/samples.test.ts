@@ -70,7 +70,13 @@ describe("checked-in config samples", () => {
       const upstream = upstreamModels[current];
       expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${upstream}`);
     }
-    expect(Object.keys(lanes)).toEqual(Object.keys(lanes).sort());
+    const priorityLanes = ["economy", "balanced", "premium"];
+    expect(Object.keys(lanes)).toEqual([
+      ...priorityLanes,
+      ...Object.keys(lanes)
+        .filter((name) => !priorityLanes.includes(name))
+        .sort(),
+    ]);
     for (const [model, lane] of Object.entries({
       "gpt-6-astra": "gpt-astra",
       "gpt-6-luna": "gpt-luna",

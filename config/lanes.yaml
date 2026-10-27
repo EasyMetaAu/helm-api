@@ -23,12 +23,24 @@
 # and lands on a deterministic json-capable model (docs/02: `*/auto` only at the
 # tail).
 
-# Lane entries are sorted alphabetically. Upstream model IDs remain versioned.
+# Show economy, balanced, premium first, then the remaining lanes alphabetically.
+# Upstream model IDs remain versioned.
 
 
-bailian-speech:
-  primary: bailian/qwen-audio-3.1-tts-flash
-  fallback: []
+economy:
+  purpose: Cheap and fast for simple tasks
+  reasoning_effort: medium
+  primary: gpt-luna
+  fallback:
+    - claude-haiku
+    - grok
+    - openrouter/deepseek-v4-flash
+    - openrouter/auto
+    - zenmux/auto
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
@@ -44,6 +56,22 @@ balanced:
     require_tools: false
     require_json: false
     require_vision: false
+
+premium:
+  purpose: Strong reasoning and high quality
+  reasoning_effort: high
+  primary: gpt-astra
+  fallback:
+    - grok
+    - claude-opus
+    - balanced
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+bailian-speech:
+  primary: bailian/qwen-audio-3.1-tts-flash
+  fallback: []
 
 # Claude Fable 5.1 — the Mythos-class Claude (autonomous knowledge work + coding),
 # 1M context. Mirrors claude-opus: LEADS with the native Anthropic OAuth alias (an
@@ -120,20 +148,6 @@ coding:
   fallback:
     - premium
     - balanced
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
-economy:
-  purpose: Cheap and fast for simple tasks
-  reasoning_effort: medium
-  primary: gpt-luna
-  fallback:
-    - claude-haiku
-    - grok
-    - openrouter/deepseek-v4-flash
-    - openrouter/auto
-    - zenmux/auto
   constraints:
     require_tools: false
     require_json: false
@@ -364,19 +378,6 @@ minimax-speech:
 minimax-video:
   primary: minimax/MiniMax-H3
   fallback: []
-
-premium:
-  purpose: Strong reasoning and high quality
-  reasoning_effort: high
-  primary: gpt-astra
-  fallback:
-    - grok
-    - claude-opus
-    - balanced
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
 
 # Native media lanes use a single paid create; never replay via fallback.
 
