@@ -48,8 +48,8 @@ const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 // executes in hermetic CI. No OAuth accounts are bound in this fixture, so the
 // subscription aliases fail open and both balanced/premium eventually serve the
 // keyed DeepSeek Pro fallback through the local mock.
-const BALANCED_CONFIGURED_PRIMARY = "gpt-6.1-sol";
-const PREMIUM_CONFIGURED_PRIMARY = "gpt-6-astra";
+const BALANCED_CONFIGURED_PRIMARY = "gpt-sol";
+const PREMIUM_CONFIGURED_PRIMARY = "gpt-astra";
 const QUALITY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-pro";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired

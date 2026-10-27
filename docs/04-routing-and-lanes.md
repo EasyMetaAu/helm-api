@@ -290,19 +290,14 @@ quality/cost lanes by complexity (`simple → economy`, `medium → balanced`,
 
 ### Vendor-family lanes
 
-Beyond the 7 generic lanes above, `config/lanes.yaml` ships **12 vendor-family
-lanes** — the rewrite targets of the [model-alias compatibility
-shim](#model-alias-compatibility-shim):
+The version-independent GPT lanes are `gpt-astra`, `gpt-luna`, `gpt-sol`, and
+`gpt-terra`. They currently target `gpt-6-astra`, `gpt-6-luna`, `gpt-6.1-sol`,
+and `gpt-6.1-terra` upstream models respectively. Versioned client model IDs,
+including dated and `openai.` variants, remain compatible through
+`model-aliases.yaml`. Lane entries are listed alphabetically; execution order
+still follows each lane's primary and fallback list.
 
-```text
-claude-opus   claude-fable   claude-sonnet   claude-haiku
-gpt-5.6       gpt-5.6-sol    gpt-5.6-terra   gpt-5.6-luna
-gpt-5.4       gpt-5.4-mini
-gemini-pro    gemini-flash
-```
-
-(26 lanes total once `gpt-6-astra`, `grok` and the image/media lanes below are
-included.) These
+Vendor-family lanes
 exist so a client that pins a fixed vendor id lands on that family's real model
 instead of the GPT-led `premium` lane. Each one
 **leads with the requested vendor's native/subscription alias** — the Claude

@@ -101,7 +101,7 @@ describe("shipped config rules drive routing", () => {
     expect(config.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
     expect(config.lanes?.vision).toMatchObject({
-      primary: "gpt-6.1-sol",
+      primary: "gpt-sol",
       fallback: ["grok", "claude-sonnet", "claude-opus"],
     });
     expect(config.lanes?.tool_use).toBeDefined();
@@ -141,7 +141,7 @@ describe("shipped config rules drive routing", () => {
       { allowCustomModel: true },
     );
 
-    expect(result.decision.lane.selected_lane).toBe("gpt-6-astra");
+    expect(result.decision.lane.selected_lane).toBe("gpt-astra");
     expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-6-astra");
     expect(result.decision.lane.candidate_chain).not.toContain("openai/gpt-5.6");
     expect(result.decision.requested_model).toBe("gpt-5.6");
