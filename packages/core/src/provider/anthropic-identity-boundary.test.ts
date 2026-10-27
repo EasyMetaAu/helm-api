@@ -324,6 +324,10 @@ describe("Anthropic adapter header semantics", () => {
       expect(headers.get("x-claude-code-upload-lane")).toBeNull();
       for (const name of [
         "x-claude-code-route-final-answer",
+        "x-claude-code-sandy-plover",
+        "x-cowork-enrollment",
+        "x-ccr-upload-attempt",
+        "x-gateway-upstream-cloud-request-id",
         "x-ssr-client-ip",
         "x-ssr-client-ip-sig",
         "x-self-hosted-runner-capabilities",
@@ -351,6 +355,10 @@ describe("Anthropic adapter header semantics", () => {
         "x-claude-code-wiggly-dove": "opaque-client-value",
         "x-claude-code-upload-lane": "private-upload-route",
         "x-claude-code-route-final-answer": "private-route",
+        "x-claude-code-sandy-plover": '[{"name":"private-tool"}]',
+        "x-cowork-enrollment": "private-enrollment",
+        "x-ccr-upload-attempt": "private-attempt",
+        "x-gateway-upstream-cloud-request-id": "private-request",
         "x-ssr-client-ip": "192.0.2.1",
         "x-ssr-client-ip-sig": "private-signature",
         "x-self-hosted-runner-capabilities": "private-capability",

@@ -12,7 +12,7 @@
 - **范围与兼容**：所有原 `gpt-6.1-sol` lane 名称及引用改为 `gpt-6.1-terra`，原 Sol 客户端别名转到 Terra，保留 Sol 显式 provider 配置和价格。档位、reasoning effort 与 fallback 顺序不变；新 Terra 官方 API 注册到 Responses，避免 Chat Completions 不支持工具调用。
 - **官方依据**：[模型页](https://developers.openai.com/api/docs/models/gpt-6.1-terra)与[价目表](https://developers.openai.com/api/docs/pricing)，2026-10-27 核对：API context 1,050,000、最大输入 922,000、最大输出 128,000；reasoning 为 none/low/medium（API 默认）/high/xhigh/max。标准每百万 token 输入 $1、输出 $5、缓存读取 $0.05，30 分钟写入 $1.25；超过 272K 输入时整次请求输入/缓存 2 倍、输出 1.5 倍；Flex 半价、Fast 两倍，区域处理 1.1 倍。
 - **订阅边界**：[官方 Codex 目录](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json)同日含 Terra：默认 context 500K、最大 context 872K、默认 low、Responses Lite。静态能力取 500K，账号实时目录继续决定可用性、推理等级、上下文与协议。当前固定 Codex 0.164.0 离线快照不含 Terra，本次不手改官方快照；只有离线旧目录时会走现有 fallback，manual 清单也需由运营方启用 Terra。未调用真实账号验证权限。
-- **计费限制**：订阅价格为 API 等价估算。现有 schema 不区分 OpenAI 12 小时缓存写入（标准短上下文 $2.50/MTok），也没有独立 max-input 字段；本次不扩展计费或请求模型，不将 12 小时价冒充 1 小时缓存价。正式部署和上游真实验收不属于本次本地配置修改。
+- **计费限制**：订阅价格为 API 等价估算。现有 schema 不区分 OpenAI 12 小时缓存写入（标准短上下文 $2.50/MTok），也没有独立 max-input 字段；本次不扩展计费或请求模型，不将 12 小时价冒充 1 小时缓存价。发布准备按用户后续授权升级至 v0.30.56；Claude 2.1.311 已通过独立静态协议检查，新增四个字段继续剥离，详见 `docs/claude-protocol-safety.md`。Grok、Codex 稳定版按发布工具同步；部署与真实上游结果另行核验。
 
 ## 2026-10-26 · Codex 旧 turn-state 发送前换账号（docs/04、05、06、07）
 
