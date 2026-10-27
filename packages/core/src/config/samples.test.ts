@@ -71,11 +71,18 @@ describe("checked-in config samples", () => {
       expect(expandLaneChain(current, lanes)[0]).toBe(`openai-codex/${upstream}`);
     }
     const priorityLanes = ["economy", "balanced", "premium"];
+    const functionalLanes = [
+      "coding",
+      "json",
+      "tool_use",
+      "transcription-file",
+      "transcription-short",
+      "vision",
+    ];
+    const leadingLanes = [...priorityLanes, ...functionalLanes];
     expect(Object.keys(lanes)).toEqual([
-      ...priorityLanes,
-      ...Object.keys(lanes)
-        .filter((name) => !priorityLanes.includes(name))
-        .sort(),
+      ...leadingLanes,
+      ...Object.keys(lanes).filter((name) => !leadingLanes.includes(name)),
     ]);
     for (const [model, lane] of Object.entries({
       "gpt-6-astra": "gpt-astra",
