@@ -170,14 +170,14 @@ function providerClients(client: ProviderClient): Map<string, ProviderClient> {
 describe("default config activates capability filter + cost (alias-namespace alignment)", () => {
   it.each([
     "gpt-6-astra",
-    "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-luna",
   ])("the shipped %s model lane preserves the Codex client's reasoning effort", (lane) => {
     expect(lanes[lane]?.reasoning_effort).toBeUndefined();
   });
 
   it.each([
-    "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-luna",
   ])("routes shipped %s aliases and registers its official upstream", (model) => {
     expect(lanes[model]?.primary).toBe(`openai-codex/${model}`);
@@ -193,7 +193,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
     }
     expect(
       config.providers.find(
-        (provider) => provider.name === (model === "gpt-6.1-sol" ? "openai-responses" : "openai"),
+        (provider) => provider.name === (model === "gpt-6.1-terra" ? "openai-responses" : "openai"),
       )?.models,
     ).toContainEqual({
       alias: `openai/${model}`,
@@ -201,13 +201,13 @@ describe("default config activates capability filter + cost (alias-namespace ali
     });
   });
 
-  it("registers GPT-6.1 Sol on Responses for tool-capable requests", () => {
-    const target = buildRegistry().resolve("openai/gpt-6.1-sol");
+  it("registers GPT-6.1 Terra on Responses for tool-capable requests", () => {
+    const target = buildRegistry().resolve("openai/gpt-6.1-terra");
     expect(target).toMatchObject({
       ok: true,
       value: {
         providerName: "openai-responses",
-        providerModel: "gpt-6.1-sol",
+        providerModel: "gpt-6.1-terra",
         targetProviderProtocol: "openai_responses",
         apiKeyEnv: "OPENAI_API_KEY",
       },
@@ -520,20 +520,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Expand the REAL shipped `json` lane: primary openai-codex/gpt-6.1-sol, then
+    // Expand the REAL shipped `json` lane: primary openai-codex/gpt-6.1-terra, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
-    expect(chain).toContain("openai-codex/gpt-6.1-sol");
+    expect(chain).toContain("openai-codex/gpt-6.1-terra");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // The json primary openai-codex/gpt-6.1-sol is json-capable AND serves
+    // The json primary openai-codex/gpt-6.1-terra is json-capable AND serves
     // non-stream requests, so it lands FIRST — the json-incapable */auto tails
     // (which WOULD be pruned, proven head-on by the previous test) are never
     // reached. The upstream `model` is the bare provider_model.
-    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-codex/gpt-6.1-sol");
-    expect(calls).toEqual(["openai-codex/gpt-6.1-sol"]);
+    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-codex/gpt-6.1-terra");
+    expect(calls).toEqual(["openai-codex/gpt-6.1-terra"]);
   });
 
   it("a chain of ONLY json-incapable candidates → capability_unsatisfiable (422 class)", async () => {
