@@ -1638,6 +1638,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     // Request-level modality detection (audio/video/document) — computed once and
     // applied to every candidate's capability gate (P7 capability-aware routing).
     const reqModalities = detectRequestModalities(req);
+    // Anthropic ingress normalizes any/tool to required/function. Also accept
+    // native shapes carried by other protocol adapters without weakening them.
+    const choice = req.tool_choice;
+    const needsForcedToolChoice =
+      choice === "required" ||
+      (isRecord(choice) &&
+        (choice.type === "function" || choice.type === "tool" || choice.type === "any"));
     const needsCachedContent =
       typeof req.cached_content === "string" && req.cached_content.length > 0;
 
@@ -1747,6 +1754,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const estimatedPromptTokens = approxPromptTokens(req);
           const verdict = checkCapability(caps, {
             needsTools: Array.isArray(req.tools) && req.tools.length > 0,
+            needsForcedToolChoice,
             needsJson: isJson(req.response_format),
             needsResponseSchema: isJsonSchema(req.response_format),
             needsVision:

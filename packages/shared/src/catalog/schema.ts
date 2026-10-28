@@ -51,6 +51,9 @@ export const ReasoningEffortCapabilitySchema = z
 
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),
+  // False forbids required/named tool selection; ordinary auto tool use still works.
+  // Omitted preserves existing routing for catalogs without this distinction.
+  supportsForcedToolChoice: z.boolean().optional(),
   // JSON-output capability as an ORDERED tier (none < object < schema), NOT a boolean:
   //   none   — no JSON mode at all (e.g. `*/auto` aggregators; pruned for any JSON request).
   //   object — `response_format:{type:"json_object"}` only (official DeepSeek: json_object

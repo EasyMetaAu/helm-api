@@ -20,6 +20,7 @@ export const ATTEMPT_CODE_LABELS: Record<string, string> = {
 
   // ── capability-filter skip reasons ──
   no_tool_support: 'No tool-calling support',
+  no_forced_tool_choice_support: 'No forced tool selection support',
   no_json_support: 'No JSON mode support',
   no_response_schema_support: 'No strict JSON schema support',
   no_vision_support: 'No image/vision support',
