@@ -602,6 +602,7 @@
   "No strict JSON schema support": "엄격한 JSON 스키마 미지원",
   "No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.": "아직 연결된 구독이 없습니다. Claude, ChatGPT 또는 Copilot 계정을 연결하려면 연결을 클릭하세요.",
   "No token usage recorded in this window yet.": "이 기간에는 아직 기록된 토큰 사용량이 없습니다.",
+  "No forced tool selection support": "강제 도구 선택 미지원",
   "No tool-calling support": "도구 호출 미지원",
   "No traffic today": "오늘 트래픽 없음",
   "No usage recorded for this account yet.": "No usage recorded for this account yet.",

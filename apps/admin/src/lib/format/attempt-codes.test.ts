@@ -28,6 +28,7 @@ describe('attemptCodeLabel', () => {
     // capability filter can emit must have a human label here.
     const skipReasons = [
       'no_tool_support',
+      'no_forced_tool_choice_support',
       'no_json_support',
       'no_response_schema_support',
       'no_vision_support',

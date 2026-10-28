@@ -1,6 +1,7 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import {
   AnthropicIdentityError,
+  anthropicTransformRequestOut,
   CodexCapacityRetryExhaustedError,
   CodexResponsesBeforeSendError,
   createAnthropicClient,
@@ -19,6 +20,7 @@ import {
   createNativePassthroughCarrier,
   ERROR_CLASS_HTTP_STATUS,
   type InternalRequest,
+  InternalRequestSchema,
   type NativePassthroughCarrier,
   nativePassthroughBody,
   type TargetProviderProtocol,
@@ -4509,6 +4511,100 @@ describe("createExecute — gateway execution adapter", () => {
       source: "generated",
     };
   }
+
+  describe.each([false, true])("forced tool choice (stream=%s)", (stream) => {
+    it.each([
+      { type: "any" },
+      { type: "tool", name: "lookup" },
+    ])("skips Sonnet 5.5 before token counting or sending, preserving %j for fallback", async (tool_choice) => {
+      const head = {
+        chatCompletion: vi.fn(),
+        chatCompletionStream: vi.fn(),
+        nativePassthrough: vi.fn(),
+        nativePassthroughStream: vi.fn(),
+        countTokens: vi.fn(),
+      } as unknown as ProviderClient;
+      const tail = {
+        chatCompletion: vi.fn((_request: InternalRequest) => Promise.resolve({ id: "fallback" })),
+        chatCompletionStream: vi.fn((_request: InternalRequest) =>
+          gen(['data: {"id":"fallback"}\n\n', "data: [DONE]\n\n"]),
+        ),
+      };
+      const alias = "anthropic/claude-sonnet-5-5";
+      const cb = breaker();
+      const failed = vi.spyOn(cb, "recordFailure");
+      const execute = createExecute({
+        defaultProvider: head,
+        providers: new Map<string, ProviderClient>([
+          ["anthropic", head],
+          ["mock", tail],
+        ]),
+        registry: protocolRegistry({
+          [alias]: {
+            providerName: "anthropic",
+            providerModel: "claude-sonnet-5-5",
+            targetProviderProtocol: "anthropic_messages",
+          },
+          fallback: {
+            providerName: "mock",
+            providerModel: "compatible",
+            targetProviderProtocol: "openai_chat",
+          },
+        }),
+        breaker: cb,
+        now: clock(),
+        catalog: loadRuntimeCatalog({ configDir: "config" }),
+        signal: new AbortController().signal,
+        nativeProtocolPassthroughEnabled: () => true,
+      });
+      const body = {
+        model: "claude-sonnet-5",
+        max_tokens: 64,
+        stream,
+        messages: [{ role: "user", content: "Use lookup" }],
+        tools: [{ name: "lookup", input_schema: { type: "object", properties: {} } }],
+        tool_choice,
+      };
+      const normalized = anthropicTransformRequestOut(body);
+      const request = InternalRequestSchema.parse({
+        ...req(),
+        ...normalized,
+        protocol: "anthropic_messages",
+        native_request: body,
+      });
+      const out = await execute(plan([alias, "fallback"]), request);
+      expect(out.attempts[0]).toMatchObject({
+        alias,
+        skipped: true,
+        skip_reason: "no_forced_tool_choice_support",
+      });
+      expect(out.final).toMatchObject({ status: "ok", alias: "fallback" });
+      if (out.stream)
+        for await (const _chunk of out.stream) {
+          /* drain */
+        }
+      for (const call of [
+        head.countTokens,
+        head.nativePassthrough,
+        head.nativePassthroughStream,
+        head.chatCompletion,
+        head.chatCompletionStream,
+      ]) {
+        expect(call).not.toHaveBeenCalled();
+      }
+      const call = stream ? tail.chatCompletionStream : tail.chatCompletion;
+      expect(call).toHaveBeenCalledOnce();
+      expect(call.mock.calls[0]?.[0]).toMatchObject({ tool_choice: normalized.tool_choice });
+      expect(body.tool_choice).toEqual(tool_choice);
+      expect(failed).not.toHaveBeenCalled();
+
+      const onlyUnsupported = await execute(plan([alias]), request);
+      expect(onlyUnsupported.final).toMatchObject({
+        status: "error",
+        error: { error_class: "capability_unsatisfiable" },
+      });
+    });
+  });
 
   it("needs_json: skips model A (no json) with a skip_reason and picks model B", async () => {
     const provider = {

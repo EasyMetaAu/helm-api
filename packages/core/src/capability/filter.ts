@@ -19,6 +19,7 @@ import type { CatalogEntry } from "@helm/shared";
 // reason means updating this enum AND the UI; never slip in a free-form string.
 export type SkipReason =
   | "no_tool_support" // request carries tools, candidate has no tool-call
+  | "no_forced_tool_choice_support" // tools work, but required/named selection does not
   | "no_json_support" // request needs JSON output, candidate has no JSON mode (jsonOutput:none)
   | "no_response_schema_support" // request needs strict json_schema, candidate only does json_object (jsonOutput:object)
   | "no_vision_support" // request has images/attachments, candidate is text-only
@@ -32,6 +33,7 @@ export type SkipReason =
 
 export interface CapabilityRequest {
   needsTools: boolean;
+  needsForcedToolChoice?: boolean;
   needsJson: boolean; // response_format is json_object OR json_schema
   needsResponseSchema: boolean; // response_format.type === "json_schema" (strict structured output)
   needsVision: boolean; // has attachments / images
@@ -67,6 +69,9 @@ export function checkCapability(
   // 1. tools
   if (req.needsTools && !caps.supportsTools) {
     return skip("no_tool_support");
+  }
+  if (req.needsForcedToolChoice && caps.supportsForcedToolChoice === false) {
+    return skip("no_forced_tool_choice_support");
   }
   // 2. JSON output. The tier is ordered none < object < schema:
   //   2a. any JSON request needs at least json_object — a `none` candidate is pruned.

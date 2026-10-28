@@ -39,6 +39,37 @@ describe("checkCapability", () => {
     expect(result).toEqual({ ok: false, skipReason: "no_tool_support" });
   });
 
+  it("skips forced tool choice only when explicitly unsupported", () => {
+    expect(
+      checkCapability(
+        caps({ supportsForcedToolChoice: false }),
+        req({
+          needsTools: true,
+          needsForcedToolChoice: true,
+        }),
+      ),
+    ).toEqual({ ok: false, skipReason: "no_forced_tool_choice_support" });
+    for (const supportsForcedToolChoice of [undefined, true]) {
+      expect(
+        checkCapability(
+          caps({ supportsForcedToolChoice }),
+          req({
+            needsTools: true,
+            needsForcedToolChoice: true,
+          }),
+        ).ok,
+      ).toBe(true);
+    }
+    expect(
+      checkCapability(
+        caps({ supportsForcedToolChoice: false }),
+        req({
+          needsTools: true,
+        }),
+      ).ok,
+    ).toBe(true);
+  });
+
   it("passes the tool gate when the candidate supports tools", () => {
     const result = checkCapability(caps({ supportsTools: true }), req({ needsTools: true }));
     expect(result).toEqual({ ok: true, skipReason: null });

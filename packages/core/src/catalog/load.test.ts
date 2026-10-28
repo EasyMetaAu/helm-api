@@ -208,6 +208,7 @@ describe("loadRuntimeCatalog", () => {
     });
     expect(sonnet?.capabilities).toMatchObject({
       supportsTools: true,
+      supportsForcedToolChoice: false,
       jsonOutput: "schema",
       supportsVision: true,
       supportsStreaming: true,

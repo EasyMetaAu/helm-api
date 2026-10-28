@@ -602,6 +602,7 @@
   "No strict JSON schema support": "Sem suporte a esquema JSON estrito",
   "No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.": "Ainda não há assinaturas conectadas. Clique em Conectar para vincular uma conta Claude, ChatGPT ou Copilot.",
   "No token usage recorded in this window yet.": "Ainda não há uso de tokens registrado nesta janela.",
+  "No forced tool selection support": "Seleção obrigatória de ferramentas não suportada",
   "No tool-calling support": "Sem suporte a chamadas de ferramentas",
   "No traffic today": "Sem tráfego hoje",
   "No usage recorded for this account yet.": "No usage recorded for this account yet.",
