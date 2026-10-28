@@ -12,6 +12,7 @@
 - **根因**：生产请求被 Sonnet 5.5 以不支持 `tool_choice: tool/any` 拒绝；执行器把上游 400 当作整个请求无效，因此没有尝试后续候选。Anthropic 当前官方文档确认该限制也适用于 count_tokens。
 - **决定**：新增可选能力 `supportsForcedToolChoice`，为 `anthropic/claude-sonnet-5-5` 显式设为 false。执行器在 token 计数与发送前跳过不支持的模型，记录 `no_forced_tool_choice_support`，并保留客户端原有强制工具要求供后续模型执行；全部候选不兼容时沿用 422。auto/none 不受影响，不把真实无效请求的 400 改成通用重试。
 - **兼容与限制**：未配置新字段的模型维持现有行为；不推断其他模型的限制。定向回归覆盖原生 Anthropic 入站规范化、流式／非流式、零上游调用、fallback 参数保留及不计熔断故障。本条记录本地修复，生产需部署代码及能力配置后才能生效。
+- **发布准备**：按发布工具准备 v0.30.59，固定 Grok 1.0.70、经独立静态审查的 Claude Code 2.1.312、Codex 0.165.0 及同 tag 模型目录；新的远程 worker 票据头继续剥离。仅补齐官方目录中的 Terra 元数据，不修改 lane 默认路由。计划分别核验 remote 原生执行和 192.168.8.4 串联路径；LAN 的 remote-helm lane 代表远端候选链，不能误标成单个 Sonnet 模型不支持强制工具。
 
 ## 2026-10-27 · GPT lane 去版本化并按优先档位排序（docs/04、06、11）
 

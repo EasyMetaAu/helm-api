@@ -100,6 +100,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 账号归因构造（旧 223417922–223418611／新 224732589–224733278）、保护字段（222035212–222035673）及 SSE 文本、citation、JSON-input、thinking、signature、compaction 分支（221868377–221869917）在审查片段中结构一致。保留既有账号隔离和流式测试；有限静态审查不证明全部客户端兼容，也不代替真实上游验收。
 - [官方发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21311)中的 `x-should-retry:false`、隐藏推理空闲检测和断连说明，不构成本次修改 Helm 重试或协议策略的理由。
 
+2026-10-28 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.312`：下载包通过 npm SHA512 integrity 校验，二进制 SHA256 为 `6b5ec691195e551b02c41df9f7d723f4ea61eaa03c2df90acefe3736f1aeb620`，内嵌 SDK 仍为 `0.128.0`（字节偏移 221854498）。复核旧 2.1.311 哈希，并由独立只读审查核对以下路径；未执行下载的 CLI 或访问账户。
+
+- 新增 `x-ccr-ticket-rev`、`x-ccr-ticket-session`、`x-ccr-ticket-seq`（244312476、244312495、244312518）来自远程 worker 响应。票据缓存随 Authorization 改变而清除，并在 worker 的 `sessionBaseUrl` 请求上注入（244353867）；没有证据表明它们是 Messages 必需身份。保持头白名单不变，补充三个剥离断言。
+- 账号归因构造（225045363–225046052）、额外保护字段（222254813）以及 Messages 请求主体（229525700–229526650）在已检查片段中保持原有结构；不复制票据或扩大身份模拟。
+- SSE 发出与累积逻辑（222087080–222091053）仍处理文本、citation、工具 JSON 增量、thinking、signature 和 compaction，并保留压缩块的 `encrypted_content`。未发现需要修改协议实现的新增 P0/P1 问题；有限静态片段不覆盖动态展开的全部字段，也不能代替真实上游验收。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。

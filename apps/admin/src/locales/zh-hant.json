@@ -602,6 +602,7 @@
   "No strict JSON schema support": "不支援嚴格 JSON Schema",
   "No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.": "尚未連線任何訂閱。點擊「連線」以關聯 Claude、ChatGPT 或 Copilot 帳戶。",
   "No token usage recorded in this window yet.": "此時間範圍內尚無權杖用量記錄。",
+  "No forced tool selection support": "不支援強制選擇工具",
   "No tool-calling support": "不支援工具呼叫",
   "No traffic today": "今日無流量",
   "No usage recorded for this account yet.": "No usage recorded for this account yet.",
