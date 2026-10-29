@@ -285,3 +285,12 @@ never diverge.
   policies, classifier, runtime settings, key caps, provider account settings,
   and memory content), but it is a convenience layer rather than the only entry
   point.
+
+### API key providers
+
+Providers includes an **API key providers** section alongside subscriptions. Operators can
+bulk-add model keys, rename or replace an account, restrict its models, set priority, pause,
+resume, request recovery and delete it. The list shows masked keys, availability or failure
+reason, next recovery attempt, request/token counts and estimated cost for the last 24 hours.
+Recovery actions do not claim that upstream balance was reset. The round-robin/manual-priority
+selector applies only to this API key pool; subscription strategies are unchanged.

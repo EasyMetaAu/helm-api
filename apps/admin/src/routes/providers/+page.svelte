@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
@@ -937,6 +938,8 @@
       >
     </div>
   </header>
+
+  <ApiKeyPools />
 
   {#if refreshStatusLabel(overview.refresh)}
     <p

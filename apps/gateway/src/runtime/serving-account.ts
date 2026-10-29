@@ -18,6 +18,7 @@ import type { DecisionRecord } from "@helm/shared";
 export interface ServingAccount {
   providerId: string;
   account: string;
+  aliases?: readonly string[];
 }
 
 // Mutable holder the pool's onSelect writes into; read synchronously after route().
@@ -30,9 +31,13 @@ export const servingAccountStore = new AsyncLocalStorage<ServingAccountHolder>()
 // Record the selected subscription for the current request (called by onSelect).
 // No-op when not inside a `run` scope (e.g. a non-OAuth request, or a unit test
 // that never enters one) — fail-open, never throws.
-export function markServingAccount(providerId: string, account: string): void {
+export function markServingAccount(
+  providerId: string,
+  account: string,
+  aliases?: readonly string[],
+): void {
   const holder = servingAccountStore.getStore();
-  if (holder) holder.selected = { providerId, account };
+  if (holder) holder.selected = { providerId, account, aliases };
 }
 
 // Run `fn` inside a fresh holder and return BOTH its result and whichever account
@@ -57,7 +62,9 @@ export function servedByAccount(
   servedAlias: string | null,
 ): boolean {
   if (!servingAccount || !servedAlias) return false;
-  return servedAlias.startsWith(`${servingAccount.providerId}/`);
+  return servingAccount.aliases
+    ? servingAccount.aliases.includes(servedAlias)
+    : servedAlias.startsWith(`${servingAccount.providerId}/`);
 }
 
 export function stampServingAccount(

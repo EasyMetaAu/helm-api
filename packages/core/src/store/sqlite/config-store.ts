@@ -23,6 +23,18 @@ export class SqliteConfigStore implements ConfigStore {
       .run();
   }
 
+  async compareAndSet(key: string, expected: string | null, value: string): Promise<boolean> {
+    const result =
+      expected === null
+        ? this.db.$sqlite
+            .prepare("INSERT INTO config_kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING")
+            .run(key, value)
+        : this.db.$sqlite
+            .prepare("UPDATE config_kv SET value = ? WHERE key = ? AND value = ?")
+            .run(value, key, expected);
+    return result.changes === 1;
+  }
+
   async setIfMissingOrNumericLte(key: string, value: string, lte: number): Promise<boolean> {
     const res = this.db.$sqlite
       .prepare(`

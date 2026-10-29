@@ -505,6 +505,7 @@ export {
   AnthropicIdentityError,
   anthropicRequestAccountUuid,
 } from "./provider/anthropic-identity.js";
+export { ApiKeyAccounts, createApiKeyPoolClient } from "./provider/api-key-pool.js";
 export { ArkMediaError, type ArkMediaOutcome, createArkMediaClient } from "./provider/ark.js";
 export * from "./provider/bailian-asr.js";
 export * from "./provider/bailian-media.js";

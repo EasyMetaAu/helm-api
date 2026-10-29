@@ -396,3 +396,51 @@ config argument for direct callers/tests, but `buildServer()` does not load an
 admin YAML path.) The two never cross: the API path never consults the admin
 credentials, and the admin path never consults the KeyStore. See [11 · Admin
 UI](11-admin-ui.md).
+
+## Managed upstream API key pools
+
+OpenAI Chat and generic Responses providers can reference the same `api_key_pool`:
+
+```yaml
+api_key_env: OPENAI_API_KEY # optional legacy credential before the first pool configuration
+api_key_pool:
+  id: openai
+  strategy: round_robin
+  reset_timezone: Asia/Shanghai
+```
+
+The authenticated Providers page manages model API keys (project or service-account keys),
+not the Helm client keys on the API Keys page. Admin keys are rejected. Credentials and
+runtime state are AES-GCM encrypted in one `config_kv` row per pool using
+`HELM_OAUTH_ENC_KEY`. SQLite and Postgres use atomic compare-and-set on that single row;
+no schema migration or cross-table query is required. Missing/wrong encryption keys or
+invalid stored data fail closed. An untouched pool may use `api_key_env`; once a pool is
+configured, deleting or pausing all accounts never restores the legacy credential.
+
+`round_robin` distributes independent requests among eligible accounts within each gateway
+process. `manual_priority` selects lower priority numbers first, rotating within that tier.
+The admin strategy overrides the YAML default. Model allowlists and upstream model-denial
+signals filter accounts before selection. The distribution is by request count, not dollars
+or tokens; multiple gateway processes do not share a global round-robin cursor.
+
+Billing/quota errors (`credit_balance_exhausted`, `insufficient_quota`, organization/project
+spend limits and organization usage limits) pause the affected account until the next calendar
+month in `reset_timezone`. This is an operator retry policy, not a claim that prepaid credit
+renews monthly. The first eligible business request acquires an atomic, expiring recovery
+reservation. Only successful upstream output confirms recovery. Unsuccessful billing recovery
+stays paused for at least 24 hours; invalid credentials instead require replacement. A manual
+retry moves the eligibility time forward without undoing a manual pause or a live reservation.
+There are no scheduled paid probes, balance pulls, credit purchases or reset-credit consumes.
+
+Ordinary 429 responses use `Retry-After` or a short cooldown. Invalid credentials remain disabled
+across monthly boundaries. Deterministic request errors and client aborts do not rotate accounts.
+Existing pre-output retry guards remain in force: emitted text/tool work cannot be replayed, and
+stateful Responses/WebSocket requests stay with their original credential generation. Replacing
+a key invalidates old-generation continuations; clients must start a new conversation with
+complete input instead of forwarding private state to the replacement account.
+
+The management surface is `/admin/api/api-key-pools`: GET lists masked accounts and the last
+24 hours of gateway-observed usage; POST `/:pool/accounts` imports named keys; PATCH/DELETE
+`/:pool/accounts/:id` edits/removes one account; POST `/:pool/accounts/:id/retry` permits a
+recovery attempt; PUT `/:pool/strategy` selects rotation. All routes inherit admin authentication.
+Costs are estimates for traffic observed by Helm, not an OpenAI balance. No Admin key is needed.
