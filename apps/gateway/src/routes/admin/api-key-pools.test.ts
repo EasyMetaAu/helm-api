@@ -39,7 +39,7 @@ function setup() {
         "openai",
         {
           accounts,
-          models: ["m"],
+          models: ["m", "gpt-6-luna"],
           timezone: "Asia/Shanghai",
           strategy: "round_robin",
           createTestClient,
@@ -201,4 +201,18 @@ describe("API key account connectivity test", () => {
     );
     expect(await res.json()).toMatchObject({ ok: false, error: "empty_response" });
   });
+});
+
+it("uses the supported non-reasoning mode for the default Luna test", async () => {
+  const { app, accounts, chatCompletion } = setup();
+  await accounts.add([{ name: "one", key: "sk-proj-first-test" }]);
+  const id = (await accounts.list())[0]!.id;
+  await app.request(
+    `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+    body({ model: "gpt-6-luna" }),
+  );
+  expect(chatCompletion).toHaveBeenCalledWith(
+    expect.objectContaining({ reasoning_effort: "none" }),
+    expect.anything(),
+  );
 });

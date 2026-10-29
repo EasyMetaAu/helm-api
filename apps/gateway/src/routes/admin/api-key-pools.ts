@@ -137,7 +137,7 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
           messages: [{ role: "user", content: "Reply with exactly OK." }],
           stream: false,
           max_completion_tokens: 256,
-          ...(model === "gpt-6-luna" ? { reasoning_effort: "minimal" } : {}),
+          ...(model === "gpt-6-luna" ? { reasoning_effort: "none" } : {}),
         },
         { signal },
       );
