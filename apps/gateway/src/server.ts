@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import type { EnvironmentTimezoneResolver } from "@helm/core";
 import {
   type AnthropicSSEEvent,
+  ApiKeyAccounts,
   AUTO_VACUUM_CHECK_INTERVAL_MS,
   anthropicTransformer,
   type BudgetCaps,
@@ -18,6 +19,7 @@ import {
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
+  createApiKeyPoolClient,
   createArkMediaClient,
   createAutoVacuumRunner,
   createBailianAsrClient,
@@ -3208,7 +3210,7 @@ export async function buildServer(
   // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
   // SAME dynamic-header client backs the eval/classify path below, so eval auth
   // never silently fails (acceptance criterion 9).
-  const provider = primaryCred
+  let provider = primaryCred
     ? createProviderClient(
         first,
         { baseUrl, timeoutMs },
@@ -3241,6 +3243,76 @@ export async function buildServer(
   // its configured aliases explicitly unavailable, so lane fallback can continue
   // to another static or connected OAuth provider.
   if (primaryCred) configuredClients.set(first.name, provider);
+  // Static OpenAI transports share one durable credential pool. An untouched pool
+  // retains the env-key path; an explicitly emptied pool never falls back to it.
+  const apiKeyPools = new Map<
+    string,
+    {
+      accounts: ApiKeyAccounts | null;
+      timezone: string;
+      strategy: "round_robin" | "manual_priority";
+      models: string[];
+    }
+  >();
+  for (const p of config.providers) {
+    const poolConfig = p.api_key_pool;
+    if (!poolConfig) continue;
+    let pool = apiKeyPools.get(poolConfig.id);
+    if (
+      pool &&
+      (pool.timezone !== poolConfig.reset_timezone || pool.strategy !== poolConfig.strategy)
+    )
+      throw new Error("providers sharing an API key pool must use the same strategy and timezone");
+    if (!pool) {
+      const accounts = oauthEncKey
+        ? new ApiKeyAccounts({
+            store: store.config,
+            encKey: oauthEncKey,
+            poolId: poolConfig.id,
+            timezone: poolConfig.reset_timezone,
+            probeLeaseMs: timeoutMs + 60_000,
+          })
+        : null;
+      if (accounts) await accounts.refresh();
+      else if ((await store.config.get(`provider.api_keys.${poolConfig.id}`)) !== null)
+        throw new Error("Stored API keys require HELM_OAUTH_ENC_KEY; refusing plaintext fallback");
+      pool = {
+        accounts,
+        timezone: poolConfig.reset_timezone,
+        strategy: poolConfig.strategy,
+        models: [],
+      };
+      apiKeyPools.set(poolConfig.id, pool);
+    }
+    pool.models = [...new Set([...pool.models, ...p.models.map((m) => m.provider_model)])];
+    if (!pool.accounts) continue;
+    const proxy = resolveProviderProxy(p, accountSettings);
+    configuredClients.set(
+      p.name,
+      createApiKeyPoolClient({
+        accounts: pool.accounts,
+        models: p.models.map((m) => m.provider_model),
+        protocol: p.targetProviderProtocol,
+        strategy: poolConfig.strategy,
+        legacyClient: configuredClients.get(p.name),
+        createClient: (apiKey) =>
+          createProviderClient(
+            p,
+            { baseUrl: baseUrlOverride || p.base_url || fallbackBaseUrl, timeoutMs },
+            { apiKey },
+            proxy,
+          ),
+        onSelect: (account) =>
+          markServingAccount(
+            poolConfig.id,
+            account,
+            p.models.map((m) => m.alias),
+          ),
+      }),
+    );
+  }
+
+  provider = configuredClients.get(first.name) ?? provider;
 
   // The synthesized OAuth subscription POOL clients (Stage 3): each subscription
   // provider is keyed by its providerId and served by ONE pool that rotates across
@@ -4262,6 +4334,7 @@ export async function buildServer(
       });
     }
     registerAdminApi(app, {
+      apiKeyPools,
       rules: ruleStore,
       keyStore,
       telemetry,

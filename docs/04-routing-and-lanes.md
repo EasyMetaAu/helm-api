@@ -578,3 +578,12 @@ by default) is the separate mechanism
 from [03](03-classification.md). Their fields in the decision record are distinct:
 classification fallback shows up as `classifier.decided_by` / `fallback_reason`,
 while execution fallback shows up as `provider_attempts` / `fallback_count`.
+
+### OpenAI API key account selection
+
+A configured OpenAI provider may use a managed `api_key_pool` without changing model aliases
+or lane chains. Account selection happens inside the provider attempt. An exhausted account
+can fail over to another eligible account before output; only exhaustion of the pool reaches
+the existing model/provider fallback chain. Chat and Responses can reference the same pool
+and share durable quota/credential state. See [managed upstream API key pools](06-auth-and-rate-limits.md#managed-upstream-api-key-pools)
+for monthly recovery, credential-generation affinity and legacy compatibility.

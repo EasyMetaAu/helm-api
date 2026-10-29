@@ -46,6 +46,7 @@ export {
   type TaskType,
   TaskTypeSchema,
 } from "./classifier/eval-output.schema.js";
+export * from "./config/api-key-pool.js";
 // Classifier config model (docs/03, research-notes Manifest) — DATA-driven
 // Layer-1 classifier surface + eval block. Schema is the single type source.
 export {

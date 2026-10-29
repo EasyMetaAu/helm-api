@@ -1,6 +1,7 @@
 import { consumeResponseTextWithinBudget, ResponseWorkCapacityError } from "@helm/core";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import { registerApiKeyPoolRoutes } from "./api-key-pools.js";
 import { registerClassifierRoutes } from "./classifier.js";
 import { registerCleanupRoutes } from "./cleanup.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -56,6 +57,7 @@ export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerReplayRoutes(app, deps);
   registerSettingsRoutes(app, deps);
   registerOAuthRoutes(app, deps);
+  registerApiKeyPoolRoutes(app, deps);
   registerCleanupRoutes(app, deps);
 }
 

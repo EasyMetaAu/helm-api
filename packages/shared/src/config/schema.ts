@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TargetProviderProtocolSchema } from "../request/schema.js";
+import { ApiKeyPoolConfigSchema } from "./api-key-pool.js";
 import { ClassifierConfigSchema } from "./classifier-schema.js";
 import { LanesConfigSchema } from "./lanes-schema.js";
 import { MemoryConfigSchema } from "./memory-schema.js";
@@ -169,6 +170,7 @@ export const ProviderConfigSchema = z
     // `oauth` block is an alternative; the exactly-one refine below keeps a
     // provider from booting with both / neither.
     api_key_env: z.string().min(1).optional(),
+    api_key_pool: ApiKeyPoolConfigSchema.optional(),
     media_account_id: z.string().trim().min(1).max(128).optional(),
     oauth: OAuthCredentialSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
@@ -229,9 +231,16 @@ export const ProviderConfigSchema = z
   // raw `api_key_env`/`oauth` fields (the transform only re-keys name/alias and
   // does not touch credentials, but ordering the refine first keeps the guard on
   // the original shape). A provider with both OR neither fails closed (principle 2).
-  .refine((p) => (p.api_key_env !== undefined) !== (p.oauth !== undefined), {
-    message: "provider requires exactly one of `api_key_env` or `oauth`",
-    path: ["api_key_env"],
+  .refine(
+    (p) =>
+      (p.api_key_env !== undefined || p.api_key_pool !== undefined) !== (p.oauth !== undefined),
+    {
+      message: "provider requires exactly one of `api_key_env` or `oauth`",
+      path: ["api_key_env"],
+    },
+  )
+  .refine((p) => !p.api_key_pool || ["openai", "openai-responses-generic"].includes(p.type), {
+    message: "API key pools require an OpenAI Chat or Responses provider",
   })
   .transform((p) => ({
     // Single source of truth for the provider id: prefer `name`, fall back to the

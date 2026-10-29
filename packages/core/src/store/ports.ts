@@ -1531,6 +1531,8 @@ export interface ResponsesRegistryStore {
 export interface ConfigStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  /** Atomic replacement; null expects an absent row. Used for credential pool state. */
+  compareAndSet?(key: string, expected: string | null, value: string): Promise<boolean>;
   // Atomic scarce-resource reservation helper. Sets `key=value` only when the row
   // is missing or the current value is a valid non-negative integer <= `lte`.
   // Returns true only for the caller that won the reservation.

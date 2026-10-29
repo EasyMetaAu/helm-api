@@ -1,4 +1,5 @@
 import type {
+  ApiKeyAccounts,
   CreateKeyInput,
   ExecutionResult,
   KeyStore,
@@ -467,6 +468,15 @@ export interface CleanupAccess {
 }
 
 export interface AdminApiDeps {
+  apiKeyPools?: ReadonlyMap<
+    string,
+    {
+      accounts: ApiKeyAccounts | null;
+      timezone: string;
+      strategy: "round_robin" | "manual_priority";
+      models: string[];
+    }
+  >;
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;

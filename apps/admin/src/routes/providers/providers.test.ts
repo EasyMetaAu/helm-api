@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateAll } from '$app/navigation';
 import type {
   OAuthAdminRefreshStatus,
@@ -134,7 +134,15 @@ function renderPage(
 }
 
 describe('providers page', () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/admin/api/api-key-pools') return Response.json({ pools: [] });
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
     logoutOAuth.mockReset();
     getAnthropicResetStatus.mockReset();
     consumeAnthropicReset.mockReset();

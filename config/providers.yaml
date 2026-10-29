@@ -216,7 +216,11 @@ providers:
   - name: openai-responses
     type: openai-responses-generic
     base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
+    api_key_env: OPENAI_API_KEY # Legacy fallback until accounts are added to the pool.
+    api_key_pool:
+      id: openai
+      strategy: round_robin
+      reset_timezone: Asia/Shanghai
     models:
       - alias: openai/gpt-6.1-terra
         provider_model: gpt-6.1-terra
@@ -226,7 +230,11 @@ providers:
   - name: openai
     type: openai
     base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
+    api_key_env: OPENAI_API_KEY # Legacy fallback until accounts are added to the pool.
+    api_key_pool:
+      id: openai
+      strategy: round_robin
+      reset_timezone: Asia/Shanghai
     models:
       - alias: openai/gpt-6-astra
         provider_model: gpt-6-astra

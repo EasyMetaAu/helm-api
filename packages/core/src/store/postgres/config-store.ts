@@ -34,4 +34,14 @@ export class PgConfigStore implements ConfigStore {
     const rows = Array.isArray(result) ? result : (result.rows ?? []);
     return rows[0] !== undefined;
   }
+
+  async compareAndSet(key: string, expected: string | null, value: string): Promise<boolean> {
+    const result = await this.db.execute(
+      expected === null
+        ? sql`INSERT INTO config_kv (key, value) VALUES (${key}, ${value}) ON CONFLICT(key) DO NOTHING RETURNING key`
+        : sql`UPDATE config_kv SET value = ${value} WHERE key = ${key} AND value = ${expected} RETURNING key`,
+    );
+    const rows = Array.isArray(result) ? result : (result as { rows?: unknown[] }).rows;
+    return rows?.length === 1;
+  }
 }

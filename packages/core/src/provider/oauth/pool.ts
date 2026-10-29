@@ -248,6 +248,10 @@ export interface OAuthPoolDeps {
   onAccountRateLimit?: (account: string, untilMs: number) => void;
   accountRateLimitCooldownMs?: number;
   selectionStrategy?: OAuthSelectionStrategy;
+  /** Static credential pools rotate independent requests, retaining strict continuation pins. */
+  rotateIndependentRequests?: boolean;
+  /** A credential lifecycle may already have persisted a scoped failure. */
+  shouldRetryAccountError?: (error: unknown) => boolean;
   quotaFreshMs?: number;
   // Provider-specific inference statuses that prove the stored credential is unusable.
   // Defaults to the legacy 401/403 contract. This does not affect token-refresh errors,
@@ -805,6 +809,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     model: string | null,
     nowMs: number,
   ): { entry: PoolEntry | undefined; reason: OAuthPoolSelection["reason"] } {
+    if (deps.rotateIndependentRequests) return { entry: chooseByLru(candidates), reason: "lru" };
     if (selectionStrategy === "balanced") {
       if (sticky) return { entry: sticky, reason: "sticky_hit" };
       const entry =
@@ -1282,6 +1287,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       } catch (err) {
         if (err instanceof CodexCapacityRetryExhaustedError) throw err;
         if (overloadRetry?.exhausted) throw err;
+        if (deps.shouldRetryAccountError?.(err)) {
+          if (statefulContinuation) throw err;
+          lastErr = err;
+          continue;
+        }
         if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           if (statefulContinuation) throw err;
@@ -1384,7 +1394,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           }
           continue;
         }
-        if (isRetryableAccountFailure(err)) {
+        if (deps.shouldRetryAccountError?.(err)) {
+          lastErr = err;
+        } else if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           lastErr = err;
         } else if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
