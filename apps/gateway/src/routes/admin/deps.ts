@@ -10,6 +10,7 @@ import type {
   OAuthSelectionStrategy,
   OAuthUsageStore,
   PoliciesConfig,
+  ProviderClient,
   ResponseWorkAdmission,
   RouteOptions,
   StoredCleanupReport,
@@ -475,6 +476,7 @@ export interface AdminApiDeps {
       timezone: string;
       strategy: "round_robin" | "manual_priority";
       models: string[];
+      createTestClient?: (key: string, model: string) => ProviderClient | null;
     }
   >;
   rules: RuleStore;

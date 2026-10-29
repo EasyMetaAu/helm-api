@@ -32,10 +32,11 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     );
     writeFileSync(
       join(config, "providers.yaml"),
-      "providers:\n  - name: openai\n    type: openai\n    base_url: http://127.0.0.1:8181/v1\n    api_key_pool: { id: openai }\n    models:\n      - { alias: 'openai/gpt-4o-mini', provider_model: gpt-4o-mini }\n",
+      "providers:\n  - name: openai\n    type: openai\n    base_url: http://127.0.0.1:8181\n    api_key_pool: { id: openai }\n    models:\n      - { alias: 'openai/gpt-4o-mini', provider_model: gpt-4o-mini }\n",
     );
     Object.assign(process.env, {
       HELM_DATA_DIR: root,
+      HELM_PROVIDER_BASE_URL: "http://127.0.0.1:8181",
       HELM_ADMIN_ENABLED: "true",
       HELM_ADMIN_USER: "pool-ui",
       HELM_ADMIN_PASSWORD: "test-only-password",
@@ -70,6 +71,16 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await page.getByRole("button", { name: "Save API keys" }).click();
     await expect(section.getByText("API 1", { exact: true })).toBeVisible();
     await expect(section.getByText("API 2", { exact: true })).toBeVisible();
+    for (const name of ["API 1", "API 2"]) {
+      const accountRow = section.getByRole("row").filter({ hasText: name });
+      await accountRow.getByRole("button", { name: "Test", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Test API key" });
+      await expect(dialog.getByText(name, { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Run test", exact: true }).click();
+      await expect(dialog.getByText("Test passed", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("hello from mock", { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    }
     let row = section.getByRole("row").filter({ hasText: "API 1" });
     await expect(row.getByRole("button", { name: "Delete", exact: true })).not.toBeVisible();
     await row.locator("summary").click();

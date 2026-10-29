@@ -130,3 +130,56 @@ describe('API key provider management', () => {
     },
   );
 });
+
+it.each([true, false])(
+  'tests the selected account and shows the actual result (ok=%s)',
+  async (ok) => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+      url.endsWith('/test')
+        ? Response.json({
+            ok,
+            model: 'm',
+            durationMs: 42,
+            ...(ok ? { response: 'OK' } : { error: 'insufficient_quota', upstreamStatus: 429 }),
+          })
+        : Response.json({
+            pools: [
+              {
+                id: 'openai',
+                configured: true,
+                timezone: 'Asia/Shanghai',
+                strategy: 'round_robin',
+                models: ['m'],
+                usage: [],
+                accounts: [
+                  {
+                    id: 'selected',
+                    name: 'Selected key',
+                    mask: '••••1234',
+                    enabled: false,
+                    priority: 50,
+                    models: null,
+                    state: 'ready',
+                    reason: null,
+                    nextRetryAt: null,
+                    probeUntil: null,
+                    deniedModels: [],
+                  },
+                ],
+              },
+            ],
+          }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(ApiKeyPools);
+    await screen.findByText('Selected key');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+    expect(screen.getByRole('dialog').textContent).toContain('Selected key');
+    await fireEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByText(ok ? 'OK' : /insufficient_quota/);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/admin/api/api-key-pools/openai/accounts/selected/test',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ model: 'm' }) }),
+    );
+  },
+);

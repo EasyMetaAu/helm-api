@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { ApiKeyPoolsViewSchema, type ApiKeyPoolView, type ApiKeyAccountView } from '@helm/shared';
+  import { onMount, onDestroy } from 'svelte';
+  import {
+    ApiKeyPoolsViewSchema,
+    ApiKeyTestResultSchema,
+    type ApiKeyTestResult,
+    type ApiKeyPoolView,
+    type ApiKeyAccountView,
+  } from '@helm/shared';
   import { t, locale } from '$lib/i18n';
   import { formatCount, formatTokens, formatUsd } from '$lib/format';
   import Modal from './Modal.svelte';
@@ -16,6 +22,54 @@
   let priority = $state(50);
   let models = $state('');
   let deleting = $state<{ pool: string; account: ApiKeyAccountView } | null>(null);
+  let testTarget = $state<{ pool: ApiKeyPoolView; account: ApiKeyAccountView } | null>(null);
+  let testModel = $state('');
+  let testResult = $state<ApiKeyTestResult | null>(null);
+  let testBusy = $state(false);
+  let testError = $state('');
+  let testAbort: AbortController | null = null;
+  const testModels = (pool: ApiKeyPoolView, account: ApiKeyAccountView) =>
+    pool.models.filter(
+      (model) =>
+        (account.models === null || account.models.includes(model)) &&
+        !/image|realtime|audio|live|tts|whisper|transcri/i.test(model),
+    );
+  function openTest(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
+    testTarget = { pool, account };
+    const choices = testModels(pool, account);
+    testModel = choices.includes('gpt-6-luna') ? 'gpt-6-luna' : (choices[0] ?? '');
+    testResult = null;
+    testError = '';
+  }
+  function closeTest() {
+    testAbort?.abort();
+    testTarget = null;
+  }
+  onDestroy(() => testAbort?.abort());
+  async function testAccount() {
+    if (!testTarget || testBusy) return;
+    testBusy = true;
+    testResult = null;
+    testError = '';
+    const controller = new AbortController();
+    testAbort = controller;
+    try {
+      const res = await fetch(`${accountUrl(testTarget.pool.id, testTarget.account.id)}/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: testModel }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error($t('API key test could not start. Refresh and try again.'));
+      testResult = ApiKeyTestResultSchema.parse(await res.json());
+    } catch (e) {
+      if (!controller.signal.aborted)
+        testError = $t('API key test could not start. Refresh and try again.');
+    } finally {
+      testBusy = false;
+      testAbort = null;
+    }
+  }
   const base = '/admin/api/api-key-pools';
   const accountUrl = (pool: string, id: string) =>
     `${base}/${encodeURIComponent(pool)}/accounts/${encodeURIComponent(id)}`;
@@ -241,6 +295,12 @@
                       <button
                         type="button"
                         class="btn-secondary flex-1 lg:flex-none"
+                        disabled={busy || testBusy || testModels(pool, account).length === 0}
+                        onclick={() => openTest(pool, account)}>{$t('Test')}</button
+                      >
+                      <button
+                        type="button"
+                        class="btn-secondary flex-1 lg:flex-none"
                         disabled={busy}
                         onclick={() => edit(pool.id, account)}>{$t('Manage')}</button
                       >
@@ -437,4 +497,67 @@
       >
     </div></Modal
   >
+{/if}
+
+{#if testTarget}
+  <Modal label={$t('Test API key')} onclose={closeTest}>
+    <h2 class="section-header mb-4">{$t('Test API key')}</h2>
+    <form
+      class="space-y-4"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void testAccount();
+      }}
+    >
+      <div>
+        <p class="font-medium text-ink-strong">{testTarget.account.name}</p>
+        <code class="text-xs text-ink-muted">{testTarget.account.mask}</code>
+      </div>
+      <p class="field-help">
+        {$t(
+          'Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.',
+        )}
+      </p>
+      <label class="block"
+        ><span class="field-label">{$t('Model')}</span>
+        <select
+          class="select w-full"
+          bind:value={testModel}
+          disabled={testBusy}
+          onchange={() => {
+            testResult = null;
+            testError = '';
+          }}
+        >
+          {#each testModels(testTarget.pool, testTarget.account) as model}
+            <option value={model}>{model}</option>
+          {/each}
+        </select>
+      </label>
+      {#if testError}<p class="alert-error" role="alert">{testError}</p>{/if}
+      {#if testResult}
+        <div role="status" class="space-y-2">
+          <div class="flex items-center gap-2">
+            <span class={testResult.ok ? 'badge-ok' : 'badge-error'}
+              >{testResult.ok ? $t('Test passed') : $t('Test failed')}</span
+            >
+            <span class="text-xs text-ink-muted tabular-nums">{testResult.durationMs} ms</span>
+          </div>
+          {#if testResult.ok}<pre
+              class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm whitespace-pre-wrap break-words">{testResult.response}</pre>
+          {:else}<p class="alert-error">
+              {testResult.error}{testResult.upstreamStatus
+                ? ` · HTTP ${testResult.upstreamStatus}`
+                : ''}
+            </p>{/if}
+        </div>
+      {/if}
+      <div class="card-actions">
+        <button type="button" class="btn-secondary" onclick={closeTest}>{$t('Close')}</button>
+        <button type="submit" class="btn-primary" disabled={testBusy || !testModel}
+          >{testBusy ? $t('Testing…') : $t('Run test')}</button
+        >
+      </div>
+    </form>
+  </Modal>
 {/if}

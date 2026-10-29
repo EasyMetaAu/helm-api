@@ -1182,5 +1182,10 @@
   "requests": "solicitações",
   "Rotate model API keys across accounts.": "Alterna as chaves API de modelos entre contas.",
   "Manage subscriptions and API key accounts in one place.": "Gerencie assinaturas e contas com chaves API em um só lugar.",
-  "{requests} requests · {tokens} tokens": "{requests} solicitações · {tokens} tokens"
+  "{requests} requests · {tokens} tokens": "{requests} solicitações · {tokens} tokens",
+  "Test API key": "Testar chave API",
+  "Test passed": "Teste aprovado",
+  "Test failed": "Teste falhou",
+  "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "Envia uma solicitação curta apenas com esta chave. Consome a cota do provedor; não altera a rotação nem a pausa.",
+  "API key test could not start. Refresh and try again.": "Não foi possível iniciar o teste. Atualize e tente novamente."
 }

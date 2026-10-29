@@ -1182,5 +1182,10 @@
   "requests": "次請求",
   "Rotate model API keys across accounts.": "在多個帳戶間輪換模型 API 金鑰。",
   "Manage subscriptions and API key accounts in one place.": "統一管理訂閱和 API 金鑰帳戶。",
-  "{requests} requests · {tokens} tokens": "{requests} 次請求 · {tokens} Token"
+  "{requests} requests · {tokens} tokens": "{requests} 次請求 · {tokens} Token",
+  "Test API key": "測試 API 金鑰",
+  "Test passed": "測試通過",
+  "Test failed": "測試失敗",
+  "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "僅使用目前金鑰傳送一次簡短請求，會消耗上游額度，不會改變輪替或暫停設定。",
+  "API key test could not start. Refresh and try again.": "無法啟動金鑰測試，請重新整理後再試。"
 }

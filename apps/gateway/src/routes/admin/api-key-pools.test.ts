@@ -1,7 +1,7 @@
 import type { ConfigStore } from "@helm/core";
-import { ApiKeyAccounts } from "@helm/core";
+import { ApiKeyAccounts, UpstreamError } from "@helm/core";
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { registerApiKeyPoolRoutes } from "./api-key-pools.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -25,13 +25,29 @@ function setup() {
     poolId: "openai",
     timezone: "Asia/Shanghai",
   });
+  const chatCompletion = vi.fn(async () => ({
+    choices: [{ message: { content: "OK" }, finish_reason: "stop" }],
+    usage: { total_tokens: 4 },
+  }));
+  const createTestClient = vi.fn(() => ({ chatCompletion }));
+  const recordUsage = vi.fn(async () => {});
   const app = new Hono<AppEnv>();
   registerApiKeyPoolRoutes(app, {
+    oauthUsage: { record: recordUsage, queryRange: async () => [] },
     apiKeyPools: new Map([
-      ["openai", { accounts, models: ["m"], timezone: "Asia/Shanghai", strategy: "round_robin" }],
+      [
+        "openai",
+        {
+          accounts,
+          models: ["m"],
+          timezone: "Asia/Shanghai",
+          strategy: "round_robin",
+          createTestClient,
+        },
+      ],
     ]),
   } as unknown as AdminApiDeps);
-  return { app, accounts, rows };
+  return { app, accounts, rows, chatCompletion, createTestClient, recordUsage };
 }
 const body = (value: unknown) => ({
   method: "POST",
@@ -91,5 +107,98 @@ describe("admin API key pools", () => {
     expect((await app.request("/admin/api/api-key-pools/openai/accounts", payload)).status).toBe(
       409,
     );
+  });
+});
+
+describe("API key account connectivity test", () => {
+  it("tests only the selected key, records usage and preserves a manual pause", async () => {
+    const { app, accounts, createTestClient, recordUsage } = setup();
+    await accounts.add([
+      { name: "one", key: "sk-proj-first-test" },
+      { name: "two", key: "sk-proj-second-test" },
+    ]);
+    const id = (await accounts.list())[1]!.id;
+    await accounts.update(id, { enabled: false });
+    const res = await app.request(
+      `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+      body({ model: "m" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, model: "m", response: "OK" });
+    expect(createTestClient).toHaveBeenCalledExactlyOnceWith("sk-proj-second-test", "m");
+    expect(recordUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "openai",
+        account: expect.stringMatching(new RegExp(`^${id}@`)),
+        tokens: 4,
+      }),
+    );
+    expect((await accounts.list())[1]!.enabled).toBe(false);
+  });
+  it("rejects unknown accounts, invalid payloads and disallowed models before sending", async () => {
+    const { app, accounts, createTestClient } = setup();
+    await accounts.add([{ name: "one", key: "sk-proj-first-test" }]);
+    const id = (await accounts.list())[0]!.id;
+    for (const [account, payload, status] of [
+      ["missing", { model: "m" }, 404],
+      [id, {}, 400],
+      [id, { model: "unconfigured" }, 400],
+      [id, { model: "m", key: "secret" }, 400],
+    ] as const) {
+      expect(
+        (
+          await app.request(
+            `/admin/api/api-key-pools/openai/accounts/${account}/test`,
+            body(payload),
+          )
+        ).status,
+      ).toBe(status);
+    }
+    await accounts.update(id, { models: [] });
+    expect(
+      (
+        await app.request(
+          `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+          body({ model: "m" }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(createTestClient).not.toHaveBeenCalled();
+  });
+  it("returns a safe upstream failure without trying another key or changing routing state", async () => {
+    const { app, accounts, chatCompletion, createTestClient } = setup();
+    await accounts.add([
+      { name: "one", key: "sk-proj-first-test" },
+      { name: "two", key: "sk-proj-second-test" },
+    ]);
+    const id = (await accounts.list())[0]!.id;
+    chatCompletion.mockRejectedValue(
+      new UpstreamError(
+        "upstream_error",
+        "secret sk-proj-first-test",
+        { error: { code: "insufficient_quota", message: "secret" } },
+        429,
+      ),
+    );
+    const res = await app.request(
+      `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+      body({ model: "m" }),
+    );
+    const result = await res.json();
+    expect(result).toMatchObject({ ok: false, error: "insufficient_quota", upstreamStatus: 429 });
+    expect(JSON.stringify(result)).not.toMatch(/secret|sk-proj/);
+    expect(createTestClient).toHaveBeenCalledTimes(1);
+    expect((await accounts.list())[0]!.state).toBe("ready");
+  });
+  it("does not report an empty upstream response as success", async () => {
+    const { app, accounts, chatCompletion } = setup();
+    await accounts.add([{ name: "one", key: "sk-proj-first-test" }]);
+    const id = (await accounts.list())[0]!.id;
+    chatCompletion.mockResolvedValue({ choices: [], usage: { total_tokens: 4 } });
+    const res = await app.request(
+      `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+      body({ model: "m" }),
+    );
+    expect(await res.json()).toMatchObject({ ok: false, error: "empty_response" });
   });
 });
