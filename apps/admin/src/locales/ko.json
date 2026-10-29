@@ -1179,5 +1179,8 @@
   "Save API keys": "API 키 저장",
   "Try recovery": "복구 시도",
   "Usage (last 24 hours)": "사용량 (최근 24시간)",
-  "requests": "요청"
+  "requests": "요청",
+  "Rotate model API keys across accounts.": "여러 계정의 모델 API 키를 순환 사용합니다.",
+  "Manage subscriptions and API key accounts in one place.": "구독과 API 키 계정을 한곳에서 관리합니다.",
+  "{requests} requests · {tokens} tokens": "요청 {requests}회 · 토큰 {tokens}개"
 }

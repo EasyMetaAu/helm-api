@@ -1179,5 +1179,8 @@
   "Save API keys": "儲存 API 金鑰",
   "Try recovery": "嘗試恢復",
   "Usage (last 24 hours)": "用量（最近 24 小時）",
-  "requests": "次請求"
+  "requests": "次請求",
+  "Rotate model API keys across accounts.": "在多個帳戶間輪換模型 API 金鑰。",
+  "Manage subscriptions and API key accounts in one place.": "統一管理訂閱和 API 金鑰帳戶。",
+  "{requests} requests · {tokens} tokens": "{requests} 次請求 · {tokens} Token"
 }

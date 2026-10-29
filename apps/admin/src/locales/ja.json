@@ -1179,5 +1179,8 @@
   "Save API keys": "API キーを保存",
   "Try recovery": "復旧を試す",
   "Usage (last 24 hours)": "使用量（過去 24 時間）",
-  "requests": "リクエスト"
+  "requests": "リクエスト",
+  "Rotate model API keys across accounts.": "複数のアカウントでモデル用 API キーを順番に使用します。",
+  "Manage subscriptions and API key accounts in one place.": "サブスクリプションと API キーアカウントをまとめて管理します。",
+  "{requests} requests · {tokens} tokens": "{requests} リクエスト · {tokens} トークン"
 }

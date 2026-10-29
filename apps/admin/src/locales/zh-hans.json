@@ -1167,17 +1167,20 @@
   "Monthly retry timezone": "每月重试时区",
   "Next recovery attempt": "下次恢复尝试",
   "No managed API keys. Existing environment credentials remain in use only until the pool is first configured.": "尚无托管密钥。首次配置密钥池之前，继续使用已有环境变量凭证。",
-  "Pause": "Pause",
+  "Pause": "暂停",
   "Paused manually": "已手动暂停",
   "Quota exhausted": "额度不足",
   "Recovery request in progress": "正在验证恢复",
   "Refresh API keys": "刷新密钥状态",
   "Replacement API key (optional)": "替换密钥（可选）",
-  "Resume": "Resume",
+  "Resume": "恢复",
   "Rotate model API keys. Exhausted accounts retry next month; a successful request confirms recovery.": "模型请求在多个密钥间轮换。额度不足的账号下月重试，实际请求成功后才恢复使用。",
   "Round robin": "均匀轮换",
   "Save API keys": "保存 API 密钥",
   "Try recovery": "尝试恢复",
   "Usage (last 24 hours)": "最近 24 小时用量",
-  "requests": "requests"
+  "requests": "次请求",
+  "Rotate model API keys across accounts.": "在多个账户间轮换模型 API 密钥。",
+  "Manage subscriptions and API key accounts in one place.": "统一管理订阅和 API 密钥账户。",
+  "{requests} requests · {tokens} tokens": "{requests} 次请求 · {tokens} Token"
 }

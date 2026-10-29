@@ -915,13 +915,8 @@
 <section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
-      <h1 class="page-title">{$t('Subscription Providers')}</h1>
-      <p class="section-desc">
-        {$t(
-          'Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.',
-        )}
-        {$t('xAI/SuperGrok is also available.')}
-      </p>
+      <h1 class="page-title">{$t('Providers')}</h1>
+      <p class="section-desc">{$t('Manage subscriptions and API key accounts in one place.')}</p>
     </div>
     <div class="flex w-full shrink-0 gap-2 sm:w-auto">
       <div class="flex-1 sm:flex-none">
@@ -940,6 +935,8 @@
   </header>
 
   <ApiKeyPools />
+
+  <h2 class="section-header mt-3">{$t('Subscription Providers')}</h2>
 
   {#if refreshStatusLabel(overview.refresh)}
     <p

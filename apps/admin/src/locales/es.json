@@ -1179,5 +1179,8 @@
   "Save API keys": "Guardar claves API",
   "Try recovery": "Intentar recuperación",
   "Usage (last 24 hours)": "Uso (últimas 24 horas)",
-  "requests": "solicitudes"
+  "requests": "solicitudes",
+  "Rotate model API keys across accounts.": "Alterna las claves API de modelos entre cuentas.",
+  "Manage subscriptions and API key accounts in one place.": "Gestiona suscripciones y cuentas con claves API en un solo lugar.",
+  "{requests} requests · {tokens} tokens": "{requests} solicitudes · {tokens} tokens"
 }
