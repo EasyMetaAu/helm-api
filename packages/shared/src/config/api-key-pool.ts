@@ -79,3 +79,13 @@ export const ApiKeyPoolsViewSchema = z.object({
   ),
 });
 export type ApiKeyPoolView = z.infer<typeof ApiKeyPoolsViewSchema>["pools"][number];
+
+export const ApiKeyTestResultSchema = z.object({
+  ok: z.boolean(),
+  model: z.string(),
+  durationMs: z.number().nonnegative(),
+  response: z.string().optional(),
+  error: z.string().optional(),
+  upstreamStatus: z.number().nullable().optional(),
+});
+export type ApiKeyTestResult = z.infer<typeof ApiKeyTestResultSchema>;

@@ -3252,6 +3252,7 @@ export async function buildServer(
       timezone: string;
       strategy: "round_robin" | "manual_priority";
       models: string[];
+      createTestClient?: (key: string, model: string) => ProviderClient | null;
     }
   >();
   for (const p of config.providers) {
@@ -3281,6 +3282,24 @@ export async function buildServer(
         timezone: poolConfig.reset_timezone,
         strategy: poolConfig.strategy,
         models: [],
+        createTestClient: (apiKey, model) => {
+          const provider = config.providers.find(
+            (candidate) =>
+              candidate.api_key_pool?.id === poolConfig.id &&
+              candidate.models.some((entry) => entry.provider_model === model),
+          );
+          return provider
+            ? createProviderClient(
+                provider,
+                {
+                  baseUrl: baseUrlOverride || provider.base_url || fallbackBaseUrl,
+                  timeoutMs: 30_000,
+                },
+                { apiKey },
+                resolveProviderProxy(provider, accountSettings),
+              )
+            : null;
+        },
       };
       apiKeyPools.set(poolConfig.id, pool);
     }

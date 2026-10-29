@@ -10,6 +10,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("API key pools through the real gateway", () => {
   it("protects admin writes, rotates Chat and Responses credentials, persists quota and attributes usage", async () => {
     const calls: string[] = [];
+    let failTest = false;
     const events: unknown[] = [];
     const upstream = createServer(async (req, res) => {
       let raw = "";
@@ -21,7 +22,10 @@ describe("API key pools through the real gateway", () => {
       };
       const key = req.headers.authorization ?? "";
       calls.push(key);
-      if (body.messages?.some((m) => m.content === "exhaust") && key.endsWith("first")) {
+      if (
+        failTest ||
+        (body.messages?.some((m) => m.content === "exhaust") && key.endsWith("first"))
+      ) {
         res.writeHead(429, { "content-type": "application/json" });
         res.end(
           JSON.stringify({ error: { code: "credit_balance_exhausted", message: "out of credit" } }),
@@ -195,6 +199,35 @@ describe("API key pools through the real gateway", () => {
         ).json()) as { pools: Array<{ usage: Array<{ requests: number }> }> };
         expect(body.pools[0]?.usage.reduce((n, row) => n + row.requests, 0)).toBe(4);
       });
+      const accountId = JSON.parse(text).pools[0].accounts[0].id;
+      const testPath = `/admin/api/api-key-pools/openai/accounts/${accountId}/test`;
+      expect(
+        (await request(testPath, { method: "POST", body: JSON.stringify({ model: "test-chat" }) }))
+          .status,
+      ).toBe(401);
+      for (const model of ["test-chat", "test-responses"]) {
+        const before = calls.length;
+        const result = await request(testPath, {
+          method: "POST",
+          headers: admin,
+          body: JSON.stringify({ model }),
+        });
+        expect(await result.json()).toMatchObject({ ok: true, model, response: "OK" });
+        expect(calls.slice(before)).toEqual(["Bearer sk-proj-mock-first"]);
+      }
+      failTest = true;
+      const before = calls.length;
+      const failed = await request(testPath, {
+        method: "POST",
+        headers: admin,
+        body: JSON.stringify({ model: "test-chat" }),
+      });
+      expect(await failed.json()).toMatchObject({
+        ok: false,
+        error: "credit_balance_exhausted",
+        upstreamStatus: 429,
+      });
+      expect(calls.slice(before)).toEqual(["Bearer sk-proj-mock-first"]);
     } finally {
       await handle?.dispose?.();
       await new Promise<void>((resolve) => upstream.close(() => resolve()));

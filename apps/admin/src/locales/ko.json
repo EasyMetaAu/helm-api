@@ -1179,5 +1179,13 @@
   "Save API keys": "API 키 저장",
   "Try recovery": "복구 시도",
   "Usage (last 24 hours)": "사용량 (최근 24시간)",
-  "requests": "요청"
+  "requests": "요청",
+  "Rotate model API keys across accounts.": "여러 계정의 모델 API 키를 순환 사용합니다.",
+  "Manage subscriptions and API key accounts in one place.": "구독과 API 키 계정을 한곳에서 관리합니다.",
+  "{requests} requests · {tokens} tokens": "요청 {requests}회 · 토큰 {tokens}개",
+  "Test API key": "API 키 테스트",
+  "Test passed": "테스트 성공",
+  "Test failed": "테스트 실패",
+  "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "이 키만 사용해 짧은 요청을 한 번 보냅니다. 공급자 사용량이 차감되며 순환 및 일시 중지 설정은 변경되지 않습니다.",
+  "API key test could not start. Refresh and try again.": "테스트를 시작할 수 없습니다. 새로고침 후 다시 시도하세요."
 }
