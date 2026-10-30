@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "versions": {
     "grok": "1.0.70",
-    "claude": "2.1.312",
-    "codex": "0.165.0"
+    "claude": "2.1.314",
+    "codex": "0.166.0"
   },
   "sources": {
     "grok": "https://x.ai/cli/stable",
     "claude": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
     "codex": "https://api.github.com/repos/openai/codex/releases/latest",
-    "codexModels": "https://raw.githubusercontent.com/openai/codex/rust-v0.165.0/codex-rs/models-manager/models.json"
+    "codexModels": "https://raw.githubusercontent.com/openai/codex/rust-v0.166.0/codex-rs/models-manager/models.json"
   },
-  "codexTag": "rust-v0.165.0",
+  "codexTag": "rust-v0.166.0",
   "catalogSha256": "6fccf10b87715c08eaca78d3a686f30ec9ca8a9b5bf55d7325b129f6db766a33"
 }

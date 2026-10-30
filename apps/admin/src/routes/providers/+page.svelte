@@ -918,600 +918,617 @@
       <h1 class="page-title">{$t('Providers')}</h1>
       <p class="section-desc">{$t('Manage subscriptions and API key accounts in one place.')}</p>
     </div>
-    <div class="flex w-full shrink-0 gap-2 sm:w-auto">
-      <div class="flex-1 sm:flex-none">
-        <RefreshControl onRefresh={refresh} onAutoRefresh={autoRefresh} />
-      </div>
-      <button
-        type="button"
-        class="btn-primary flex-1 sm:flex-none"
-        disabled={!overview.configured}
-        onclick={() => {
-          reconnecting = null;
-          showConnect = true;
-        }}>{$t('Connect')}</button
-      >
-    </div>
   </header>
 
-  <ApiKeyPools />
+  <section class="flex flex-col gap-2" aria-labelledby="subscription-providers">
+    <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h2 id="subscription-providers" class="section-header order-1 shrink-0">
+        {$t('Subscription Providers')}
+      </h2>
 
-  <h2 class="section-header mt-3">{$t('Subscription Providers')}</h2>
+      {#if rows.length > 0}
+        {@const selectedStrategy =
+          strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
+          strategyOptions[0]}
+        <div
+          class="order-3 flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 lg:order-2 lg:flex-1 lg:basis-0 lg:flex-nowrap"
+        >
+          <label
+            class="flex min-w-0 flex-1 items-center gap-2 sm:flex-none"
+            title={$t(
+              'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
+            )}
+          >
+            <span class="shrink-0 text-sm text-ink-muted">{$t('Account usage strategy')}</span>
+            <select
+              class="select h-11 min-w-0 flex-1 disabled:opacity-50 sm:h-9 sm:w-44 sm:flex-none"
+              aria-label={$t('Account usage strategy')}
+              value={overview.selectionStrategy}
+              disabled={savingStrategy}
+              onchange={(e) =>
+                saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+            >
+              {#each strategyOptions as option (option.value)}
+                <option value={option.value}>{$t(option.label)}</option>
+              {/each}
+            </select>
+          </label>
+          <p
+            class="field-help min-w-0 basis-full sm:flex-1 sm:basis-0 sm:truncate"
+            title={$t(selectedStrategy.description)}
+          >
+            {$t(selectedStrategy.description)}
+          </p>
+        </div>
+      {/if}
 
-  {#if refreshStatusLabel(overview.refresh)}
-    <p
-      data-testid="provider-refresh-status"
-      class:alert-error={overview.refresh.state === 'failed'}
-      class:field-help={overview.refresh.state !== 'failed'}
-      role="status"
-      aria-live="polite"
-    >
-      {refreshStatusLabel(overview.refresh)}
-    </p>
-  {/if}
+      <div class="order-2 ml-auto flex shrink-0 items-center gap-2 lg:order-3">
+        <RefreshControl onRefresh={refresh} onAutoRefresh={autoRefresh} />
+        <button
+          type="button"
+          class="btn-primary"
+          disabled={!overview.configured}
+          onclick={() => {
+            reconnecting = null;
+            showConnect = true;
+          }}>{$t('Connect')}</button
+        >
+      </div>
+    </header>
 
-  {#if error}
-    <p class="alert-error" role="alert">{error}</p>
-  {/if}
-
-  {#if resetNotice}
-    <p class="alert-success" role="status">{resetNotice}</p>
-  {/if}
-
-  {#if !overview.configured}
-    <p class="alert-warn">
-      {$t('OAuth login is disabled. Set HELM_OAUTH_ENC_KEY (32 bytes) and restart to enable it.')}
-    </p>
-  {/if}
-
-  {#if showConnect}
-    <ConnectProviderDialog
-      providers={overview.providers}
-      reconnect={reconnecting}
-      onconnected={onConnected}
-      onclose={() => {
-        reconnecting = null;
-        showConnect = false;
-      }}
-    />
-  {/if}
-
-  {#if managing}
-    <ManageAccountDialog
-      providerId={managing.providerId}
-      providerName={managing.providerName}
-      account={managing.account}
-      onsaved={onManaged}
-      onclose={() => (managing = null)}
-    />
-  {/if}
-
-  {#if testing}
-    <TestAccountDialog
-      provider={testing.providerId}
-      providerName={testing.providerName}
-      account={testing.account}
-      models={testing.models}
-      onclose={() => (testing = null)}
-    />
-  {/if}
-
-  {#if rows.length === 0}
-    <div class="empty-state">
-      <p>
-        {$t(
-          'No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.',
-        )}
-        {$t('xAI/SuperGrok is also available.')}
+    {#if refreshStatusLabel(overview.refresh)}
+      <p
+        data-testid="provider-refresh-status"
+        class:alert-error={overview.refresh.state === 'failed'}
+        class:field-help={overview.refresh.state !== 'failed'}
+        role="status"
+        aria-live="polite"
+      >
+        {refreshStatusLabel(overview.refresh)}
       </p>
-    </div>
-  {:else}
-    {@const selectedStrategy =
-      strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
-      strategyOptions[0]}
-    <div class="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div class="min-w-0">
-        <h2 class="field-label">
-          {$t('Account usage strategy')}
-        </h2>
-        <p class="field-help mt-0.5 max-w-2xl leading-snug">
+    {/if}
+    {#if error}
+      <p class="alert-error" role="alert">{error}</p>
+    {/if}
+
+    {#if resetNotice}
+      <p class="alert-success" role="status">{resetNotice}</p>
+    {/if}
+
+    {#if !overview.configured}
+      <p class="alert-warn">
+        {$t('OAuth login is disabled. Set HELM_OAUTH_ENC_KEY (32 bytes) and restart to enable it.')}
+      </p>
+    {/if}
+
+    {#if showConnect}
+      <ConnectProviderDialog
+        providers={overview.providers}
+        reconnect={reconnecting}
+        onconnected={onConnected}
+        onclose={() => {
+          reconnecting = null;
+          showConnect = false;
+        }}
+      />
+    {/if}
+
+    {#if managing}
+      <ManageAccountDialog
+        providerId={managing.providerId}
+        providerName={managing.providerName}
+        account={managing.account}
+        onsaved={onManaged}
+        onclose={() => (managing = null)}
+      />
+    {/if}
+
+    {#if testing}
+      <TestAccountDialog
+        provider={testing.providerId}
+        providerName={testing.providerName}
+        account={testing.account}
+        models={testing.models}
+        onclose={() => (testing = null)}
+      />
+    {/if}
+
+    {#if rows.length === 0}
+      <div class="empty-state">
+        <p>
           {$t(
-            'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
+            'No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.',
           )}
-        </p>
-        <p class="field-help mt-0.5 max-w-2xl leading-snug">
-          {$t(selectedStrategy.description)}
+          {$t('xAI/SuperGrok is also available.')}
         </p>
       </div>
-      <select
-        class="select shrink-0 disabled:opacity-50 sm:w-56"
-        aria-label={$t('Account usage strategy')}
-        value={overview.selectionStrategy}
-        disabled={savingStrategy}
-        onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
-      >
-        {#each strategyOptions as option (option.value)}
-          <option value={option.value}>{$t(option.label)}</option>
-        {/each}
-      </select>
-    </div>
-    <div class="cards-table-frame">
-      <table class="cards-table">
-        <thead class="table-head">
-          <tr>
-            <th class="px-3 py-2">{$t('Provider')}</th>
-            <th class="px-3 py-2">{$t('Status')}</th>
-            <th class="px-3 py-2">{$t('Models')}</th>
-            <th class="px-3 py-2">{$t('Today')}</th>
-            <th class="px-3 py-2">{$t('Quota')}</th>
-            <th class="px-3 py-2">{$t('Scheduling')}</th>
-            <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-white">{$t('Actions')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each rows as row (keyOf(row.provider.id, row.account.account))}
-            {@const k = keyOf(row.provider.id, row.account.account)}
-            {@const usage = usageByKey.get(k)}
-            {@const isCodex = row.provider.id === 'openai-codex'}
-            {@const quota = isCodex ? activeCodexQuota(quotaByKey.get(k)) : quotaByKey.get(k)}
-            <!-- The live WHAM quota plan can change before the OAuth identity claim refreshes. -->
-            {@const codexPlanType = isCodex
-              ? (quota?.planType ?? row.account.chatgptPlanType)
-              : undefined}
-            {@const saving = savingSchedule[k] === true}
-            {@const supportsFast =
-              row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
-            {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
-            {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
-            {@const usageLimit = usageLimitStatus(quota, isCodex)}
-            {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
-            {@const needsReconnect = !row.account.healthy}
-            {@const credentialFailed = row.account.credentialFailed === true}
-            {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
-            {@const codexCreditBalance =
-              isCodex && quota?.credits && !quota.credits.unlimited
-                ? formatCreditBalance(quota.credits.balance)
-                : null}
-            {@const hasCodexQuotaMetadata =
-              isCodex &&
-              Boolean(
-                quota?.planType ||
-                quota?.credits ||
-                rateLimitReachedLabel(quota?.rateLimitReachedType),
-              )}
-            {@const hasCodexIdentity =
-              isCodex &&
-              Boolean(
-                row.account.email ||
-                codexPlanType ||
-                row.account.chatgptAccountId ||
-                row.account.isFedramp,
-              )}
-            <tr class="align-top" data-testid="provider-account-row">
-              <!-- Provider / account + type badge. The name+account is a link into the
+    {:else}
+      <div class="cards-table-frame lg:bg-white">
+        <table class="cards-table">
+          <thead class="table-head">
+            <tr>
+              <th class="px-3 py-2">{$t('Provider')}</th>
+              <th class="px-3 py-2">{$t('Status')}</th>
+              <th class="px-3 py-2">{$t('Models')}</th>
+              <th class="px-3 py-2">{$t('Today')}</th>
+              <th class="px-3 py-2">{$t('Quota')}</th>
+              <th class="px-3 py-2">{$t('Scheduling')}</th>
+              <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-slate-50">{$t('Actions')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each rows as row (keyOf(row.provider.id, row.account.account))}
+              {@const k = keyOf(row.provider.id, row.account.account)}
+              {@const usage = usageByKey.get(k)}
+              {@const isCodex = row.provider.id === 'openai-codex'}
+              {@const quota = isCodex ? activeCodexQuota(quotaByKey.get(k)) : quotaByKey.get(k)}
+              <!-- The live WHAM quota plan can change before the OAuth identity claim refreshes. -->
+              {@const codexPlanType = isCodex
+                ? (quota?.planType ?? row.account.chatgptPlanType)
+                : undefined}
+              {@const saving = savingSchedule[k] === true}
+              {@const supportsFast =
+                row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
+              {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
+              {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
+              {@const usageLimit = usageLimitStatus(quota, isCodex)}
+              {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
+              {@const needsReconnect = !row.account.healthy}
+              {@const credentialFailed = row.account.credentialFailed === true}
+              {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
+              {@const codexCreditBalance =
+                isCodex && quota?.credits && !quota.credits.unlimited
+                  ? formatCreditBalance(quota.credits.balance)
+                  : null}
+              {@const hasCodexQuotaMetadata =
+                isCodex &&
+                Boolean(
+                  quota?.planType ||
+                  quota?.credits ||
+                  rateLimitReachedLabel(quota?.rateLimitReachedType),
+                )}
+              {@const hasCodexIdentity =
+                isCodex &&
+                Boolean(
+                  row.account.email ||
+                  codexPlanType ||
+                  row.account.chatgptAccountId ||
+                  row.account.isFedramp,
+                )}
+              <tr class="align-top" data-testid="provider-account-row">
+                <!-- Provider / account + type badge. The name+account is a link into the
                    account usage-detail page (per-reset-period token usage). -->
-              <td data-label={$t('Provider')} class="px-3 py-3 lg:max-w-56 lg:whitespace-normal">
-                <a
-                  class="group block"
-                  href={accountDetailHref(base, row.provider.id, row.account.account)}
-                  title={$t('View token usage per reset period')}
-                >
-                  <div
-                    class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline"
+                <td data-label={$t('Provider')} class="lg:max-w-56 lg:whitespace-normal">
+                  <a
+                    class="group block"
+                    href={accountDetailHref(base, row.provider.id, row.account.account)}
+                    title={$t('View token usage per reset period')}
                   >
-                    {row.provider.name}
-                  </div>
-                  <code class="font-mono text-xs text-ink-strong group-hover:text-indigo-600">
-                    {row.account.account}
-                  </code>
-                </a>
-                {#if hasCodexIdentity}
-                  <div
-                    class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs"
-                    data-testid="codex-subscription-details"
-                  >
-                    {#if row.account.email && row.account.email !== row.account.account}
-                      <span class="break-all text-ink-body">{row.account.email}</span>
-                    {/if}
-                    {#if codexPlanType || row.account.isFedramp}
-                      <div class="flex flex-wrap gap-1">
-                        {#if codexPlanType}
-                          <span class="badge-neutral">{planLabel(codexPlanType)}</span>
-                        {/if}
-                        {#if row.account.isFedramp}
-                          <span class="badge-neutral">{$t('FedRAMP')}</span>
-                        {/if}
-                      </div>
-                    {/if}
-                    {#if row.account.chatgptAccountId}
-                      <span
-                        class="break-all font-mono text-[10px] text-ink-muted"
-                        title={$t('ChatGPT account ID')}
-                      >
-                        {$t('ChatGPT ID: {id}', { id: row.account.chatgptAccountId })}
-                      </span>
-                    {/if}
-                  </div>
-                {/if}
-                <div class="mt-1 flex flex-wrap items-center gap-1">
-                  <span
-                    class="badge-neutral"
-                    title={row.account.anthropicPlanCheckedAt
-                      ? `${$t('Plan checked')}: ${new Date(row.account.anthropicPlanCheckedAt).toLocaleString()}`
-                      : undefined}>{typeBadge(row.provider, row.account)}</span
-                  >
-                  <!-- Egress proxy (redacted; "Direct" when none) -->
-                  {#if proxyLabel(row.account.proxy)}
-                    <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
-                      >{proxyLabel(row.account.proxy)}</span
+                    <div
+                      class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline"
                     >
-                  {:else}
-                    <span class="text-xs text-ink-muted">{$t('Direct')}</span>
+                      {row.provider.name}
+                    </div>
+                    <code class="font-mono text-xs text-ink-strong group-hover:text-indigo-600">
+                      {row.account.account}
+                    </code>
+                  </a>
+                  {#if hasCodexIdentity}
+                    <div
+                      class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs"
+                      data-testid="codex-subscription-details"
+                    >
+                      {#if row.account.email && row.account.email !== row.account.account}
+                        <span class="break-all text-ink-body">{row.account.email}</span>
+                      {/if}
+                      {#if codexPlanType || row.account.isFedramp}
+                        <div class="flex flex-wrap gap-1">
+                          {#if codexPlanType}
+                            <span class="badge-neutral">{planLabel(codexPlanType)}</span>
+                          {/if}
+                          {#if row.account.isFedramp}
+                            <span class="badge-neutral">{$t('FedRAMP')}</span>
+                          {/if}
+                        </div>
+                      {/if}
+                      {#if row.account.chatgptAccountId}
+                        <span
+                          class="break-all font-mono text-[10px] text-ink-muted"
+                          title={$t('ChatGPT account ID')}
+                        >
+                          {$t('ChatGPT ID: {id}', { id: row.account.chatgptAccountId })}
+                        </span>
+                      {/if}
+                    </div>
                   {/if}
-                  {#if isCodex && row.account.autoReset}
+                  <div class="mt-1 flex flex-wrap items-center gap-1">
                     <span
-                      class="badge-ok"
-                      data-testid="auto-reset-badge"
-                      title={$t(
-                        'Auto-resets the weekly limit once it saturates (at most once per hour)',
-                      )}>{$t('Auto-reset')}</span
+                      class="badge-neutral"
+                      title={row.account.anthropicPlanCheckedAt
+                        ? `${$t('Plan checked')}: ${new Date(row.account.anthropicPlanCheckedAt).toLocaleString()}`
+                        : undefined}>{typeBadge(row.provider, row.account)}</span
                     >
-                  {/if}
-                </div>
-              </td>
-
-              <!-- Status (+ parked pill) -->
-              <td data-label={$t('Status')} class="px-3 py-3 lg:whitespace-normal">
-                {#if row.account.healthy}
-                  <span class="badge-ok">{$t('connected')}</span>
-                {:else}
-                  <span class="badge-error">{$t('needs reconnect')}</span>
-                {/if}
-                {#if !row.account.schedulable}
-                  <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
-                {/if}
-                {#if usageLimit}
-                  <div class="mt-1">
-                    {#if row.account.allowSpendRemainingCredits}
-                      <!-- Toggle on: the account still serves off its remaining credits
-                           despite the limit, so the pill reflects that instead of a plain
-                           "parked" rate-limited state. -->
-                      <span class="badge-warning"
-                        >{$t('Rate limited · still spending credits')}</span
+                    <!-- Egress proxy (redacted; "Direct" when none) -->
+                    {#if proxyLabel(row.account.proxy)}
+                      <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
+                        >{proxyLabel(row.account.proxy)}</span
                       >
                     {:else}
-                      <span class="badge-error">{$t('Rate limited')}</span>
+                      <span class="text-xs text-ink-muted">{$t('Direct')}</span>
                     {/if}
-                    {#if usageLimitRecovery}
-                      <div class="text-[10px] text-ink-muted">
-                        {usageLimit.label
-                          ? `${usageLimit.label} · ${usageLimitRecovery}`
-                          : usageLimitRecovery}
-                      </div>
+                    {#if isCodex && row.account.autoReset}
+                      <span
+                        class="badge-ok"
+                        data-testid="auto-reset-badge"
+                        title={$t(
+                          'Auto-resets the weekly limit once it saturates (at most once per hour)',
+                        )}>{$t('Auto-reset')}</span
+                      >
                     {/if}
                   </div>
-                {/if}
-              </td>
+                </td>
 
-              <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
-              <td data-label={$t('Models')} class="px-3 py-3">
-                {#if row.account.models.length > 0}
-                  {@const shown = [...row.account.models]
-                    .sort(
-                      (left, right) =>
-                        Number(Boolean(mediaBadge(right))) - Number(Boolean(mediaBadge(left))),
-                    )
-                    .slice(0, MODELS_SHOWN)}
-                  {@const extra = row.account.models.length - shown.length}
-                  <div
-                    class="flex max-w-full flex-wrap gap-1 lg:w-40"
-                    title={row.account.models.join('\n')}
-                  >
-                    {#each shown as m (m)}
-                      <span class="badge-neutral font-mono text-[10px]">{m}</span>
-                      {#if mediaBadge(m)}
-                        <span class="badge-ok text-[10px]">{mediaBadge(m)}</span>
+                <!-- Status (+ parked pill) -->
+                <td data-label={$t('Status')} class="lg:whitespace-normal">
+                  {#if row.account.healthy}
+                    <span class="badge-ok">{$t('connected')}</span>
+                  {:else}
+                    <span class="badge-error">{$t('needs reconnect')}</span>
+                  {/if}
+                  {#if !row.account.schedulable}
+                    <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
+                  {/if}
+                  {#if usageLimit}
+                    <div class="mt-1">
+                      {#if row.account.allowSpendRemainingCredits}
+                        <!-- Toggle on: the account still serves off its remaining credits
+                           despite the limit, so the pill reflects that instead of a plain
+                           "parked" rate-limited state. -->
+                        <span class="badge-warning"
+                          >{$t('Rate limited · still spending credits')}</span
+                        >
+                      {:else}
+                        <span class="badge-error">{$t('Rate limited')}</span>
                       {/if}
-                    {/each}
-                    {#if extra > 0}
-                      <span class="badge-neutral text-[10px]">+{extra}</span>
-                    {/if}
-                  </div>
-                {:else}
-                  <span class="text-xs text-ink-muted">—</span>
-                {/if}
-              </td>
-
-              <!-- Today's usage -->
-              <td data-label={$t('Today')} class="px-3 py-3 text-xs">
-                {#if usage && usage.requests > 0}
-                  <div class="text-ink-body">
-                    {$t('{n} req', { n: formatCount(usage.requests) })}
-                  </div>
-                  <div class="text-ink-muted">{formatTokens(usage.tokens)} tok</div>
-                  <div class="text-ink-muted">{formatUsd(usage.costUsd)}</div>
-                  <div class="text-ink-muted">{usage.rpm} RPM</div>
-                {:else}
-                  <span class="text-ink-muted">—</span>
-                {/if}
-              </td>
-
-              <!-- Quota / session windows (+ Codex reset-credit count) -->
-              <td data-label={$t('Quota')} class="px-3 py-3" data-testid="provider-quota-cell">
-                {#if quota && quota.windows.length > 0}
-                  <div class="flex w-full flex-col gap-1.5 lg:w-36">
-                    {#each quota.windows as w (w.key)}
-                      <div>
-                        <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
-                          <span>{quotaWindowLabel(w)}</span>
-                          <span class="shrink-0">{Math.round(w.usedPercent)}%</span>
+                      {#if usageLimitRecovery}
+                        <div class="text-[10px] text-ink-muted">
+                          {usageLimit.label
+                            ? `${usageLimit.label} · ${usageLimitRecovery}`
+                            : usageLimitRecovery}
                         </div>
-                        <div class="progress-track">
-                          <div
-                            class={`progress-bar ${barColor(w.usedPercent)}`}
-                            style={`width:${Math.min(100, Math.max(2, w.usedPercent))}%`}
-                          ></div>
-                        </div>
-                        {#if resetIn(w.resetsAtMs)}
-                          <div class="text-[10px] text-ink-muted">{resetIn(w.resetsAtMs)}</div>
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-                {#if additionalLimits.length > 0}
-                  <div class:mt-2={quota && quota.windows.length > 0}>
-                    <div class="text-[10px] font-medium text-ink-muted">
-                      {$t('Additional limits')}
+                      {/if}
                     </div>
-                    <div class="mt-1 flex flex-wrap gap-1">
-                      {#each additionalLimits as limit (limit)}
-                        <span class="badge-neutral text-[10px]">{limit}</span>
+                  {/if}
+                </td>
+
+                <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
+                <td data-label={$t('Models')}>
+                  {#if row.account.models.length > 0}
+                    {@const shown = [...row.account.models]
+                      .sort(
+                        (left, right) =>
+                          Number(Boolean(mediaBadge(right))) - Number(Boolean(mediaBadge(left))),
+                      )
+                      .slice(0, MODELS_SHOWN)}
+                    {@const extra = row.account.models.length - shown.length}
+                    <div
+                      class="flex max-w-full flex-wrap gap-1 lg:w-52"
+                      title={row.account.models.join('\n')}
+                    >
+                      {#each shown as m (m)}
+                        <span class="badge-neutral font-mono text-[10px]">{m}</span>
+                        {#if mediaBadge(m)}
+                          <span class="badge-ok text-[10px]">{mediaBadge(m)}</span>
+                        {/if}
+                      {/each}
+                      {#if extra > 0}
+                        <span class="badge-neutral text-[10px]">+{extra}</span>
+                      {/if}
+                    </div>
+                  {:else}
+                    <span class="text-xs text-ink-muted">—</span>
+                  {/if}
+                </td>
+
+                <!-- Today's usage -->
+                <td data-label={$t('Today')} class="text-xs">
+                  {#if usage && usage.requests > 0}
+                    <div class="text-ink-body">
+                      <span>{$t('{n} req', { n: formatCount(usage.requests) })}</span>
+                      <span class="text-ink-muted"> · {usage.rpm} RPM</span>
+                    </div>
+                    <div class="text-ink-muted">
+                      <span>{formatTokens(usage.tokens)} tok</span> ·
+                      <span>{formatUsd(usage.costUsd)}</span>
+                    </div>
+                  {:else}
+                    <span class="text-ink-muted">—</span>
+                  {/if}
+                </td>
+
+                <!-- Quota / session windows (+ Codex reset-credit count) -->
+                <td data-label={$t('Quota')} data-testid="provider-quota-cell">
+                  {#if quota && quota.windows.length > 0}
+                    <div class="flex w-full flex-col gap-1.5 lg:w-36">
+                      {#each quota.windows as w (w.key)}
+                        <div>
+                          <div
+                            class="flex items-center justify-between gap-1 text-xs text-ink-muted"
+                          >
+                            <span>{quotaWindowLabel(w)}</span>
+                            <span class="shrink-0">{Math.round(w.usedPercent)}%</span>
+                          </div>
+                          <div class="progress-track">
+                            <div
+                              class={`progress-bar ${barColor(w.usedPercent)}`}
+                              style={`width:${Math.min(100, Math.max(2, w.usedPercent))}%`}
+                            ></div>
+                          </div>
+                          {#if resetIn(w.resetsAtMs)}
+                            <div class="text-[10px] text-ink-muted">{resetIn(w.resetsAtMs)}</div>
+                          {/if}
+                        </div>
                       {/each}
                     </div>
-                  </div>
-                {/if}
-                {#if isCodex && quota?.individualLimit}
-                  {@const usedPercent = individualLimitUsedPercent(quota)}
-                  <div class="mt-2 min-w-0" data-testid="codex-individual-limit">
-                    <div class="flex items-center justify-between gap-2 text-xs text-ink-muted">
-                      <span>{$t('Monthly credit limit')}</span>
+                  {/if}
+                  {#if additionalLimits.length > 0}
+                    <div class:mt-2={quota && quota.windows.length > 0}>
+                      <div class="text-[10px] font-medium text-ink-muted">
+                        {$t('Additional limits')}
+                      </div>
+                      <div class="mt-1 flex flex-wrap gap-1">
+                        {#each additionalLimits as limit (limit)}
+                          <span class="badge-neutral text-[10px]">{limit}</span>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+                  {#if isCodex && quota?.individualLimit}
+                    {@const usedPercent = individualLimitUsedPercent(quota)}
+                    <div class="mt-2 min-w-0" data-testid="codex-individual-limit">
+                      <div class="flex items-center justify-between gap-2 text-xs text-ink-muted">
+                        <span>{$t('Monthly credit limit')}</span>
+                        {#if usedPercent != null}
+                          <span>{Math.round(usedPercent)}%</span>
+                        {/if}
+                      </div>
                       {#if usedPercent != null}
-                        <span>{Math.round(usedPercent)}%</span>
+                        <div class="progress-track">
+                          <div
+                            class={`progress-bar ${barColor(usedPercent)}`}
+                            style={`width:${Math.min(100, Math.max(2, usedPercent))}%`}
+                          ></div>
+                        </div>
+                      {/if}
+                      <div class="text-[10px] text-ink-muted">
+                        {$t('{used} of {limit} credits used', {
+                          used: formatCreditAmount(quota.individualLimit.used),
+                          limit: formatCreditAmount(quota.individualLimit.limit),
+                        })}
+                      </div>
+                      {#if resetIn(quota.individualLimit.resetsAtMs)}
+                        <div class="text-[10px] text-ink-muted">
+                          {resetIn(quota.individualLimit.resetsAtMs)}
+                        </div>
                       {/if}
                     </div>
-                    {#if usedPercent != null}
-                      <div class="progress-track">
-                        <div
-                          class={`progress-bar ${barColor(usedPercent)}`}
-                          style={`width:${Math.min(100, Math.max(2, usedPercent))}%`}
-                        ></div>
-                      </div>
-                    {/if}
+                  {/if}
+                  {#if codexCredits != null}
+                    <div
+                      class="text-[10px] text-ink-muted"
+                      class:mt-1={quota && quota.windows.length > 0}
+                    >
+                      {$t('{n} reset credits', { n: codexCredits })}
+                    </div>
+                  {/if}
+                  {#if isCodex && quota?.planType}
                     <div class="text-[10px] text-ink-muted">
-                      {$t('{used} of {limit} credits used', {
-                        used: formatCreditAmount(quota.individualLimit.used),
-                        limit: formatCreditAmount(quota.individualLimit.limit),
+                      {$t('Plan: {plan}', { plan: planLabel(quota.planType) })}
+                    </div>
+                  {/if}
+                  {#if isCodex && quota?.credits?.unlimited}
+                    <div class="text-[10px] text-ink-muted">
+                      {$t('Credits: {balance}', {
+                        balance: $t('Unlimited'),
                       })}
                     </div>
-                    {#if resetIn(quota.individualLimit.resetsAtMs)}
-                      <div class="text-[10px] text-ink-muted">
-                        {resetIn(quota.individualLimit.resetsAtMs)}
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-                {#if codexCredits != null}
-                  <div
-                    class="text-[10px] text-ink-muted"
-                    class:mt-1={quota && quota.windows.length > 0}
-                  >
-                    {$t('{n} reset credits', { n: codexCredits })}
-                  </div>
-                {/if}
-                {#if isCodex && quota?.planType}
-                  <div class="text-[10px] text-ink-muted">
-                    {$t('Plan: {plan}', { plan: planLabel(quota.planType) })}
-                  </div>
-                {/if}
-                {#if isCodex && quota?.credits?.unlimited}
-                  <div class="text-[10px] text-ink-muted">
-                    {$t('Credits: {balance}', {
-                      balance: $t('Unlimited'),
-                    })}
-                  </div>
-                {:else if codexCreditBalance}
-                  <div class="text-[10px] text-ink-muted">
-                    {$t('Credits: {balance}', {
-                      balance: codexCreditBalance,
-                    })}
-                  </div>
-                {/if}
-                {#if isCodex && rateLimitReachedLabel(quota?.rateLimitReachedType)}
-                  <div class="text-[10px] text-ink-muted">
-                    {rateLimitReachedLabel(quota?.rateLimitReachedType)}
-                  </div>
-                {/if}
-                {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit && !hasCodexQuotaMetadata}
-                  <span class="text-xs text-ink-muted">—</span>
-                {/if}
-              </td>
+                  {:else if codexCreditBalance}
+                    <div class="text-[10px] text-ink-muted">
+                      {$t('Credits: {balance}', {
+                        balance: codexCreditBalance,
+                      })}
+                    </div>
+                  {/if}
+                  {#if isCodex && rateLimitReachedLabel(quota?.rateLimitReachedType)}
+                    <div class="text-[10px] text-ink-muted">
+                      {rateLimitReachedLabel(quota?.rateLimitReachedType)}
+                    </div>
+                  {/if}
+                  {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit && !hasCodexQuotaMetadata}
+                    <span class="text-xs text-ink-muted">—</span>
+                  {/if}
+                </td>
 
-              <!-- Scheduling: priority (lower = served first), schedulable, fast mode,
+                <!-- Scheduling: priority (lower = served first), schedulable, fast mode,
                    token expiry — the per-account knobs, grouped in one cell. -->
-              <td
-                data-label={$t('Scheduling')}
-                class="px-3 py-3 text-xs"
-                data-testid="provider-scheduling-cell"
-              >
-                <div class="grid w-36 grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5">
-                  <span class="text-ink-muted">{$t('Priority')}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
-                    value={row.account.priority}
-                    disabled={saving}
-                    aria-label={$t('Priority')}
-                    onchange={(e) =>
-                      savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
-                  />
-                  <span class="text-ink-muted">{$t('Schedulable')}</span>
-                  <input
-                    type="checkbox"
-                    class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                    checked={row.account.schedulable}
-                    disabled={saving || credentialFailed}
-                    aria-label={$t('Schedulable')}
-                    title={credentialFailed ? $t('needs reconnect') : undefined}
-                    onchange={(e) =>
-                      toggleSchedulable(
-                        row.provider.id,
-                        row.account.account,
-                        e.currentTarget.checked,
-                      )}
-                  />
-                  {#if supportsFast}
-                    <span class="text-ink-muted">{$t('Fast')}</span>
+                <td
+                  data-label={$t('Scheduling')}
+                  class="text-xs"
+                  data-testid="provider-scheduling-cell"
+                >
+                  <div
+                    class="grid w-full max-w-full grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1 lg:w-max lg:grid-cols-[auto_auto_auto_auto]"
+                  >
+                    <span class="text-ink-muted">{$t('Priority')}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
+                      value={row.account.priority}
+                      disabled={saving}
+                      aria-label={$t('Priority')}
+                      onchange={(e) =>
+                        savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
+                    />
+                    <span class="text-ink-muted">{$t('Schedulable')}</span>
                     <input
                       type="checkbox"
                       class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
-                      checked={row.account.fastMode ?? false}
-                      disabled={saving}
-                      aria-label={$t('Fast mode')}
+                      checked={row.account.schedulable}
+                      disabled={saving || credentialFailed}
+                      aria-label={$t('Schedulable')}
+                      title={credentialFailed ? $t('needs reconnect') : undefined}
                       onchange={(e) =>
-                        toggleFastMode(
+                        toggleSchedulable(
                           row.provider.id,
                           row.account.account,
                           e.currentTarget.checked,
                         )}
                     />
-                  {/if}
-                  <span class="text-ink-muted">{$t('Expires')}</span>
-                  <span class="text-ink-body">{expiryLabel(row.account)}</span>
-                </div>
-              </td>
+                    {#if supportsFast}
+                      <span class="text-ink-muted">{$t('Fast')}</span>
+                      <input
+                        type="checkbox"
+                        class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                        checked={row.account.fastMode ?? false}
+                        disabled={saving}
+                        aria-label={$t('Fast mode')}
+                        onchange={(e) =>
+                          toggleFastMode(
+                            row.provider.id,
+                            row.account.account,
+                            e.currentTarget.checked,
+                          )}
+                      />
+                    {/if}
+                    <span class="text-ink-muted">{$t('Expires')}</span>
+                    <span class="text-ink-body">{expiryLabel(row.account)}</span>
+                  </div>
+                </td>
 
-              <!-- Actions -->
-              <td
-                data-label={$t('Actions')}
-                class="px-3 py-3 lg:sticky lg:right-0 lg:bg-white lg:text-right"
-              >
-                <div class="flex items-center justify-end gap-2">
-                  {#if needsReconnect}
-                    <button
-                      type="button"
-                      class="btn-primary"
-                      disabled={!overview.configured}
-                      onclick={() => {
-                        reconnecting = {
-                          providerId: row.provider.id,
-                          account: row.account.account,
-                        };
-                        showConnect = true;
-                      }}>{$t('Reconnect')}</button
-                    >
-                  {/if}
-                  <button
-                    type="button"
-                    class="btn-secondary"
-                    onclick={() =>
-                      (testing = {
-                        providerId: row.provider.id,
-                        providerName: row.provider.name,
-                        account: row.account.account,
-                        models: row.account.models.filter((model) => mediaBadge(model) === null),
-                      })}>{$t('Test')}</button
-                  >
-                  <button
-                    type="button"
-                    class="btn-secondary"
-                    onclick={() =>
-                      (managing = {
-                        providerId: row.provider.id,
-                        providerName: row.provider.name,
-                        account: row.account.account,
-                      })}>{$t('Manage')}</button
-                  >
-                  <details data-testid="provider-actions" class="menu">
-                    <summary class="menu-trigger" title={$t('More actions')}>
-                      <span aria-hidden="true">⋯</span>
-                      <span class="sr-only">{$t('More actions')}</span>
-                    </summary>
-                    <div class="menu-panel w-56">
-                      {#if usageLimit?.retryable && isCodex}
-                        <button
-                          type="button"
-                          class="menu-item"
-                          disabled={resetting[k] === true}
-                          title={$t('Clear Helm local cooldown and try this account again')}
-                          onclick={() => retryAccount(row.provider.id, row.account.account)}
-                          >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
-                        >
-                      {/if}
-                      {#if isCodex}
-                        <button
-                          type="button"
-                          class="menu-item"
-                          disabled={!canResetCodexLimit}
-                          title={resetCreditTitle(quota, codexCredits)}
-                          onclick={() =>
-                            (confirmingReset = (() => {
-                              const credit = quota?.resetCreditDetails?.find(
-                                (item) =>
-                                  item.status === 'available' &&
-                                  item.resetType === 'codexRateLimits',
-                              );
-                              return {
-                                providerId: row.provider.id,
-                                account: row.account.account,
-                                credits: codexCredits ?? 0,
-                                autoReset: row.account.autoReset ?? false,
-                                ...(credit?.id ? { creditId: credit.id } : {}),
-                                ...(credit?.title ? { creditTitle: credit.title } : {}),
-                                idempotencyKey: resetRequestId(),
-                              };
-                            })())}
-                          >{codexCredits != null && codexCredits > 0
-                            ? $t('Reset limit ({n})', { n: codexCredits })
-                            : $t('Reset limit')}</button
-                        >
-                      {/if}
-                      {#if row.provider.id === 'anthropic'}
-                        <button
-                          type="button"
-                          class="menu-item"
-                          disabled={resettingLimit}
-                          onclick={() => prepareAnthropicReset(row.account.account)}
-                          >{$t(
-                            'Reset Claude usage',
-                          )}{#if anthropicResetButtonMeta(row.account.account)}
-                            <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
-                              >({anthropicResetButtonMeta(row.account.account)})</span
-                            >{/if}</button
-                        >
-                      {/if}
+                <!-- Actions -->
+                <td
+                  data-label={$t('Actions')}
+                  class="lg:sticky lg:right-0 lg:bg-white lg:text-right"
+                >
+                  <div class="flex items-center justify-end gap-2">
+                    {#if needsReconnect}
                       <button
                         type="button"
-                        class="menu-item-danger"
-                        disabled={disconnecting}
-                        onclick={() =>
-                          (confirming = {
+                        class="btn-primary"
+                        disabled={!overview.configured}
+                        onclick={() => {
+                          reconnecting = {
                             providerId: row.provider.id,
                             account: row.account.account,
-                          })}>{$t('Disconnect')}</button
+                          };
+                          showConnect = true;
+                        }}>{$t('Reconnect')}</button
                       >
-                    </div>
-                  </details>
-                </div>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {/if}
+                    {/if}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      onclick={() =>
+                        (testing = {
+                          providerId: row.provider.id,
+                          providerName: row.provider.name,
+                          account: row.account.account,
+                          models: row.account.models.filter((model) => mediaBadge(model) === null),
+                        })}>{$t('Test')}</button
+                    >
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      onclick={() =>
+                        (managing = {
+                          providerId: row.provider.id,
+                          providerName: row.provider.name,
+                          account: row.account.account,
+                        })}>{$t('Manage')}</button
+                    >
+                    <details data-testid="provider-actions" class="menu">
+                      <summary class="menu-trigger" title={$t('More actions')}>
+                        <span aria-hidden="true">⋯</span>
+                        <span class="sr-only">{$t('More actions')}</span>
+                      </summary>
+                      <div class="menu-panel w-56">
+                        {#if usageLimit?.retryable && isCodex}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={resetting[k] === true}
+                            title={$t('Clear Helm local cooldown and try this account again')}
+                            onclick={() => retryAccount(row.provider.id, row.account.account)}
+                            >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
+                          >
+                        {/if}
+                        {#if isCodex}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={!canResetCodexLimit}
+                            title={resetCreditTitle(quota, codexCredits)}
+                            onclick={() =>
+                              (confirmingReset = (() => {
+                                const credit = quota?.resetCreditDetails?.find(
+                                  (item) =>
+                                    item.status === 'available' &&
+                                    item.resetType === 'codexRateLimits',
+                                );
+                                return {
+                                  providerId: row.provider.id,
+                                  account: row.account.account,
+                                  credits: codexCredits ?? 0,
+                                  autoReset: row.account.autoReset ?? false,
+                                  ...(credit?.id ? { creditId: credit.id } : {}),
+                                  ...(credit?.title ? { creditTitle: credit.title } : {}),
+                                  idempotencyKey: resetRequestId(),
+                                };
+                              })())}
+                            >{codexCredits != null && codexCredits > 0
+                              ? $t('Reset limit ({n})', { n: codexCredits })
+                              : $t('Reset limit')}</button
+                          >
+                        {/if}
+                        {#if row.provider.id === 'anthropic'}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={resettingLimit}
+                            onclick={() => prepareAnthropicReset(row.account.account)}
+                            >{$t(
+                              'Reset Claude usage',
+                            )}{#if anthropicResetButtonMeta(row.account.account)}
+                              <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
+                                >({anthropicResetButtonMeta(row.account.account)})</span
+                              >{/if}</button
+                          >
+                        {/if}
+                        <button
+                          type="button"
+                          class="menu-item-danger"
+                          disabled={disconnecting}
+                          onclick={() =>
+                            (confirming = {
+                              providerId: row.provider.id,
+                              account: row.account.account,
+                            })}>{$t('Disconnect')}</button
+                        >
+                      </div>
+                    </details>
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </section>
+
+  <ApiKeyPools />
 
   {#if confirming}
     <Modal
