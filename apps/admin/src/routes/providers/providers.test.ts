@@ -196,6 +196,15 @@ describe('providers page', () => {
     });
   });
 
+  it('puts subscription accounts before the API key pool', async () => {
+    renderPage();
+    const subscription = screen.getByRole('heading', { name: 'Subscription Providers' });
+    const api = screen.getByRole('heading', { name: 'API key providers' });
+    expect(
+      subscription.compareDocumentPosition(api) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it('requires the explicit Claude confirmation and cannot dismiss by backdrop or Escape', async () => {
     getAnthropicResetStatus.mockResolvedValue({
       eligible: true,
@@ -330,7 +339,7 @@ describe('providers page', () => {
     expect(screen.getByText('Subscription Providers')).toBeInTheDocument();
     expect(screen.getByLabelText('Account usage strategy')).toHaveValue('balanced');
     expect(
-      screen.getByText(
+      screen.getByTitle(
         'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
       ),
     ).toBeInTheDocument();

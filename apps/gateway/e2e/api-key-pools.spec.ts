@@ -63,6 +63,14 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await expect(page).toHaveURL(url);
     await expect(page).toHaveTitle(/Helm/i);
     const section = page.getByRole("region", { name: "API key providers", exact: true });
+    const subscriptions = page.getByRole("region", { name: "Subscription Providers", exact: true });
+    await expect(subscriptions.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
+    expect(
+      await subscriptions.evaluate((node) => {
+        const api = document.querySelector('section[aria-label="API key providers"]');
+        return Boolean(api && node.compareDocumentPosition(api) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }),
+    ).toBe(true);
     await expect(section.getByRole("button", { name: "Add API keys" })).toBeEnabled();
     await section.getByRole("button", { name: "Add API keys" }).click();
     await page
@@ -129,9 +137,9 @@ test("API key provider import, pause, edit and delete through the real admin UI"
                   enabled: true,
                   priority: 50,
                   models: null,
-                  state: "ready",
-                  reason: null,
-                  nextRetryAt: null,
+                  state: i === 0 ? "quota_exhausted" : "ready",
+                  reason: i === 0 ? "credit_balance_exhausted" : null,
+                  nextRetryAt: i === 0 ? Date.UTC(2026, 10, 1) : null,
                   probeUntil: null,
                   deniedModels: [],
                 })),
@@ -195,6 +203,13 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       await page.reload();
       await expect(page.getByRole("heading", { name: "提供商", exact: true })).toBeVisible();
       await expect(page.getByText("OpenAI 4", { exact: true })).toBeVisible();
+      const failure = page.getByRole("row").filter({ hasText: "OpenAI 1" });
+      await expect(
+        failure.getByText("credit_balance_exhausted", { exact: true }),
+      ).not.toBeVisible();
+      await failure.getByText("详情", { exact: true }).click();
+      await expect(failure.getByText("credit_balance_exhausted", { exact: true })).toBeVisible();
+      await failure.getByText("详情", { exact: true }).click();
       await page.setViewportSize({ width: 1440, height: 1100 });
       const lastAccount = page.getByRole("row").filter({ hasText: "OpenAI 4" });
       await lastAccount.locator("summary").click();
@@ -207,6 +222,12 @@ test("API key provider import, pause, edit and delete through the real admin UI"
         path: join(evidenceDir, "api-key-pools-desktop.png"),
         fullPage: false,
       });
+      for (const width of [1024, 768, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        ).toBe(true);
+      }
       await page.setViewportSize({ width: 390, height: 844 });
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
@@ -214,6 +235,19 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       await page.screenshot({
         path: join(evidenceDir, "api-key-pools-mobile.png"),
         fullPage: true,
+      });
+      await failure.getByRole("button", { name: "测试", exact: true }).click();
+      await expect(page.getByRole("dialog", { name: "测试 API 密钥" })).toBeVisible();
+      await page
+        .getByRole("dialog", { name: "测试 API 密钥" })
+        .getByRole("button", { name: "关闭", exact: true })
+        .click();
+      await page
+        .getByRole("heading", { name: "API 密钥提供商", exact: true })
+        .evaluate((node) => node.scrollIntoView({ block: "start" }));
+      await page.screenshot({
+        path: join(evidenceDir, "api-key-pools-mobile-api.png"),
+        fullPage: false,
       });
     }
     expect(errors).toEqual([]);
