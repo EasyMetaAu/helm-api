@@ -1,3 +1,5 @@
+import type { AccountSelectionTrace } from "@helm/shared";
+import { createSpeedHistory } from "./speed.js";
 // OAuth account POOL client (issue #38, Stage 3). A single ProviderClient that
 // fronts N per-account clients of ONE subscription provider (each already built
 // with its own token manager + egress proxy + executor type). On every call it
@@ -192,7 +194,7 @@ export interface OAuthPoolMember {
   quotaResetCredits?: number | null;
 }
 
-export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk" | "use_expiring";
+export type OAuthSelectionStrategy = AccountSelectionTrace["strategy"];
 
 // The pool's ProviderClient plus an out-of-band mutator the gateway uses to park /
 // un-park a single account in O(1) — a single 429 must NOT rebuild the whole pool
@@ -292,6 +294,7 @@ interface PoolEntry {
 }
 
 export interface OAuthPoolSelection {
+  trace?: AccountSelectionTrace;
   reason: "sticky_hit" | "hash_assign" | "lru" | "strategy";
   strategy: OAuthSelectionStrategy;
   affinityKeySource: string | null;
@@ -326,6 +329,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     )
       ? firstNativeProtocolProfile
       : undefined;
+  const speedHistory = createSpeedHistory();
+  const speedTurns = new Map<string, number>();
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
   const scopedRateLimits = new Map<
     string,
@@ -809,6 +814,41 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     model: string | null,
     nowMs: number,
   ): { entry: PoolEntry | undefined; reason: OAuthPoolSelection["reason"] } {
+    if (selectionStrategy === "fastest") {
+      const tier = preferredPriorityTier(candidates);
+      const ranked = tier.map((entry) => ({
+        entry,
+        speed: speedHistory.read(entry.member.account, model, nowMs),
+      }));
+      const unknown = ranked.filter((row) => row.speed === null).map((row) => row.entry);
+      const paces = ranked
+        .flatMap((row) => (row.speed?.tokensPerSecond ? [row.speed.tokensPerSecond] : []))
+        .sort((a, b) => a - b);
+      const median = paces[Math.floor(paces.length / 2)] ?? null;
+      const estimate = (row: (typeof ranked)[number]): number => {
+        if (!row.speed) return Infinity;
+        const pace = row.speed.tokensPerSecond ?? median;
+        return row.speed.ttftMs + (pace ? 200_000 / pace : 0);
+      };
+      const measured = ranked
+        .filter((row) => row.speed !== null)
+        .sort((a, b) => estimate(a) - estimate(b));
+      const turnKey = model ?? "";
+      const turn = (speedTurns.get(turnKey) ?? 0) + 1;
+      speedTurns.delete(turnKey);
+      speedTurns.set(turnKey, turn);
+      if (speedTurns.size > 1024) speedTurns.delete(speedTurns.keys().next().value as string);
+      const best = measured[0];
+      if (unknown.length && (!best || turn % 5 === 2))
+        return { entry: chooseByLru(unknown), reason: "strategy" };
+      if (!best) return { entry: chooseByLru(tier), reason: "lru" };
+      const tolerance = estimate(best) * 1.1;
+      const alike = measured.filter((row) => estimate(row) <= tolerance).map((row) => row.entry);
+      return {
+        entry: sticky && alike.includes(sticky) ? sticky : alike[0],
+        reason: sticky && alike.includes(sticky) ? "sticky_hit" : "strategy",
+      };
+    }
     if (deps.rotateIndependentRequests) return { entry: chooseByLru(candidates), reason: "lru" };
     if (selectionStrategy === "balanced") {
       if (sticky) return { entry: sticky, reason: "sticky_hit" };
@@ -1062,6 +1102,60 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // still uses the full `eligible` set so a pinned conversation is never diverted.
     const preferred = preferHealthyTier(eligible, nowMs);
     const capacityTier = preferredCapacityTier(preferred, opts.avoidBusy === true);
+    const snapshot = (
+      selected: PoolEntry,
+      reason: OAuthPoolSelection["reason"],
+    ): AccountSelectionTrace => {
+      const priority = Math.min(...capacityTier.candidates.map((entry) => entry.member.priority));
+      const kept = entries.slice(0, 20);
+      if (!kept.includes(selected)) kept[kept.length - 1] = selected;
+      return {
+        strategy: selectionStrategy,
+        reason,
+        captured_at_ms: nowMs,
+        omitted_candidates: Math.max(0, entries.length - kept.length),
+        candidates: kept.map((entry) => {
+          const member = entry.member;
+          const speed = speedHistory.read(member.account, model, nowMs);
+          const exclusion: AccountSelectionTrace["candidates"][number]["exclusion"] =
+            !member.schedulable
+              ? "disabled"
+              : !supportsModel(member, model, nowMs)
+                ? "unsupported_model"
+                : usageLimited(member, nowMs) || modelLimited(member.account, model, nowMs)
+                  ? "quota_limit"
+                  : retryableAccountLimited(member.account, nowMs)
+                    ? "cooldown"
+                    : exclude?.has(member.account)
+                      ? "already_tried"
+                      : assertedAccount !== null &&
+                          member.anthropicAccountUuid?.toLowerCase() !== assertedAccount
+                        ? "identity_pin"
+                        : !preferred.includes(entry)
+                          ? "credit_tier"
+                          : !capacityTier.candidates.includes(entry)
+                            ? "capacity"
+                            : member.priority !== priority && entry !== selected
+                              ? "priority"
+                              : null;
+          const resets = applicableQuotaWindows(entry, model, nowMs).flatMap((w) =>
+            w.resetsAtMs !== null && w.resetsAtMs > nowMs ? [w.resetsAtMs] : [],
+          );
+          return {
+            account: member.account,
+            selected: entry === selected,
+            priority: member.priority,
+            exclusion,
+            quota_fresh: quotaFresh(member, nowMs),
+            quota_pressure: quotaPressure(entry, model, nowMs),
+            expiring_value: expiringQuotaValue(entry, model, nowMs),
+            next_reset_ms: resets.length ? Math.min(...resets) : null,
+            ttft_ms: speed?.ttftMs ?? null,
+            tokens_per_second: speed?.tokensPerSecond ?? null,
+          };
+        }),
+      };
+    };
     const selectionBase = {
       affinityKeySource: affinityKeySource(stickyKey ?? null),
       capacityAvoided: capacityTier.capacityAvoided,
@@ -1095,6 +1189,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       return commitSelection(stickyEntry, null, nowMs, {
         ...selectionBase,
         reason: "sticky_hit",
+        trace: snapshot(stickyEntry, "sticky_hit"),
       });
     }
     if (stickyKey?.startsWith("previous_response_id:") && !knownSticky) {
@@ -1133,6 +1228,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return commitSelection(best, stickyOnly ? null : (stickyKey ?? null), nowMs, {
       ...selectionBase,
       reason,
+      trace: snapshot(best, reason),
     });
   }
 
@@ -1358,6 +1454,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     for (;;) {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
+      const speedStarted = now();
       try {
         signal?.throwIfAborted();
         const raw = open(entry.member.client, entry);
@@ -1429,15 +1526,57 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       if (stickyKey?.startsWith("responses_websocket_session:")) {
         rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
       }
+      const firstAt = now();
+      let outputTokens: number | null = null;
+      let usageBuffer = "";
+      const observeUsage = (chunk: string): void => {
+        if (selectionStrategy !== "fastest") return;
+        usageBuffer += chunk;
+        const lines = usageBuffer.split("\n");
+        usageBuffer = lines.pop() ?? "";
+        if (usageBuffer.length > 1024 * 1024) usageBuffer = "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const event = JSON.parse(line.slice(5)) as {
+              usage?: { completion_tokens?: number; output_tokens?: number };
+              response?: { usage?: { output_tokens?: number } };
+              usageMetadata?: { candidatesTokenCount?: number };
+            };
+            const tokens =
+              event.usage?.completion_tokens ??
+              event.usage?.output_tokens ??
+              event.response?.usage?.output_tokens ??
+              event.usageMetadata?.candidatesTokenCount;
+            if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0)
+              outputTokens = Math.max(outputTokens ?? 0, tokens);
+          } catch {
+            /* comments, sentinels and non-usage frames are not samples */
+          }
+        }
+      };
       const trackResponseAffinity = streamResponseAffinityTracker(entry);
       try {
         if (!first.done) {
+          observeUsage(first.value);
           trackResponseAffinity(first.value);
           yield first.value;
         }
         while (true) {
           const chunk = await iterator.next();
-          if (chunk.done) return;
+          if (chunk.done) {
+            if (selectionStrategy === "fastest" && !first.done && !signal?.aborted)
+              speedHistory.record(
+                entry.member.account,
+                model,
+                firstAt - speedStarted,
+                outputTokens,
+                now() - firstAt,
+                now(),
+              );
+            return;
+          }
+          observeUsage(chunk.value);
           trackResponseAffinity(chunk.value);
           yield chunk.value;
         }
@@ -1449,6 +1588,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)
         ) {
           parkCredentialFailedAccount(entry, err);
+        } else if (!signal?.aborted && isRetryableTransientError(err)) {
+          // This stream stays failed. Only a later independent request may use a
+          // sibling; strong continuation pins remain bound to the original account.
+          coolRetryableAccount(entry);
         }
         throw err;
       } finally {

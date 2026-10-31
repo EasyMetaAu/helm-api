@@ -5,6 +5,7 @@ import {
   ProtocolSchema,
   TargetProviderProtocolSchema,
 } from "../request/schema.js";
+import { AccountSelectionTraceSchema } from "./account-selection.js";
 
 // Decision record — the full routing trail for one request: classification,
 // matched policy, selected lane + candidate chain, every provider attempt, and
@@ -143,6 +144,7 @@ export const FinalDecisionSchema = z.object({
 export const ServingAccountDecisionSchema = z.object({
   provider_id: z.string().min(1),
   account: z.string().min(1),
+  selection: AccountSelectionTraceSchema.optional(),
 });
 
 // Cost split (docs/07 "cost split (including eval's own self-cost)"). `eval_usd` isolates the

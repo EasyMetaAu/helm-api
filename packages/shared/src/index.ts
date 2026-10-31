@@ -148,6 +148,11 @@ export {
   type StoreConfig,
   StoreConfigSchema,
 } from "./config/schema.js";
+export {
+  type AccountSelectionTrace,
+  AccountSelectionTraceSchema,
+  OAuthSelectionStrategySchema,
+} from "./decision/account-selection.js";
 // Portal (self-service) whitelist projection of a decision record (docs/12 §4.3).
 export { type PortalDecisionView, toPortalDecisionView } from "./decision/portal-view.js";
 // Admin request-debug list query model (pagination + error/role filters, docs/07).

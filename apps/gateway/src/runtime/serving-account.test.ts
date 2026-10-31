@@ -20,6 +20,20 @@ describe("withServingAccountCapture + markServingAccount (ALS bridge)", () => {
     expect(servingAccount).toEqual({ providerId: "anthropic", account: "default" });
   });
 
+  it("carries an account selection snapshot into the request holder", async () => {
+    const selection = {
+      strategy: "balanced" as const,
+      reason: "lru" as const,
+      captured_at_ms: 1,
+      omitted_candidates: 0,
+      candidates: [],
+    };
+    const result = await withServingAccountCapture(async () =>
+      markServingAccount("anthropic", "default", undefined, selection),
+    );
+    expect(result.servingAccount?.selection).toEqual(selection);
+  });
+
   it("captures null when nothing marks an account (configured / non-OAuth provider)", async () => {
     const { result, servingAccount } = await withServingAccountCapture(async () => 42);
     expect(result).toBe(42);

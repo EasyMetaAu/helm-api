@@ -315,6 +315,7 @@ export const RoutingSignalFeedbackConfigSchema = z
   .strict();
 
 export const RuntimeConfigSchema = z.object({
+  outbound_privacy: z.enum(["off", "mask", "block"]).default("off"),
   request_timeout_ms: z.number().int().positive().default(60_000),
   // SSE keep-alive heartbeat (ms). While a STREAMING response idles between upstream
   // chunks, emit an SSE comment (`:\n\n` — ignored by every compliant SSE parser) at

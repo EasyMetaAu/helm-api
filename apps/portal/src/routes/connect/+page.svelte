@@ -1,6 +1,11 @@
 <script lang="ts">
   import { t } from "$lib/i18n";
   import { getKey } from "$lib/auth";
+  import { onDestroy } from "svelte";
+  import {
+    testInferenceConnection,
+    type ConnectionResult,
+  } from "$lib/connection-test";
 
   // base_url is derived from the page origin — the whole point of this page is to
   // stop users guessing whether it needs /v1 (docs/12 §5). We surface BOTH forms.
@@ -68,17 +73,26 @@
     }
   }
 
-  // Optional connection test: fire one /v1/models call.
-  let testState = $state<"idle" | "ok" | "fail">("idle");
+  let testRunning = $state(false);
+  let testResult = $state<ConnectionResult | null>(null);
+  let testLane = $state("auto");
+  let testAbort: AbortController | undefined;
+  onDestroy(() => testAbort?.abort());
   async function testConnection() {
-    testState = "idle";
+    if (testRunning || tab === "mcp" || !testLane.trim()) return;
+    testRunning = true;
+    testResult = null;
+    testAbort = new AbortController();
     try {
-      const res = await fetch(`${origin}/v1/models`, {
-        headers: { Authorization: `Bearer ${key}` },
+      testResult = await testInferenceConnection({
+        origin,
+        key,
+        client: tab,
+        model: testLane.trim(),
+        signal: testAbort.signal,
       });
-      testState = res.ok ? "ok" : "fail";
-    } catch {
-      testState = "fail";
+    } finally {
+      testRunning = false;
     }
   }
 
@@ -94,8 +108,13 @@ base_url = "${baseV1}"
 wire_api = "responses"
 env_key = "HELM_API_KEY"
 
+[profiles.helm]
+model_provider = "helm"
+model = "auto"
+
 # 2) Set the key in your shell, then run codex
-export HELM_API_KEY="<KEY>"`;
+export HELM_API_KEY="<KEY>"
+codex --profile helm`;
   const sdkPython = `from openai import OpenAI
 
 client = OpenAI(base_url="${baseV1}", api_key="<KEY>")
@@ -174,7 +193,11 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
       class:shadow-sm={tab === ct.id}
       class:text-ink-2={tab !== ct.id}
       class:hover:text-ink-1={tab !== ct.id}
-      onclick={() => (tab = ct.id)}
+      disabled={testRunning}
+      onclick={() => {
+        tab = ct.id;
+        testResult = null;
+      }}
     >
       {ct.label}
     </button>
@@ -333,16 +356,66 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
     </div>
   {/if}
 
-  <div class="card-actions">
-    <button class="btn-secondary" onclick={testConnection}
-      >{$t("Test connection")}</button
-    >
-    {#if testState === "ok"}<span class="badge badge-ok">{$t("Connected")}</span
-      >{/if}
-    {#if testState === "fail"}<span class="badge badge-error"
-        >{$t("Failed")}</span
-      >{/if}
-  </div>
+  {#if tab !== "mcp"}
+    <div class="mt-4 border-t border-border pt-4">
+      <label class="block text-sm" for="connection-lane"
+        >{$t("Lane to test")}</label
+      >
+      <input
+        id="connection-lane"
+        class="input mt-1"
+        bind:value={testLane}
+        oninput={() => {
+          testResult = null;
+        }}
+        disabled={testRunning}
+      />
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t(
+          "Sends one short model request using this key's permissions and budget. Provider charges may apply.",
+        )}
+      </p>
+      <div class="card-actions">
+        <button
+          class="btn-secondary"
+          onclick={testConnection}
+          disabled={testRunning || !testLane.trim()}
+        >
+          {testRunning ? $t("Testing…") : $t("Test inference")}
+        </button>
+        {#if testRunning}<button
+            class="btn-secondary"
+            onclick={() => testAbort?.abort()}>{$t("Cancel")}</button
+          >{/if}
+        <div aria-live="polite">
+          {#if testResult}
+            <span
+              class:badge-ok={testResult.auth}
+              class:badge-error={!testResult.auth}
+              class="badge"
+              >{testResult.auth
+                ? $t("Authentication passed")
+                : $t("Authentication failed")}</span
+            >
+            <span
+              class:badge-ok={testResult.inference}
+              class:badge-error={!testResult.inference}
+              class="badge"
+              >{testResult.inference
+                ? $t("Inference completed")
+                : $t("Inference not confirmed")}</span
+            >
+            {#if testResult.status !== null}<span class="text-sm"
+                >HTTP {testResult.status}</span
+              >{/if}
+            {#if testResult.firstOutputMs !== null}<span class="text-sm"
+                >{$t("First output")}: {testResult.firstOutputMs} ms</span
+              >{/if}
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#snippet codeBlock(code: string, id: string)}

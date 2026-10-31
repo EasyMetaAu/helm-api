@@ -229,6 +229,7 @@ const SELECTION_STRATEGIES: ReadonlySet<string> = new Set([
   "manual_priority",
   "low_risk",
   "use_expiring",
+  "fastest",
 ]);
 
 function parseSelectionStrategy(raw: unknown): OAuthSelectionStrategy | null {
@@ -1453,7 +1454,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const selectionStrategy = parseSelectionStrategy(body.selectionStrategy);
     if (selectionStrategy === null) {
       return c.json(
-        { error: "selectionStrategy must be balanced, manual_priority, low_risk, or use_expiring" },
+        {
+          error:
+            "selectionStrategy must be balanced, manual_priority, low_risk, use_expiring, or fastest",
+        },
         400,
       );
     }

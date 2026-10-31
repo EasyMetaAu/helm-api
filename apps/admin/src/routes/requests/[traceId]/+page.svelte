@@ -345,6 +345,52 @@
           >
             {d.serving_account?.account ?? '—'}
           </dd>
+          {#if d.serving_account?.selection}
+            {@const selection = d.serving_account.selection}
+            <details class="mt-2 text-sm">
+              <summary class="cursor-pointer">{$t('Why this account?')}</summary>
+              <p>
+                {selection.strategy} · {selection.reason} · {new Date(
+                  selection.captured_at_ms,
+                ).toISOString()}
+              </p>
+              <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                  <thead
+                    ><tr
+                      ><th>{$t('Account')}</th><th>{$t('Reason')}</th><th>{$t('Quota used')}</th><th
+                        >{$t('First output')}</th
+                      ></tr
+                    ></thead
+                  >
+                  <tbody
+                    >{#each selection.candidates as candidate}<tr>
+                        <td>{candidate.account}</td>
+                        <td
+                          >{candidate.selected
+                            ? $t('Selected')
+                            : (candidate.exclusion ?? $t('Eligible'))}</td
+                        >
+                        <td
+                          >{candidate.quota_fresh && candidate.quota_pressure !== null
+                            ? `${candidate.quota_pressure}%`
+                            : $t('Unknown')}</td
+                        >
+                        <td
+                          >{candidate.ttft_ms === null
+                            ? $t('Unknown')
+                            : `${Math.round(candidate.ttft_ms)} ms`}</td
+                        >
+                      </tr>{/each}</tbody
+                  >
+                </table>
+              </div>
+              {#if selection.omitted_candidates > 0}<p>
+                  {selection.omitted_candidates}
+                  {$t('additional candidates omitted')}
+                </p>{/if}
+            </details>
+          {/if}
         </div>
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Served model')}</dt>

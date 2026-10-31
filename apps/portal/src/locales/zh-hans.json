@@ -841,7 +841,7 @@
   "Temperature": "温度",
   "Test": "测试",
   "Test connection": "连通性测试",
-  "Testing…": "测试中…",
+  "Testing…": "正在测试…",
   "Text": "文本",
   "That fact already exists — no duplicate was created.": "该事实已存在——未创建重复项。",
   "That key is not valid.": "该密钥无效。",
@@ -1002,5 +1002,12 @@
   "Date": "日期",
   "Daily usage": "每日用量",
   "Allowed clients": "允许的客户端",
-  "No clients allowed. Contact your administrator.": "当前拒绝所有客户端，请联系管理员。"
+  "No clients allowed. Contact your administrator.": "当前拒绝所有客户端，请联系管理员。",
+  "Lane to test": "要测试的通道",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "使用当前密钥的权限和额度发送一次简短请求，上游可能收取费用。",
+  "Test inference": "测试推理",
+  "Authentication passed": "鉴权成功",
+  "Inference completed": "推理已完成",
+  "Inference not confirmed": "尚未确认推理成功",
+  "First output": "首个输出"
 }
