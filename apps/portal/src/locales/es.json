@@ -1002,5 +1002,12 @@
   "Date": "Date",
   "Daily usage": "Daily usage",
   "Allowed clients": "Clientes permitidos",
-  "No clients allowed. Contact your administrator.": "No se permite ningún cliente. Contacta con tu administrador."
+  "No clients allowed. Contact your administrator.": "No se permite ningún cliente. Contacta con tu administrador.",
+  "Lane to test": "Ruta que se probará",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "Envía una solicitud breve al modelo con los permisos y el presupuesto de esta clave. El proveedor puede cobrar por ella.",
+  "Test inference": "Probar inferencia",
+  "Authentication passed": "Autenticación correcta",
+  "Inference completed": "Inferencia completada",
+  "Inference not confirmed": "Inferencia no confirmada",
+  "First output": "Primera salida"
 }

@@ -1002,5 +1002,12 @@
   "Date": "Date",
   "Daily usage": "Daily usage",
   "Allowed clients": "許可するクライアント",
-  "No clients allowed. Contact your administrator.": "許可されたクライアントがありません。管理者にお問い合わせください。"
+  "No clients allowed. Contact your administrator.": "許可されたクライアントがありません。管理者にお問い合わせください。",
+  "Lane to test": "テストするルート",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "このキーの権限と予算で短いモデルリクエストを1回送信します。プロバイダーの料金が発生する場合があります。",
+  "Test inference": "推論をテスト",
+  "Authentication passed": "認証成功",
+  "Inference completed": "推論完了",
+  "Inference not confirmed": "推論を確認できませんでした",
+  "First output": "最初の出力"
 }
