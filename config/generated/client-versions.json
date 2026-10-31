@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "versions": {
     "grok": "1.0.70",
-    "claude": "2.1.314",
+    "claude": "2.1.316",
     "codex": "0.166.0"
   },
   "sources": {
