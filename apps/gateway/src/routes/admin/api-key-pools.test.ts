@@ -6,7 +6,7 @@ import type { AppEnv } from "../../app.js";
 import { registerApiKeyPoolRoutes } from "./api-key-pools.js";
 import type { AdminApiDeps } from "./deps.js";
 
-function setup() {
+function setup(type: "openai" | "anthropic" = "openai") {
   const rows = new Map<string, string>();
   const store: ConfigStore = {
     get: async (k) => rows.get(k) ?? null,
@@ -23,6 +23,7 @@ function setup() {
     store,
     encKey: Buffer.alloc(32, 1),
     poolId: "openai",
+    providerType: type,
     timezone: "Asia/Shanghai",
   });
   const chatCompletion = vi.fn(async () => ({
@@ -39,6 +40,7 @@ function setup() {
         "openai",
         {
           accounts,
+          type,
           models: ["m", "gpt-6-luna"],
           timezone: "Asia/Shanghai",
           strategy: "round_robin",
@@ -215,4 +217,32 @@ it("uses the supported non-reasoning mode for the default Luna test", async () =
     expect.objectContaining({ reasoning_effort: "none" }),
     expect.anything(),
   );
+});
+
+it("reports Anthropic low credit without exposing upstream messages", async () => {
+  const { app, accounts, chatCompletion } = setup("anthropic");
+  await accounts.add([{ name: "Claude", key: "sk-ant-test-credential" }]);
+  const id = (await accounts.list())[0]!.id;
+  chatCompletion.mockRejectedValue(
+    new UpstreamError(
+      "upstream_error",
+      "failure",
+      {
+        error: {
+          type: "invalid_request_error",
+          message: "Your credit balance is too low to access the Anthropic API. secret",
+        },
+      },
+      400,
+    ),
+  );
+  const res = await app.request(
+    `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+    body({ model: "m" }),
+  );
+  expect(await res.json()).toMatchObject({
+    ok: false,
+    error: "credit_balance_exhausted",
+    upstreamStatus: 400,
+  });
 });

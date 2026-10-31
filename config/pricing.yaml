@@ -1084,7 +1084,7 @@ zenmux-anthropic/claude-haiku-4.5:
 # Official Opus 5.5 pricing, checked 2026-09-23. Cache reads are 0.05x input;
 # fast mode is 2x standard pricing, including cache writes/reads.
 # https://platform.claude.com/docs/en/about-claude/pricing
-anthropic/claude-opus-5-5:
+anthropic/claude-opus-5-5: &anthropic_api_claude_opus_5_5
   inputPerMTokUsd: 4.0
   outputPerMTokUsd: 20.0
   cacheReadPerMTokUsd: 0.2
@@ -1149,7 +1149,7 @@ anthropic/claude-sonnet-4-6:
 # Official Claude API-equivalent estimate for Pro/Max subscription traffic.
 # Sonnet 5.5 standard pricing (checked 2026-09-29). No long-context surcharge or Fast tier.
 # https://platform.claude.com/docs/en/about-claude/pricing
-anthropic/claude-sonnet-5-5:
+anthropic/claude-sonnet-5-5: &anthropic_api_claude_sonnet_5_5
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 10.0
   cacheReadPerMTokUsd: 0.2
@@ -1161,7 +1161,7 @@ anthropic/claude-sonnet-5-5:
 # Official Claude Fable 5.1 pricing (platform.claude.com/docs/en/about-claude/pricing,
 # checked 2026-09-05): $10/M input, $50/M output, $0.25/M cache read, $12.50/M
 # 5-minute cache write and $20/M 1-hour cache write.
-anthropic/claude-fable-5-1:
+anthropic/claude-fable-5-1: &anthropic_api_claude_fable_5_1
   inputPerMTokUsd: 10.0
   outputPerMTokUsd: 50.0
   cacheReadPerMTokUsd: 0.25
@@ -1179,7 +1179,7 @@ anthropic/claude-fable-5:
   inferenceGeoMultipliers:
     global: 1.0
     us: 1.1
-anthropic/claude-haiku-4-5-20251001:
+anthropic/claude-haiku-4-5-20251001: &anthropic_api_claude_haiku_4_5_20251001
   inputPerMTokUsd: 1.0
   outputPerMTokUsd: 5.0
   cacheReadPerMTokUsd: 0.1
@@ -1638,3 +1638,9 @@ minimax/speech-2.8-turbo:
       - "Use extra_info.usage_characters; word_count and norm_text_char_count are not billing quantities."
       - "Price page lists same standard rates for synchronous and asynchronous TTS; streaming changes transport, not character unit."
       - "If using externally created cloned/designed voice, first-use voice fee may apply."
+
+# Paid API aliases use the same model capabilities and public API prices.
+anthropic-api/claude-opus-5-5: *anthropic_api_claude_opus_5_5
+anthropic-api/claude-sonnet-5-5: *anthropic_api_claude_sonnet_5_5
+anthropic-api/claude-fable-5-1: *anthropic_api_claude_fable_5_1
+anthropic-api/claude-haiku-4-5-20251001: *anthropic_api_claude_haiku_4_5_20251001

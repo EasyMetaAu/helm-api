@@ -6,6 +6,8 @@ import {
   ApiKeyAccountPatchSchema,
   type ApiKeyAccountView,
   ApiKeyAccountViewSchema,
+  type ApiKeyProviderType,
+  apiKeyMatchesProvider,
   type Protocol,
 } from "@helm/shared";
 import { z } from "zod";
@@ -90,8 +92,28 @@ const BILLING = new Set([
   "organization_usage_limit_exceeded",
   "usage_limit_exceeded",
 ]);
-function failureKind(error: unknown): "billing" | "rate" | "invalid" | "model" | null {
+function failureKind(
+  error: unknown,
+  providerType: ApiKeyProviderType = "openai",
+): "billing" | "rate" | "invalid" | "model" | null {
   const code = errorCode(error);
+  if (providerType === "anthropic" && error instanceof UpstreamError) {
+    if (error.upstreamStatus === 401 || code === "authentication_error") return "invalid";
+    if (code === "rate_limit_error") return "rate";
+    const message = record(record(error.providerRaw).error).message;
+    if (
+      (error.upstreamStatus === 400 || error.upstreamStatus === null) &&
+      code === "invalid_request_error" &&
+      typeof message === "string" &&
+      message.startsWith("Your credit balance is too low to access the Anthropic API")
+    )
+      return "billing";
+    if (
+      (error.upstreamStatus === 404 || error.upstreamStatus === null) &&
+      code === "not_found_error"
+    )
+      return "model";
+  }
   if (BILLING.has(code)) return "billing";
   if (code === "invalid_api_key" || code === "account_deactivated") return "invalid";
   if (code === "model_not_found" || code === "model_not_allowed") return "model";
@@ -116,6 +138,7 @@ export class ApiKeyAccounts {
       store: ConfigStore;
       encKey: Buffer;
       poolId: string;
+      providerType?: ApiKeyProviderType;
       timezone: string;
       now?: () => number;
       probeLeaseMs?: number;
@@ -145,12 +168,19 @@ export class ApiKeyAccounts {
   entries(): readonly Account[] {
     return this.snapshot?.accounts ?? [];
   }
+  classifyFailure(error: unknown) {
+    return failureKind(error, this.deps.providerType);
+  }
+  isAccountFailure(error: unknown): boolean {
+    return this.classifyFailure(error) !== null;
+  }
   eligible(id: string): boolean {
     const a = this.entries().find((a) => a.id === id);
     return (
       a !== undefined &&
       a.enabled &&
       a.state !== "invalid" &&
+      !(a.state === "quota_exhausted" && a.nextRetryAt === null) &&
       (a.nextRetryAt ?? 0) <= this.now() &&
       (a.probeUntil ?? 0) <= this.now()
     );
@@ -181,6 +211,12 @@ export class ApiKeyAccounts {
   }
   async add(inputs: ApiKeyAccountInput[]): Promise<void> {
     const validated = z.array(ApiKeyAccountInputSchema).min(1).max(50).parse(inputs);
+    if (
+      validated.some(
+        (input) => !apiKeyMatchesProvider(input.key, this.deps.providerType ?? "openai"),
+      )
+    )
+      throw new Error("API key does not match the selected provider type");
     await this.mutate((doc) => {
       for (const input of validated) {
         const fingerprint = createHash("sha256").update(input.key).digest("hex");
@@ -207,6 +243,8 @@ export class ApiKeyAccounts {
   }
   async update(id: string, input: ApiKeyAccountPatch): Promise<void> {
     const patch = ApiKeyAccountPatchSchema.parse(input);
+    if (patch.key && !apiKeyMatchesProvider(patch.key, this.deps.providerType ?? "openai"))
+      throw new Error("API key does not match the selected provider type");
     await this.mutate((doc) => {
       const a = doc.accounts.find((a) => a.id === id);
       if (!a) throw new Error("API key account not found");
@@ -260,6 +298,7 @@ export class ApiKeyAccounts {
         !current.enabled ||
         !allowsModel(current) ||
         current.state === "invalid" ||
+        (current.state === "quota_exhausted" && current.nextRetryAt === null) ||
         (current.nextRetryAt ?? 0) > this.now() ||
         (current.probeUntil ?? 0) > this.now()
       )
@@ -270,7 +309,7 @@ export class ApiKeyAccounts {
     });
   }
   async settle(attempt: ApiKeyAttempt, error: unknown | null, model?: string): Promise<void> {
-    const kind = failureKind(error);
+    const kind = failureKind(error, this.deps.providerType);
     if (attempt.probeId === null && kind === null) return;
     await this.mutate((doc) => {
       const a = doc.accounts.find((a) => a.id === attempt.id);
@@ -280,9 +319,12 @@ export class ApiKeyAccounts {
       const exhaustedProbe = attempt.probeId !== null && a.state === "quota_exhausted";
       if (kind === "billing") {
         a.state = "quota_exhausted";
-        a.nextRetryAt = attempt.probeId
-          ? this.now() + DAY
-          : nextMonthlyRetry(this.now(), this.deps.timezone);
+        a.nextRetryAt =
+          this.deps.providerType === "anthropic"
+            ? null
+            : attempt.probeId
+              ? this.now() + DAY
+              : nextMonthlyRetry(this.now(), this.deps.timezone);
       } else if (kind === "invalid") {
         a.state = "invalid";
         a.nextRetryAt = null;
@@ -314,7 +356,10 @@ export class ApiKeyAccounts {
       }
       if (exhaustedProbe && error !== null && kind !== "invalid") {
         a.state = "quota_exhausted";
-        a.nextRetryAt = Math.max(a.nextRetryAt ?? 0, this.now() + DAY);
+        a.nextRetryAt =
+          this.deps.providerType === "anthropic"
+            ? null
+            : Math.max(a.nextRetryAt ?? 0, this.now() + DAY);
       }
       if (kind) a.reason = errorCode(error) || kind;
       if (attempt.probeId === null && (kind === "billing" || kind === "invalid")) {
@@ -430,7 +475,7 @@ export function createApiKeyPoolClient(deps: {
         rotateIndependentRequests: true,
         upstreamCredentialFailureStatuses: [],
         shouldRetryAccountError: (error) =>
-          error instanceof AccountUnavailable || failureKind(error) !== null,
+          error instanceof AccountUnavailable || deps.accounts.isAccountFailure(error),
         onSelect: (id) => deps.onSelect?.(id),
       });
       signature = nextSignature;

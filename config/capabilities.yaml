@@ -777,7 +777,7 @@ zenmux-anthropic/claude-haiku-4.5:
 # control. The provider adapter removes legacy thinking modes while preserving
 # adaptive display settings, so no manual-budget policy is installed here.
 # https://platform.claude.com/docs/en/models/opus-5-5/overview
-anthropic/claude-opus-5-5:
+anthropic/claude-opus-5-5: &anthropic_api_claude_opus_5_5
   requestCompatibility:
     anthropic:
       unsupportedSamplingParameters: [temperature, top_p, top_k]
@@ -853,7 +853,7 @@ anthropic/claude-sonnet-4-6:
 # forced tool requests skip this model; auto/none tool choice remains supported.
 # https://platform.claude.com/docs/en/models/sonnet-5-5/overview
 # https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
-anthropic/claude-sonnet-5-5:
+anthropic/claude-sonnet-5-5: &anthropic_api_claude_sonnet_5_5
   requestCompatibility:
     anthropic:
       unsupportedSamplingParameters: [temperature, top_p, top_k]
@@ -875,7 +875,7 @@ anthropic/claude-sonnet-5-5:
 # Official Claude Fable 5.1 (platform.claude.com/docs/en/models/fable-5-1/overview,
 # checked 2026-09-05): adaptive thinking always on, default high; 1M context,
 # 128K output, text+image input, tools/computer-use/PDF and structured output.
-anthropic/claude-fable-5-1:
+anthropic/claude-fable-5-1: &anthropic_api_claude_fable_5_1
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -907,7 +907,7 @@ anthropic/claude-fable-5:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
-anthropic/claude-haiku-4-5-20251001:
+anthropic/claude-haiku-4-5-20251001: &anthropic_api_claude_haiku_4_5_20251001
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
@@ -1164,3 +1164,9 @@ minimax/speech-2.8-turbo:
   maxContextTokens: 0
   maxOutputTokens: null
   outputAudio: true
+
+# Paid API aliases use the same model capabilities and public API prices.
+anthropic-api/claude-opus-5-5: *anthropic_api_claude_opus_5_5
+anthropic-api/claude-sonnet-5-5: *anthropic_api_claude_sonnet_5_5
+anthropic-api/claude-fable-5-1: *anthropic_api_claude_fable_5_1
+anthropic-api/claude-haiku-4-5-20251001: *anthropic_api_claude_haiku_4_5_20251001

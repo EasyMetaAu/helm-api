@@ -1187,5 +1187,8 @@
   "Test passed": "Prueba correcta",
   "Test failed": "Prueba fallida",
   "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "Envía una solicitud breve solo con esta clave. Consume cuota del proveedor; no cambia la rotación ni la pausa.",
-  "API key test could not start. Refresh and try again.": "No se pudo iniciar la prueba. Actualiza e inténtalo de nuevo."
+  "API key test could not start. Refresh and try again.": "No se pudo iniciar la prueba. Actualiza e inténtalo de nuevo.",
+  "Provider type": "Tipo de proveedor",
+  "Out of credit: paused until you add credit and retry.": "Sin crédito: se pausa hasta que añadas crédito y reintentes.",
+  "API key does not match the selected provider type": "La clave API no corresponde al tipo de proveedor seleccionado"
 }

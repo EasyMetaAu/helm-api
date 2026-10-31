@@ -1187,5 +1187,8 @@
   "Test passed": "테스트 성공",
   "Test failed": "테스트 실패",
   "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "이 키만 사용해 짧은 요청을 한 번 보냅니다. 공급자 사용량이 차감되며 순환 및 일시 중지 설정은 변경되지 않습니다.",
-  "API key test could not start. Refresh and try again.": "테스트를 시작할 수 없습니다. 새로고침 후 다시 시도하세요."
+  "API key test could not start. Refresh and try again.": "테스트를 시작할 수 없습니다. 새로고침 후 다시 시도하세요.",
+  "Provider type": "제공업체 유형",
+  "Out of credit: paused until you add credit and retry.": "잔액이 부족하면 일시 중지됩니다. 충전 후 수동으로 다시 시도하세요.",
+  "API key does not match the selected provider type": "API 키가 선택한 제공업체 유형과 일치하지 않습니다"
 }

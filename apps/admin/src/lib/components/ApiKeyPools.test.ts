@@ -7,6 +7,56 @@ afterEach(async () => {
   await setLocale('en');
 });
 describe('API key provider management', () => {
+  it('selects the provider in one shared add-key dialog', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      init?.method
+        ? new Response(null, { status: 204 })
+        : Response.json({
+            pools: [
+              {
+                id: 'openai',
+                type: 'openai',
+                configured: true,
+                timezone: 'Asia/Shanghai',
+                strategy: 'round_robin',
+                models: ['m'],
+                accounts: [],
+                usage: [],
+              },
+              {
+                id: 'anthropic-api',
+                type: 'anthropic',
+                configured: true,
+                timezone: 'Asia/Shanghai',
+                strategy: 'round_robin',
+                models: ['claude-haiku-5-5'],
+                accounts: [],
+                usage: [],
+              },
+            ],
+          }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(ApiKeyPools);
+    await screen.findByText('Claude (Anthropic)');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add API keys' }));
+    await fireEvent.change(screen.getByLabelText('Provider type'), {
+      target: { value: 'anthropic-api' },
+    });
+    await fireEvent.input(screen.getByLabelText('API keys (one per line)'), {
+      target: { value: 'sk-ant-api-test-key' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save API keys' }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) =>
+            url === '/admin/api/api-key-pools/anthropic-api/accounts' && init?.method === 'POST',
+        ),
+      ).toBe(true),
+    );
+    expect(document.body.textContent).not.toContain('sk-ant-api-test-key');
+  });
   it('imports multiple keys and clears the credential input after success', async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
       init?.method
@@ -27,7 +77,7 @@ describe('API key provider management', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
     render(ApiKeyPools);
-    await screen.findByRole('button', { name: 'Add API keys' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add API keys' })).toBeEnabled());
     await fireEvent.click(screen.getByRole('button', { name: 'Add API keys' }));
     const input = screen.getByLabelText('API keys (one per line)');
     await fireEvent.input(input, { target: { value: 'sk-proj-test-first\nsk-proj-test-second' } });

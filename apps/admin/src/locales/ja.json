@@ -1187,5 +1187,8 @@
   "Test passed": "テスト成功",
   "Test failed": "テスト失敗",
   "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "このキーだけで短いリクエストを1回送信します。上流の利用枠を消費しますが、ローテーションや一時停止の設定は変更しません。",
-  "API key test could not start. Refresh and try again.": "テストを開始できませんでした。更新して再試行してください。"
+  "API key test could not start. Refresh and try again.": "テストを開始できませんでした。更新して再試行してください。",
+  "Provider type": "プロバイダーの種類",
+  "Out of credit: paused until you add credit and retry.": "残高不足時は停止します。チャージ後に手動で再試行できます。",
+  "API key does not match the selected provider type": "API キーが選択したプロバイダーの種類と一致しません"
 }

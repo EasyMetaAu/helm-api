@@ -239,9 +239,20 @@ export const ProviderConfigSchema = z
       path: ["api_key_env"],
     },
   )
-  .refine((p) => !p.api_key_pool || ["openai", "openai-responses-generic"].includes(p.type), {
-    message: "API key pools require an OpenAI Chat or Responses provider",
-  })
+  .refine(
+    (p) => !p.api_key_pool || ["openai", "openai-responses-generic", "anthropic"].includes(p.type),
+    {
+      message: "API key pools require an OpenAI Chat, Responses or Anthropic provider",
+    },
+  )
+  .refine(
+    (p) =>
+      !p.api_key_pool ||
+      ![p.name ?? p.alias, p.api_key_pool.id].some((id) =>
+        ["anthropic", "openai-codex", "github-copilot", "xai"].includes(id ?? ""),
+      ),
+    { message: "API key pools must use names distinct from subscription providers" },
+  )
   .transform((p) => ({
     // Single source of truth for the provider id: prefer `name`, fall back to the
     // legacy `alias`. Both are kept so existing consumers (auth/server) that read

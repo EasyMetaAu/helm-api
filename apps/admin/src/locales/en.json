@@ -1187,5 +1187,8 @@
   "Test passed": "Test passed",
   "Test failed": "Test failed",
   "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.",
-  "API key test could not start. Refresh and try again.": "API key test could not start. Refresh and try again."
+  "API key test could not start. Refresh and try again.": "API key test could not start. Refresh and try again.",
+  "Provider type": "Provider type",
+  "Out of credit: paused until you add credit and retry.": "Out of credit: paused until you add credit and retry.",
+  "API key does not match the selected provider type": "API key does not match the selected provider type"
 }

@@ -1675,6 +1675,40 @@ function countCacheControlBlocks(body: Record<string, unknown>): number {
 }
 
 describe("createAnthropicClient", () => {
+  it("keeps official paid API requests free of subscription identity and prompts", async () => {
+    let sent: RequestInit | undefined;
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-ant-test" },
+      fetch: (async (_url, init) => {
+        sent = init;
+        return jsonResponse({
+          id: "msg",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      }) as typeof fetch,
+    });
+    await client.chatCompletion({
+      model: "claude-haiku-4-5-20251001",
+      messages: [
+        { role: "system", content: "You summarize receipts." },
+        { role: "developer", content: "Keep currency codes." },
+        { role: "user", content: "Hi" },
+      ],
+    });
+    expect(JSON.parse(String(sent?.body)).system).toEqual([
+      { type: "text", text: "You summarize receipts." },
+      { type: "text", text: "Keep currency codes." },
+    ]);
+    const headers = new Headers(sent?.headers);
+    expect(headers.get("x-api-key")).toBe("sk-ant-test");
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.has("x-app")).toBe(false);
+    expect(headers.has("user-agent")).toBe(false);
+    expect(headers.get("anthropic-beta") ?? "").not.toMatch(/oauth|claude-code/);
+  });
+
   it("marks the client as the Anthropic Messages native protocol profile", () => {
     const client = createAnthropicClient({
       config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
@@ -1846,7 +1880,11 @@ describe("createAnthropicClient", () => {
       });
     });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "k" },
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer test-token",
+        claudeCliFingerprintMode: "conservative",
+      },
       fetch: fetchMock as unknown as typeof fetch,
     });
     await client.chatCompletion({
@@ -2026,7 +2064,7 @@ describe("createAnthropicClient", () => {
     expect(billing).not.toContain("cch=00000;");
   });
 
-  it("keeps static-key Anthropic traffic on the conservative cache-stable CCH profile by default", async () => {
+  it("does not inject billing fingerprints into official static-key requests", async () => {
     const seenCch: string[] = [];
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { system: Array<{ text: string }> };
@@ -2061,8 +2099,7 @@ describe("createAnthropicClient", () => {
     });
 
     expect(seenCch).toHaveLength(2);
-    expect(seenCch[0]).toMatch(/^[0-9a-f]{5}$/);
-    expect(seenCch[1]).toBe(seenCch[0]);
+    expect(seenCch).toEqual(["", ""]);
   });
 
   it("defaults non-official Anthropic-compatible relays to strict shape with cache-stable CCH", async () => {

@@ -579,11 +579,17 @@ from [03](03-classification.md). Their fields in the decision record are distinc
 classification fallback shows up as `classifier.decided_by` / `fallback_reason`,
 while execution fallback shows up as `provider_attempts` / `fallback_count`.
 
-### OpenAI API key account selection
+### API key account selection
 
-A configured OpenAI provider may use a managed `api_key_pool` without changing model aliases
+A configured OpenAI or Anthropic provider may use a managed `api_key_pool` without changing model aliases
 or lane chains. Account selection happens inside the provider attempt. An exhausted account
 can fail over to another eligible account before output; only exhaustion of the pool reaches
 the existing model/provider fallback chain. Chat and Responses can reference the same pool
 and share durable quota/credential state. See [managed upstream API key pools](06-auth-and-rate-limits.md#managed-upstream-api-key-pools)
 for monthly recovery, credential-generation affinity and legacy compatibility.
+
+Paid Claude models use `anthropic-api/<model>`, while subscription models use `anthropic/<model>`.
+For an API-only application, a lane can select `anthropic-api/claude-haiku-4-5-20251001` with no
+fallbacks; key rotation still occurs inside that provider. Add paid aliases after subscription
+aliases for ordered fallback. A lane does not mix those sources by weight. Provider type and
+names must remain separate so paid clients cannot be overwritten by the subscription pool.

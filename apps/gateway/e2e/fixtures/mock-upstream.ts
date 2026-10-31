@@ -470,6 +470,20 @@ export function createMockUpstream() {
     return c.json(echoResponse(model));
   });
 
+  app.post("/v1/messages", async (c) => {
+    const body = await c.req.json();
+    return c.json({
+      id: "msg_mock",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: "hello from mock" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 4, output_tokens: 3 },
+    });
+  });
+
   app.post("/v1/messages/count_tokens", async (c) => {
     const body = await c.req.json();
     if (messagesText(body).includes(COUNT_REJECT_SENTINEL)) {

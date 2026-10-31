@@ -22,6 +22,7 @@ import type {
   AnthropicResetRequest,
   AnthropicResetResult,
   AnthropicResetStatus,
+  ApiKeyProviderType,
   ClassifierConfig,
   ClientPolicy,
   DecisionRecord,
@@ -472,6 +473,7 @@ export interface AdminApiDeps {
   apiKeyPools?: ReadonlyMap<
     string,
     {
+      type?: ApiKeyProviderType;
       accounts: ApiKeyAccounts | null;
       timezone: string;
       strategy: "round_robin" | "manual_priority";

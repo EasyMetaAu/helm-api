@@ -1187,5 +1187,8 @@
   "Test passed": "測試通過",
   "Test failed": "測試失敗",
   "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "僅使用目前金鑰傳送一次簡短請求，會消耗上游額度，不會改變輪替或暫停設定。",
-  "API key test could not start. Refresh and try again.": "無法啟動金鑰測試，請重新整理後再試。"
+  "API key test could not start. Refresh and try again.": "無法啟動金鑰測試，請重新整理後再試。",
+  "Provider type": "供應商類型",
+  "Out of credit: paused until you add credit and retry.": "餘額不足後暫停，儲值後可手動恢復。",
+  "API key does not match the selected provider type": "API 金鑰與所選供應商類型不符"
 }

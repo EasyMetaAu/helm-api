@@ -32,6 +32,7 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
         }
         return {
           id,
+          type: pool.type ?? "openai",
           configured: pool.accounts !== null,
           timezone: pool.timezone,
           strategy: pool.accounts?.strategy(pool.strategy) ?? pool.strategy,
@@ -50,6 +51,8 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
       return c.body(null, 204);
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
+      if (message === "API key does not match the selected provider type")
+        return c.json({ error: message }, 400);
       if (
         message === "API key is already in this pool" ||
         message === "Replace the invalid API key before retrying"
@@ -192,6 +195,9 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
         "model_not_found",
         "model_not_allowed",
         "rate_limit_exceeded",
+        "authentication_error",
+        "rate_limit_error",
+        "not_found_error",
       ]);
       return c.json({
         ok: false,
@@ -201,9 +207,11 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
         error:
           signal.aborted || upstream?.errorClass === "timeout"
             ? "timeout"
-            : code && known.has(code)
-              ? code
-              : "upstream_error",
+            : pool.type === "anthropic" && pool.accounts?.classifyFailure(error) === "billing"
+              ? "credit_balance_exhausted"
+              : code && known.has(code)
+                ? code
+                : "upstream_error",
       });
     } finally {
       runningTests.delete(lock);
