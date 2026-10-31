@@ -1002,5 +1002,12 @@
   "Date": "Date",
   "Daily usage": "Daily usage",
   "Allowed clients": "허용된 클라이언트",
-  "No clients allowed. Contact your administrator.": "허용된 클라이언트가 없습니다. 관리자에게 문의하세요."
+  "No clients allowed. Contact your administrator.": "허용된 클라이언트가 없습니다. 관리자에게 문의하세요.",
+  "Lane to test": "테스트할 경로",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "이 키의 권한과 예산으로 짧은 모델 요청을 한 번 전송합니다. 공급자 요금이 발생할 수 있습니다.",
+  "Test inference": "추론 테스트",
+  "Authentication passed": "인증 성공",
+  "Inference completed": "추론 완료",
+  "Inference not confirmed": "추론 확인 안 됨",
+  "First output": "첫 출력"
 }

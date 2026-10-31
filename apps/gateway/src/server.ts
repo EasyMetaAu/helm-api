@@ -99,8 +99,10 @@ import {
   type OpenAICodexIdentity,
   OpenAICodexModelsError,
   type OpenAICodexModelsResult,
+  OutboundPrivacyError,
   oauthRefreshQueueDepth,
   openAICodexIdentityFingerprint,
+  outboundPrivacyContext,
   type PoliciesConfig,
   type ProviderClient,
   type ProxyConfig,
@@ -184,6 +186,7 @@ import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middlewa
 import { concurrencyMiddleware, createConcurrencyGate } from "./middleware/concurrency.js";
 import { HelmHttpError } from "./middleware/error-handler.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
+import { outboundPrivacyMiddleware } from "./middleware/outbound-privacy.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import {
   type AccountSettingsMap,
@@ -1418,7 +1421,7 @@ export async function synthesizeOAuthProviders(
         // Stamp the per-request holder so the route's settle path can attribute
         // today's usage to THIS subscription (providers page Tier 2). No-op when
         // not inside a capture scope (fail-open; never throws).
-        markServingAccount(providerId, account);
+        markServingAccount(providerId, account, undefined, selection.trace);
       },
       accountRateLimitCooldownMs: DEFAULT_429_COOLDOWN_MS,
       onAccountRateLimit: (account, untilMs) => onAccountRateLimit?.(providerId, account, untilMs),
@@ -3758,6 +3761,8 @@ export async function buildServer(
     },
   });
 
+  app.use("*", outboundPrivacyMiddleware(config.runtime.outbound_privacy));
+
   // Mandatory auth for the OpenAI chat surface (Hono middleware -> HelmError on
   // failure). Includes LiteLLM-compatible chat aliases; Anthropic /v1/messages
   // self-authenticates so its errors are translated to the Anthropic envelope
@@ -4025,6 +4030,11 @@ export async function buildServer(
     signal: AbortSignal,
     classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
   ) => {
+    if (config.runtime.outbound_privacy !== "off") {
+      const privacy = outboundPrivacyContext.getStore();
+      if (!privacy) throw new OutboundPrivacyError();
+      req = privacy.mask(req);
+    }
     // Capture which OAuth subscription served this request: the pool's onSelect
     // fires synchronously inside routeRequest (selection + execute's first-chunk
     // peek), so the ALS holder is populated by the time routeRequest resolves. We

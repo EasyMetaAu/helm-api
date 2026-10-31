@@ -841,7 +841,7 @@
   "Temperature": "溫度",
   "Test": "測試",
   "Test connection": "連線測試",
-  "Testing…": "測試中…",
+  "Testing…": "正在測試…",
   "Text": "文字",
   "That fact already exists — no duplicate was created.": "該事實已存在——未建立重複項。",
   "That key is not valid.": "該金鑰無效。",
@@ -1002,5 +1002,12 @@
   "Date": "Date",
   "Daily usage": "Daily usage",
   "Allowed clients": "允許的客戶端",
-  "No clients allowed. Contact your administrator.": "目前拒絕所有用戶端，請聯絡管理員。"
+  "No clients allowed. Contact your administrator.": "目前拒絕所有用戶端，請聯絡管理員。",
+  "Lane to test": "要測試的通道",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "使用目前金鑰的權限和額度傳送一次簡短請求，上游可能收取費用。",
+  "Test inference": "測試推理",
+  "Authentication passed": "驗證成功",
+  "Inference completed": "推理已完成",
+  "Inference not confirmed": "尚未確認推理成功",
+  "First output": "首個輸出"
 }

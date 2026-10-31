@@ -29,6 +29,7 @@ const SELECTION_STRATEGIES = new Set<OAuthSelectionStrategy>([
   "manual_priority",
   "low_risk",
   "use_expiring",
+  "fastest",
 ]);
 // NUL composite separator: it cannot appear in a provider id or account label,
 // so `${providerId}\u0000${account}` is an unambiguous, collision-free map key

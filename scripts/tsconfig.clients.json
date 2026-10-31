@@ -10,6 +10,8 @@
     "./sync-client-versions.ts",
     "./sync-client-versions.test.ts",
     "./sync-claude-cli.ts",
-    "./sync-codex-models.ts"
+    "./sync-codex-models.ts",
+    "./client-connect.ts",
+    "./client-connect.test.ts"
   ]
 }

@@ -1,3 +1,4 @@
+import type { AccountSelectionTrace } from '@helm/shared';
 import { AccountTimezoneViewSchema, type AccountTimezoneView } from '@helm/shared';
 // Admin OAuth-login API client (issue #38). The admin UI is a PURE consumer of
 // the gateway's /admin/api/oauth surface (CLAUDE.md Principle 1) — no core logic,
@@ -23,7 +24,7 @@ import {
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
 export type OAuthFlow = 'manual_paste' | 'device_code';
-export type OAuthSelectionStrategy = 'balanced' | 'manual_priority' | 'low_risk' | 'use_expiring';
+export type OAuthSelectionStrategy = AccountSelectionTrace['strategy'];
 
 export interface OAuthAccount {
   account: string;

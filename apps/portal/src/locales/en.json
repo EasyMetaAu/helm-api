@@ -1002,5 +1002,12 @@
   "Date": "Date",
   "Daily usage": "Daily usage",
   "Allowed clients": "Allowed clients",
-  "No clients allowed. Contact your administrator.": "No clients allowed. Contact your administrator."
+  "No clients allowed. Contact your administrator.": "No clients allowed. Contact your administrator.",
+  "Lane to test": "Lane to test",
+  "Sends one short model request using this key's permissions and budget. Provider charges may apply.": "Sends one short model request using this key's permissions and budget. Provider charges may apply.",
+  "Test inference": "Test inference",
+  "Authentication passed": "Authentication passed",
+  "Inference completed": "Inference completed",
+  "Inference not confirmed": "Inference not confirmed",
+  "First output": "First output"
 }

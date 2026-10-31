@@ -26,6 +26,8 @@ Bailian / MiniMax media: [integration guide](native-media.md), [reviewed plan](m
 
 Ark media integration: [English / 中文 API guide](ark-media.md), [contracts](ark-media-contract.md), and [task status](ark-media-development-plan.md).
 
+See [Connection checks, account evidence and optional privacy](connection-routing-privacy.md) for the client helper and opt-in gateway improvements.
+
 ## Reading order
 
 > **New to the codebase?** [Architecture & Data Flow](architecture.md) draws the

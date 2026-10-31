@@ -1190,5 +1190,13 @@
   "API key test could not start. Refresh and try again.": "無法啟動金鑰測試，請重新整理後再試。",
   "Provider type": "供應商類型",
   "Out of credit: paused until you add credit and retry.": "餘額不足後暫停，儲值後可手動恢復。",
-  "API key does not match the selected provider type": "API 金鑰與所選供應商類型不符"
+  "API key does not match the selected provider type": "API 金鑰與所選供應商類型不符",
+  "First output": "首個輸出",
+  "Why this account?": "為何選擇此帳號？",
+  "Quota used": "額度使用比例",
+  "Selected": "已選取",
+  "Eligible": "符合條件",
+  "additional candidates omitted": "個其他候選未顯示",
+  "Speed first": "速度優先",
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "在相同模型和優先級內依近期串流回應速度選擇，仍遵守帳號與額度限制。"
 }

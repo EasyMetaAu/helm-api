@@ -26,6 +26,21 @@ const VALID_YAML = {
 };
 
 describe("loadConfig", () => {
+  it("defaults privacy off, accepts explicit modes and rejects unknown environment values", () => {
+    const readFile = fakeReadFile(VALID_YAML);
+    expect(loadConfig({ configDir: "config", env: {}, readFile }).runtime.outbound_privacy).toBe(
+      "off",
+    );
+    for (const mode of ["mask", "block"]) {
+      expect(
+        loadConfig({ configDir: "config", env: { HELM_OUTBOUND_PRIVACY: mode }, readFile }).runtime
+          .outbound_privacy,
+      ).toBe(mode);
+    }
+    expect(() =>
+      loadConfig({ configDir: "config", env: { HELM_OUTBOUND_PRIVACY: "enabled" }, readFile }),
+    ).toThrow(ConfigError);
+  });
   it("returns a typed config from valid yaml", () => {
     const cfg = loadConfig({
       configDir: "config",

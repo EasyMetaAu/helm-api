@@ -171,6 +171,12 @@
       description:
         'Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.',
     },
+    {
+      value: 'fastest',
+      label: 'Speed first',
+      description:
+        'Use recent streamed response speed within the same model and priority; keep account and quota limits.',
+    },
   ];
 
   // One table row per connected account, flattened across providers, joined to its

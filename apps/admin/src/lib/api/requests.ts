@@ -1,3 +1,4 @@
+import { AccountSelectionTraceSchema, type AccountSelectionTrace } from '@helm/shared';
 // Admin request-debug API client. The admin UI is a PURE consumer of the
 // gateway's /admin/api/* HTTP surface — it imports NO core/gateway business logic
 // and re-computes NO classification/routing/cost (CLAUDE.md Principle 1). It only renders
@@ -117,6 +118,7 @@ export type StreamOutcome =
 export interface ServingAccountView {
   provider_id: string;
   account: string;
+  selection?: AccountSelectionTrace;
 }
 
 export interface SessionView {
@@ -340,6 +342,7 @@ interface RawDecisionRecord {
   serving_account?: {
     provider_id?: string | null;
     account?: string | null;
+    selection?: unknown;
   } | null;
 }
 
@@ -435,7 +438,14 @@ function aliasPrefix(alias: string | null): string | null {
 function normalizeServingAccount(raw: RawDecisionRecord): ServingAccountView | null {
   const providerId = nonEmptyString(raw.serving_account?.provider_id);
   const account = nonEmptyString(raw.serving_account?.account);
-  return providerId && account ? { provider_id: providerId, account } : null;
+  const selection = AccountSelectionTraceSchema.safeParse(raw.serving_account?.selection);
+  return providerId && account
+    ? {
+        provider_id: providerId,
+        account,
+        ...(selection.success ? { selection: selection.data } : {}),
+      }
+    : null;
 }
 
 function normalizeSession(raw: RawDecisionRecord): SessionView | null {

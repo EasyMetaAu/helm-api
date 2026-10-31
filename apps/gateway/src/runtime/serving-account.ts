@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { DecisionRecord } from "@helm/shared";
+import type { AccountSelectionTrace, DecisionRecord } from "@helm/shared";
 
 // Per-request "which OAuth subscription served this call" holder (providers page
 // Tier 2 usage attribution). The pool's `onSelect(account)` fires DEEP inside
@@ -19,6 +19,7 @@ export interface ServingAccount {
   providerId: string;
   account: string;
   aliases?: readonly string[];
+  selection?: AccountSelectionTrace;
 }
 
 // Mutable holder the pool's onSelect writes into; read synchronously after route().
@@ -35,9 +36,11 @@ export function markServingAccount(
   providerId: string,
   account: string,
   aliases?: readonly string[],
+  selection?: AccountSelectionTrace,
 ): void {
   const holder = servingAccountStore.getStore();
-  if (holder) holder.selected = { providerId, account, aliases };
+  if (holder)
+    holder.selected = { providerId, account, aliases, ...(selection ? { selection } : {}) };
 }
 
 // Run `fn` inside a fresh holder and return BOTH its result and whichever account
@@ -82,5 +85,6 @@ export function stampServingAccount(
   decision.serving_account = {
     provider_id: servingAccount.providerId,
     account: servingAccount.account,
+    ...(servingAccount.selection ? { selection: servingAccount.selection } : {}),
   };
 }

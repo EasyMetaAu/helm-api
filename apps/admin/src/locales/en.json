@@ -1190,5 +1190,13 @@
   "API key test could not start. Refresh and try again.": "API key test could not start. Refresh and try again.",
   "Provider type": "Provider type",
   "Out of credit: paused until you add credit and retry.": "Out of credit: paused until you add credit and retry.",
-  "API key does not match the selected provider type": "API key does not match the selected provider type"
+  "API key does not match the selected provider type": "API key does not match the selected provider type",
+  "First output": "First output",
+  "Why this account?": "Why this account?",
+  "Quota used": "Quota used",
+  "Selected": "Selected",
+  "Eligible": "Eligible",
+  "additional candidates omitted": "additional candidates omitted",
+  "Speed first": "Speed first",
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "Use recent streamed response speed within the same model and priority; keep account and quota limits."
 }

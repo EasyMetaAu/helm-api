@@ -1190,5 +1190,13 @@
   "API key test could not start. Refresh and try again.": "テストを開始できませんでした。更新して再試行してください。",
   "Provider type": "プロバイダーの種類",
   "Out of credit: paused until you add credit and retry.": "残高不足時は停止します。チャージ後に手動で再試行できます。",
-  "API key does not match the selected provider type": "API キーが選択したプロバイダーの種類と一致しません"
+  "API key does not match the selected provider type": "API キーが選択したプロバイダーの種類と一致しません",
+  "First output": "最初の出力",
+  "Why this account?": "このアカウントが選ばれた理由",
+  "Quota used": "使用済みクォータ",
+  "Selected": "選択済み",
+  "Eligible": "選択可能",
+  "additional candidates omitted": "その他の候補を省略",
+  "Speed first": "速度を優先",
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "同じモデルと優先度のアカウントを最近のストリーミング応答速度で選択します。アカウントとクォータの制限は維持されます。"
 }

@@ -15,6 +15,7 @@ export interface EnvMapping {
 }
 
 export const ENV_MAPPINGS: readonly EnvMapping[] = [
+  { env: "HELM_OUTBOUND_PRIVACY", path: ["runtime", "outbound_privacy"], kind: "string" },
   { env: "HELM_HOST", path: ["server", "host"], kind: "string" },
   { env: "HELM_PORT", path: ["server", "port"], kind: "number" },
   { env: "HELM_BASE_PATH", path: ["server", "base_path"], kind: "string" },

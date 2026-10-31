@@ -1190,5 +1190,13 @@
   "API key test could not start. Refresh and try again.": "Não foi possível iniciar o teste. Atualize e tente novamente.",
   "Provider type": "Tipo de provedor",
   "Out of credit: paused until you add credit and retry.": "Sem crédito: pausado até adicionar crédito e tentar novamente.",
-  "API key does not match the selected provider type": "A chave API não corresponde ao tipo de provedor selecionado"
+  "API key does not match the selected provider type": "A chave API não corresponde ao tipo de provedor selecionado",
+  "First output": "Primeira saída",
+  "Why this account?": "Por que esta conta?",
+  "Quota used": "Cota utilizada",
+  "Selected": "Selecionada",
+  "Eligible": "Disponível",
+  "additional candidates omitted": "candidatas adicionais omitidas",
+  "Speed first": "Priorizar velocidade",
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "Usa a velocidade recente das respostas em streaming para o mesmo modelo e prioridade, respeitando os limites de conta e cota."
 }
