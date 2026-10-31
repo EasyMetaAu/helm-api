@@ -32,7 +32,7 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     );
     writeFileSync(
       join(config, "providers.yaml"),
-      "providers:\n  - name: openai\n    type: openai\n    base_url: http://127.0.0.1:8181\n    api_key_pool: { id: openai }\n    models:\n      - { alias: 'openai/gpt-4o-mini', provider_model: gpt-4o-mini }\n",
+      "providers:\n  - name: openai\n    type: openai\n    base_url: http://127.0.0.1:8181\n    api_key_pool: { id: openai }\n    models:\n      - { alias: 'openai/gpt-4o-mini', provider_model: gpt-4o-mini }\n  - name: anthropic-api\n    type: anthropic\n    base_url: http://127.0.0.1:8181\n    api_key_pool: { id: anthropic-api }\n    models:\n      - { alias: 'anthropic-api/claude-haiku-4-5-20251001', provider_model: claude-haiku-4-5-20251001 }\n",
     );
     Object.assign(process.env, {
       HELM_DATA_DIR: root,
@@ -103,8 +103,10 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await row.locator("summary").click();
     await row.getByRole("button", { name: "Resume", exact: true }).click();
     await expect(row.getByText("Available", { exact: true })).toBeVisible();
-    await section.getByLabel("API key rotation strategy").selectOption("manual_priority");
-    await expect(section.getByLabel("API key rotation strategy")).toHaveValue("manual_priority");
+    await section.getByLabel("API key rotation strategy").first().selectOption("manual_priority");
+    await expect(section.getByLabel("API key rotation strategy").first()).toHaveValue(
+      "manual_priority",
+    );
     const readback = await page.request.get(`http://127.0.0.1:${port}/admin/api/api-key-pools`, {
       headers: adminHeaders,
     });
@@ -116,6 +118,26 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await row.getByRole("button", { name: "Delete", exact: true }).click();
     await page.getByRole("button", { name: "Confirm delete" }).click();
     await expect(section.getByText("Primary account", { exact: true })).toHaveCount(0);
+    await section.getByRole("button", { name: "Add API keys", exact: true }).click();
+    await page.getByLabel("Provider type", { exact: true }).selectOption("anthropic-api");
+    await page.getByLabel("API keys (one per line)").fill("sk-ant-api03-ui-test");
+    await page.getByRole("button", { name: "Save API keys", exact: true }).click();
+    const claudeRow = section.getByRole("row").filter({ hasText: "API 1" });
+    await expect(claudeRow).toBeVisible();
+    await claudeRow.getByRole("button", { name: "Test", exact: true }).click();
+    const claudeDialog = page.getByRole("dialog", { name: "Test API key" });
+    await claudeDialog.getByRole("button", { name: "Run test", exact: true }).click();
+    await expect(claudeDialog.getByText("Test passed", { exact: true })).toBeVisible();
+    await claudeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    const poolResponse = await page.request.get(
+      `http://127.0.0.1:${port}/admin/api/api-key-pools`,
+      { headers: adminHeaders },
+    );
+    const typedPool = (await poolResponse.json()).pools.find(
+      (pool: { type: string }) => pool.type === "anthropic",
+    );
+    expect(typedPool.accounts).toHaveLength(1);
+    expect(typedPool.accounts[0].mask).toBe("••••test");
     const evidenceDir = process.env.HELM_UI_EVIDENCE_DIR;
     if (evidenceDir) {
       mkdirSync(evidenceDir, { recursive: true });
@@ -149,6 +171,30 @@ test("API key provider import, pause, edit and delete through the real admin UI"
                   tokens: 42000 + i * 1000,
                   costUsd: i === 0 ? 0.000003 : 0.024 + i * 0.003,
                 })),
+              },
+              {
+                id: "anthropic-api",
+                type: "anthropic",
+                configured: true,
+                timezone: "Asia/Shanghai",
+                strategy: "round_robin",
+                models: ["claude-haiku-4-5-20251001"],
+                usage: [],
+                accounts: [
+                  {
+                    id: "claude-demo",
+                    name: "Claude API",
+                    mask: "••••demo",
+                    enabled: true,
+                    priority: 50,
+                    models: null,
+                    state: "ready",
+                    reason: null,
+                    nextRetryAt: null,
+                    probeUntil: null,
+                    deniedModels: [],
+                  },
+                ],
               },
             ],
           },

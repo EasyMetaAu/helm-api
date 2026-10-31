@@ -148,6 +148,7 @@ import {
   xaiGrokSubscriptionTierHint,
 } from "@helm/core";
 import type {
+  ApiKeyProviderType,
   CatalogEntry,
   ClassifierConfig,
   DecisionRecord,
@@ -3243,11 +3244,12 @@ export async function buildServer(
   // its configured aliases explicitly unavailable, so lane fallback can continue
   // to another static or connected OAuth provider.
   if (primaryCred) configuredClients.set(first.name, provider);
-  // Static OpenAI transports share one durable credential pool. An untouched pool
+  // Static API transports share a durable credential pool per provider type. An untouched pool
   // retains the env-key path; an explicitly emptied pool never falls back to it.
   const apiKeyPools = new Map<
     string,
     {
+      type: ApiKeyProviderType;
       accounts: ApiKeyAccounts | null;
       timezone: string;
       strategy: "round_robin" | "manual_priority";
@@ -3258,18 +3260,24 @@ export async function buildServer(
   for (const p of config.providers) {
     const poolConfig = p.api_key_pool;
     if (!poolConfig) continue;
+    const type = p.type === "anthropic" ? "anthropic" : "openai";
     let pool = apiKeyPools.get(poolConfig.id);
     if (
       pool &&
-      (pool.timezone !== poolConfig.reset_timezone || pool.strategy !== poolConfig.strategy)
+      (pool.type !== type ||
+        pool.timezone !== poolConfig.reset_timezone ||
+        pool.strategy !== poolConfig.strategy)
     )
-      throw new Error("providers sharing an API key pool must use the same strategy and timezone");
+      throw new Error(
+        "providers sharing an API key pool must use the same type, strategy and timezone",
+      );
     if (!pool) {
       const accounts = oauthEncKey
         ? new ApiKeyAccounts({
             store: store.config,
             encKey: oauthEncKey,
             poolId: poolConfig.id,
+            providerType: type,
             timezone: poolConfig.reset_timezone,
             probeLeaseMs: timeoutMs + 60_000,
           })
@@ -3278,6 +3286,7 @@ export async function buildServer(
       else if ((await store.config.get(`provider.api_keys.${poolConfig.id}`)) !== null)
         throw new Error("Stored API keys require HELM_OAUTH_ENC_KEY; refusing plaintext fallback");
       pool = {
+        type,
         accounts,
         timezone: poolConfig.reset_timezone,
         strategy: poolConfig.strategy,

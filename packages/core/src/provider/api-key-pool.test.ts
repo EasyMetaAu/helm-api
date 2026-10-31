@@ -53,6 +53,163 @@ async function setup(count = 2) {
 }
 
 describe("API key accounts and pool", () => {
+  it("parks Anthropic credit failures until manual recovery, including after restart", async () => {
+    const { store } = memoryStore();
+    let now = Date.parse("2026-10-31T23:00:00Z");
+    const options = {
+      store,
+      encKey: KEY,
+      poolId: "anthropic-api",
+      providerType: "anthropic" as const,
+      timezone: "Asia/Shanghai",
+      now: () => now,
+    };
+    const accounts = new ApiKeyAccounts(options);
+    await accounts.add([{ name: "Claude", key: "sk-ant-test-key" }]);
+    const id = accounts.entries()[0]!.id;
+    const failure = new UpstreamError(
+      "upstream_error",
+      "billing",
+      {
+        error: {
+          type: "invalid_request_error",
+          message: "Your credit balance is too low to access the Anthropic API.",
+        },
+      },
+      400,
+    );
+    await accounts.settle((await accounts.acquire(id))!, failure, "m");
+    expect(accounts.entries()[0]).toMatchObject({ state: "quota_exhausted", nextRetryAt: null });
+    now += 40 * 86_400_000;
+    const restarted = new ApiKeyAccounts(options);
+    await restarted.refresh();
+    expect(await restarted.acquire(id)).toBeNull();
+    await restarted.retry(id);
+    const probe = await restarted.acquire(id);
+    expect(probe).not.toBeNull();
+    await restarted.settle(probe!, failure, "m");
+    expect(await restarted.acquire(id)).toBeNull();
+    await restarted.retry(id);
+    await restarted.settle((await restarted.acquire(id))!, null);
+    expect(restarted.entries()[0]!.state).toBe("ready");
+  });
+  it("rotates away from invalid Anthropic credentials but not bad request content", async () => {
+    const { store } = memoryStore();
+    const accounts = new ApiKeyAccounts({
+      store,
+      encKey: KEY,
+      poolId: "anthropic-api",
+      providerType: "anthropic",
+      timezone: "Asia/Shanghai",
+    });
+    await accounts.add([
+      { name: "first", key: "sk-ant-first-test" },
+      { name: "second", key: "sk-ant-second-test" },
+    ]);
+    await accounts.update(accounts.entries()[0]!.id, { priority: 0 });
+    const pool = createApiKeyPoolClient({
+      accounts,
+      strategy: "manual_priority",
+      models: ["m"],
+      protocol: "anthropic_messages",
+      createClient: (key) =>
+        client(async () => {
+          if (key.includes("first"))
+            throw new UpstreamError(
+              "upstream_error",
+              "auth",
+              { error: { type: "authentication_error" } },
+              401,
+            );
+          return { ok: true };
+        }),
+    });
+    expect(await pool.chatCompletion(REQ)).toEqual({ ok: true });
+    expect(accounts.entries()[0]!.state).toBe("invalid");
+    const second = accounts.entries()[1]!;
+    await accounts.settle(
+      (await accounts.acquire(second.id))!,
+      new UpstreamError(
+        "upstream_error",
+        "bad prompt",
+        { error: { type: "invalid_request_error", message: "prompt is too long" } },
+        400,
+      ),
+      "m",
+    );
+    expect(accounts.entries()[1]!.state).toBe("ready");
+  });
+  it.each([
+    false,
+    true,
+  ])("only retries Anthropic SSE billing errors before output (partial=%s)", async (partial) => {
+    const { store } = memoryStore();
+    const accounts = new ApiKeyAccounts({
+      store,
+      encKey: KEY,
+      poolId: "anthropic-api",
+      providerType: "anthropic",
+      timezone: "Asia/Shanghai",
+    });
+    await accounts.add([
+      { name: "first", key: "sk-ant-first-test" },
+      { name: "second", key: "sk-ant-second-test" },
+    ]);
+    await accounts.update(accounts.entries()[0]!.id, { priority: 0 });
+    const calls: string[] = [];
+    const delta =
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}\n\n';
+    const pool = createApiKeyPoolClient({
+      accounts,
+      strategy: "manual_priority",
+      models: ["m"],
+      protocol: "anthropic_messages",
+      createClient: (key) => ({
+        ...client(async () => ({})),
+        nativeProtocolProfile: "anthropic_messages",
+        async *nativePassthroughStream() {
+          calls.push(key);
+          yield 'event: message_start\ndata: {"type":"message_start","message":{"id":"test"}}\n\n';
+          if (key.includes("first")) {
+            if (partial) yield delta;
+            yield 'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}\n\n';
+          } else yield delta;
+        },
+      }),
+    });
+    let text = "";
+    for await (const chunk of pool.nativePassthroughStream!({
+      protocol: "anthropic_messages",
+      body: { model: "m" },
+      mutations: {},
+    }))
+      text += chunk;
+    expect(calls).toHaveLength(partial ? 1 : 2);
+    expect(text).toContain('"text":"OK"');
+    expect(text.includes("event: error")).toBe(partial);
+    expect(accounts.entries()[0]!.state).toBe(partial ? "ready" : "quota_exhausted");
+  });
+  it("rejects credentials for another provider before persistence or replacement", async () => {
+    const { store, data } = memoryStore();
+    const a = new ApiKeyAccounts({
+      store,
+      encKey: KEY,
+      poolId: "anthropic-api",
+      providerType: "anthropic",
+      timezone: "Asia/Shanghai",
+    });
+    await expect(a.add([{ name: "wrong", key: "sk-proj-wrong-test" }])).rejects.toThrow(
+      "selected provider type",
+    );
+    await expect(a.add([{ name: "oauth", key: "sk-ant-oat01-test" }])).rejects.toThrow(
+      "selected provider type",
+    );
+    expect(data.size).toBe(0);
+    await a.add([{ name: "valid", key: "sk-ant-usr-test" }]);
+    await expect(a.update(a.entries()[0]!.id, { key: "sk-proj-wrong-test" })).rejects.toThrow(
+      "selected provider type",
+    );
+  });
   it("rotates 100 concurrent stateless requests evenly, even with a soft session key", async () => {
     const s = await setup(5);
     const calls = new Map<string, number>();

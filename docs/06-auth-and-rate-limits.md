@@ -423,7 +423,7 @@ The admin strategy overrides the YAML default. Model allowlists and upstream mod
 signals filter accounts before selection. The distribution is by request count, not dollars
 or tokens; multiple gateway processes do not share a global round-robin cursor.
 
-Billing/quota errors (`credit_balance_exhausted`, `insufficient_quota`, organization/project
+OpenAI billing/quota errors (`credit_balance_exhausted`, `insufficient_quota`, organization/project
 spend limits and organization usage limits) pause the affected account until the next calendar
 month in `reset_timezone`. This is an operator retry policy, not a claim that prepaid credit
 renews monthly. The first eligible business request acquires an atomic, expiring recovery
@@ -444,3 +444,11 @@ The management surface is `/admin/api/api-key-pools`: GET lists masked accounts 
 `/:pool/accounts/:id` edits/removes one account; POST `/:pool/accounts/:id/retry` permits a
 recovery attempt; PUT `/:pool/strategy` selects rotation. All routes inherit admin authentication.
 Costs are estimates for traffic observed by Helm, not an OpenAI balance. No Admin key is needed.
+
+Anthropic static API providers also support `api_key_pool`, using a distinct provider/pool ID
+such as `anthropic-api`. The same encrypted storage, request rotation and diagnostics apply.
+Imports and replacements reject credentials for another provider and Anthropic OAuth tokens.
+Anthropic's explicit low-credit response pauses the account indefinitely: after adding credit,
+select **Try recovery** to permit one real business request to prove recovery. A failed recovery
+stays paused. Anthropic `authentication_error` disables the key, and `rate_limit_error` uses a
+cooldown. These rules cover errors before streamed output too; partial output is never replayed.

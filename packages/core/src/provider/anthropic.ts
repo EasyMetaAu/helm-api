@@ -1297,6 +1297,7 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
 export function openaiToAnthropicRequest(
   req: ChatCompletionRequest,
   opts?: {
+    claudeCodeSystem?: boolean;
     metadataUserId?: string;
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"];
   },
@@ -1312,12 +1313,17 @@ export function openaiToAnthropicRequest(
       : null;
   const body: Record<string, unknown> = {
     model: r.model,
-    system: buildSystem(
-      messages,
-      String(r.model ?? "claude-3-5-sonnet-20241022"),
-      clientIdentity,
-      !hasClientCacheControl(r),
-    ),
+    system:
+      opts?.claudeCodeSystem === false
+        ? messages
+            .filter((m) => m.role === "system" || m.role === "developer")
+            .flatMap((m) => textBlocksFromContent(m.content, m.cache_control))
+        : buildSystem(
+            messages,
+            String(r.model ?? "claude-3-5-sonnet-20241022"),
+            clientIdentity,
+            !hasClientCacheControl(r),
+          ),
     messages: toAnthropicMessages(messages),
     max_tokens:
       typeof r.max_completion_tokens === "number"
@@ -1575,6 +1581,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     cfg.baseUrl,
   );
 
+  const officialPaidApi = hasStatic && isOfficialAnthropicBaseUrl(cfg.baseUrl);
+
   async function headers(
     body: Record<string, unknown>,
     extraBetas: readonly string[] = [],
@@ -1598,7 +1606,21 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       "User-Agent": userAgent,
       "x-app": "cli",
     };
-    if (options.includeClaudeCliRuntimeHeaders === true && fingerprintMode !== "off") {
+    if (officialPaidApi) {
+      delete h["User-Agent"];
+      delete h["x-app"];
+      delete h["anthropic-dangerous-direct-browser-access"];
+      const betas = h["anthropic-beta"]
+        ?.split(",")
+        .filter((b) => !OAUTH_BETA.split(",").includes(b));
+      if (betas?.length) h["anthropic-beta"] = betas.join(",");
+      else delete h["anthropic-beta"];
+    }
+    if (
+      !officialPaidApi &&
+      options.includeClaudeCliRuntimeHeaders === true &&
+      fingerprintMode !== "off"
+    ) {
       h["x-client-request-id"] = randomUUID();
       // This adapter uses fetch, not the Stainless SDK. Do not invent its SDK,
       // OS, timeout or retry telemetry. Native clients retain their own headers.
@@ -1806,6 +1828,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
       const translatedBody = openaiToAnthropicRequest(req, {
+        claudeCodeSystem: !officialPaidApi,
         metadataUserId: cfg.metadataUserId,
         compatibility: opts?.requestCompatibility?.anthropic,
       });
@@ -1832,6 +1855,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       const model = String((req as Record<string, unknown>).model ?? "");
       const translatedBody = {
         ...openaiToAnthropicRequest(req, {
+          claudeCodeSystem: !officialPaidApi,
           metadataUserId: cfg.metadataUserId,
           compatibility: opts?.requestCompatibility?.anthropic,
         }),

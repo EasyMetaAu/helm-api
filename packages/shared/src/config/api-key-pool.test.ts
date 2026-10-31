@@ -16,10 +16,19 @@ describe("API key pool configuration boundaries", () => {
       }).api_key_env,
     ).toBe("OPENAI_API_KEY");
   });
+  it("supports a separate Anthropic API pool with its native protocol", () => {
+    const p = ProviderConfigSchema.parse({
+      name: "anthropic-api",
+      type: "anthropic",
+      api_key_pool: { id: "anthropic-api" },
+    });
+    expect(p.targetProviderProtocol).toBe("anthropic_messages");
+  });
   it.each([
+    { name: "anthropic", type: "anthropic", api_key_pool: { id: "paid" } },
+    { name: "paid", type: "anthropic", api_key_pool: { id: "anthropic" } },
     { name: "x", api_key_pool: { id: "x", reset_timezone: "not-a-timezone" } },
     { name: "x", api_key_pool: { id: "x", key: "plaintext" } },
-    { name: "x", type: "anthropic", api_key_pool: { id: "x" } },
     { name: "x", api_key_pool: { id: "x" }, oauth: { provider: "openai-codex" } },
   ])("rejects invalid or ambiguous configuration", (config) => {
     expect(ProviderConfigSchema.safeParse(config).success).toBe(false);

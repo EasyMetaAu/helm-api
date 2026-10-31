@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     ApiKeyPoolsViewSchema,
+    apiKeyMatchesProvider,
     ApiKeyTestResultSchema,
     type ApiKeyTestResult,
     type ApiKeyPoolView,
@@ -105,6 +106,8 @@
   onMount(() => {
     void run(load);
   });
+  const poolName = (pool: ApiKeyPoolView) =>
+    pool.type === 'anthropic' ? 'Claude (Anthropic)' : pool.id === 'openai' ? 'OpenAI' : pool.id;
   async function add() {
     if (!adding) return;
     const lines = keys
@@ -113,6 +116,11 @@
       .filter(Boolean);
     if (!lines.length || lines.some((s) => s.startsWith('sk-admin-'))) {
       error = $t('Enter model API keys, not Admin keys');
+      return;
+    }
+    const pool = pools.find((entry) => entry.id === adding);
+    if (!pool || lines.some((key) => !apiKeyMatchesProvider(key, pool.type))) {
+      error = $t('API key does not match the selected provider type');
       return;
     }
     await write(`${base}/${encodeURIComponent(adding)}/accounts`, 'POST', {
@@ -170,25 +178,37 @@
     <h2 class="section-header" title={$t('Rotate model API keys across accounts.')}>
       {$t('API key providers')}
     </h2>
-    <button
-      type="button"
-      class="btn-secondary ml-auto shrink-0"
-      disabled={busy}
-      onclick={() => run(load)}
-    >
-      <svg
-        class="size-4"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.5"
-        aria-hidden="true"
-        ><path d="M20 7v5h-5M4 17v-5h5" /><path
-          d="M6.1 7a7 7 0 0 1 11.55-1.7L20 8M4 16l2.35 2.7A7 7 0 0 0 17.9 17"
-        /></svg
+    <div class="ml-auto flex items-center gap-2">
+      <button
+        type="button"
+        class="btn-secondary shrink-0"
+        disabled={busy}
+        onclick={() => run(load)}
       >
-      {$t('Refresh API keys')}
-    </button>
+        <svg
+          class="size-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          aria-hidden="true"
+          ><path d="M20 7v5h-5M4 17v-5h5" /><path
+            d="M6.1 7a7 7 0 0 1 11.55-1.7L20 8M4 16l2.35 2.7A7 7 0 0 0 17.9 17"
+          /></svg
+        >
+        {$t('Refresh API keys')}
+      </button>
+      <button
+        type="button"
+        class="btn-primary"
+        disabled={busy || !pools.some((pool) => pool.configured)}
+        onclick={() => {
+          adding = pools.find((pool) => pool.configured)?.id ?? null;
+          keys = '';
+          error = '';
+        }}>{$t('Add API keys')}</button
+      >
+    </div>
   </header>
   <div class="flex flex-col gap-4">
     {#if error}<p role="alert" class="alert-error">{error}</p>{/if}
@@ -196,10 +216,14 @@
       <div class="flex flex-col gap-2">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h3 class="text-sm font-semibold text-ink">
-            {pool.id === 'openai' ? 'OpenAI' : pool.id}
+            {poolName(pool)}
           </h3>
           <span class="field-help">
-            {$t('Monthly retry timezone')}: {pool.timezone} · {$t('Day 1, 00:00')}
+            {#if pool.type === 'anthropic'}
+              {$t('Out of credit: paused until you add credit and retry.')}
+            {:else}
+              {$t('Monthly retry timezone')}: {pool.timezone} · {$t('Day 1, 00:00')}
+            {/if}
           </span>
           <div class="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
             <select
@@ -219,15 +243,6 @@
                 value="manual_priority">{$t('Manual priority')}</option
               >
             </select>
-            <button
-              type="button"
-              class="btn-primary h-11 shrink-0 sm:h-9"
-              disabled={busy || !pool.configured}
-              onclick={() => {
-                adding = pool.id;
-                keys = '';
-              }}>{$t('Add API keys')}</button
-            >
           </div>
         </div>
         {#if !pool.configured}<p class="alert-warn">
@@ -397,6 +412,20 @@
       }}
     >
       <h2 class="section-header">{$t('Add API keys')}</h2>
+      {#if error}<p role="alert" class="alert-error">{error}</p>{/if}
+      <label class="block"
+        >{$t('Provider type')}
+        <select
+          class="select mt-2 w-full"
+          aria-label={$t('Provider type')}
+          bind:value={adding}
+          disabled={busy}
+        >
+          {#each pools as pool (pool.id)}
+            <option value={pool.id} disabled={!pool.configured}>{poolName(pool)}</option>
+          {/each}
+        </select>
+      </label>
       <label class="block"
         >{$t('API keys (one per line)')}<textarea
           class="input mt-2 w-full font-mono"

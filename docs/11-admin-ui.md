@@ -294,3 +294,8 @@ resume, request recovery and delete it. The list shows masked keys, availability
 reason, next recovery attempt, request/token counts and estimated cost for the last 24 hours.
 Recovery actions do not claim that upstream balance was reset. The round-robin/manual-priority
 selector applies only to this API key pool; subscription strategies are unchanged.
+
+Use the shared **Add API keys** action and select **Provider type** (OpenAI or Claude/Anthropic).
+Keys remain grouped by provider, with independent strategy and per-key tests. Claude API keys
+use `anthropic-api`, distinct from Claude subscription accounts. Their low-credit error pauses
+use until an operator adds credit and selects **Try recovery**; there is no claimed monthly reset.

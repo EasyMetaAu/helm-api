@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+export const ApiKeyProviderTypeSchema = z.enum(["openai", "anthropic"]);
+export type ApiKeyProviderType = z.infer<typeof ApiKeyProviderTypeSchema>;
+export function apiKeyMatchesProvider(key: string, type: ApiKeyProviderType): boolean {
+  return type === "anthropic"
+    ? key.startsWith("sk-ant-") && !key.startsWith("sk-ant-oat") && !key.startsWith("sk-ant-admin")
+    : !key.startsWith("sk-ant-");
+}
+
 export const ApiKeyPoolConfigSchema = z
   .object({
     id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
@@ -62,6 +70,7 @@ export const ApiKeyPoolsViewSchema = z.object({
   pools: z.array(
     z.object({
       id: z.string(),
+      type: ApiKeyProviderTypeSchema.default("openai"),
       configured: z.boolean(),
       timezone: z.string(),
       strategy: z.enum(["round_robin", "manual_priority"]),
