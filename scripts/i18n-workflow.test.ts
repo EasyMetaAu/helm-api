@@ -14,7 +14,19 @@ function placeholders(value: string): string[] {
     .sort();
 }
 
+function hasUntranslatedLane(value: string): boolean {
+  // Placeholder names are code, not visible copy. Their parity is checked below.
+  const prose = value.replace(/\{[A-Za-z0-9_]+\}/g, "");
+  return /\blane\b/i.test(prose) || /[車车]道/.test(prose);
+}
+
 describe("i18n maintenance workflow", () => {
+  it("checks rendered terminology without treating interpolation names as prose", () => {
+    expect(hasUntranslatedLane("通道：{lane}。")).toBe(false);
+    expect(hasUntranslatedLane("lane：{selected}。")).toBe(true);
+    expect(hasUntranslatedLane("车道：{lane}。")).toBe(true);
+    expect(hasUntranslatedLane("車道：{lane}。")).toBe(true);
+  });
   it.each(["admin", "portal"])(
     "keeps every %s locale structurally aligned",
     (app) => {
@@ -115,7 +127,7 @@ describe("i18n maintenance workflow", () => {
           read(`apps/${app}/src/locales/${locale}.json`),
         ) as Record<string, string>;
         const inconsistent = Object.entries(dict).filter(
-          ([, value]) => /\blane\b/i.test(value) || /[車车]道/.test(value),
+          ([, value]) => hasUntranslatedLane(value),
         );
         expect(inconsistent, `${app}:${locale}`).toEqual([]);
       }
