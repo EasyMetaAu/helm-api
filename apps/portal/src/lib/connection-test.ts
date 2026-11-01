@@ -7,6 +7,15 @@ export interface ConnectionResult {
   model: string;
   status: number | null;
   firstOutputMs: number | null;
+  requestId: string | null;
+  failure:
+    | "authentication"
+    | "http"
+    | "stream"
+    | "network"
+    | "timeout"
+    | "cancelled"
+    | null;
 }
 
 // One user-initiated, bounded request through the ordinary authenticated route.
@@ -18,6 +27,7 @@ export async function testInferenceConnection(input: {
   model: string;
   signal?: AbortSignal;
   fetcher?: typeof fetch;
+  onStage?: (stage: "auth" | "inference") => void;
 }): Promise<ConnectionResult> {
   const fetcher = input.fetcher ?? fetch;
   const result: ConnectionResult = {
@@ -26,6 +36,8 @@ export async function testInferenceConnection(input: {
     model: input.model,
     status: null,
     firstOutputMs: null,
+    requestId: null,
+    failure: null,
   };
   const timeout = AbortSignal.timeout(30_000);
   const signal = input.signal
@@ -36,13 +48,18 @@ export async function testInferenceConnection(input: {
     "content-type": "application/json",
   };
   try {
+    input.onStage?.("auth");
     const auth = await fetcher(`${input.origin}/v1/models`, {
       headers,
       signal,
     });
     result.status = auth.status;
     await auth.body?.cancel();
-    if (!auth.ok) return result;
+    if (!auth.ok) {
+      result.failure =
+        auth.status === 401 || auth.status === 403 ? "authentication" : "http";
+      return result;
+    }
     result.auth = true;
     const body = { model: input.model, stream: true };
     const prompt = "Reply with OK only.";
@@ -60,6 +77,7 @@ export async function testInferenceConnection(input: {
             messages: [{ role: "user", content: prompt }],
             max_tokens: 64,
           };
+    input.onStage?.("inference");
     const start = performance.now();
     const response = await fetcher(`${input.origin}${path}`, {
       method: "POST",
@@ -68,6 +86,17 @@ export async function testInferenceConnection(input: {
       signal,
     });
     result.status = response.status;
+    // Never link by the caller-controlled correlation id, or by the models probe.
+    result.requestId =
+      response.headers.get("X-Helm-Request-Id")?.trim() || null;
+    result.failure = "stream";
+    if (!response.ok) {
+      result.failure =
+        response.status === 401 || response.status === 403
+          ? "authentication"
+          : "http";
+      if (result.failure === "authentication") result.auth = false;
+    }
     if (
       !response.ok ||
       !response.headers.get("content-type")?.includes("text/event-stream")
@@ -124,12 +153,18 @@ export async function testInferenceConnection(input: {
               parsed.assembled.finishReason === "stop";
       result.inference =
         !failed && terminal && parsed.assembled.content.trim().length > 0;
+      if (result.inference) result.failure = null;
     } finally {
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   } catch {
-    // The result keeps the last proven stage; a timeout is never success.
+    // Keep proven stages; unavailable checks must not claim credentials were rejected.
+    result.failure = input.signal?.aborted
+      ? "cancelled"
+      : timeout.aborted
+        ? "timeout"
+        : "network";
   }
   return result;
 }
