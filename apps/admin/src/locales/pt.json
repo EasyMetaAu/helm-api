@@ -1186,7 +1186,6 @@
   "Test API key": "Testar chave API",
   "Test passed": "Teste aprovado",
   "Test failed": "Teste falhou",
-  "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "Envia uma solicitação curta apenas com esta chave. Consome a cota do provedor; não altera a rotação nem a pausa.",
   "API key test could not start. Refresh and try again.": "Não foi possível iniciar o teste. Atualize e tente novamente.",
   "Provider type": "Tipo de provedor",
   "Out of credit: paused until you add credit and retry.": "Sem crédito: pausado até adicionar crédito e tentar novamente.",
@@ -1198,5 +1197,7 @@
   "Eligible": "Disponível",
   "additional candidates omitted": "candidatas adicionais omitidas",
   "Speed first": "Priorizar velocidade",
-  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "Usa a velocidade recente das respostas em streaming para o mesmo modelo e prioridade, respeitando os limites de conta e cota."
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "Usa a velocidade recente das respostas em streaming para o mesmo modelo e prioridade, respeitando os limites de conta e cota.",
+  "Batch test and recover": "Testar e recuperar em lote",
+  "Sends one short request per key. Successful tests clear automatic quota pauses; manually paused keys stay paused. Uses upstream quota.": "Envia uma solicitação curta por chave. O sucesso remove a pausa automática por cota; pausas manuais são mantidas. Consome cota do provedor."
 }

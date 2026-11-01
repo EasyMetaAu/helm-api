@@ -281,6 +281,30 @@ export class ApiKeyAccounts {
       // Do not clear a live probe or manual pause. A real request must prove recovery.
     });
   }
+  // A user-requested test may probe a billing/cooldown pause immediately. The
+  // lease and credential generation fence concurrent failures and key replacement.
+  async acquireTestRecovery(
+    id: string,
+    generation: string,
+    model: string,
+  ): Promise<ApiKeyAttempt | null> {
+    return this.mutate((doc) => {
+      const a = doc.accounts.find((entry) => entry.id === id);
+      if (
+        !a ||
+        a.generation !== generation ||
+        !a.enabled ||
+        a.state === "invalid" ||
+        (a.models !== null && !a.models.includes(model))
+      )
+        return null;
+      if ((a.probeUntil ?? 0) > this.now()) throw new Error("Recovery already in progress");
+      if (a.state === "ready" && !a.deniedModels.includes(model)) return null;
+      a.probeId = randomUUID();
+      a.probeUntil = this.now() + (this.deps.probeLeaseMs ?? 600_000);
+      return { id, generation: a.generation, key: a.key, probeId: a.probeId };
+    });
+  }
   async acquire(id: string, model?: string): Promise<ApiKeyAttempt | null> {
     await this.refresh();
     if (!this.eligible(id)) return null;
@@ -352,6 +376,7 @@ export class ApiKeyAccounts {
           a.state = "ready";
           a.reason = null;
           a.nextRetryAt = null;
+          if (model) a.deniedModels = a.deniedModels.filter((denied) => denied !== model);
         } else a.nextRetryAt = this.now() + 60_000;
       }
       if (exhaustedProbe && error !== null && kind !== "invalid") {

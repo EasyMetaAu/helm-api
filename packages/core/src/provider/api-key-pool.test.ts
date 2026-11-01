@@ -53,6 +53,49 @@ async function setup(count = 2) {
 }
 
 describe("API key accounts and pool", () => {
+  it("claims a manual test recovery without waiting for quota retry and fences stale results", async () => {
+    const { accounts } = await setup(1);
+    const a = accounts.entries()[0]!;
+    const billing = new UpstreamError(
+      "upstream_error",
+      "billing",
+      { error: { code: "credit_balance_exhausted" } },
+      429,
+    );
+    await accounts.settle((await accounts.acquire(a.id))!, billing);
+    const probe = await accounts.acquireTestRecovery(a.id, a.generation, "m");
+    expect(probe?.probeId).toBeTruthy();
+    await expect(accounts.acquireTestRecovery(a.id, a.generation, "m")).rejects.toThrow(
+      "Recovery already in progress",
+    );
+    await accounts.settle(probe!, billing, "m");
+    expect(accounts.entries()[0]!.state).toBe("quota_exhausted");
+    const next = await accounts.acquireTestRecovery(a.id, a.generation, "m");
+    await accounts.settle(next!, null, "m");
+    expect(accounts.entries()[0]).toMatchObject({
+      state: "ready",
+      nextRetryAt: null,
+      reason: null,
+    });
+    await accounts.settle((await accounts.acquire(a.id))!, billing);
+    const stale = await accounts.acquireTestRecovery(a.id, a.generation, "m");
+    await accounts.update(a.id, { key: "sk-proj-replacement" });
+    await accounts.settle((await accounts.acquire(a.id))!, billing);
+    await accounts.settle(stale!, null, "m");
+    expect(accounts.entries()[0]!.state).toBe("quota_exhausted");
+    const concurrent = await accounts.acquireTestRecovery(
+      a.id,
+      accounts.entries()[0]!.generation,
+      "m",
+    );
+    await accounts.settle({ ...concurrent!, probeId: null }, billing);
+    await accounts.settle(concurrent!, null, "m");
+    expect(accounts.entries()[0]!.state).toBe("quota_exhausted");
+    await accounts.update(a.id, { enabled: false });
+    expect(
+      await accounts.acquireTestRecovery(a.id, accounts.entries()[0]!.generation, "m"),
+    ).toBeNull();
+  });
   it("parks Anthropic credit failures until manual recovery, including after restart", async () => {
     const { store } = memoryStore();
     let now = Date.parse("2026-10-31T23:00:00Z");

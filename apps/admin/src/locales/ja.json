@@ -1186,7 +1186,6 @@
   "Test API key": "API キーをテスト",
   "Test passed": "テスト成功",
   "Test failed": "テスト失敗",
-  "Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.": "このキーだけで短いリクエストを1回送信します。上流の利用枠を消費しますが、ローテーションや一時停止の設定は変更しません。",
   "API key test could not start. Refresh and try again.": "テストを開始できませんでした。更新して再試行してください。",
   "Provider type": "プロバイダーの種類",
   "Out of credit: paused until you add credit and retry.": "残高不足時は停止します。チャージ後に手動で再試行できます。",
@@ -1198,5 +1197,7 @@
   "Eligible": "選択可能",
   "additional candidates omitted": "その他の候補を省略",
   "Speed first": "速度を優先",
-  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "同じモデルと優先度のアカウントを最近のストリーミング応答速度で選択します。アカウントとクォータの制限は維持されます。"
+  "Use recent streamed response speed within the same model and priority; keep account and quota limits.": "同じモデルと優先度のアカウントを最近のストリーミング応答速度で選択します。アカウントとクォータの制限は維持されます。",
+  "Batch test and recover": "一括テストと復旧",
+  "Sends one short request per key. Successful tests clear automatic quota pauses; manually paused keys stay paused. Uses upstream quota.": "キーごとに短いリクエストを送信します。成功すると自動の利用枠停止を解除します。手動停止は維持され、上流の利用枠を消費します。"
 }

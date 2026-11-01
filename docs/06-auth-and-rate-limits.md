@@ -449,6 +449,13 @@ Anthropic static API providers also support `api_key_pool`, using a distinct pro
 such as `anthropic-api`. The same encrypted storage, request rotation and diagnostics apply.
 Imports and replacements reject credentials for another provider and Anthropic OAuth tokens.
 Anthropic's explicit low-credit response pauses the account indefinitely: after adding credit,
-select **Try recovery** to permit one real business request to prove recovery. A failed recovery
+select **Try recovery** to run a short test immediately. A successful test clears the automatic pause. A failed recovery
 stays paused. Anthropic `authentication_error` disables the key, and `rate_limit_error` uses a
 cooldown. These rules cover errors before streamed output too; partial output is never replayed.
+
+Successful per-key tests now recover automatic quota/cooldown pauses using the same durable
+probe lease and credential-generation checks as business traffic. Empty responses, errors,
+cancellation and stale results cannot confirm recovery. Manual disables and invalid keys
+remain unchanged. **Batch test and recover** tests eligible paused keys sequentially for the
+selected model; model-restricted, manually disabled, invalid or currently probing keys are skipped.
+The legacy `/:pool/accounts/:id/retry` API still only schedules a business-request probe.
