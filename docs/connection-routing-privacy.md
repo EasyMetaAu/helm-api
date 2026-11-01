@@ -18,6 +18,22 @@ non-2xx responses are not success. The test has a 30-second timeout and a
 256-KiB response limit. Cancel stops the request. It does not claim to test every
 tool or modality, and a browser fixture is not production acceptance.
 
+The connection page separates configuration copying, browser authentication,
+completed browser inference, and local client verification. The selected lane is
+used in both setup examples and the test. Copying never changes local files.
+A browser test cannot confirm a local Claude Code, Codex, or SDK setup: start the
+client as instructed and check the resulting request in your history.
+
+When an inference response includes `X-Helm-Request-Id`, the result links to that
+request's Portal detail. It never uses the caller-controlled trace ID. Records
+may appear after a short delay. Network failures and cancellation leave unproven
+stages unconfirmed; they do not label the API key as invalid.
+
+Admin request details also summarize the recorded routing and delivery outcome.
+A committed provider attempt followed by an incomplete stream is not presented
+as a completed response. Classification fallback remains separate from execution
+fallback, and missing historical evidence is stated explicitly.
+
 ## Explain an account choice
 
 The administrator's request detail shows **Why this account?** for subscription

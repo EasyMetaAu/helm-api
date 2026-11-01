@@ -15,6 +15,7 @@
   import Conversation from '$lib/components/Conversation.svelte';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
+  import RoutingSummary from '$lib/components/RoutingSummary.svelte';
   import TokenUsage from '$lib/components/TokenUsage.svelte';
   import ImagePreview from '$lib/components/ImagePreview.svelte';
   import { type CollectedImage, collectImages } from '$lib/components/imageData';
@@ -287,6 +288,8 @@
         onclose={() => (showRetry = false)}
       />
     {/if}
+
+    <RoutingSummary detail={d} />
 
     <!-- Request summary: identity + routing at a glance (the same fields as the list
          row) so an operator can read/copy WHO called and WHAT was asked without
