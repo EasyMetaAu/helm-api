@@ -246,3 +246,29 @@ it("reports Anthropic low credit without exposing upstream messages", async () =
     upstreamStatus: 400,
   });
 });
+
+it("recovers a billing-paused key immediately after a successful test, but not an empty response", async () => {
+  const { app, accounts, chatCompletion } = setup();
+  await accounts.add([{ name: "one", key: "sk-proj-recovery-test" }]);
+  const id = accounts.entries()[0]!.id;
+  const billing = new UpstreamError(
+    "upstream_error",
+    "billing",
+    { error: { code: "credit_balance_exhausted" } },
+    429,
+  );
+  await accounts.settle((await accounts.acquire(id))!, billing);
+  chatCompletion.mockResolvedValueOnce({ choices: [], usage: { total_tokens: 0 } });
+  await app.request(`/admin/api/api-key-pools/openai/accounts/${id}/test`, body({ model: "m" }));
+  expect(accounts.entries()[0]!.state).toBe("quota_exhausted");
+  const res = await app.request(
+    `/admin/api/api-key-pools/openai/accounts/${id}/test`,
+    body({ model: "m" }),
+  );
+  expect(await res.json()).toMatchObject({ ok: true });
+  expect((await accounts.list())[0]).toMatchObject({
+    state: "ready",
+    reason: null,
+    nextRetryAt: null,
+  });
+});

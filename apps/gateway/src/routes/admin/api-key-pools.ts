@@ -105,7 +105,7 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
       deps.apiKeyPools!.get(c.req.param("pool"))!.accounts!.remove(c.req.param("id")),
     );
   });
-  // Diagnostics deliberately bypass pool selection and do not alter account lifecycle.
+  // Test exactly the selected key. A successful leased test can recover an automatic pause.
   app.post("/admin/api/api-key-pools/:pool/accounts/:id/test", async (c) => {
     c.header("cache-control", "no-store");
     const parsed = z
@@ -131,6 +131,16 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
     const client = pool.createTestClient?.(account.key, model);
     if (!client) return c.json({ error: "Account tester unavailable" }, 503);
     runningTests.add(lock);
+    let recovery: Awaited<ReturnType<NonNullable<typeof pool.accounts>["acquireTestRecovery"]>>;
+    try {
+      recovery = await pool.accounts!.acquireTestRecovery(id, account.generation, model);
+    } catch (error) {
+      runningTests.delete(lock);
+      if (error instanceof Error && error.message === "Recovery already in progress")
+        return c.json({ error: "Recovery already in progress" }, 409);
+      throw error;
+    }
+    let recoverySettled = false;
     const started = Date.now();
     const signal = AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(30_000)]);
     try {
@@ -172,6 +182,10 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
           durationMs: Date.now() - started,
           error: "empty_response",
         });
+      if (recovery) {
+        await pool.accounts!.settle(recovery, null, model);
+        recoverySettled = true;
+      }
       // Never relay an echoed credential, even from a misconfigured upstream.
       return c.json({
         ok: true,
@@ -180,6 +194,10 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
         response: response.replaceAll(account.key, "[redacted]").slice(0, 2000),
       });
     } catch (error) {
+      if (recovery) {
+        await pool.accounts!.settle(recovery, error, model);
+        recoverySettled = true;
+      }
       const upstream = error instanceof UpstreamError ? error : null;
       const detail = z
         .object({ error: z.object({ code: z.string().optional(), type: z.string().optional() }) })
@@ -215,6 +233,12 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
       });
     } finally {
       runningTests.delete(lock);
+      if (recovery && !recoverySettled)
+        await pool.accounts!.settle(
+          recovery,
+          new Error("Test did not complete successfully"),
+          model,
+        );
     }
   });
   app.post("/admin/api/api-key-pools/:pool/accounts/:id/retry", async (c) => {

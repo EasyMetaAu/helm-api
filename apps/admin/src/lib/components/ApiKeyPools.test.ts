@@ -233,3 +233,57 @@ it.each([true, false])(
     );
   },
 );
+
+it('batch tests recoverable keys sequentially and skips manual pauses', async () => {
+  const accounts = ['a', 'b', 'c'].map((id) => ({
+    id,
+    name: `Key ${id}`,
+    mask: '••••1234',
+    enabled: id !== 'c',
+    priority: 50,
+    models: null,
+    state: 'quota_exhausted',
+    reason: 'insufficient_quota',
+    nextRetryAt: null,
+    probeUntil: null,
+    deniedModels: [],
+  }));
+  const pool = {
+    id: 'openai',
+    configured: true,
+    timezone: 'Asia/Shanghai',
+    strategy: 'round_robin',
+    models: ['gpt-6-luna'],
+    usage: [],
+    accounts,
+  };
+  const calls: string[] = [];
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (!init?.method) return Response.json({ pools: [pool] });
+    calls.push(url);
+    const ok = url.includes('/b/');
+    if (ok) accounts[1]!.state = 'ready';
+    return Response.json({
+      ok,
+      model: 'gpt-6-luna',
+      durationMs: 1,
+      ...(ok ? { response: 'OK' } : { error: 'insufficient_quota', upstreamStatus: 429 }),
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(ApiKeyPools);
+  await screen.findByText('Key a');
+  await fireEvent.click(screen.getByRole('button', { name: 'Batch test and recover' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Run test' }));
+  await waitFor(() =>
+    expect(calls).toEqual([
+      '/admin/api/api-key-pools/openai/accounts/a/test',
+      '/admin/api/api-key-pools/openai/accounts/b/test',
+    ]),
+  );
+  await waitFor(() => {
+    const results = screen.getAllByRole('listitem');
+    expect(results[0]?.textContent).toContain('insufficient_quota');
+    expect(results[1]?.textContent).toContain('Test passed');
+  });
+});

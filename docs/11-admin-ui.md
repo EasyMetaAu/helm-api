@@ -299,3 +299,8 @@ Use the shared **Add API keys** action and select **Provider type** (OpenAI or C
 Keys remain grouped by provider, with independent strategy and per-key tests. Claude API keys
 use `anthropic-api`, distinct from Claude subscription accounts. Their low-credit error pauses
 use until an operator adds credit and selects **Try recovery**; there is no claimed monthly reset.
+
+API provider **Try recovery** now runs the selected key's connectivity test immediately.
+A successful test clears its automatic quota/cooldown pause. **Batch test and recover** selects
+a text model and tests recoverable keys sequentially, showing each result. Manual disables
+remain unchanged, and failed keys stay paused. These tests consume upstream quota.

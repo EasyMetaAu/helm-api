@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ApiKeyAccounts, createSqliteDb, SqliteConfigStore, UpstreamError } from "@helm/core";
 import { serve } from "@hono/node-server";
 import { expect, test } from "@playwright/test";
 import { buildServer } from "../src/server.js";
@@ -88,6 +89,43 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       await expect(dialog.getByText("Test passed", { exact: true })).toBeVisible();
       await expect(dialog.getByText("hello from mock", { exact: true })).toBeVisible();
       await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    }
+    // Reproduce persisted quota pauses, then recover through the actual browser flow.
+    const recoveryDb = createSqliteDb(join(root, "helm.db"));
+    try {
+      const accounts = new ApiKeyAccounts({
+        store: new SqliteConfigStore(recoveryDb),
+        encKey: Buffer.alloc(32, 9),
+        poolId: "openai",
+        timezone: "Asia/Shanghai",
+      });
+      for (const account of await accounts.list()) {
+        const attempt = await accounts.acquire(account.id);
+        if (!attempt) throw new Error("Expected a ready test key");
+        await accounts.settle(
+          attempt,
+          new UpstreamError(
+            "upstream_error",
+            "billing",
+            { error: { code: "credit_balance_exhausted" } },
+            429,
+          ),
+        );
+      }
+      await page.reload();
+      await section
+        .getByRole("button", { name: "Batch test and recover", exact: true })
+        .first()
+        .click();
+      const batch = page.getByRole("dialog", { name: "Batch test and recover", exact: true });
+      await batch.getByRole("button", { name: "Run test", exact: true }).click();
+      await expect(batch.getByText(/Test passed/)).toHaveCount(2);
+      expect(
+        (await accounts.list()).every((a) => a.state === "ready" && a.nextRetryAt === null),
+      ).toBe(true);
+      await batch.getByRole("button", { name: "Close", exact: true }).click();
+    } finally {
+      recoveryDb.$sqlite.close();
     }
     let row = section.getByRole("row").filter({ hasText: "API 1" });
     await expect(row.getByRole("button", { name: "Delete", exact: true })).not.toBeVisible();

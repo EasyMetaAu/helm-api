@@ -29,6 +29,68 @@
   let testBusy = $state(false);
   let testError = $state('');
   let testAbort: AbortController | null = null;
+  let batchPool = $state<ApiKeyPoolView | null>(null);
+  let batchModel = $state('');
+  let batchBusy = $state(false);
+  let batchResults = $state<Array<{ name: string; result?: ApiKeyTestResult; error?: string }>>([]);
+  let batchAbort: AbortController | null = null;
+  const recoverable = (account: ApiKeyAccountView) =>
+    account.enabled &&
+    account.state !== 'invalid' &&
+    (account.state !== 'ready' || account.deniedModels.length > 0) &&
+    !(account.probeUntil && account.probeUntil > Date.now());
+  const defaultTestModel = (choices: string[]) =>
+    choices.find((m) => m === 'gpt-6-luna') ??
+    choices.find((m) => m.includes('haiku')) ??
+    choices[0] ??
+    '';
+  function closeBatch() {
+    batchAbort?.abort();
+    batchPool = null;
+  }
+  async function runBatch() {
+    if (!batchPool || batchBusy) return;
+    const pool = batchPool;
+    const model = batchModel;
+    const controller = new AbortController();
+    batchAbort = controller;
+    batchBusy = true;
+    batchResults = [];
+    try {
+      for (const account of pool.accounts.filter(
+        (a) => recoverable(a) && testModels(pool, a).includes(model),
+      )) {
+        if (controller.signal.aborted) break;
+        try {
+          const result = await requestTest(pool.id, account.id, model, controller.signal);
+          batchResults = [...batchResults, { name: account.name, result }];
+        } catch {
+          if (!controller.signal.aborted)
+            batchResults = [
+              ...batchResults,
+              {
+                name: account.name,
+                error: $t('API key test could not start. Refresh and try again.'),
+              },
+            ];
+        }
+      }
+      await run(load);
+    } finally {
+      batchBusy = false;
+      batchAbort = null;
+    }
+  }
+  async function requestTest(pool: string, id: string, model: string, signal: AbortSignal) {
+    const res = await fetch(`${accountUrl(pool, id)}/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal,
+    });
+    if (!res.ok) throw new Error($t('API key test could not start. Refresh and try again.'));
+    return ApiKeyTestResultSchema.parse(await res.json());
+  }
   const testModels = (pool: ApiKeyPoolView, account: ApiKeyAccountView) =>
     pool.models.filter(
       (model) =>
@@ -38,7 +100,7 @@
   function openTest(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
     testTarget = { pool, account };
     const choices = testModels(pool, account);
-    testModel = choices.includes('gpt-6-luna') ? 'gpt-6-luna' : (choices[0] ?? '');
+    testModel = defaultTestModel(choices);
     testResult = null;
     testError = '';
   }
@@ -46,7 +108,10 @@
     testAbort?.abort();
     testTarget = null;
   }
-  onDestroy(() => testAbort?.abort());
+  onDestroy(() => {
+    testAbort?.abort();
+    batchAbort?.abort();
+  });
   async function testAccount() {
     if (!testTarget || testBusy) return;
     testBusy = true;
@@ -55,14 +120,13 @@
     const controller = new AbortController();
     testAbort = controller;
     try {
-      const res = await fetch(`${accountUrl(testTarget.pool.id, testTarget.account.id)}/test`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: testModel }),
-        signal: controller.signal,
-      });
-      if (!res.ok) throw new Error($t('API key test could not start. Refresh and try again.'));
-      testResult = ApiKeyTestResultSchema.parse(await res.json());
+      testResult = await requestTest(
+        testTarget.pool.id,
+        testTarget.account.id,
+        testModel,
+        controller.signal,
+      );
+      await run(load);
     } catch (e) {
       if (!controller.signal.aborted)
         testError = $t('API key test could not start. Refresh and try again.');
@@ -226,6 +290,25 @@
             {/if}
           </span>
           <div class="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+            <button
+              type="button"
+              class="btn-secondary shrink-0"
+              disabled={busy ||
+                testBusy ||
+                batchBusy ||
+                !pool.accounts.some((a) => recoverable(a) && testModels(pool, a).length > 0)}
+              onclick={() => {
+                batchPool = pool;
+                batchResults = [];
+                batchModel = defaultTestModel(
+                  pool.models.filter((model) =>
+                    pool.accounts.some(
+                      (a) => recoverable(a) && testModels(pool, a).includes(model),
+                    ),
+                  ),
+                );
+              }}>{$t('Batch test and recover')}</button
+            >
             <select
               aria-label={$t('API key rotation strategy')}
               class="select h-11 min-w-0 flex-1 sm:h-9 sm:w-40 sm:flex-none"
@@ -320,7 +403,10 @@
                         <button
                           type="button"
                           class="btn-secondary flex-1 lg:flex-none"
-                          disabled={busy || testBusy || testModels(pool, account).length === 0}
+                          disabled={busy ||
+                            testBusy ||
+                            batchBusy ||
+                            testModels(pool, account).length === 0}
                           onclick={() => openTest(pool, account)}>{$t('Test')}</button
                         >
                         <button
@@ -359,16 +445,14 @@
                                 type="button"
                                 class="menu-item"
                                 disabled={busy ||
+                                  testBusy ||
+                                  batchBusy ||
+                                  testModels(pool, account).length === 0 ||
                                   Boolean(account.probeUntil && account.probeUntil > Date.now())}
-                                onclick={() =>
-                                  run(async () => {
-                                    await write(
-                                      `${accountUrl(pool.id, account.id)}/retry`,
-                                      'POST',
-                                      {},
-                                    );
-                                    await load();
-                                  })}>{$t('Try recovery')}</button
+                                onclick={() => {
+                                  openTest(pool, account);
+                                  void testAccount();
+                                }}>{$t('Try recovery')}</button
                               >
                             {/if}
                             <button
@@ -555,7 +639,7 @@
       </div>
       <p class="field-help">
         {$t(
-          'Sends one short request using only this key. Uses upstream quota; does not change rotation or pause settings.',
+          'Sends one short request per key. Successful tests clear automatic quota pauses; manually paused keys stay paused. Uses upstream quota.',
         )}
       </p>
       <label class="block"
@@ -596,6 +680,56 @@
         <button type="button" class="btn-secondary" onclick={closeTest}>{$t('Close')}</button>
         <button type="submit" class="btn-primary" disabled={testBusy || !testModel}
           >{testBusy ? $t('Testing…') : $t('Run test')}</button
+        >
+      </div>
+    </form>
+  </Modal>
+{/if}
+
+{#if batchPool}
+  <Modal label={$t('Batch test and recover')} onclose={closeBatch}>
+    <h2 class="section-header mb-4">{$t('Batch test and recover')} · {poolName(batchPool)}</h2>
+    <p class="field-help mb-4">
+      {$t(
+        'Sends one short request per key. Successful tests clear automatic quota pauses; manually paused keys stay paused. Uses upstream quota.',
+      )}
+    </p>
+    <form
+      class="space-y-4"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void runBatch();
+      }}
+    >
+      <label class="block"
+        >{$t('Model')}
+        <select
+          class="select mt-2 w-full"
+          aria-label={$t('Model')}
+          bind:value={batchModel}
+          disabled={batchBusy}
+        >
+          {#each batchPool.models.filter( (model) => batchPool!.accounts.some((a) => recoverable(a) && testModels(batchPool!, a).includes(model)), ) as model}
+            <option value={model}>{model}</option>
+          {/each}
+        </select>
+      </label>
+      <ul class="space-y-2" aria-live="polite">
+        {#each batchResults as item}
+          <li>
+            <span class="font-medium">{item.name}</span> · {item.result?.ok
+              ? $t('Test passed')
+              : (item.error ?? `${$t('Test failed')}: ${item.result?.error ?? ''}`)}
+          </li>
+        {/each}
+      </ul>
+      <div class="card-actions">
+        <button type="button" class="btn-secondary" onclick={closeBatch}>{$t('Close')}</button>
+        <button
+          type="submit"
+          class="btn-primary"
+          disabled={batchBusy || !batchModel || batchResults.length > 0}
+          >{batchBusy ? $t('Testing…') : $t('Run test')}</button
         >
       </div>
     </form>
