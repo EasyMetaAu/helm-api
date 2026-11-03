@@ -398,7 +398,7 @@
   "First reply": "첫 응답",
   "Fit to window": "창에 맞춤",
   "Fixed lower bound on how many requests may wait.": "대기할 수 있는 요청 수의 고정 하한입니다.",
-  "Follow account priority first; rotate only within the same priority.": "계정 우선순위를 먼저 따르고, 같은 우선순위 안에서만 순환합니다.",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "숫자가 작을수록 먼저 선택됩니다(50보다 49가 먼저). 숫자가 같은 계정은 번갈아 사용합니다. 기존 세션은 원래 계정을 사용할 수 있는 동안 계속 그 계정을 사용합니다.",
   "Follow how this request was classified, routed, and billed — step by step.": "이 요청이 어떻게 분류, 라우팅, 청구되었는지 단계별로 확인하세요.",
   "Force lane": "레인 강제",
   "Force lane sends matching requests to that lane.": "레인 강제는 일치하는 요청을 해당 레인으로 보냅니다.",

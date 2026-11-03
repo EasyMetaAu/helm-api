@@ -398,7 +398,7 @@
   "First reply": "Primeira resposta",
   "Fit to window": "Ajustar à janela",
   "Fixed lower bound on how many requests may wait.": "Limite inferior fixo de quantas solicitações podem esperar.",
-  "Follow account priority first; rotate only within the same priority.": "Siga primeiro a prioridade da conta; rotacione apenas dentro da mesma prioridade.",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "Os números menores têm preferência (49 antes de 50). Contas com o mesmo número se alternam. Cada sessão mantém sua conta enquanto ela estiver disponível.",
   "Follow how this request was classified, routed, and billed — step by step.": "Acompanhe como esta solicitação foi classificada, roteada e cobrada, passo a passo.",
   "Force lane": "Forçar lane",
   "Force lane sends matching requests to that lane.": "Forçar lane envia solicitações correspondentes para essa lane.",

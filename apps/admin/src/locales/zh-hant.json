@@ -398,7 +398,7 @@
   "First reply": "首個回覆",
   "Fit to window": "適應視窗",
   "Fixed lower bound on how many requests may wait.": "允許排隊等待的請求數量下限（固定值）。",
-  "Follow account priority first; rotate only within the same priority.": "優先按帳號優先級使用，同優先級內輪換。",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "數字越小越優先（49 優先於 50）。數字相同的帳號輪流使用。現有對話會繼續使用原帳號，只要該帳號仍可用。",
   "Follow how this request was classified, routed, and billed — step by step.": "逐步瞭解這個請求是如何被分類、路由和計費的。",
   "Force lane": "強制通道",
   "Force lane sends matching requests to that lane.": "強制通道會將符合的請求傳送到該通道。",
