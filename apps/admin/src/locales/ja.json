@@ -398,7 +398,7 @@
   "First reply": "最初の返信",
   "Fit to window": "ウィンドウに合わせる",
   "Fixed lower bound on how many requests may wait.": "待機できるリクエスト数の固定下限。",
-  "Follow account priority first; rotate only within the same priority.": "アカウント優先度を先に適用し、同じ優先度内だけでローテーションします。",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "数字が小さいほど優先されます（50 より 49 が先）。同じ数字のアカウントは交互に使用します。既存のセッションは、元のアカウントが利用できる限りそのまま使用します。",
   "Follow how this request was classified, routed, and billed — step by step.": "このリクエストがどのように分類、ルーティング、課金されたかを手順ごとに追跡します。",
   "Force lane": "レーンを強制",
   "Force lane sends matching requests to that lane.": "レーンの強制は、一致するリクエストをそのレーンに送ります。",

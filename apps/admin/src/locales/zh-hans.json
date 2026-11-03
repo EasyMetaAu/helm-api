@@ -398,7 +398,7 @@
   "First reply": "首个回复",
   "Fit to window": "适应窗口",
   "Fixed lower bound on how many requests may wait.": "允许排队等待的请求数量下限（固定值）。",
-  "Follow account priority first; rotate only within the same priority.": "优先按账号优先级使用，同优先级内轮换。",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "数字越小越优先（49 优先于 50）。数字相同的账号轮流使用。已有会话会继续使用原账号，只要它仍可用。",
   "Follow how this request was classified, routed, and billed — step by step.": "逐步了解这个请求是如何被分类、路由和计费的。",
   "Force lane": "强制通道",
   "Force lane sends matching requests to that lane.": "强制通道会将匹配请求发送到该通道。",

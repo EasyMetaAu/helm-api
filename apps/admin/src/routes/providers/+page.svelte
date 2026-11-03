@@ -158,7 +158,8 @@
     {
       value: 'manual_priority',
       label: 'Manual priority',
-      description: 'Follow account priority first; rotate only within the same priority.',
+      description:
+        'Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.',
     },
     {
       value: 'low_risk',

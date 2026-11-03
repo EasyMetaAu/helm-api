@@ -398,7 +398,7 @@
   "First reply": "First reply",
   "Fit to window": "Fit to window",
   "Fixed lower bound on how many requests may wait.": "Fixed lower bound on how many requests may wait.",
-  "Follow account priority first; rotate only within the same priority.": "Follow account priority first; rotate only within the same priority.",
+  "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.": "Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.",
   "Follow how this request was classified, routed, and billed — step by step.": "Follow how this request was classified, routed, and billed — step by step.",
   "Force lane": "Force lane",
   "Force lane sends matching requests to that lane.": "Force lane sends matching requests to that lane.",
