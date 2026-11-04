@@ -116,7 +116,7 @@
     {#each TABS as id (id)}
       <button
         type="button"
-        class={`rounded border px-3 py-1 text-sm ${tab === id ? tabActive : tabInactive}`}
+        class={`min-h-11 rounded border px-3 py-1 text-sm md:min-h-0 ${tab === id ? tabActive : tabInactive}`}
         onclick={() => (tab = id)}>{tabLabel(id)}</button
       >
     {/each}
@@ -124,13 +124,13 @@
       {#if tab === "tree" && hasTree}
         <button
           type="button"
-          class={`rounded border px-3 py-1 text-sm ${tabInactive}`}
+          class={`min-h-11 rounded border px-3 py-1 text-sm md:min-h-0 ${tabInactive}`}
           data-testid="jsontree-expand-all"
           onclick={expandAll}>{$t("Expand all")}</button
         >
         <button
           type="button"
-          class={`rounded border px-3 py-1 text-sm ${tabInactive}`}
+          class={`min-h-11 rounded border px-3 py-1 text-sm md:min-h-0 ${tabInactive}`}
           data-testid="jsontree-collapse-all"
           onclick={collapseAll}>{$t("Collapse all")}</button
         >

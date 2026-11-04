@@ -10,18 +10,18 @@ describe('admin sidebar', () => {
     const { container } = render(Layout, { children });
     const sidebar = container.querySelector('aside');
 
-    expect(sidebar).toHaveClass('md:w-56');
+    expect(sidebar).toHaveClass('lg:w-56');
     expect(screen.getByText('LLM Gateway')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Collapse' }));
 
-    expect(sidebar).toHaveClass('md:w-16');
-    expect(screen.getByText('LLM Gateway').parentElement).toHaveClass('md:hidden');
+    expect(sidebar).toHaveClass('lg:w-16');
+    expect(screen.getByText('LLM Gateway').parentElement).toHaveClass('lg:hidden');
     expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Expand' }));
 
-    expect(sidebar).toHaveClass('md:w-56');
+    expect(sidebar).toHaveClass('lg:w-56');
     expect(screen.getByText('LLM Gateway')).toBeInTheDocument();
   });
 });

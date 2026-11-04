@@ -47,7 +47,7 @@
 {#if onLoginRoute || !$apiKey}
   {@render children()}
 {:else}
-  <div class="min-h-screen bg-canvas text-ink-1">
+  <div class="min-h-screen bg-canvas text-ink">
     <!-- The mobile nav drawer lives inside the header; a click below it closes it. -->
     <header
       class="border-b border-border bg-surface"
@@ -56,7 +56,7 @@
       <div class="flex h-14 items-center gap-4 px-4 sm:px-6 lg:px-8">
         <a
           href={hrefFor("")}
-          class="flex items-center gap-2 font-semibold text-ink-1"
+          class="flex items-center gap-2 font-semibold text-ink"
         >
           <Logo size="sm" />
           <span>Helm</span>
@@ -73,9 +73,9 @@
               class:bg-indigo-600={isActive(item.seg)}
               class:text-white={isActive(item.seg)}
               class:shadow-sm={isActive(item.seg)}
-              class:text-ink-2={!isActive(item.seg)}
+              class:text-ink-body={!isActive(item.seg)}
               class:hover:bg-canvas={!isActive(item.seg)}
-              class:hover:text-ink-1={!isActive(item.seg)}
+              class:hover:text-ink={!isActive(item.seg)}
             >
               {$t(item.label)}
             </a>
@@ -85,35 +85,63 @@
         <div class="ml-auto flex items-center gap-2">
           <!-- Mobile hamburger -->
           <button
-            class="btn-icon md:hidden"
+            class="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-control border border-border text-ink-body transition-colors hover:bg-canvas hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 md:hidden"
             aria-label={$t("Menu")}
+            aria-expanded={navOpen}
             onclick={() => (navOpen = !navOpen)}
           >
-            ☰
+            <svg
+              class="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.8"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"
+              />
+            </svg>
           </button>
 
           <div class="hidden sm:block">
-            <LocaleSwitcher compact />
+            <LocaleSwitcher compact id="locale-switcher-header" />
           </div>
 
           <!-- Key pill + account menu. clickOutside closes the dropdown when the
                user clicks the blank area (only wired while it's open). -->
           <div class="relative" use:clickOutside={() => (menuOpen = false)}>
             <button
-              class="rounded-full border border-border bg-canvas px-3 py-1.5 text-xs font-mono text-ink-2 hover:text-ink-1"
+              class="inline-flex min-h-11 items-center rounded-full border border-border bg-canvas px-3 py-1.5 text-xs font-mono text-ink-body hover:text-ink md:min-h-0"
               onclick={() => (menuOpen = !menuOpen)}
             >
-              {keyFingerprint($apiKey)} ▾
+              {keyFingerprint($apiKey)}
+              <svg
+                class="ml-1 h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke-width="2"
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="m19.5 8.25-7.5 7.5-7.5-7.5"
+                />
+              </svg>
             </button>
             {#if menuOpen}
               <div
                 class="absolute right-0 z-20 mt-2 w-48 rounded-lg border border-border bg-surface p-2 shadow-lg"
               >
                 <div class="px-2 py-1.5 sm:hidden">
-                  <LocaleSwitcher />
+                  <LocaleSwitcher id="locale-switcher-menu" />
                 </div>
                 <button
-                  class="block w-full rounded px-2 py-1.5 text-left text-sm text-danger hover:bg-canvas"
+                  class="flex min-h-11 w-full items-center rounded px-2 py-1.5 text-left text-sm text-danger hover:bg-canvas md:min-h-0"
                   onclick={clearKey}
                 >
                   {$t("Sign out")}
@@ -131,17 +159,17 @@
             <a
               href={hrefFor(item.seg)}
               aria-current={isActive(item.seg) ? "page" : undefined}
-              class="mb-1 block rounded-md px-3 py-2 text-sm font-medium"
+              class="mb-1 flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium"
               class:bg-indigo-600={isActive(item.seg)}
               class:text-white={isActive(item.seg)}
-              class:text-ink-2={!isActive(item.seg)}
+              class:text-ink-body={!isActive(item.seg)}
               onclick={() => (navOpen = false)}
             >
               {$t(item.label)}
             </a>
           {/each}
-          <div class="mt-2 px-1">
-            <LocaleSwitcher />
+          <div class="mt-2 px-1 sm:hidden">
+            <LocaleSwitcher id="locale-switcher-drawer" />
           </div>
         </nav>
       {/if}

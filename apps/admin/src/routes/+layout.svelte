@@ -140,7 +140,7 @@
   <!-- Mobile backdrop -->
   {#if navOpen}
     <button
-      class="fixed inset-0 z-20 bg-slate-900/30 md:hidden"
+      class="fixed inset-0 z-20 bg-slate-900/30 lg:hidden"
       aria-label={$t('Close navigation')}
       onclick={() => (navOpen = false)}
     ></button>
@@ -148,13 +148,13 @@
 
   <!-- Sidebar -->
   <aside
-    class="fixed inset-y-0 left-0 z-30 flex w-56 transform flex-col border-r border-slate-200 bg-white transition-[width,transform] duration-200 ease-out md:static md:translate-x-0 {sidebarCollapsed
-      ? 'md:w-16'
-      : 'md:w-56'} {navOpen ? 'translate-x-0' : '-translate-x-full'}"
+    class="fixed inset-y-0 left-0 z-30 flex w-56 transform flex-col border-r border-slate-200 bg-white transition-[width,transform] duration-200 ease-out lg:static lg:translate-x-0 {sidebarCollapsed
+      ? 'lg:w-16'
+      : 'lg:w-56'} {navOpen ? 'translate-x-0' : '-translate-x-full'}"
   >
     <div
       class="flex h-14 items-center gap-2.5 px-5 {sidebarCollapsed
-        ? 'md:justify-center md:px-0'
+        ? 'lg:justify-center lg:px-0'
         : ''}"
     >
       <span
@@ -177,7 +177,7 @@
           </g>
         </svg>
       </span>
-      <div class="leading-tight {sidebarCollapsed ? 'md:hidden' : ''}">
+      <div class="leading-tight {sidebarCollapsed ? 'lg:hidden' : ''}">
         <div class="text-sm font-semibold tracking-tight">Helm</div>
         <div class="text-xs text-slate-400">{$t('LLM Gateway')}</div>
       </div>
@@ -185,7 +185,7 @@
 
     <nav
       id="admin-sidebar-navigation"
-      class="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-2 {sidebarCollapsed ? 'md:px-2' : ''}"
+      class="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-2 {sidebarCollapsed ? 'lg:px-2' : ''}"
     >
       {#each nav as item (item.seg)}
         <a
@@ -195,7 +195,7 @@
           title={$t(sidebarCollapsed ? item.label : item.desc)}
           onclick={() => (navOpen = false)}
           class="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors {sidebarCollapsed
-            ? 'md:justify-center md:px-0'
+            ? 'lg:justify-center lg:px-0'
             : ''} {isActive(item.seg)
             ? 'bg-indigo-50 text-indigo-700'
             : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}"
@@ -212,14 +212,14 @@
           >
             <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
           </svg>
-          <span class="min-w-0 truncate {sidebarCollapsed ? 'md:hidden' : ''}"
+          <span class="min-w-0 truncate {sidebarCollapsed ? 'lg:hidden' : ''}"
             >{$t(item.label)}</span
           >
         </a>
       {/each}
     </nav>
 
-    <div class="hidden shrink-0 border-t border-slate-200 p-2 md:block">
+    <div class="hidden shrink-0 border-t border-slate-200 p-2 lg:block">
       <button
         type="button"
         class="flex w-full items-center gap-3 rounded-lg py-2 text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 {sidebarCollapsed
@@ -256,10 +256,10 @@
   <div class="flex min-w-0 flex-1 flex-col">
     <!-- Top bar: hamburger on mobile + current section label -->
     <header
-      class="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur md:px-6"
+      class="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur lg:px-6"
     >
       <button
-        class="-ml-1 flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 md:hidden"
+        class="-ml-1 flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 lg:hidden"
         aria-label={$t('Open navigation')}
         onclick={() => (navOpen = true)}
       >
@@ -277,7 +277,7 @@
           />
         </svg>
       </button>
-      <span class="text-sm font-medium text-slate-500 md:hidden">{$t(activeLabel)}</span>
+      <span class="text-sm font-medium text-slate-500 lg:hidden">{$t(activeLabel)}</span>
       <div class="ml-auto flex items-center gap-2">
         <StatusCluster />
         <form method="post" action={`${base}/logout`}>

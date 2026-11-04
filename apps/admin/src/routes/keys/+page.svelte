@@ -265,7 +265,7 @@
 
 <section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-    <div class="min-w-0">
+    <div class="flex min-w-0 flex-col gap-1">
       <h1 class="page-title">{$t('API Keys')}</h1>
       <p class="section-desc">
         {$t(
@@ -306,7 +306,7 @@
       <p>{$t('No API keys yet. Create one to let a client authenticate against the gateway.')}</p>
     </div>
   {:else}
-    <div class="cards-table-frame">
+    <div class="cards-table-frame overflow-visible">
       <table class="cards-table">
         <thead class="table-head">
           <tr>
@@ -333,14 +333,17 @@
                 {#if key.role === 'root'}
                   <p
                     data-testid="root-warning"
-                    class="mt-1 max-w-56 whitespace-normal text-xs text-amber-700"
+                    class="mt-1 whitespace-normal table-mode:max-w-56 text-xs text-amber-700"
                   >
                     <span class="badge-warning">{key.role}</span>
                     {$t('Management plane only — do not feed production traffic.')}
                   </p>
                 {/if}
               </td>
-              <td data-label={$t('Access')} class="px-3 py-2 text-ink-muted lg:whitespace-normal">
+              <td
+                data-label={$t('Access')}
+                class="px-3 py-2 text-ink-muted table-mode:min-w-48 table-mode:whitespace-normal"
+              >
                 <div class="whitespace-normal">
                   {$t('Allowed lanes')}:
                   {key.allowed_lanes === null
@@ -374,7 +377,10 @@
                   <div class="sr-only">{$t('Memory')}: <span>{$t('Off')}</span></div>
                 {/if}
               </td>
-              <td data-label={$t('Limits')} class="px-3 py-2 text-ink-muted lg:whitespace-normal">
+              <td
+                data-label={$t('Limits')}
+                class="px-3 py-2 text-ink-muted table-mode:min-w-48 table-mode:whitespace-normal"
+              >
                 {#if limitChips(key).length === 0 && budgetParts(key).length === 0}
                   <span class="text-ink-faint">{$t('Defaults')}</span>
                 {:else}
@@ -419,7 +425,7 @@
                   <span class="badge-ok">{$t('active')}</span>
                 {/if}
               </td>
-              <td data-label={$t('Actions')} class="px-3 py-2 lg:text-right">
+              <td class="px-3 py-2 table-mode:text-right">
                 <div class="flex items-center justify-end gap-2">
                   <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
                   {#if key.key_id !== INTERNAL_KEY_ID && !key.disabled}

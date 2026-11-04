@@ -75,7 +75,8 @@
       {$t('No lanes are configured yet.')}
     </div>
   {:else}
-    <div class="flex flex-col gap-2">
+    <!-- pb-20 keeps the last lane clear of the floating save bar. -->
+    <div class="flex flex-col gap-2 pb-20">
       {#each lanes as lane (lane.name)}
         <LaneEditor
           {lane}

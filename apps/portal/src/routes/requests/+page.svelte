@@ -205,7 +205,7 @@
 </div>
 
 <form
-  class="card mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(16rem,1fr)_minmax(9rem,.45fr)_auto] lg:items-end"
+  class="card mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-[minmax(16rem,1fr)_minmax(9rem,.45fr)_auto] md:items-end"
   onsubmit={(e) => {
     e.preventDefault();
     go();
@@ -235,7 +235,7 @@
       <option value="error">{$t("error")}</option>
     </select>
   </label>
-  <div class="flex items-center gap-2 sm:col-span-2 lg:col-span-1">
+  <div class="flex items-center gap-2 sm:col-span-2 md:col-span-1">
     <button type="submit" class="btn-secondary">{$t("Apply")}</button>
     <button
       type="button"
@@ -251,7 +251,7 @@
 {#if error}
   <p class="alert-error">{error}</p>
 {:else}
-  <div class="card flex flex-col gap-3">
+  <div class="flex flex-col gap-3">
     {#if loading}
       <p class="section-desc">{$t("Loading…")}</p>
     {:else if rows.length === 0}
@@ -264,8 +264,8 @@
         </p>
       </div>
     {:else}
-      <div class="table-wrap">
-        <table class="table-base">
+      <div class="cards-table-frame dense">
+        <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2 text-left">{$t("Time")}</th>
@@ -280,30 +280,32 @@
           <tbody>
             {#each rows as row (row.request_id)}
               <tr
-                class="table-row cursor-pointer hover:bg-canvas"
+                class="cursor-pointer"
                 onclick={() => goto(detailHref(row.request_id))}
               >
-                <td class="px-3 py-2">
+                <td data-label={$t("Time")}>
                   <a class="link-inline" href={detailHref(row.request_id)}>
                     {formatTimestamp(new Date(row.created_at).toISOString())}
                   </a>
                 </td>
-                <td class="px-3 py-2">{row.served_model ?? "—"}</td>
-                <td class="px-3 py-2">{row.lane}</td>
-                <td class="px-3 py-2">
+                <td data-label={$t("Model")}>{row.served_model ?? "—"}</td>
+                <td data-label={$t("Lane")}>{row.lane}</td>
+                <td data-label={$t("Status")}>
                   <span
                     class="badge {row.status === 'ok'
                       ? 'badge-ok'
                       : 'badge-error'}">{row.status}</span
                   >
                 </td>
-                <td class="px-3 py-2 text-right"
+                <td data-label={$t("Latency")} class="table-mode:text-right"
                   >{formatDurationMs(row.latency_ms)}</td
                 >
-                <td class="px-3 py-2 text-right">
+                <td data-label={$t("Tokens")} class="table-mode:text-right">
                   <TokensCell usage={toTokenUsageView(row.usage)} />
                 </td>
-                <td class="px-3 py-2 text-right">{formatUsd(row.cost_usd)}</td>
+                <td data-label={$t("Cost")} class="table-mode:text-right">
+                  {formatUsd(row.cost_usd)}
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -333,31 +335,38 @@
         </div>
 
         {#if totalPages > 1}
-          <nav class="flex items-center gap-1" aria-label={$t("Pagination")}>
+          <nav
+            class="flex w-full items-center justify-between gap-1 sm:w-auto sm:justify-start"
+            aria-label={$t("Pagination")}
+          >
             <button
               type="button"
               class="btn-secondary"
               disabled={page <= 1}
               onclick={() => go({ page: page - 1 })}>{$t("Previous")}</button
             >
-            {#each pageItems as item, i (item === "ellipsis" ? `e${i}` : item)}
-              {#if item === "ellipsis"}
-                <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
-              {:else if item === page}
-                <span
-                  aria-current="page"
-                  class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
-                  >{item}</span
-                >
-              {:else}
-                <a
-                  data-sveltekit-noscroll
-                  href={pageHref(item)}
-                  class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-                  >{item}</a
-                >
-              {/if}
-            {/each}
+            <!-- Numbered pages need room; phones rely on Previous/Next and the
+                 "Page x of y" text. -->
+            <div class="hidden items-center gap-1 sm:flex">
+              {#each pageItems as item, i (item === "ellipsis" ? `e${i}` : item)}
+                {#if item === "ellipsis"}
+                  <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
+                {:else if item === page}
+                  <span
+                    aria-current="page"
+                    class="inline-flex h-11 min-w-11 md:h-9 md:min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+                    >{item}</span
+                  >
+                {:else}
+                  <a
+                    data-sveltekit-noscroll
+                    href={pageHref(item)}
+                    class="inline-flex h-11 min-w-11 md:h-9 md:min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                    >{item}</a
+                  >
+                {/if}
+              {/each}
+            </div>
             <button
               type="button"
               class="btn-secondary"

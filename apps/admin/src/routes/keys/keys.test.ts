@@ -586,4 +586,16 @@ describe('keys page', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(screen.getAllByTestId('key-row')).toHaveLength(1);
   });
+
+  it('leaves the row-actions cell without a caption and lets the root warning fill a narrow row', () => {
+    renderPage([key('k1', { role: 'root' })]);
+    const row = screen.getByTestId('key-row');
+    const actionsCell = within(row)
+      .getByRole('link', { name: /^details$/i })
+      .closest('td');
+    // A data-label would print an "Actions" caption above the buttons in row mode.
+    expect(actionsCell).not.toHaveAttribute('data-label');
+    expect(screen.getByTestId('root-warning').className).not.toMatch(/(^|\s)max-w-56/);
+    expect(screen.getByTestId('root-warning').className).toContain('table-mode:max-w-56');
+  });
 });

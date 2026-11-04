@@ -62,16 +62,28 @@
   {:else if loadError}
     <p class="alert-error">{loadError}</p>
   {:else if me}
-    <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
+    <div
+      class="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3"
+    >
       <div class="card">
         <h2 class="section-header mb-3">{$t("Key")}</h2>
-        <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+        <dl
+          class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-sm"
+        >
           <dt class="text-ink-muted">{$t("Key")}</dt>
           <dd class="text-right font-mono">{me.key_prefix}…</dd>
           <dt class="text-ink-muted">{$t("Role")}</dt>
           <dd class="text-right">{me.role}</dd>
           <dt class="text-ink-muted">{$t("Allowed clients")}</dt>
-          <dd class="text-right">{me.client_policy == null ? $t("all") : me.client_policy.allowed_clients.length === 0 ? $t("No clients allowed. Contact your administrator.") : me.client_policy.allowed_clients.map((id) => CLIENT_LABELS[id]).join(", ")}</dd>
+          <dd class="text-right">
+            {me.client_policy == null
+              ? $t("all")
+              : me.client_policy.allowed_clients.length === 0
+                ? $t("No clients allowed. Contact your administrator.")
+                : me.client_policy.allowed_clients
+                    .map((id) => CLIENT_LABELS[id])
+                    .join(", ")}
+          </dd>
           <dt class="text-ink-muted">{$t("Available lanes")}</dt>
           <dd class="text-right">
             {me.allowed_lanes?.join(", ") ?? $t("all")}
@@ -149,7 +161,9 @@
 
       <div class="card">
         <h2 class="section-header mb-3">{$t("Memory")}</h2>
-        <dl class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+        <dl
+          class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-sm"
+        >
           <dt class="text-ink-muted">{$t("Memory mode")}</dt>
           <dd class="text-right">{me.memory.mode}</dd>
           <dt class="text-ink-muted">{$t("Project")}</dt>

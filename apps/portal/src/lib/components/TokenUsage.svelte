@@ -11,7 +11,10 @@
   const fmt = formatTokens;
 </script>
 
-<dl data-testid="token-usage" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
+<dl
+  data-testid="token-usage"
+  class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1 text-sm"
+>
   <dt class="text-ink-muted">{$t("Input tokens")}</dt>
   <dd data-testid="tokens-input" class="text-right font-mono text-ink-strong">
     {fmt(usage.input)}

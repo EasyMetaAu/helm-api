@@ -24,7 +24,9 @@
     <tbody>
       {#each dimensions as dim (dim.name)}
         <tr class="table-row" data-testid="dimension-row">
-          <td class="px-3 py-2 font-mono text-ink-strong">{dim.name}</td>
+          <td class="whitespace-normal px-3 py-2 font-mono text-ink-strong [overflow-wrap:anywhere]"
+            >{dim.name}</td
+          >
           <td class="px-3 py-2 tabular-nums text-ink-body">{dim.weight}</td>
           <td class="px-3 py-2 text-ink-body">
             <span aria-hidden="true">{arrow(dim.direction)}</span>

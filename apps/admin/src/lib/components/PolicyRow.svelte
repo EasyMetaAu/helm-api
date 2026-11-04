@@ -165,86 +165,90 @@
     </p>
   {/if}
 
-  <fieldset class="flex flex-col gap-3">
-    <legend class="field-label">{$t('When a request matches ALL of:')}</legend>
+  <div class="grid gap-3 xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] xl:gap-8">
+    <fieldset class="flex flex-col gap-3">
+      <legend class="field-label">{$t('When a request matches ALL of:')}</legend>
 
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="field">
-        <span class="field-label">{$t('Task type')}</span>
-        <select
-          class="select"
-          value={match.task_type ?? ''}
-          onchange={(e) => emitMatch({ task_type: e.currentTarget.value })}
-        >
-          <option value="">{$t('(any)')}</option>
-          {#each TASK_TYPE_OPTIONS as opt (opt)}
-            <option value={opt}>{opt}</option>
-          {/each}
-        </select>
+      <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <label class="field">
+          <span class="field-label">{$t('Task type')}</span>
+          <select
+            class="select"
+            value={match.task_type ?? ''}
+            onchange={(e) => emitMatch({ task_type: e.currentTarget.value })}
+          >
+            <option value="">{$t('(any)')}</option>
+            {#each TASK_TYPE_OPTIONS as opt (opt)}
+              <option value={opt}>{opt}</option>
+            {/each}
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">{$t('Complexity')}</span>
+          <select
+            class="select"
+            value={match.complexity ?? ''}
+            onchange={(e) => emitMatch({ complexity: e.currentTarget.value })}
+          >
+            <option value="">{$t('(any)')}</option>
+            {#each COMPLEXITY_OPTIONS as c (c)}
+              <option value={c}>{c}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+
+      <label class="checkbox-field items-start">
+        <input
+          type="checkbox"
+          class="checkbox mt-0.5"
+          checked={match.needs_json === true}
+          onchange={(e) => emitMatch({ needs_json: e.currentTarget.checked ? true : undefined })}
+        />
+        <span class="flex flex-col">
+          <span class="field-label">{$t('Requires JSON output')}</span>
+          <span class="field-help">{$t('Match requests that ask for a JSON response.')}</span>
+        </span>
       </label>
+    </fieldset>
 
-      <label class="field">
-        <span class="field-label">{$t('Complexity')}</span>
-        <select
-          class="select"
-          value={match.complexity ?? ''}
-          onchange={(e) => emitMatch({ complexity: e.currentTarget.value })}
-        >
-          <option value="">{$t('(any)')}</option>
-          {#each COMPLEXITY_OPTIONS as c (c)}
-            <option value={c}>{c}</option>
-          {/each}
-        </select>
-      </label>
-    </div>
+    <fieldset
+      class="flex flex-col gap-2 border-t border-slate-100 pt-3 xl:border-t-0 xl:border-l xl:pl-8 xl:pt-0"
+    >
+      <legend class="field-label">{$t('Then apply actions:')}</legend>
 
-    <label class="checkbox-field items-start">
-      <input
-        type="checkbox"
-        class="checkbox mt-0.5"
-        checked={match.needs_json === true}
-        onchange={(e) => emitMatch({ needs_json: e.currentTarget.checked ? true : undefined })}
-      />
-      <span class="flex flex-col">
-        <span class="field-label">{$t('Requires JSON output')}</span>
-        <span class="field-help">{$t('Match requests that ask for a JSON response.')}</span>
-      </span>
-    </label>
-  </fieldset>
+      <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <label class="field">
+          <span class="field-label">{$t('Force lane')}</span>
+          <select
+            aria-label={$t('use lane')}
+            class="select"
+            value={useLane}
+            onchange={(e) => setLane(e.currentTarget.value)}
+          >
+            <option value="">{$t('(select lane)')}</option>
+            {#each lanes as l (l)}
+              <option value={l}>{l}</option>
+            {/each}
+          </select>
+        </label>
 
-  <fieldset class="flex flex-col gap-2 border-t border-slate-100 pt-3">
-    <legend class="field-label">{$t('Then apply actions:')}</legend>
-
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="field">
-        <span class="field-label">{$t('Force lane')}</span>
-        <select
-          aria-label={$t('use lane')}
-          class="select"
-          value={useLane}
-          onchange={(e) => setLane(e.currentTarget.value)}
-        >
-          <option value="">{$t('(select lane)')}</option>
-          {#each lanes as l (l)}
-            <option value={l}>{l}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label class="field">
-        <span class="field-label">{$t('Forced reasoning effort')}</span>
-        <select
-          aria-label={$t('policy reasoning effort')}
-          class="select"
-          value={reasoningEffort}
-          onchange={(e) => setReasoningEffort(e.currentTarget.value)}
-        >
-          <option value="">{$t('Unset (lane/client decides)')}</option>
-          {#each REASONING_EFFORTS as eff (eff)}
-            <option value={eff}>{eff}</option>
-          {/each}
-        </select>
-      </label>
-    </div>
-  </fieldset>
+        <label class="field">
+          <span class="field-label">{$t('Forced reasoning effort')}</span>
+          <select
+            aria-label={$t('policy reasoning effort')}
+            class="select"
+            value={reasoningEffort}
+            onchange={(e) => setReasoningEffort(e.currentTarget.value)}
+          >
+            <option value="">{$t('Unset (lane/client decides)')}</option>
+            {#each REASONING_EFFORTS as eff (eff)}
+              <option value={eff}>{eff}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+    </fieldset>
+  </div>
 </div>

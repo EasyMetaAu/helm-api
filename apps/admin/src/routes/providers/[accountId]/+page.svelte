@@ -138,7 +138,7 @@
   }
 </script>
 
-<div class="w-full px-4 py-6 md:px-8 md:py-8">
+<div class="w-full px-4 py-6 md:px-8">
   <header class="mb-5">
     <a class="link-inline text-sm" href={`${base}/providers`}>← {$t('Providers')}</a>
     <div class="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -311,7 +311,7 @@
     </section>
 
     <!-- History table -->
-    <section class="cards-table-frame">
+    <section class="cards-table-frame compact">
       <table class="cards-table">
         <thead class="table-head">
           <tr>
@@ -345,16 +345,16 @@
                   <span class="ml-1 text-xs text-amber-600">{$t('(partial)')}</span>
                 {/if}
               </td>
-              <td data-label={$t('Requests')} class="px-3 py-2 text-right font-mono"
+              <td data-label={$t('Requests')} class="px-3 py-2 font-mono table-mode:text-right"
                 >{formatCount(p.requests)}</td
               >
-              <td data-label={$t('Tokens')} class="px-3 py-2 text-right font-mono"
+              <td data-label={$t('Tokens')} class="px-3 py-2 font-mono table-mode:text-right"
                 >{formatTokens(p.tokens)}</td
               >
-              <td data-label={$t('Cost')} class="px-3 py-2 text-right font-mono"
+              <td data-label={$t('Cost')} class="px-3 py-2 font-mono table-mode:text-right"
                 >{formatUsd(p.costUsd)}</td
               >
-              <td data-label={`${$t('Used')} %`} class="px-3 py-2 text-right font-mono">
+              <td data-label={`${$t('Used')} %`} class="px-3 py-2 font-mono table-mode:text-right">
                 {granularity === 'period' && p.usedPercent != null
                   ? `${Math.round(p.usedPercent)}%`
                   : '—'}

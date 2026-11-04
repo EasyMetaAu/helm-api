@@ -338,19 +338,17 @@
             )}
           </div>
         {:else}
-          <div
-            class="cards-table-frame lg:overflow-visible lg:bg-white lg:[&_thead_th:first-child]:rounded-tl-lg lg:[&_thead_th:last-child]:rounded-tr-lg"
-          >
+          <div class="cards-table-frame compact overflow-visible">
             <table class="cards-table">
               <thead class="table-head"
                 ><tr>
-                  <th class="px-3 py-2 lg:w-[30%]">{$t('Account')}</th>
-                  <th class="px-3 py-2 lg:w-[25%]">{$t('Status')}</th>
+                  <th class="px-3 py-2 table-mode:w-[30%]">{$t('Account')}</th>
+                  <th class="px-3 py-2 table-mode:w-[25%]">{$t('Status')}</th>
                   <th class="px-3 py-2">{$t('Usage (last 24 hours)')}</th>
                   {#if pool.strategy === 'manual_priority'}<th class="px-3 py-2"
                       >{$t('Priority')}</th
                     >{/if}
-                  <th class="px-3 py-2 lg:text-right">{$t('Actions')}</th>
+                  <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
                 </tr></thead
               >
               <tbody>
@@ -398,11 +396,11 @@
                         data-label={$t('Priority')}
                         class="tabular-nums text-ink-body">{account.priority}</td
                       >{/if}
-                    <td data-label={$t('Actions')}>
+                    <td>
                       <div class="flex items-center justify-end gap-2">
                         <button
                           type="button"
-                          class="btn-secondary flex-1 lg:flex-none"
+                          class="btn-secondary"
                           disabled={busy ||
                             testBusy ||
                             batchBusy ||
@@ -411,7 +409,7 @@
                         >
                         <button
                           type="button"
-                          class="btn-secondary flex-1 lg:flex-none"
+                          class="btn-secondary"
                           disabled={busy}
                           onclick={() => edit(pool.id, account)}>{$t('Manage')}</button
                         >

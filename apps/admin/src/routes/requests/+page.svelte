@@ -185,7 +185,7 @@
 </script>
 
 <section class="page">
-  <header class="flex items-start justify-between gap-3">
+  <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Requests')}</h1>
       <p class="section-desc">
@@ -245,7 +245,7 @@
        model / route text. Selects apply immediately; text search applies on Enter
        or Apply. Changing any filter resets to page 1. -->
   <form
-    class="card grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(12rem,1fr)_minmax(14rem,1.2fr)_minmax(8rem,.65fr)_minmax(7rem,.5fr)_minmax(8rem,.6fr)_auto] xl:items-end"
+    class="card grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 lg:items-end 2xl:grid-cols-[minmax(12rem,1fr)_minmax(14rem,1.2fr)_minmax(8rem,.65fr)_minmax(7rem,.5fr)_minmax(8rem,.6fr)_auto]"
     onsubmit={(e) => {
       e.preventDefault();
       go();
@@ -310,7 +310,7 @@
       </select>
     </label>
 
-    <div class="flex items-center gap-2 sm:col-span-2 xl:col-span-1">
+    <div class="flex items-center gap-2 sm:col-span-2 lg:col-span-1">
       <button type="submit" class="btn-secondary">{$t('Apply')}</button>
       <button type="button" data-testid="filter-reset" class="btn-secondary" onclick={reset}
         >{$t('Reset')}</button
@@ -404,7 +404,7 @@
          with the rows shown. Page numbers are real <a> links (native pointer cursor /
          open-in-new-tab); Prev/Next stay buttons for their disabled states. -->
     <div
-      class="flex flex-col gap-3 text-sm text-ink-muted sm:flex-row sm:items-center sm:justify-between"
+      class="flex flex-col gap-3 text-sm text-ink-muted lg:flex-row lg:items-center lg:justify-between"
     >
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
         <label class="flex items-center gap-2">
@@ -426,7 +426,7 @@
         </span>
       </div>
 
-      <nav class="flex items-center gap-1" aria-label={$t('Pagination')}>
+      <nav class="flex shrink-0 flex-wrap items-center gap-1" aria-label={$t('Pagination')}>
         <button
           type="button"
           data-testid="pager-prev"
@@ -441,7 +441,7 @@
             <span
               data-testid="pager-page-current"
               aria-current="page"
-              class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+              class="inline-flex h-11 min-w-11 lg:h-9 lg:min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
               >{item}</span
             >
           {:else}
@@ -449,7 +449,7 @@
               data-testid="pager-page"
               data-sveltekit-noscroll
               href={pageHref(item)}
-              class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+              class="inline-flex h-11 min-w-11 lg:h-9 lg:min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
               >{item}</a
             >
           {/if}
