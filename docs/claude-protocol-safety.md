@@ -117,6 +117,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 账号归因函数（旧 227901174–227901863／新 258720048–258720737）保持账户来源优先级与受保护 metadata 的覆盖顺序；新主请求 metadata 调用位于 263324956。附加保护头（256056998）仍由 `CLAUDE_CODE_ADDITIONAL_PROTECTION` 控制，不新增身份模拟。
 - SDK SSE 分支（旧 224980287／新 255885736，各检查 4100 字节）以及主消费分支（旧 232429790／新 263378251，各检查 2000 字节）在归一化局部压缩变量名后结构一致，保留文本、工具参数、thinking、signature 与 compaction 的处理。未发现本次范围内需要调整 Helm 协议实现的 P0/P1 问题；继续运行既有身份边界与流式回归。静态片段不证明全部客户端行为或真实上游兼容。
 
+2026-11-04 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.318`：新旧 2.1.316 平台包均通过 npm SHA512 integrity 校验，旧包二进制与审核记录一致，新二进制 SHA256 为 `677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d`，内嵌 SDK 仍为 `0.128.0`（字节偏移 262430818）。只静态读取公开制品，没有执行下载的 CLI 或访问账户。
+
+- 引号内 `X-*`、`x-*`、`Anthropic-*`、`anthropic-*` 字段由 342 项变为 344 项：新增 `x-cc-internal-tool-provenance-server-url`（功能开关表中的内部开关名，与 beta `tool-provenance-2026-10-26` 并列，128134676）、`x-ccr-gmail-attachments`（远程 MCP 连接器字段，与 `x-mcp-server-origin` 同处定义，265111694）、`x-ccr-tool-container-host-draining`（读取 MCP 响应头，295173287）；删除 `x-ccr-ticket-mcp`。它们都不是推理入站头，已审查白名单不变，10 个已审查字段在新版中仍全部存在。
+- 新增 beta 值 `claude-code-side-query-2026-09-29`、`program-use-case-ids-2026-09-17`、`tool-provenance-2026-10-26`。Helm 原生透传只合并客户端实际发送的 `anthropic-beta`，不自行补造，因此无需修改。
+- 账号归因头（131506332）、附加保护头（261282352）、`x-client-app`、request-class／prompt-id 构造，以及 SSE 的文本、citation、JSON-input、thinking、signature、compaction 分支（262670538 附近）在归一化压缩变量名后与旧版结构一致。未发现需要调整 Helm 协议实现的 P0/P1 问题；有限静态审查不证明全部客户端行为一致，也不替代真实上游验收。
+
 发布/同步流程在写版本快照前要求：
 
 1. 新发现的 Claude CLI 版本必须等于已审查版本。新版本不能通过单改生成文件获得“协议兼容”状态。
