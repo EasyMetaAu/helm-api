@@ -4,7 +4,10 @@
 
   // `compact` renders a narrow, auto-width pill for the header status cluster;
   // the default block variant is the full-width control used in forms/sidebars.
-  let { compact = false }: { compact?: boolean } = $props();
+  let {
+    compact = false,
+    id = "locale-switcher",
+  }: { compact?: boolean; id?: string } = $props();
 
   function onChange(event: Event): void {
     const next = (event.currentTarget as HTMLSelectElement).value as LocaleCode;
@@ -13,7 +16,7 @@
 </script>
 
 <div class="relative">
-  <label class="sr-only" for="locale-switcher">{$t("Language")}</label>
+  <label class="sr-only" for={id}>{$t("Language")}</label>
   <!-- Globe icon -->
   <svg
     class="pointer-events-none absolute top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 {compact
@@ -32,11 +35,11 @@
     />
   </svg>
   <select
-    id="locale-switcher"
+    {id}
     value={$locale}
     onchange={onChange}
     class="cursor-pointer appearance-none {compact
-      ? 'w-auto rounded-control border border-slate-200 bg-white py-1.5 pl-8 pr-7 text-sm text-slate-600 transition-colors hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/40'
+      ? 'min-h-11 w-auto md:min-h-0 rounded-control border border-slate-200 bg-white py-1.5 pl-8 pr-7 text-sm text-slate-600 transition-colors hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/40'
       : 'select pl-8 pr-7'}"
   >
     {#each SUPPORTED_LANGUAGES as language (language.code)}

@@ -321,7 +321,7 @@
     {:else}
       <div class="flex items-center justify-between text-sm">
         <span>{formatUsd(spent)} {$t("of")} {formatUsd(spendCap)}</span>
-        <span class="text-ink-3"
+        <span class="text-ink-muted"
           >{spendPct !== null ? `${Math.round(spendPct)}%` : ""}</span
         >
       </div>
@@ -415,7 +415,7 @@
         </div>
         <ul class="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5">
           {#each byModel as slice, i (i)}
-            <li class="flex items-start gap-1.5 text-xs text-ink-2">
+            <li class="flex items-start gap-1.5 text-xs text-ink-body">
               <span
                 class="mt-0.5 size-2.5 shrink-0 rounded-full"
                 style:background-color={SLICE_COLORS[i % SLICE_COLORS.length]}
@@ -436,10 +436,10 @@
 
   <!-- "By model" table: same data the donut slices, with request count + share%. -->
   {#if modelRows.length > 0}
-    <section class="card mt-4">
+    <section class="mt-4">
       <h2 class="section-header mb-3">{$t("By model")}</h2>
-      <div class="table-wrap">
-        <table class="table-base">
+      <div class="cards-table-frame compact">
+        <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2 text-left">{$t("Model")}</th>
@@ -451,8 +451,8 @@
           </thead>
           <tbody>
             {#each modelRows as row, i (row.model)}
-              <tr class="table-row">
-                <td class="px-3 py-2">
+              <tr>
+                <td data-label={$t("Model")}>
                   <span
                     class="mr-1.5 inline-block size-2.5 rounded-full align-middle"
                     style:background-color={SLICE_COLORS[
@@ -461,14 +461,18 @@
                   ></span>
                   <span class="align-middle">{row.model}</span>
                 </td>
-                <td class="px-3 py-2 text-right">
+                <td data-label={$t("Requests")} class="table-mode:text-right">
                   {formatTokens(row.requests)}
                 </td>
-                <td class="px-3 py-2 text-right">
+                <td data-label={$t("Tokens")} class="table-mode:text-right">
                   {formatTokens(row.tokens)}
                 </td>
-                <td class="px-3 py-2 text-right">{formatUsd(row.cost)}</td>
-                <td class="px-3 py-2 text-right">{row.sharePct}%</td>
+                <td data-label={$t("Cost")} class="table-mode:text-right">
+                  {formatUsd(row.cost)}
+                </td>
+                <td data-label={$t("Share")} class="table-mode:text-right">
+                  {row.sharePct}%
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -480,10 +484,10 @@
   <!-- Daily usage: only shown once the series is day-bucketed (7d/30d/all) — the
        hourly today/yesterday series already has the trend chart above. -->
   {#if dailyRows.length > 0}
-    <section class="card mt-4">
+    <section class="mt-4">
       <h2 class="section-header mb-3">{$t("Daily usage")}</h2>
-      <div class="table-wrap">
-        <table class="table-base">
+      <div class="cards-table-frame compact">
+        <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2 text-left">{$t("Date")}</th>
@@ -494,17 +498,19 @@
           </thead>
           <tbody>
             {#each dailyRows as row (row.date.getTime())}
-              <tr class="table-row">
-                <td class="px-3 py-2">
+              <tr>
+                <td data-label={$t("Date")}>
                   {formatTrendTick(row.date, "day")}
                 </td>
-                <td class="px-3 py-2 text-right">
+                <td data-label={$t("Requests")} class="table-mode:text-right">
                   {formatTokens(row.requests)}
                 </td>
-                <td class="px-3 py-2 text-right">
+                <td data-label={$t("Tokens")} class="table-mode:text-right">
                   {formatTokens(row.tokens)}
                 </td>
-                <td class="px-3 py-2 text-right">{formatUsd(row.cost)}</td>
+                <td data-label={$t("Cost")} class="table-mode:text-right">
+                  {formatUsd(row.cost)}
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -514,7 +520,7 @@
   {/if}
 
   <!-- Recent requests -->
-  <section class="card mt-4">
+  <section class="mt-4">
     <div class="mb-3 flex items-center justify-between">
       <h2 class="section-header">{$t("Recent requests")}</h2>
       <a class="link-inline" href={`${base}/requests`}>{$t("View all")}</a>
@@ -522,8 +528,8 @@
     {#if recent.length === 0}
       <div class="empty-state">{$t("No requests yet.")}</div>
     {:else}
-      <div class="table-wrap">
-        <table class="table-base">
+      <div class="cards-table-frame dense">
+        <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2 text-left">{$t("Time")}</th>
@@ -539,10 +545,10 @@
               <!-- Whole row is a link to the detail (keyboard: the time cell holds
                    the real focusable <a>; mouse: click anywhere on the row). -->
               <tr
-                class="table-row cursor-pointer hover:bg-canvas"
+                class="cursor-pointer"
                 onclick={() => goto(`${base}/requests/${row.request_id}`)}
               >
-                <td class="px-3 py-2">
+                <td data-label={$t("Time")}>
                   <a
                     class="link-inline"
                     href={`${base}/requests/${row.request_id}`}
@@ -550,19 +556,21 @@
                     {formatTimestamp(new Date(row.created_at).toISOString())}
                   </a>
                 </td>
-                <td class="px-3 py-2">{row.served_model ?? "—"}</td>
-                <td class="px-3 py-2">{row.lane}</td>
-                <td class="px-3 py-2">
+                <td data-label={$t("Model")}>{row.served_model ?? "—"}</td>
+                <td data-label={$t("Lane")}>{row.lane}</td>
+                <td data-label={$t("Status")}>
                   <span
                     class="badge {row.status === 'ok'
                       ? 'badge-ok'
                       : 'badge-error'}">{row.status}</span
                   >
                 </td>
-                <td class="px-3 py-2 text-right"
+                <td data-label={$t("Tokens")} class="table-mode:text-right"
                   >{formatTokens(row.usage?.completion_tokens ?? null)}</td
                 >
-                <td class="px-3 py-2 text-right">{formatUsd(row.cost_usd)}</td>
+                <td data-label={$t("Cost")} class="table-mode:text-right">
+                  {formatUsd(row.cost_usd)}
+                </td>
               </tr>
             {/each}
           </tbody>

@@ -10,9 +10,12 @@ describe("Portal account page", () => {
   it("fills the window and lays out key details as a 2-column description list", () => {
     expect(page).not.toContain("max-w-3xl");
     expect(page).toContain("<dl");
-    expect(page).toContain("grid-cols-2");
-    // The three cards sit side by side on wide screens, so a full-width page never
-    // stretches a label away from its value.
+    // Label column hugs its text, value column takes the rest and may shrink, so
+    // a long value wraps by words instead of orphaning characters on phones.
+    expect(page).toContain("grid-cols-[auto_minmax(0,1fr)]");
+    // The cards go two-up from tablets and three-up on wide screens, so a
+    // full-width page never stretches a label away from its value.
+    expect(page).toContain("md:grid-cols-2");
     expect(page).toContain("xl:grid-cols-3");
   });
 

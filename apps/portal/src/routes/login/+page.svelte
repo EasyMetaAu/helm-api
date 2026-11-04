@@ -47,7 +47,7 @@
 <div class="flex min-h-screen items-center justify-center bg-canvas px-4">
   <div class="w-full max-w-sm">
     <div class="mb-6 flex items-center justify-between">
-      <div class="flex items-center gap-2 text-lg font-semibold text-ink-1">
+      <div class="flex items-center gap-2 text-lg font-semibold text-ink">
         <Logo /> Helm
       </div>
       <LocaleSwitcher compact />

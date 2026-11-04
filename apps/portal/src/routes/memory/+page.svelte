@@ -304,9 +304,9 @@
       class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between"
     >
       <h2 class="section-header">{$t("Facts")}</h2>
-      <div class="flex flex-wrap items-end gap-2">
+      <div class="flex w-full flex-wrap items-end gap-2 lg:w-auto">
         <form
-          class="flex items-end gap-2"
+          class="flex w-full items-end gap-2 sm:w-auto"
           onsubmit={(e) => {
             e.preventDefault();
             applyFactSearch();
@@ -314,17 +314,19 @@
         >
           <input
             type="search"
-            class="input w-52"
+            class="input min-w-0 flex-1 sm:w-52 sm:flex-none"
             aria-label={$t("Search facts")}
             placeholder={$t("Search fact text…")}
             bind:value={factSearch}
           />
           <button type="submit" class="btn-secondary">{$t("Search")}</button>
         </form>
-        <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+        <label
+          class="flex w-full flex-col gap-1 text-xs font-medium text-ink-muted sm:w-auto"
+        >
           {$t("Status")}
           <select
-            class="select w-40"
+            class="select w-full sm:w-40"
             aria-label={$t("Fact status filter")}
             bind:value={factStatus}
             onchange={() => {
@@ -340,7 +342,7 @@
         </label>
         <button
           type="button"
-          class="btn-primary-sm"
+          class="btn-primary-sm min-h-11 whitespace-nowrap md:min-h-0"
           onclick={() => (showAddFact = true)}
         >
           {$t("Add fact")}
@@ -403,7 +405,7 @@
                 <td data-label={$t("Updated")} class="px-3 py-2 text-ink-muted">
                   {formatTimestamp(fact.updatedAt)}
                 </td>
-                <td class="px-3 py-2 lg:text-right">
+                <td class="px-3 py-2 table-mode:text-right">
                   <div class="flex justify-end gap-2">
                     <button
                       type="button"
@@ -436,30 +438,37 @@
           })} ·
           {$t("{total} facts", { total: filteredFacts.length })}
         </span>
-        <nav class="flex items-center gap-1" aria-label={$t("Pagination")}>
+        <nav
+          class="flex w-full items-center justify-between gap-1 sm:w-auto sm:justify-start"
+          aria-label={$t("Pagination")}
+        >
           <button
             type="button"
             class="btn-secondary"
             disabled={factPage <= 1}
             onclick={() => (factPage -= 1)}>{$t("Previous")}</button
           >
-          {#each factPageItems as item, i (item === "ellipsis" ? `e${i}` : item)}
-            {#if item === "ellipsis"}
-              <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
-            {:else if item === factPage}
-              <span
-                aria-current="page"
-                class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
-                >{item}</span
-              >
-            {:else}
-              <button
-                type="button"
-                class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-                onclick={() => (factPage = item)}>{item}</button
-              >
-            {/if}
-          {/each}
+          <!-- Numbered pages need room; phones rely on Previous/Next and the
+               "Page x of y" text. -->
+          <div class="hidden items-center gap-1 sm:flex">
+            {#each factPageItems as item, i (item === "ellipsis" ? `e${i}` : item)}
+              {#if item === "ellipsis"}
+                <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
+              {:else if item === factPage}
+                <span
+                  aria-current="page"
+                  class="inline-flex h-11 min-w-11 md:h-9 md:min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+                  >{item}</span
+                >
+              {:else}
+                <button
+                  type="button"
+                  class="inline-flex h-11 min-w-11 md:h-9 md:min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                  onclick={() => (factPage = item)}>{item}</button
+                >
+              {/if}
+            {/each}
+          </div>
           <button
             type="button"
             class="btn-secondary"

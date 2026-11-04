@@ -1050,17 +1050,16 @@
         </p>
       </div>
     {:else}
-      <div class="cards-table-frame lg:bg-white">
+      <div class="cards-table-frame overflow-visible">
         <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2">{$t('Provider')}</th>
-              <th class="px-3 py-2">{$t('Status')}</th>
               <th class="px-3 py-2">{$t('Models')}</th>
               <th class="px-3 py-2">{$t('Today')}</th>
               <th class="px-3 py-2">{$t('Quota')}</th>
               <th class="px-3 py-2">{$t('Scheduling')}</th>
-              <th class="px-3 py-2 lg:sticky lg:right-0 lg:bg-slate-50">{$t('Actions')}</th>
+              <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1103,9 +1102,12 @@
                   row.account.isFedramp,
                 )}
               <tr class="align-top" data-testid="provider-account-row">
-                <!-- Provider / account + type badge. The name+account is a link into the
-                   account usage-detail page (per-reset-period token usage). -->
-                <td data-label={$t('Provider')} class="lg:max-w-56 lg:whitespace-normal">
+                <!-- Provider / account + health + type badge. The name+account is a link
+                   into the account usage-detail page (per-reset-period token usage). -->
+                <td
+                  data-label={$t('Provider')}
+                  class="table-mode:w-56 table-mode:whitespace-normal"
+                >
                   <a
                     class="group block"
                     href={accountDetailHref(base, row.provider.id, row.account.account)}
@@ -1173,20 +1175,17 @@
                       >
                     {/if}
                   </div>
-                </td>
-
-                <!-- Status (+ parked pill) -->
-                <td data-label={$t('Status')} class="lg:whitespace-normal">
-                  {#if row.account.healthy}
-                    <span class="badge-ok">{$t('connected')}</span>
-                  {:else}
-                    <span class="badge-error">{$t('needs reconnect')}</span>
-                  {/if}
-                  {#if !row.account.schedulable}
-                    <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
-                  {/if}
-                  {#if usageLimit}
-                    <div class="mt-1">
+                  <!-- Health (+ parked / rate-limit pill and its recovery time) -->
+                  <div class="mt-1.5 flex flex-wrap items-center gap-1">
+                    {#if row.account.healthy}
+                      <span class="badge-ok">{$t('connected')}</span>
+                    {:else}
+                      <span class="badge-error">{$t('needs reconnect')}</span>
+                    {/if}
+                    {#if !row.account.schedulable}
+                      <span class="badge-neutral">{$t('parked')}</span>
+                    {/if}
+                    {#if usageLimit}
                       {#if row.account.allowSpendRemainingCredits}
                         <!-- Toggle on: the account still serves off its remaining credits
                            despite the limit, so the pill reflects that instead of a plain
@@ -1198,14 +1197,14 @@
                         <span class="badge-error">{$t('Rate limited')}</span>
                       {/if}
                       {#if usageLimitRecovery}
-                        <div class="text-[10px] text-ink-muted">
+                        <span class="basis-full text-[10px] text-ink-muted">
                           {usageLimit.label
                             ? `${usageLimit.label} · ${usageLimitRecovery}`
                             : usageLimitRecovery}
-                        </div>
+                        </span>
                       {/if}
-                    </div>
-                  {/if}
+                    {/if}
+                  </div>
                 </td>
 
                 <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
@@ -1219,7 +1218,7 @@
                       .slice(0, MODELS_SHOWN)}
                     {@const extra = row.account.models.length - shown.length}
                     <div
-                      class="flex max-w-full flex-wrap gap-1 lg:w-52"
+                      class="flex max-w-full flex-wrap gap-1 table-mode:w-48"
                       title={row.account.models.join('\n')}
                     >
                       {#each shown as m (m)}
@@ -1256,7 +1255,7 @@
                 <!-- Quota / session windows (+ Codex reset-credit count) -->
                 <td data-label={$t('Quota')} data-testid="provider-quota-cell">
                   {#if quota && quota.windows.length > 0}
-                    <div class="flex w-full flex-col gap-1.5 lg:w-36">
+                    <div class="flex w-full flex-col gap-1.5 table-mode:w-36">
                       {#each quota.windows as w (w.key)}
                         <div>
                           <div
@@ -1364,14 +1363,14 @@
                   data-testid="provider-scheduling-cell"
                 >
                   <div
-                    class="grid w-full max-w-full grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1 lg:w-max lg:grid-cols-[auto_auto_auto_auto]"
+                    class="grid w-max max-w-full grid-cols-[auto_auto] items-center gap-x-3 gap-y-1"
                   >
                     <span class="text-ink-muted">{$t('Priority')}</span>
                     <input
                       type="number"
                       min="0"
                       step="1"
-                      class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
+                      class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 lg:min-h-0"
                       value={row.account.priority}
                       disabled={saving}
                       aria-label={$t('Priority')}
@@ -1381,7 +1380,7 @@
                     <span class="text-ink-muted">{$t('Schedulable')}</span>
                     <input
                       type="checkbox"
-                      class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                      class="h-5 w-5 disabled:opacity-50 lg:h-4 lg:w-4"
                       checked={row.account.schedulable}
                       disabled={saving || credentialFailed}
                       aria-label={$t('Schedulable')}
@@ -1397,7 +1396,7 @@
                       <span class="text-ink-muted">{$t('Fast')}</span>
                       <input
                         type="checkbox"
-                        class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                        class="h-5 w-5 disabled:opacity-50 lg:h-4 lg:w-4"
                         checked={row.account.fastMode ?? false}
                         disabled={saving}
                         aria-label={$t('Fast mode')}
@@ -1415,10 +1414,7 @@
                 </td>
 
                 <!-- Actions -->
-                <td
-                  data-label={$t('Actions')}
-                  class="lg:sticky lg:right-0 lg:bg-white lg:text-right"
-                >
+                <td class="table-mode:text-right">
                   <div class="flex items-center justify-end gap-2">
                     {#if needsReconnect}
                       <button

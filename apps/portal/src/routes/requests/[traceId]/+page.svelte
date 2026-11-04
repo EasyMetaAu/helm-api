@@ -185,12 +185,12 @@
   <div class="section-desc mb-4 flex flex-wrap gap-x-4 gap-y-1 text-xs">
     <span>
       {$t("Request ID")}:
-      <code class="font-mono">{detail.request_id}</code>
+      <code class="break-all font-mono">{detail.request_id}</code>
     </span>
     {#if detail.trace_id !== detail.request_id}
       <span>
         {$t("Client trace ID")}:
-        <code class="font-mono">{detail.trace_id}</code>
+        <code class="break-all font-mono">{detail.trace_id}</code>
       </span>
     {/if}
     {#if requestTime}
@@ -198,20 +198,22 @@
     {/if}
   </div>
 
-  <div class="card mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-    <div>
+  <div class="card mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+    <div class="min-w-0">
       <div class="section-desc">{$t("Requested model")}</div>
-      <div class="mt-1 font-medium">{detail.requested_model}</div>
+      <div class="mt-1 break-words font-medium">{detail.requested_model}</div>
     </div>
-    <div>
+    <div class="min-w-0">
       <div class="section-desc">{$t("Model")}</div>
-      <div class="mt-1 font-medium">{detail.served_model ?? "—"}</div>
+      <div class="mt-1 break-words font-medium">
+        {detail.served_model ?? "—"}
+      </div>
     </div>
-    <div>
+    <div class="min-w-0">
       <div class="section-desc">{$t("Lane")}</div>
-      <div class="mt-1 font-medium">{detail.lane}</div>
+      <div class="mt-1 break-words font-medium">{detail.lane}</div>
     </div>
-    <div>
+    <div class="min-w-0">
       <div class="section-desc">{$t("Status")}</div>
       <div class="mt-1">
         <span
@@ -220,9 +222,9 @@
         >
       </div>
     </div>
-    <div>
+    <div class="min-w-0">
       <div class="section-desc">{$t("Reasoning effort")}</div>
-      <div class="mt-1 font-medium">
+      <div class="mt-1 break-words font-medium">
         {detail.reasoning_effort ?? "—"}
         {#if detail.requested_reasoning_effort && detail.requested_reasoning_effort !== detail.reasoning_effort}
           <span class="section-desc"
@@ -231,9 +233,11 @@
         {/if}
       </div>
     </div>
-    <div>
+    <div class="min-w-0">
       <div class="section-desc">{$t("Latency")}</div>
-      <div class="mt-1 font-medium">{formatDurationMs(detail.latency_ms)}</div>
+      <div class="mt-1 break-words font-medium">
+        {formatDurationMs(detail.latency_ms)}
+      </div>
     </div>
   </div>
 
@@ -256,65 +260,67 @@
   <!-- Throughput: TPS + generation window + time-to-first-token. All '—' for a
        non-streaming response (no measurable generation window). Mirrors
        admin's detail page (apps/admin/src/routes/requests/[traceId]/+page.svelte). -->
-  {#if detail.generation_ms !== null || detail.tps !== null || detail.ttfb_ms !== null}
-    <section class="card mt-4 text-sm">
-      <h2 class="section-header">{$t("Throughput")}</h2>
-      <dl
-        data-testid="throughput"
-        class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm"
-      >
-        <dt class="text-ink-muted">{$t("TPS")}</dt>
-        <dd data-testid="tps" class="text-right font-mono text-ink-strong">
-          {formatTps(detail.tps)}
-        </dd>
-
-        <dt class="text-ink-muted">{$t("Time to first token")}</dt>
-        <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
-          {detail.ttfb_ms === null ? "—" : formatDurationMs(detail.ttfb_ms)}
-        </dd>
-
-        <dt class="text-ink-muted">{$t("Generation time")}</dt>
-        <dd
-          data-testid="generation-ms"
-          class="text-right font-mono text-ink-strong"
+  <div class="mt-4 grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+    {#if detail.generation_ms !== null || detail.tps !== null || detail.ttfb_ms !== null}
+      <section class="card text-sm">
+        <h2 class="section-header mb-2">{$t("Throughput")}</h2>
+        <dl
+          data-testid="throughput"
+          class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1 text-sm"
         >
-          {detail.generation_ms === null
-            ? "—"
-            : formatDurationMs(detail.generation_ms)}
-        </dd>
-      </dl>
-    </section>
-  {/if}
+          <dt class="text-ink-muted">{$t("TPS")}</dt>
+          <dd data-testid="tps" class="text-right font-mono text-ink-strong">
+            {formatTps(detail.tps)}
+          </dd>
 
-  <!-- Fallback attempts (execution stage only — Principle 5): outcome + latency
-       per try. Deliberately never names provider/alias/model (R7). -->
-  {#if detail.attempts.length > 0}
-    <section class="card mt-4 text-sm">
-      <h2 class="section-header">{$t("Fallback attempts")}</h2>
-      <ul class="flex flex-col gap-1">
-        {#each detail.attempts as attempt, i (i)}
-          <li
-            data-testid="attempt-row"
-            class="flex items-center justify-between gap-2"
+          <dt class="text-ink-muted">{$t("Time to first token")}</dt>
+          <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
+            {detail.ttfb_ms === null ? "—" : formatDurationMs(detail.ttfb_ms)}
+          </dd>
+
+          <dt class="text-ink-muted">{$t("Generation time")}</dt>
+          <dd
+            data-testid="generation-ms"
+            class="text-right font-mono text-ink-strong"
           >
-            <span class="text-ink-muted">{$t("Attempt")} {i + 1}</span>
-            <span class="flex items-center gap-2">
-              <span class="badge {outcomeBadge(attempt.outcome)}"
-                >{$t(attemptOutcomeKey(attempt.outcome))}</span
-              >
-              <span class="font-mono text-ink-muted"
-                >{formatDurationMs(attempt.latency_ms)}</span
-              >
-            </span>
-          </li>
-        {/each}
-      </ul>
-    </section>
-  {/if}
+            {detail.generation_ms === null
+              ? "—"
+              : formatDurationMs(detail.generation_ms)}
+          </dd>
+        </dl>
+      </section>
+    {/if}
+
+    <!-- Fallback attempts (execution stage only — Principle 5): outcome + latency
+       per try. Deliberately never names provider/alias/model (R7). -->
+    {#if detail.attempts.length > 0}
+      <section class="card text-sm">
+        <h2 class="section-header mb-2">{$t("Fallback attempts")}</h2>
+        <ul class="flex flex-col gap-1">
+          {#each detail.attempts as attempt, i (i)}
+            <li
+              data-testid="attempt-row"
+              class="flex items-center justify-between gap-2"
+            >
+              <span class="text-ink-muted">{$t("Attempt")} {i + 1}</span>
+              <span class="flex items-center gap-2">
+                <span class="badge {outcomeBadge(attempt.outcome)}"
+                  >{$t(attemptOutcomeKey(attempt.outcome))}</span
+                >
+                <span class="font-mono text-ink-muted"
+                  >{formatDurationMs(attempt.latency_ms)}</span
+                >
+              </span>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+  </div>
 
   {#if mediaGroups.length > 0}
     <section data-testid="media-overview" class="card mt-4 text-sm">
-      <h2 class="section-header">{$t("Images")}</h2>
+      <h2 class="section-header mb-2">{$t("Images")}</h2>
       <p class="field-help mb-3">
         {$t(
           "All images sent in the request and returned in the response — click any to view full size.",
@@ -344,7 +350,7 @@
   {/if}
 
   <section class="card mt-4 text-sm">
-    <h2 class="section-header">{$t("Request")}</h2>
+    <h2 class="section-header mb-2">{$t("Request")}</h2>
     {#if payloadMeta.captured && hasPayloadPart("request")}
       <p class="field-help mb-2">
         {$t(
@@ -355,13 +361,13 @@
         <button
           type="button"
           data-testid="request-view-chat"
-          class={`rounded border px-3 py-1 text-sm ${reqView === "chat" ? "border-action bg-action text-white" : "border-border bg-surface text-ink-muted hover:bg-canvas"}`}
+          class={`min-h-11 rounded border px-3 py-1 text-sm md:min-h-0 ${reqView === "chat" ? "border-action bg-action text-white" : "border-border bg-surface text-ink-muted hover:bg-canvas"}`}
           onclick={() => (reqView = "chat")}>{$t("Conversation")}</button
         >
         <button
           type="button"
           data-testid="request-view-raw"
-          class={`rounded border px-3 py-1 text-sm ${reqView === "raw" ? "border-action bg-action text-white" : "border-border bg-surface text-ink-muted hover:bg-canvas"}`}
+          class={`min-h-11 rounded border px-3 py-1 text-sm md:min-h-0 ${reqView === "raw" ? "border-action bg-action text-white" : "border-border bg-surface text-ink-muted hover:bg-canvas"}`}
           onclick={() => (reqView = "raw")}>{$t("Raw")}</button
         >
       </div>
@@ -430,7 +436,7 @@
 
   {#if payloadMeta.captured && hasPayloadPart("response")}
     <section class="card mt-4 text-sm">
-      <h2 class="section-header">{$t("Response")}</h2>
+      <h2 class="section-header mb-2">{$t("Response")}</h2>
       {#if !responseLoaded}
         <div class="rounded border border-dashed border-border bg-canvas p-3">
           <p class="field-help mb-2">

@@ -82,7 +82,12 @@
   }
 
   function sessionHref(sessionRef: string): string {
-    const search = filtersToSearch({ range: 'all', sessionRef, page: 1, pageSize: DEFAULT_PAGE_SIZE });
+    const search = filtersToSearch({
+      range: 'all',
+      sessionRef,
+      page: 1,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
     return `${base}/requests?${search}`;
   }
   // Picking a preset clears any custom range and resets to page 1.
@@ -215,7 +220,7 @@
   }
 </script>
 
-<div class="w-full px-4 py-6 md:px-8 md:py-8">
+<div class="w-full px-4 py-6 md:px-8">
   <header class="mb-5">
     <a class="link-inline text-sm" href={`${base}/keys`}>← {$t('API Keys')}</a>
     <div class="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -361,7 +366,7 @@
     </div>
   </section>
 
-  <!-- Stat cards -->
+  <!-- Stat cards: one 5-column grid so the 5-up and 4-up rows line up -->
   <div class="grid grid-cols-2 gap-3 lg:grid-cols-5 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
@@ -394,10 +399,8 @@
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Spend')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatUsd(stats.totalCost)}</div>
     </div>
-  </div>
 
-  <!-- Token stat cards -->
-  <div class="mt-3 grid grid-cols-2 gap-3 md:mt-4 lg:grid-cols-4 lg:gap-4">
+    <!-- Token stat cards -->
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Total tokens')}
@@ -422,7 +425,7 @@
         {formatTokens(stats.outputTokens)}
       </div>
     </div>
-    <div class="card">
+    <div class="card col-span-2 lg:col-span-1">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Cached tokens')}
       </div>

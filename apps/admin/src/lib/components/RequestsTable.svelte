@@ -135,7 +135,7 @@
 {#snippet timeCell(r: RequestListItem)}
   <a
     data-testid="request-detail-link"
-    class="link-inline block max-w-[7.5rem] whitespace-normal text-ink-strong"
+    class="link-inline block whitespace-nowrap text-ink-strong table-mode:max-w-[7.5rem] table-mode:whitespace-normal"
     href={detailHref(r.request_id)}
     title={r.request_id}
   >
@@ -286,7 +286,7 @@
   </div>
 {/snippet}
 
-<div class="cards-table-frame">
+<div class="cards-table-frame dense">
   <table class="cards-table">
     <thead class="table-head">
       <tr>

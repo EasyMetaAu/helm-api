@@ -227,7 +227,9 @@
       {/if}
     </div>
     <div class="hidden min-w-0 items-center gap-2 text-xs sm:flex">
-      <code class="max-w-[16rem] truncate font-mono text-ink-body">{trimmedPrimary || '—'}</code>
+      <code class="max-w-[11rem] truncate font-mono text-ink-body lg:max-w-[16rem]"
+        >{trimmedPrimary || '—'}</code
+      >
       {#if fallback.length > 0}
         <span class="text-ink-muted" title={fallback.join(' → ')}>→ +{fallback.length}</span>
       {/if}

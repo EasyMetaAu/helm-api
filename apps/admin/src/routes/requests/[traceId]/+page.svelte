@@ -297,7 +297,7 @@
          (Principle 7); each value degrades to an em-dash, never blank/fabricated. -->
     <section data-testid="request-summary" class="card text-sm">
       <h2 class="section-header">{$t('Request summary')}</h2>
-      <dl class="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 lg:grid-cols-4">
+      <dl class="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 lg:grid-cols-4 [&>div]:min-w-0">
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Key')}</dt>
           <dd class="mt-0.5 text-ink-body">
@@ -336,12 +336,12 @@
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Provider')}</dt>
           <dd class="mt-0.5 font-mono text-ink-body">{d.served_provider ?? '—'}</dd>
         </div>
-        <div>
+        <div class={d.serving_account?.selection ? 'col-span-full' : ''}>
           <dt class="text-xs uppercase tracking-wide text-slate-400">
             {$t('Subscription account')}
           </dt>
           <dd
-            class="mt-0.5 font-mono text-ink-body"
+            class="mt-0.5 break-all font-mono text-ink-body"
             title={d.serving_account
               ? `${d.serving_account.provider_id}/${d.serving_account.account}`
               : undefined}
@@ -358,28 +358,28 @@
                 ).toISOString()}
               </p>
               <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
+                <table class="table-base text-xs">
                   <thead
                     ><tr
-                      ><th>{$t('Account')}</th><th>{$t('Reason')}</th><th>{$t('Quota used')}</th><th
-                        >{$t('First output')}</th
-                      ></tr
+                      ><th class="pr-4">{$t('Account')}</th><th class="pr-4">{$t('Reason')}</th><th
+                        class="pr-4">{$t('Quota used')}</th
+                      ><th class="pr-4">{$t('First output')}</th></tr
                     ></thead
                   >
                   <tbody
                     >{#each selection.candidates as candidate}<tr>
-                        <td>{candidate.account}</td>
-                        <td
+                        <td class="pr-4">{candidate.account}</td>
+                        <td class="pr-4"
                           >{candidate.selected
                             ? $t('Selected')
                             : (candidate.exclusion ?? $t('Eligible'))}</td
                         >
-                        <td
+                        <td class="pr-4"
                           >{candidate.quota_fresh && candidate.quota_pressure !== null
                             ? `${candidate.quota_pressure}%`
                             : $t('Unknown')}</td
                         >
-                        <td
+                        <td class="pr-4"
                           >{candidate.ttft_ms === null
                             ? $t('Unknown')
                             : `${Math.round(candidate.ttft_ms)} ms`}</td
@@ -397,7 +397,7 @@
         </div>
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Served model')}</dt>
-          <dd class="mt-0.5 font-mono text-ink-body">{d.final_model ?? '—'}</dd>
+          <dd class="mt-0.5 break-all font-mono text-ink-body">{d.final_model ?? '—'}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Requested model')}</dt>
@@ -431,7 +431,7 @@
     <!-- Usage & performance: cost, tokens and throughput side by side right under
          the summary — the three numbers an operator checks first — instead of three
          full-width cards at the bottom of the page. -->
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
       <section class="card">
         <h2 class="section-header">{$t('Cost')}</h2>
         <p class="field-help mb-2">

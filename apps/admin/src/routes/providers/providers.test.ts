@@ -999,7 +999,7 @@ describe('providers page', () => {
     expect(resetUsageLimit).not.toHaveBeenCalled();
   });
 
-  it('keeps the account table to seven columns and tucks rare actions into a row menu', () => {
+  it('keeps the account table to six columns and tucks rare actions into a row menu', () => {
     renderPage({
       providers: [
         provider({
@@ -1018,8 +1018,11 @@ describe('providers page', () => {
         }),
       ],
     });
-    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
+    expect(screen.getAllByRole('columnheader')).toHaveLength(6);
     const row = screen.getByTestId('provider-account-row');
+    // Health sits beside the account it describes, so a laptop-width table has
+    // no narrow status column to squeeze.
+    expect(within(row).getAllByRole('cell')[0]).toHaveTextContent('connected');
     expect(within(row).getByRole('button', { name: 'Test' })).toBeVisible();
     expect(within(row).getByRole('button', { name: 'Manage' })).toBeVisible();
     const menu = within(row).getByTestId('provider-actions');

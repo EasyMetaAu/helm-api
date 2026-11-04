@@ -178,7 +178,7 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
 <!-- Client selector — a segmented control (active = white pill on a grey track)
      so the current choice is obvious at a glance. -->
 <div
-  class="mb-4 inline-flex flex-wrap gap-1 rounded-lg bg-canvas p-1"
+  class="mb-4 inline-flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1"
   role="tablist"
   aria-label={$t("Client")}
 >
@@ -187,12 +187,12 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
       type="button"
       role="tab"
       aria-selected={tab === ct.id}
-      class="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+      class="min-h-11 rounded-md px-3 py-1.5 text-sm font-medium transition-colors md:min-h-0"
       class:bg-white={tab === ct.id}
-      class:text-ink-1={tab === ct.id}
+      class:text-ink={tab === ct.id}
       class:shadow-sm={tab === ct.id}
-      class:text-ink-2={tab !== ct.id}
-      class:hover:text-ink-1={tab !== ct.id}
+      class:text-ink-body={tab !== ct.id}
+      class:hover:text-ink={tab !== ct.id}
       disabled={testRunning}
       onclick={() => {
         tab = ct.id;
@@ -221,12 +221,14 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
   )}
 </p>
 <!-- Key row -->
-<div class="card mb-4 flex items-center justify-between gap-3">
-  <div>
+<div
+  class="card mb-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between"
+>
+  <div class="min-w-0">
     <div class="section-desc">{$t("Your API key")}</div>
-    <div class="mt-1 font-mono text-sm">{keyForDisplay}</div>
+    <div class="mt-1 break-all font-mono text-sm">{keyForDisplay}</div>
   </div>
-  <div class="flex gap-2">
+  <div class="flex shrink-0 gap-2">
     <button class="btn-secondary" onclick={() => (showKey = !showKey)}>
       {showKey ? $t("Hide") : $t("Show full key")}
     </button>
@@ -255,7 +257,7 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
 {#if copyFailed}<p role="alert" class="alert-error mb-3">
     {$t("Copy failed. Select and copy the configuration manually.")}
   </p>{/if}
-<div class="card space-y-4">
+<div class="card space-y-4 p-3 sm:p-4">
   {#if tab === "claude"}
     <p class="alert-warn">
       ⚠️ {$t(
@@ -302,35 +304,35 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
       <button
         type="button"
         role="tab"
-        class="tab-btn shrink-0 whitespace-nowrap"
+        class="tab-btn min-h-11 shrink-0 whitespace-nowrap md:min-h-0"
         aria-selected={mcpTab === "chatgpt"}
         onclick={() => (mcpTab = "chatgpt")}>{$t("ChatGPT")}</button
       >
       <button
         type="button"
         role="tab"
-        class="tab-btn shrink-0 whitespace-nowrap"
+        class="tab-btn min-h-11 shrink-0 whitespace-nowrap md:min-h-0"
         aria-selected={mcpTab === "claude"}
         onclick={() => (mcpTab = "claude")}>{$t("Claude Code")}</button
       >
       <button
         type="button"
         role="tab"
-        class="tab-btn shrink-0 whitespace-nowrap"
+        class="tab-btn min-h-11 shrink-0 whitespace-nowrap md:min-h-0"
         aria-selected={mcpTab === "json"}
         onclick={() => (mcpTab = "json")}>{$t("JSON config")}</button
       >
       <button
         type="button"
         role="tab"
-        class="tab-btn shrink-0 whitespace-nowrap"
+        class="tab-btn min-h-11 shrink-0 whitespace-nowrap md:min-h-0"
         aria-selected={mcpTab === "codex"}
         onclick={() => (mcpTab = "codex")}>{$t("Codex CLI")}</button
       >
       <button
         type="button"
         role="tab"
-        class="tab-btn shrink-0 whitespace-nowrap"
+        class="tab-btn min-h-11 shrink-0 whitespace-nowrap md:min-h-0"
         aria-selected={mcpTab === "curl"}
         onclick={() => (mcpTab = "curl")}>{$t("curl")}</button
       >
@@ -408,150 +410,154 @@ args = ["-y", "mcp-remote", "${mcpUrl}", "--header", "Authorization:Bearer <KEY>
   {/if}
 </div>
 {#if tab !== "mcp"}
-  <section class="card mt-5" aria-labelledby="test-heading">
-    <h2 id="test-heading" class="section-header">
-      {$t("3. Test through this browser")}
-    </h2>
-    <p class="field-help">
-      {$t("Browser checks do not verify your local client configuration.")}
-    </p>
-    <p class="mt-2 text-sm text-ink-muted">
-      {$t(
-        "Sends one short model request using this key's permissions and budget. Provider charges may apply.",
-      )}
-    </p>
-    <div class="mt-4 flex flex-wrap items-center gap-3">
-      <button
-        class="btn-primary shrink-0"
-        onclick={testConnection}
-        disabled={testRunning || !testLane.trim()}
-      >
-        {testRunning ? $t("Testing…") : $t("Test inference")}
-      </button>
-      {#if testRunning}<button
-          class="btn-secondary"
-          onclick={() => testAbort?.abort()}>{$t("Cancel")}</button
-        >{/if}
-      <div aria-live="polite" class="flex flex-wrap items-center gap-2">
-        {#if testRunning}<span class="text-sm"
-            >{testStage === "auth"
-              ? $t("Checking authentication…")
-              : $t(
-                  "Authentication passed. Waiting for a complete response…",
-                )}</span
-          >{/if}
-        {#if testResult}
-          <span
-            class:badge-ok={testResult.auth}
-            class:badge-error={testResult.failure === "authentication"}
-            class:badge-neutral={!testResult.auth &&
-              testResult.failure !== "authentication"}
-            class="badge"
-            >{testResult.auth
-              ? $t("Authentication passed")
-              : testResult.failure === "authentication"
-                ? $t("Authentication failed")
-                : $t("Authentication not confirmed")}</span
-          >
-          <span
-            class:badge-ok={testResult.inference}
-            class:badge-error={!testResult.inference &&
-              testResult.failure !== "cancelled"}
-            class:badge-neutral={testResult.failure === "cancelled"}
-            class="badge"
-            >{testResult.inference
-              ? $t("Inference completed")
-              : $t("Inference not confirmed")}</span
-          >
-          {#if testResult.status !== null}<span class="text-sm"
-              >HTTP {testResult.status}</span
-            >{/if}
-          {#if testResult.firstOutputMs !== null}<span class="text-sm"
-              >{$t("First output")}: {testResult.firstOutputMs} ms</span
-            >{/if}
-        {/if}
-      </div>
-    </div>
-    {#if testResult}
-      <div class="mt-3 space-y-2 text-sm" role="status">
-        {#if testResult.failure === "authentication"}
-          <p>
-            {$t(
-              "Check your key and its permissions, then sign in again if needed.",
-            )}
-          </p>
-        {:else if testResult.failure === "cancelled"}
-          <p>{$t("Test cancelled. Run it again when ready.")}</p>
-        {:else if testResult.failure === "timeout"}
-          <p>
-            {$t(
-              "The test timed out after 30 seconds. Check request details before retrying.",
-            )}
-          </p>
-        {:else if testResult.failure === "network"}
-          <p>
-            {$t(
-              "The connection was interrupted. Check your network and retry.",
-            )}
-          </p>
-        {:else if testResult.failure === "http"}
-          <p>
-            {$t(
-              "Check the lane and available capacity, then retry. An administrator can inspect the request details.",
-            )}
-          </p>
-        {:else if testResult.failure === "stream"}
-          <p>
-            {$t(
-              "No complete answer was received. Open request details to investigate.",
-            )}
-          </p>
-        {/if}
-        {#if testResult.requestId}
-          <a
-            class="text-link underline underline-offset-2"
-            href={`${base}/requests/${encodeURIComponent(testResult.requestId)}`}
-            >{$t("View test request")}</a
-          >
-          <p class="field-help">
-            {$t("The request record may take a moment to appear.")}
-          </p>
-        {/if}
-      </div>
-    {/if}
-  </section>
-  <section class="card mt-5 space-y-2" aria-labelledby="client-check-heading">
-    <div class="flex flex-wrap items-center gap-2">
-      <h2 id="client-check-heading" class="section-header">
-        {$t("4. Verify in your client")}
+  <div class="mt-5 grid items-start gap-5 lg:grid-cols-2">
+    <section class="card" aria-labelledby="test-heading">
+      <h2 id="test-heading" class="section-header">
+        {$t("3. Test through this browser")}
       </h2>
-      <span class="badge badge-neutral">{$t("Local client not verified")}</span>
-    </div>
-    <p class="text-sm text-ink-body">
-      {#if tab === "claude"}
+      <p class="field-help">
+        {$t("Browser checks do not verify your local client configuration.")}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
         {$t(
-          "Start a new Claude Code session in the configured terminal and send a short message.",
+          "Sends one short model request using this key's permissions and budget. Provider charges may apply.",
         )}
-      {:else if tab === "codex"}
-        {$t(
-          "Start Codex with the helm profile in the configured terminal and send a short message.",
-        )}
-      {:else}
-        {$t(
-          "Run the configured SDK example once to send a real client request.",
-        )}
+      </p>
+      <div class="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          class="btn-primary shrink-0"
+          onclick={testConnection}
+          disabled={testRunning || !testLane.trim()}
+        >
+          {testRunning ? $t("Testing…") : $t("Test inference")}
+        </button>
+        {#if testRunning}<button
+            class="btn-secondary"
+            onclick={() => testAbort?.abort()}>{$t("Cancel")}</button
+          >{/if}
+        <div aria-live="polite" class="flex flex-wrap items-center gap-2">
+          {#if testRunning}<span class="text-sm"
+              >{testStage === "auth"
+                ? $t("Checking authentication…")
+                : $t(
+                    "Authentication passed. Waiting for a complete response…",
+                  )}</span
+            >{/if}
+          {#if testResult}
+            <span
+              class:badge-ok={testResult.auth}
+              class:badge-error={testResult.failure === "authentication"}
+              class:badge-neutral={!testResult.auth &&
+                testResult.failure !== "authentication"}
+              class="badge"
+              >{testResult.auth
+                ? $t("Authentication passed")
+                : testResult.failure === "authentication"
+                  ? $t("Authentication failed")
+                  : $t("Authentication not confirmed")}</span
+            >
+            <span
+              class:badge-ok={testResult.inference}
+              class:badge-error={!testResult.inference &&
+                testResult.failure !== "cancelled"}
+              class:badge-neutral={testResult.failure === "cancelled"}
+              class="badge"
+              >{testResult.inference
+                ? $t("Inference completed")
+                : $t("Inference not confirmed")}</span
+            >
+            {#if testResult.status !== null}<span class="text-sm"
+                >HTTP {testResult.status}</span
+              >{/if}
+            {#if testResult.firstOutputMs !== null}<span class="text-sm"
+                >{$t("First output")}: {testResult.firstOutputMs} ms</span
+              >{/if}
+          {/if}
+        </div>
+      </div>
+      {#if testResult}
+        <div class="mt-3 space-y-2 text-sm" role="status">
+          {#if testResult.failure === "authentication"}
+            <p>
+              {$t(
+                "Check your key and its permissions, then sign in again if needed.",
+              )}
+            </p>
+          {:else if testResult.failure === "cancelled"}
+            <p>{$t("Test cancelled. Run it again when ready.")}</p>
+          {:else if testResult.failure === "timeout"}
+            <p>
+              {$t(
+                "The test timed out after 30 seconds. Check request details before retrying.",
+              )}
+            </p>
+          {:else if testResult.failure === "network"}
+            <p>
+              {$t(
+                "The connection was interrupted. Check your network and retry.",
+              )}
+            </p>
+          {:else if testResult.failure === "http"}
+            <p>
+              {$t(
+                "Check the lane and available capacity, then retry. An administrator can inspect the request details.",
+              )}
+            </p>
+          {:else if testResult.failure === "stream"}
+            <p>
+              {$t(
+                "No complete answer was received. Open request details to investigate.",
+              )}
+            </p>
+          {/if}
+          {#if testResult.requestId}
+            <a
+              class="text-link underline underline-offset-2"
+              href={`${base}/requests/${encodeURIComponent(testResult.requestId)}`}
+              >{$t("View test request")}</a
+            >
+            <p class="field-help">
+              {$t("The request record may take a moment to appear.")}
+            </p>
+          {/if}
+        </div>
       {/if}
-    </p>
-    <p class="field-help">
-      {$t(
-        "Find that request in your history and check its time and result. Browser test requests also appear there.",
-      )}
-    </p>
-    <a
-      class="text-sm text-link underline underline-offset-2"
-      href={`${base}/requests`}>{$t("Open request history")}</a
-    >
-  </section>
+    </section>
+    <section class="card space-y-2" aria-labelledby="client-check-heading">
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 id="client-check-heading" class="section-header">
+          {$t("4. Verify in your client")}
+        </h2>
+        <span class="badge badge-neutral"
+          >{$t("Local client not verified")}</span
+        >
+      </div>
+      <p class="text-sm text-ink-body">
+        {#if tab === "claude"}
+          {$t(
+            "Start a new Claude Code session in the configured terminal and send a short message.",
+          )}
+        {:else if tab === "codex"}
+          {$t(
+            "Start Codex with the helm profile in the configured terminal and send a short message.",
+          )}
+        {:else}
+          {$t(
+            "Run the configured SDK example once to send a real client request.",
+          )}
+        {/if}
+      </p>
+      <p class="field-help">
+        {$t(
+          "Find that request in your history and check its time and result. Browser test requests also appear there.",
+        )}
+      </p>
+      <a
+        class="text-sm text-link underline underline-offset-2"
+        href={`${base}/requests`}>{$t("Open request history")}</a
+      >
+    </section>
+  </div>
 {/if}
 
 {#snippet codeBlock(code: string, id: string)}

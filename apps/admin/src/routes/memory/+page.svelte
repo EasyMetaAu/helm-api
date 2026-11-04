@@ -421,7 +421,7 @@
 
 <section class="page">
   <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-    <div class="min-w-0">
+    <div class="flex min-w-0 flex-col gap-1">
       <h1 class="page-title">{$t('Memory')}</h1>
       <p class="section-desc">
         {$t(
@@ -462,7 +462,7 @@
     {#if statsError}
       <p class="alert-error" role="alert">{statsError}</p>
     {/if}
-    <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">
       <div class="card flex flex-col gap-2">
         <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Queue')}</p>
         <p class="text-2xl font-semibold text-ink-strong">
@@ -516,7 +516,7 @@
     <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]">
       <div class="card flex flex-col gap-2 text-sm">
         <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Activity')}</p>
-        <div class="grid gap-2 sm:grid-cols-2">
+        <div class="grid grid-cols-2 gap-2">
           <div>
             <p class="text-ink-muted">{$t('Last raw message')}</p>
             <p class="text-ink-strong">
@@ -612,7 +612,7 @@
                 })}
               <tr
                 data-testid="scope-row"
-                class="cursor-pointer align-top {isSelected ? 'bg-indigo-50' : ''}"
+                class="cursor-pointer align-middle {isSelected ? 'bg-indigo-50' : ''}"
                 onclick={() => pickScopeRow(scope)}
               >
                 <td data-label={$t('Project')} class="px-3 py-2">
@@ -631,7 +631,7 @@
                 <td data-label={$t('Last updated')} class="px-3 py-2 text-ink-muted">
                   {scope.lastUpdated ? formatTimestamp(scope.lastUpdated) : '—'}
                 </td>
-                <td class="px-3 py-2 lg:text-right">
+                <td class="px-3 py-2 table-mode:text-right">
                   <button type="button" class="btn-secondary" onclick={() => pickScopeRow(scope)}
                     >{$t('View')}</button
                   >
@@ -844,7 +844,7 @@
                     <td data-label={$t('Updated')} class="px-3 py-2 text-ink-muted">
                       {formatTimestamp(fact.updatedAt)}
                     </td>
-                    <td class="px-3 py-2 lg:text-right">
+                    <td class="px-3 py-2 table-mode:text-right">
                       <div class="flex justify-end gap-2">
                         <button
                           type="button"

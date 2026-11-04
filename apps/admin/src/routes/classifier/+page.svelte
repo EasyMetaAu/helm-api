@@ -147,7 +147,7 @@
       </p>
     </div>
 
-    <label class="flex min-h-11 items-center gap-3 py-1.5 md:min-h-0 md:py-0">
+    <label class="flex min-h-11 items-center gap-3 py-1.5 lg:min-h-0 lg:py-0">
       <input type="checkbox" class="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
       <span class="field-label">{$t('Enable Layer-2 eval')}</span>
       <span class="badge-eval">{$t('Layer-2')}</span>

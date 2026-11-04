@@ -262,6 +262,22 @@ describe('key detail page', () => {
     expect(link.getAttribute('href')).toBe('/requests/tr_1?from=%2Fkeys%2Fk1');
   });
 
+  it('lays the nine stat tiles out in one grid so the 5-up and 4-up rows align', () => {
+    render(KeyDetailPage, { data: pageData() });
+    const tile = (label: RegExp) =>
+      screen
+        .getAllByText(label)
+        .find((el) => el.className.includes('uppercase'))
+        ?.closest('.card');
+    const first = tile(/^requests$/i);
+    const last = tile(/^cached tokens$/i);
+    const grid = first?.parentElement;
+    expect(grid).toBe(last?.parentElement);
+    expect(grid?.children).toHaveLength(9);
+    // The odd ninth tile spans both columns on small screens instead of orphaning.
+    expect(last?.className).toContain('col-span-2');
+  });
+
   it('always links the Memory config to the scoped memory view — even when memory is off', () => {
     const { unmount } = render(KeyDetailPage, {
       data: pageData({ key: keyView({ memory_mode: 'inject', memory_project_id: 'proj-a' }) }),

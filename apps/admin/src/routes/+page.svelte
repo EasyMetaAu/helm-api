@@ -298,17 +298,19 @@
   {/snippet}
 
   <!-- Stat cards -->
-  <div class="grid grid-cols-2 gap-3 lg:grid-cols-5 lg:gap-4">
+  <div class="grid grid-cols-2 gap-3 md:grid-cols-5 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatCount(stats.total)}</div>
+      <div class="mt-1 whitespace-nowrap text-xl font-semibold text-slate-900 xl:text-2xl">
+        {formatCount(stats.total)}
+      </div>
       {@render deltaBadge(data.compare?.requests, formatCount)}
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Success rate')}
       </div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">
+      <div class="mt-1 whitespace-nowrap text-xl font-semibold text-slate-900 xl:text-2xl">
         {stats.successRate === null ? '—' : `${stats.successRate}%`}
       </div>
       <div class="mt-0.5 text-xs text-slate-400">
@@ -319,7 +321,7 @@
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Avg latency')}
       </div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">
+      <div class="mt-1 whitespace-nowrap text-xl font-semibold text-slate-900 xl:text-2xl">
         {stats.avgLatency === null ? '—' : formatDurationMs(stats.avgLatency)}
       </div>
     </div>
@@ -332,13 +334,18 @@
       >
         {$t('Avg TPS')}
       </div>
-      <div data-testid="stat-avg-tps" class="mt-1 text-2xl font-semibold text-slate-900">
+      <div
+        data-testid="stat-avg-tps"
+        class="mt-1 whitespace-nowrap text-xl font-semibold text-slate-900 xl:text-2xl"
+      >
         {formatTps(stats.avgTps)}
       </div>
     </div>
-    <div class="card">
+    <div class="card col-span-2 md:col-span-1">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Spend')}</div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatUsd(stats.totalCost)}</div>
+      <div class="mt-1 whitespace-nowrap text-xl font-semibold text-slate-900 xl:text-2xl">
+        {formatUsd(stats.totalCost)}
+      </div>
       {@render deltaBadge(data.compare?.totalCost, formatUsd)}
     </div>
   </div>
@@ -398,7 +405,7 @@
     <section class="card lg:col-span-2">
       <h2 class="section-header mb-3">{$t('Token usage over time')}</h2>
       {#if trend.length > 0}
-        <div class="h-64">
+        <div class="h-64 lg:h-80">
           <!-- Compact the Y-axis ticks (15M, not 15,000,000) via the shared
                formatTokens; the x-axis already switches hour↔day by bucket
                (formatTrendTick). The tooltip is overridden below to append the
