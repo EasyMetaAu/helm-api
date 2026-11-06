@@ -60,6 +60,62 @@ function req(over: Partial<InternalRequest> = {}): InternalRequest {
   };
 }
 
+it.each([
+  true,
+  false,
+])("passes authenticated owner and original conversation to Anthropic (native=%s)", async (native) => {
+  const call = vi.fn().mockResolvedValue({ id: "m", choices: [], usage: {} });
+  const client: ProviderClient = {
+    chatCompletion: call,
+    chatCompletionStream: vi.fn(),
+    nativePassthrough: call,
+    nativeProtocolProfile: "anthropic_messages",
+  };
+  const execute = createExecute({
+    defaultProvider: client,
+    providers: new Map([["anthropic", client]]),
+    registry: protocolRegistry({
+      a: {
+        providerName: "anthropic",
+        providerModel: "claude-test",
+        targetProviderProtocol: "anthropic_messages",
+      },
+    }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+    nativeProtocolPassthroughEnabled: () => native,
+  });
+  await execute(
+    plan(["a"]),
+    req({
+      protocol: "anthropic_messages",
+      native_request: createNativePassthroughCarrier({
+        protocol: "anthropic_messages",
+        body: { model: "a", max_tokens: 32, messages: [{ role: "user", content: "hi" }] },
+        headers: { "user-agent": "claude-cli/2.2.10 (external, cli)" },
+      }),
+      metadata: {
+        conversation_id: null,
+        thread_id: "original-conversation",
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+      },
+    }),
+  );
+  expect(call).toHaveBeenCalledOnce();
+  expect(call.mock.calls[0]?.[1]).toMatchObject({
+    anthropicIdentityContext: {
+      owner: ["acct", "k1"],
+      requestId: "req-1",
+      sessionId: "original-conversation",
+      clientVersion: "2.2.10",
+    },
+  });
+});
+
 it("preserves exhausted Codex capacity advice without switching account or candidate", async () => {
   const error = new CodexCapacityRetryExhaustedError(
     new UpstreamError(

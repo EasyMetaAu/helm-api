@@ -24,6 +24,7 @@ import {
   isCodexResponsesBeforeSendError,
   isCodexResponsesPostSendFailureCode,
   type NativePassthroughDisableReason,
+  offeredAnthropicClientVersion,
   openaiTransformer,
   optimizeVisualContext,
   preOutputClassifierFor,
@@ -1579,6 +1580,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     req: InternalRequest,
   ): Promise<ExecuteOutcome> {
     const attempts: RouteProviderAttempt[] = [];
+    const anthropicIdentityContext = {
+      owner: [req.account_id, req.api_key_id] as [string, string],
+      requestId: req.request_id,
+      sessionId: req.metadata.thread_id,
+      clientVersion: offeredAnthropicClientVersion(req.native_request ?? {}, {
+        metadata: req.metadata,
+      }),
+    };
     const overloadRetry: OverloadRetryBudget = {
       attempt: 0,
       onRetry: (event) =>
@@ -1880,6 +1889,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             delete countBody.stream;
             const tokenCount = await provider.countTokens(countBody, {
               signal,
+              anthropicIdentityContext,
               requestCompatibility: caps?.requestCompatibility,
             });
             const inputTokens = countTokensInputTokens(tokenCount);
@@ -2013,6 +2023,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 return peekStream(
                   () => {
                     const raw = passthroughStream(passthroughBody, {
+                      anthropicIdentityContext,
                       signal: preOutputAbort
                         ? AbortSignal.any([attemptSignal, preOutputAbort.signal])
                         : attemptSignal,
@@ -2118,6 +2129,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 peekStream(
                   () => {
                     const raw = provider.chatCompletionStream(rendered.body, {
+                      anthropicIdentityContext,
                       signal: attemptSignal,
                       overloadRetry,
                       ...(req.metadata.stateful_provider_account
@@ -2202,6 +2214,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               signal,
               (attemptSignal) =>
                 passthroughInvoke(passthroughBody, {
+                  anthropicIdentityContext,
                   signal: attemptSignal,
                   overloadRetry,
                   ...(req.metadata.stateful_provider_account
@@ -2247,6 +2260,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           );
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             provider.chatCompletion(bodyReq.body, {
+              anthropicIdentityContext,
               signal: attemptSignal,
               overloadRetry,
               ...(req.metadata.stateful_provider_account

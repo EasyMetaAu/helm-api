@@ -136,6 +136,8 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Authenticated owner scope and original conversation, never sent verbatim. */
+  anthropicIdentityContext?: import("./anthropic-account-profile.js").AnthropicIdentityContext;
   /** Inbound identity, forwarded only by explicitly configured Helm image relays. */
   clientUserAgent?: string;
   /** Resolved alias policy; never inferred from the upstream model name. */

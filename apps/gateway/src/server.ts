@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import type { EnvironmentTimezoneResolver } from "@helm/core";
 import {
+  type AnthropicAccountProfileResolver,
   type AnthropicSSEEvent,
   ApiKeyAccounts,
   AUTO_VACUUM_CHECK_INTERVAL_MS,
@@ -18,6 +19,7 @@ import {
   type CreateKeyInput,
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
+  createAnthropicAccountProfileResolver,
   createAnthropicClient,
   createApiKeyPoolClient,
   createArkMediaClient,
@@ -214,7 +216,7 @@ import {
 import { createCodexModelsEtagTracker } from "./oauth/codex-model-etag-tracker.js";
 import { codexResetCreditSharedKey } from "./oauth/codex-reset-account-key.js";
 import {
-  anthropicMetadataUserId,
+  legacyAnthropicDeviceId,
   stableInstallationId,
   stableSessionId,
 } from "./oauth/device-identity.js";
@@ -957,13 +959,16 @@ async function buildOAuthAccountClient(
             })
           )?.runtime;
   }
-  // Stable per-account anti-ban identity (never rotates): Anthropic gets a
-  // metadata.user_id; Codex a stable session_id plus its own installation id (the
-  // client's is machine-wide, shared by every account on that install). All
-  // deterministic from (providerId, account) salted by the at-rest key — no DB write-back.
+  // Anthropic profiles are persisted by verified UUID at dispatch; account
+  // labels and encryption-key rotation must not change the logical device.
   const identity =
     providerId === "anthropic"
-      ? { metadataUserId: anthropicMetadataUserId(providerId, account, oauthCtx.encKey) }
+      ? {
+          resolveAccountProfile: createAnthropicAccountProfileResolver(
+            oauthCtx.config,
+            legacyAnthropicDeviceId(account, oauthCtx.encKey),
+          ),
+        }
       : providerId === "openai-codex"
         ? {
             sessionId: stableSessionId(providerId, account, oauthCtx.encKey),
@@ -1334,7 +1339,7 @@ export async function synthesizeOAuthProviders(
       const client = await buildOAuthAccountClient(
         providerId,
         account,
-        oauthCtx,
+        { ...oauthCtx, config },
         proxy,
         s.fastMode === true,
         { baseUrl: fallbackBaseUrl, timeoutMs },
@@ -1682,7 +1687,17 @@ export function buildProviderClients(
         { baseUrl, timeoutMs },
         cred,
         proxy,
-        undefined,
+        p.type === "anthropic" &&
+          p.oauth &&
+          isOAuthPreset(p.oauth) &&
+          p.oauth.provider === "anthropic"
+          ? {
+              resolveAccountProfile: createAnthropicAccountProfileResolver(
+                oauthCtx?.config,
+                oauthCtx ? legacyAnthropicDeviceId(p.oauth.account, oauthCtx.encKey) : undefined,
+              ),
+            }
+          : undefined,
         undefined,
         fastMode,
         undefined,
@@ -1729,10 +1744,11 @@ function createProviderClient(
   // provider's upstream traffic tunnels through it via the executor's injected
   // `fetch` seam — invisible to the protocol layer. undefined ⇒ direct connection.
   proxy?: ProxyConfig,
-  // Stable per-account subscription identity (anti-ban, issue #38). Computed ONCE
-  // per account by synthesis (deterministic, never per-request): Anthropic carries
-  // it as metadata.user_id; Codex as a stable session_id / prompt_cache_key.
-  identity?: { metadataUserId?: string; sessionId?: string; installationId?: string },
+  identity?: {
+    resolveAccountProfile?: AnthropicAccountProfileResolver;
+    sessionId?: string;
+    installationId?: string;
+  },
   // Upstream response-header hook (providers page Tier 3 quota). Only the Codex
   // client uses it today (its `x-codex-*` rate-limit windows are PUSHed on every
   // reply); bound per-account by synthesis so the scrape knows which subscription.
@@ -1792,7 +1808,7 @@ function createProviderClient(
       config: {
         ...base,
         ...cred,
-        metadataUserId: identity?.metadataUserId,
+        resolveAccountProfile: identity?.resolveAccountProfile,
         claudeCliFingerprintMode: p.claude_cli_fingerprint_mode,
         fastMode,
       },
@@ -3220,7 +3236,19 @@ export async function buildServer(
         { baseUrl, timeoutMs },
         primaryCred,
         primaryProxy,
-        undefined,
+        first.type === "anthropic" &&
+          first.oauth &&
+          isOAuthPreset(first.oauth) &&
+          first.oauth.provider === "anthropic"
+          ? {
+              resolveAccountProfile: createAnthropicAccountProfileResolver(
+                store.config,
+                oauthCtx
+                  ? legacyAnthropicDeviceId(first.oauth.account, oauthCtx.encKey)
+                  : undefined,
+              ),
+            }
+          : undefined,
         undefined,
         false,
         undefined,

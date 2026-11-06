@@ -1,4 +1,13 @@
 import {
+  type AnthropicAccountProfileResolver,
+  type AnthropicIdentityContext,
+  applyAnthropicAccountProfile,
+  offeredAnthropicClientVersion,
+  updateAnthropicUserAgent,
+} from "./anthropic-account-profile.js";
+import {
+  AnthropicAccountUuidSchema,
+  AnthropicIdentityError,
   anthropicRequestAccountUuid,
   assertAnthropicAccountIdentity,
 } from "./anthropic-identity.js";
@@ -85,6 +94,7 @@ export interface AnthropicClientConfig {
   // account assertion. This is not verified identity or protection from suspension.
   // Explicit client identities take precedence and are checked against OAuth metadata.
   metadataUserId?: string;
+  resolveAccountProfile?: AnthropicAccountProfileResolver;
   // Wire-image profile for Claude Code emulation. "auto" keeps static API-key
   // providers conservative while making OAuth subscription traffic strict.
   claudeCliFingerprintMode?: "auto" | "off" | "conservative" | "strict";
@@ -1670,26 +1680,58 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     normalizeToolNames = false,
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
     sourceIdentity?: Record<string, unknown>,
+    identityContext?: AnthropicIdentityContext,
+    identityRequestId = randomUUID(),
   ): Promise<AnthropicRequestResult> {
-    const wireInput = await applyEnvironmentTimezone(
+    let wireInput = await applyEnvironmentTimezone(
       normalizeAnthropicModelParameters(
         cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
         compatibility,
       ),
       deps.resolveEnvironmentTimezone,
     );
-    const body = nativePassthroughBody(wireInput);
-    const prepared = prepareNativePassthroughRequest(
-      wireInput,
-      await headers(body, extraBetas, { includeClaudeCliRuntimeHeaders, sourceIdentity }),
-      {
-        mergeHeaders: includeClaudeCliRuntimeHeaders ? ["anthropic-beta"] : [],
-        forceAcceptEncodingIdentity: cfg.getAuthHeader !== undefined && body.stream === true,
-        ...(cfg.getAuthHeader !== undefined && body.stream === true
-          ? { providerProfileApplied: "anthropic_official_safe" }
-          : {}),
-      },
-    );
+    let body = nativePassthroughBody(wireInput);
+    // Validate the untouched account assertion before resolving or rewriting
+    // logical device/session identity. Authentication owns the actual account UUID.
+    const providerHeaders = await headers(body, extraBetas, {
+      includeClaudeCliRuntimeHeaders,
+      sourceIdentity,
+    });
+    if (hasDynamic && cfg.resolveAccountProfile) {
+      const verified = AnthropicAccountUuidSchema.safeParse(
+        cfg.currentMetadata?.().anthropicAccountUuid,
+      );
+      if (!verified.success)
+        throw new AnthropicIdentityError(
+          "Anthropic OAuth account identity is missing; reconnect the account",
+        );
+      const profile = await cfg.resolveAccountProfile(
+        verified.data,
+        offeredAnthropicClientVersion(input, sourceIdentity, identityContext?.clientVersion),
+      );
+      const resolved = applyAnthropicAccountProfile(
+        wireInput,
+        profile,
+        verified.data,
+        identityRequestId,
+        sourceIdentity,
+        identityContext,
+      );
+      wireInput = resolved.input;
+      body = nativePassthroughBody(wireInput);
+      providerHeaders["X-Claude-Code-Session-Id"] = resolved.sessionId;
+      providerHeaders["User-Agent"] = updateAnthropicUserAgent(
+        providerHeaders["User-Agent"] ?? "",
+        profile.clientVersion,
+      );
+    }
+    const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
+      mergeHeaders: includeClaudeCliRuntimeHeaders ? ["anthropic-beta"] : [],
+      forceAcceptEncodingIdentity: cfg.getAuthHeader !== undefined && body.stream === true,
+      ...(cfg.getAuthHeader !== undefined && body.stream === true
+        ? { providerProfileApplied: "anthropic_official_safe" }
+        : {}),
+    });
     const strictClaudeCliFingerprint =
       fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
     const strictPrepared = strictClaudeCliFingerprint
@@ -1781,7 +1823,9 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     normalizeToolNames = false,
     compatibility?: NonNullable<Capabilities["requestCompatibility"]>["anthropic"],
     sourceIdentity?: Record<string, unknown>,
+    identityContext?: AnthropicIdentityContext,
   ): Promise<AnthropicRequestResult> {
+    const identityRequestId = randomUUID();
     const result = await request(
       body,
       external,
@@ -1792,6 +1836,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       normalizeToolNames,
       compatibility,
       sourceIdentity,
+      identityContext,
+      identityRequestId,
     );
     if (result.res.status === 401 && cfg.onUnauthorized !== undefined) {
       await result.res.body?.cancel().catch(() => {});
@@ -1806,6 +1852,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         normalizeToolNames,
         compatibility,
         sourceIdentity,
+        identityContext,
+        identityRequestId,
       );
     }
     return result;
@@ -1845,6 +1893,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
         opts?.requestCompatibility?.anthropic,
         req,
+        opts?.anthropicIdentityContext,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1874,6 +1923,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
         opts?.requestCompatibility?.anthropic,
         req,
+        opts?.anthropicIdentityContext,
       );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs, toolNameMap);
@@ -1898,6 +1948,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         false,
         false,
         opts?.requestCompatibility?.anthropic,
+        undefined,
+        opts?.anthropicIdentityContext,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const nativeResponse = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1916,6 +1968,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
         false,
         opts?.requestCompatibility?.anthropic,
+        undefined,
+        opts?.anthropicIdentityContext,
       );
       if (!res.ok) throw await errorFromResponse(res);
       return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
@@ -1938,6 +1992,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         false,
         false,
         opts?.requestCompatibility?.anthropic,
+        undefined,
+        opts?.anthropicIdentityContext,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const raw = readAnthropicSSERaw(res, timeoutMs);
