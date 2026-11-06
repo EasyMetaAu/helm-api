@@ -123,9 +123,15 @@ describe("API key accounts and pool", () => {
     );
     await accounts.settle((await accounts.acquire(id))!, failure, "m");
     expect(accounts.entries()[0]).toMatchObject({ state: "quota_exhausted", nextRetryAt: null });
+    expect((await accounts.list())[0]?.reasonMessage).toBe(
+      "Your credit balance is too low to access the Anthropic API.",
+    );
     now += 40 * 86_400_000;
     const restarted = new ApiKeyAccounts(options);
     await restarted.refresh();
+    expect((await restarted.list())[0]?.reasonMessage).toBe(
+      "Your credit balance is too low to access the Anthropic API.",
+    );
     expect(await restarted.acquire(id)).toBeNull();
     await restarted.retry(id);
     const probe = await restarted.acquire(id);
@@ -135,6 +141,7 @@ describe("API key accounts and pool", () => {
     await restarted.retry(id);
     await restarted.settle((await restarted.acquire(id))!, null);
     expect(restarted.entries()[0]!.state).toBe("ready");
+    expect((await restarted.list())[0]?.reasonMessage).toBeNull();
   });
   it("rotates away from invalid Anthropic credentials but not bad request content", async () => {
     const { store } = memoryStore();
@@ -494,4 +501,19 @@ describe("API key accounts and pool", () => {
       Date.parse("2026-11-01T00:00:00Z"),
     );
   });
+});
+
+it("redacts account credentials before exposing a saved upstream reason", async () => {
+  const { accounts } = await setup(1);
+  const a = accounts.entries()[0]!;
+  await accounts.settle(
+    (await accounts.acquire(a.id))!,
+    new UpstreamError(
+      "upstream_error",
+      "billing",
+      { error: { code: "credit_balance_exhausted", message: `Rejected key ${a.key}` } },
+      429,
+    ),
+  );
+  expect((await accounts.list())[0]?.reasonMessage).toBe("Rejected key [redacted]");
 });

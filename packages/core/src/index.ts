@@ -38,6 +38,7 @@ export {
   type SkipReason,
 } from "./capability/filter.js";
 export {
+  anthropicBilledCostFromUsage,
   billedCostFromBody,
   computeCostUsd,
   type ResolvedCompactionPricing,

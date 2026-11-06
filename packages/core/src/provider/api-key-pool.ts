@@ -233,6 +233,7 @@ export class ApiKeyAccounts {
           models: null,
           state: "ready",
           reason: null,
+          reasonMessage: null,
           nextRetryAt: null,
           probeUntil: null,
           probeId: null,
@@ -257,6 +258,7 @@ export class ApiKeyAccounts {
           generation: randomUUID(),
           state: "ready",
           reason: null,
+          reasonMessage: null,
           nextRetryAt: null,
           probeId: null,
           probeUntil: null,
@@ -375,6 +377,7 @@ export class ApiKeyAccounts {
         if (error === null) {
           a.state = "ready";
           a.reason = null;
+          a.reasonMessage = null;
           a.nextRetryAt = null;
           if (model) a.deniedModels = a.deniedModels.filter((denied) => denied !== model);
         } else a.nextRetryAt = this.now() + 60_000;
@@ -386,7 +389,19 @@ export class ApiKeyAccounts {
             ? null
             : Math.max(a.nextRetryAt ?? 0, this.now() + DAY);
       }
-      if (kind) a.reason = errorCode(error) || kind;
+      if (kind) {
+        a.reason = errorCode(error) || kind;
+        const message =
+          error instanceof UpstreamError
+            ? record(record(error.providerRaw).error).message
+            : undefined;
+        a.reasonMessage =
+          typeof message === "string"
+            ? doc.accounts
+                .reduce((text, account) => text.replaceAll(account.key, "[redacted]"), message)
+                .slice(0, 4000)
+            : null;
+      }
       if (attempt.probeId === null && (kind === "billing" || kind === "invalid")) {
         a.probeId = null;
         a.probeUntil = null;

@@ -368,6 +368,9 @@
                           >
                           <p class="mt-1 max-w-xs whitespace-normal break-words">
                             {account.reason}
+                            {#if account.reasonMessage}<span class="mt-1 block"
+                                >{account.reasonMessage}</span
+                              >{/if}
                           </p>
                         </details>{/if}
                       {#if account.nextRetryAt}<p class="field-help mt-1 whitespace-normal">

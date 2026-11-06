@@ -16,6 +16,7 @@ import {
   type EnvironmentTimezoneResolver,
 } from "./environment-timezone.js";
 import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
+
 // Native Anthropic Messages executor (issue #38) — routes Helm's internal
 // OpenAI-Chat IR to the Anthropic /v1/messages API, used by Claude Pro/Max
 // SUBSCRIPTION (OAuth) providers. Implements the same ProviderClient interface as
@@ -42,6 +43,7 @@ import {
   type NativePassthroughInput,
   nativePassthroughBody,
 } from "@helm/shared";
+import { anthropicBilledCostFromUsage } from "../catalog/cost.js";
 import {
   type AnthropicToolNameMap,
   createAnthropicToolNameMap,
@@ -1486,6 +1488,7 @@ export function anthropicToOpenAIResponse(
     typeof cacheCreationDetails?.ephemeral_1h_input_tokens === "number"
       ? cacheCreationDetails.ephemeral_1h_input_tokens
       : undefined;
+  const billedCost = anthropicBilledCostFromUsage(usage);
   const promptTokens = inTok + cacheRead + cacheCreation;
   const message: Record<string, unknown> = { role: "assistant", content: text || null };
   if (toolCalls.length) message.tool_calls = toolCalls;
@@ -1503,6 +1506,7 @@ export function anthropicToOpenAIResponse(
       },
     ],
     usage: {
+      ...(billedCost !== null ? { cost_usd: billedCost } : {}),
       prompt_tokens: promptTokens,
       completion_tokens: outTok,
       total_tokens: promptTokens + outTok,
@@ -1571,6 +1575,58 @@ function normalizeAnthropicModelParameters(
     removed.map((key) => `${key}_removed_for_model`),
   );
   return cloneCarrierWithBody(input, next);
+}
+
+// Only the official API-key boundary removes subscription client identity.
+// Work on a copy: the same carrier may later serve an OAuth or relay attempt.
+function prepareOfficialPaidInput(input: NativePassthroughInput): NativePassthroughInput {
+  const body = nativePassthroughBody(input);
+  const isIdentity = (text: unknown): boolean =>
+    typeof text === "string" &&
+    (text.trim() === SYSTEM_SPOOF ||
+      /^x-anthropic-billing-header:\s*cc_version=[^\r\n]+$/.test(text.trim()));
+  let system = body.system;
+  if (Array.isArray(system)) {
+    const filtered = system.filter(
+      (block) => !isRecord(block) || block.type !== "text" || !isIdentity(block.text),
+    );
+    if (filtered.length !== system.length) system = filtered.length > 0 ? filtered : undefined;
+  } else if (typeof system === "string") {
+    const lines = system.split("\n");
+    const filtered = lines.filter((line) => !isIdentity(line));
+    if (filtered.length !== lines.length) system = filtered.join("\n") || undefined;
+  }
+  const changed = system !== body.system;
+  const next = changed ? { ...body, system } : body;
+  if (changed && system === undefined) delete next.system;
+  if (!isNativePassthroughCarrier(input)) return next;
+  const carrier = cloneCarrierWithBody(input, next, { preserveRawBody: !changed });
+  if (changed)
+    appendMutationList(carrier.mutations, "body_shims_applied", [
+      "anthropic_api_subscription_identity_removed",
+    ]);
+  const dropped: string[] = [];
+  carrier.headers = {};
+  for (const [name, value] of Object.entries(input.headers)) {
+    const lower = name.toLowerCase();
+    if (
+      lower === "x-app" ||
+      lower.startsWith("x-claude-code-") ||
+      (lower === "user-agent" && /claude-cli/i.test(String(value)))
+    ) {
+      dropped.push(name);
+    } else if (lower === "anthropic-beta") {
+      const betas = (Array.isArray(value) ? value.join(",") : value)
+        .split(",")
+        .map((v) => v.trim());
+      const kept = betas.filter((v) => v && !/^(oauth-|claude-code-)/.test(v));
+      if (kept.length > 0) carrier.headers[name] = kept.join(",");
+      if (kept.length !== betas.length)
+        appendMutationList(carrier.mutations, "headers_overwritten", [name]);
+    } else carrier.headers[name] = value;
+  }
+  appendMutationList(carrier.mutations, "headers_dropped", dropped);
+  return carrier;
 }
 
 export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient {
@@ -1690,6 +1746,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       ),
       deps.resolveEnvironmentTimezone,
     );
+    if (officialPaidApi) wireInput = prepareOfficialPaidInput(wireInput);
     let body = nativePassthroughBody(wireInput);
     // Validate the untouched account assertion before resolving or rewriting
     // logical device/session identity. Authentication owns the actual account UUID.
@@ -1733,7 +1790,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         : {}),
     });
     const strictClaudeCliFingerprint =
-      fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
+      !officialPaidApi && fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
     const strictPrepared = strictClaudeCliFingerprint
       ? prepareStrictClaudeCliBody(cloneStrictClaudeCliBody(prepared.body))
       : { body: prepared.body };
@@ -2635,6 +2692,7 @@ function openaiUsageChunk(
     cacheCreation1h: number;
     speed?: string;
     inferenceGeo?: string;
+    billedCost?: number;
   },
 ): string {
   const promptTokens = usage.input + usage.cacheRead + usage.cacheCreation;
@@ -2650,6 +2708,7 @@ function openaiUsageChunk(
       completion_tokens: usage.output,
       total_tokens: promptTokens + usage.output,
       ...(usage.inferenceGeo !== undefined ? { inference_geo: usage.inferenceGeo } : {}),
+      ...(usage.billedCost !== undefined ? { cost_usd: usage.billedCost } : {}),
       ...(usage.cacheRead > 0 || usage.cacheCreation > 0
         ? {
             prompt_tokens_details: {
@@ -2698,6 +2757,7 @@ export async function* translateAnthropicSSE(
   let usageCacheCreation1h = 0;
   let usageSpeed: string | undefined;
   let usageInferenceGeo: string | undefined;
+  let usageBilledCost: number | null = null;
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
@@ -2731,6 +2791,8 @@ export async function* translateAnthropicSSE(
             string,
             unknown
           >;
+          const amount = anthropicBilledCostFromUsage(u);
+          if (amount !== null) usageBilledCost = amount;
           if (typeof u.speed === "string") usageSpeed = u.speed;
           if (typeof u.inference_geo === "string") usageInferenceGeo = u.inference_geo;
           if (typeof u.input_tokens === "number") usageInput = u.input_tokens;
@@ -2790,6 +2852,8 @@ export async function* translateAnthropicSSE(
         } else if (type === "message_delta") {
           const d = (evt.delta ?? {}) as Record<string, unknown>;
           const u = (evt.usage ?? {}) as Record<string, unknown>;
+          const amount = anthropicBilledCostFromUsage(u);
+          if (amount !== null) usageBilledCost = amount;
           if (typeof u.speed === "string") usageSpeed = u.speed;
           if (typeof u.inference_geo === "string") usageInferenceGeo = u.inference_geo;
           if (typeof u.output_tokens === "number") usageOutput = u.output_tokens;
@@ -2826,6 +2890,7 @@ export async function* translateAnthropicSSE(
             cacheCreation1h: usageCacheCreation1h,
             ...(usageSpeed !== undefined ? { speed: usageSpeed } : {}),
             ...(usageInferenceGeo !== undefined ? { inferenceGeo: usageInferenceGeo } : {}),
+            ...(usageBilledCost !== null ? { billedCost: usageBilledCost } : {}),
           });
           yield "data: [DONE]\n\n";
           // Terminal event: stop reading NOW. Otherwise the next read would block
