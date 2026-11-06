@@ -1644,3 +1644,33 @@ anthropic-api/claude-opus-5-5: *anthropic_api_claude_opus_5_5
 anthropic-api/claude-sonnet-5-5: *anthropic_api_claude_sonnet_5_5
 anthropic-api/claude-fable-5-1: *anthropic_api_claude_fable_5_1
 anthropic-api/claude-haiku-4-5-20251001: *anthropic_api_claude_haiku_4_5_20251001
+
+# ZenMux Anthropic 5.5 prices, verified against its catalog on 2026-11-07.
+zenmux-anthropic/claude-haiku-5.5:
+  inputPerMTokUsd: 0.1
+  outputPerMTokUsd: 0.5
+  cacheReadPerMTokUsd: 0.01
+  cacheWritePerMTokUsd: 0.125
+  cacheWrite1hPerMTokUsd: 0.2
+  inferenceGeoMultipliers: { global: 1 }
+  contextTiers:
+    - minPromptTokens: 100000
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 2.5
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 0.625
+      cacheWrite1hPerMTokUsd: 1
+zenmux-anthropic/claude-sonnet-5.5:
+  inputPerMTokUsd: 2
+  outputPerMTokUsd: 10
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 2.5
+  cacheWrite1hPerMTokUsd: 4
+  inferenceGeoMultipliers: { global: 1 }
+zenmux-anthropic/claude-opus-5.5:
+  inputPerMTokUsd: 4
+  outputPerMTokUsd: 20
+  cacheReadPerMTokUsd: 0.2
+  cacheWritePerMTokUsd: 5
+  cacheWrite1hPerMTokUsd: 8
+  inferenceGeoMultipliers: { global: 1 }

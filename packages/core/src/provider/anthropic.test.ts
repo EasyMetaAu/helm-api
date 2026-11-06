@@ -3007,7 +3007,7 @@ describe("createAnthropicClient — nativePassthrough", () => {
       });
     });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      config: { baseUrl: "https://relay.example/anthropic", apiKey: "sk-static" },
       fetch: fetchMock as unknown as typeof fetch,
     });
     await client.nativePassthrough?.(body);
@@ -4056,7 +4056,7 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
       return sseStreamResponse(writes);
     });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      config: { baseUrl: "https://relay.example/anthropic", apiKey: "sk-static" },
       fetch: fetchMock as unknown as typeof fetch,
     });
     const chunks: string[] = [];
@@ -4080,7 +4080,7 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
       return sseStreamResponse(['event: message_stop\ndata: {"type":"message_stop"}\n\n']);
     });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      config: { baseUrl: "https://relay.example/anthropic", apiKey: "sk-static" },
       fetch: fetchMock as unknown as typeof fetch,
     });
     for await (const _ of client.nativePassthroughStream?.(body) ?? []) {

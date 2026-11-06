@@ -290,7 +290,7 @@ describe("Anthropic adapter header semantics", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves actual native SDK metadata and reviewed optional fields without inventing absent ones", async () => {
+  it("preserves actual relay SDK metadata and reviewed optional fields without inventing absent ones", async () => {
     const fields = {
       "anthropic-version": "future-version",
       "anthropic-beta": "future-beta,oauth-2025-04-20",
@@ -340,6 +340,9 @@ describe("Anthropic adapter header semantics", () => {
         "x-self-hosted-runner-capabilities",
         "x-tunnel-peer",
         "x-mcp-features",
+        "x-download-token",
+        "x-mcp-error-code",
+        "x-ccr-tool-container-restart",
         "anthropic-client-os",
       ]) {
         expect(headers.get(name), name).toBeNull();
@@ -350,7 +353,7 @@ describe("Anthropic adapter header semantics", () => {
       return response();
     });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "test" },
+      config: { baseUrl: "https://relay.example.test", apiKey: "test" },
       fetch: fetcher,
     });
     await client.nativePassthrough?.({
@@ -378,6 +381,9 @@ describe("Anthropic adapter header semantics", () => {
         "x-self-hosted-runner-capabilities": "private-capability",
         "x-tunnel-peer": "tool-server",
         "x-mcp-features": "private-feature",
+        "x-download-token": "private-download-token",
+        "x-mcp-error-code": "private-mcp-error",
+        "x-ccr-tool-container-restart": "private-container-state",
         "anthropic-client-os": "private-platform",
         cookie: "secret",
         "x-claude-remote-container-id": "private",

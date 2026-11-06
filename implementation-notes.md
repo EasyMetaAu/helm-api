@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-11-07 · 官方 Claude API 身份边界与 ZenMux 成本（docs/04、05、07、11）
+
+- 官方 Anthropic API Key 路径只删除独立的 Claude Code 身份和 billing system 标记，以及专用 CLI Header／OAuth beta；业务 system、metadata、签名历史和工具内容保持原样。OAuth 订阅身份校验和第三方 relay 透传不变。清理使用请求副本，并记录 mutation ledger。
+- ZenMux 的点号模型 ID 保持原样，定价按完整 provider alias 查找，不跨供应商套价。新增三个 5.5 价格条目、配套能力元数据及已确认的 global=1；其他未知地区继续返回未计量。
+- Anthropic 金额字段在用量边界统一接收非负有限数字或十进制金额字符串，流式按最后有效累计金额取值，不相加；优先使用上游金额，再按目录估算。原始响应保持不变。
+- API 账户额外保存经凭据清理的上游错误说明，旧记录可缺省；测试恢复或更换 key 后清空旧说明。未改余额故障的暂停策略，也未执行历史成本重算。
+- 验证：353 项定向单测／集成检查、1 项 API 账户管理浏览器流程通过；shared/core 构建、core/gateway/admin 类型检查及 admin 构建通过。改动文件 Biome 无错误，保留既有警告。独立只读审查无 P0/P1 发现。
+- 发布准备：执行 `pnpm release:prepare 0.30.70`；Codex 稳定快照升至 0.167.0，同 tag 模型目录内容未变，Claude Code 同步至经增量静态审查的 2.1.319，Grok 1.0.77 保持不变。协议头白名单不变，审查证据见 `docs/claude-protocol-safety.md`。另 24 项版本／模型兼容定向测试通过。
+
 ## 2026-11-06 · Claude 账号设备、会话与版本一致性（docs/04、05、06、07）
 
 - **身份决定**：先取得凭证并校验原始非空账号声明，再用已认证 UUID 关联持久档案；缺失 UUID 或档案损坏拒绝发送。通过既有 `config_kv` 单表 CAS 固定设备和最高版本，无新增表；同表记录旧设备首次归属，防止内部账号名称复用时不同 UUID 共用设备。首次沿用旧网关账号设备值，随后不受账号重命名、重启或加密密钥轮换影响；旧原生客户端设备透传会统一到该档案。
@@ -58,7 +67,6 @@
 - **发布准备**：v0.30.62 已执行 `pnpm release:prepare 0.30.62`，官方稳定快照仍为 Grok 1.0.70、Claude Code 2.1.312、Codex 0.165.0 及同 tag 模型目录，无快照差异；补齐其余五种管理界面语言，修复完整 CI 的词条一致性失败。
 - **限制**：轮询次数在单个 gateway 的协议池内均衡，不保证多副本全局严格均匀；用量仅覆盖 Helm 观察到的流量，金额为估算。策略可在后台覆盖 YAML 默认值，时区仍由配置控制。
 
-
 ## 2026-10-28 · Sonnet 5.5 强制工具选择能力过滤（docs/02、04、05、07）
 
 - **根因**：生产请求被 Sonnet 5.5 以不支持 `tool_choice: tool/any` 拒绝；执行器把上游 400 当作整个请求无效，因此没有尝试后续候选。Anthropic 当前官方文档确认该限制也适用于 count_tokens。
@@ -85,15 +93,9 @@
 - **订阅边界**：[官方 Codex 目录](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json)同日含 Terra：默认 context 500K、最大 context 872K、默认 low、Responses Lite。静态能力取 500K，账号实时目录继续决定可用性、推理等级、上下文与协议。当前固定 Codex 0.164.0 离线快照不含 Terra，本次不手改官方快照；只有离线旧目录时会走现有 fallback，manual 清单也需由运营方启用 Terra。未调用真实账号验证权限。
 - **计费限制**：订阅价格为 API 等价估算。现有 schema 不区分 OpenAI 12 小时缓存写入（标准短上下文 $2.50/MTok），也没有独立 max-input 字段；本次不扩展计费或请求模型，不将 12 小时价冒充 1 小时缓存价。发布准备按用户后续授权升级至 v0.30.56；Claude 2.1.311 已通过独立静态协议检查，新增四个字段继续剥离，详见 `docs/claude-protocol-safety.md`。Grok、Codex 稳定版按发布工具同步；部署与真实上游结果另行核验。
 
-## 2026-10-26 · Codex 旧 turn-state 发送前换账号（docs/04、05、06、07）
-
-- **原因与边界**：原账号冷却时，即使 HTTP 请求携带完整历史，旧 `x-codex-turn-state` 仍强制绑定原账号。本次只在零发送、原账号已知且不可调度、有其他可用账号时恢复：验证完整 input 与工具配对，删除该请求副本的旧 header，保留所有正文并重新选择账号；不清除账号配额或修改用户设置。
-- **状态更新**：请求级 reset 跳过所选账号的旧 turnKey 缓存，上游返回的新状态正常回传并记录。后续携带新状态继续绑定新账号；旧客户端对象、其他会话与原账号续接映射不批量清空。变更在 mutation ledger 记录 `codex_turn_state_recovered`。
-- **限制**：`previous_response_id`、conversation、item/file 引用、不完整工具对、未知 input 类型以及内部 WebSocket session 不走本次恢复；继续要求完整历史或原会话恢复。POST 后结果未知、已有输出及容量三次重试耗尽不触发此类换号。
-- **发布准备**：v0.30.55 已通过 `pnpm release:prepare 0.30.55`，客户端与模型目录保持已验证的 Grok 1.0.70、Claude 2.1.310、Codex 0.164.0 快照。
-- **真实协议证据**：通过公网发送三轮极短合成请求，生产读回账号 A → B → B；第二轮无旧状态但保留历史，收到新 turn-state，第三轮携带新状态成功且不必再次获得状态头。没有重放用户原始任务或主动修改生产账号冷却；测试 Key 均撤销。
-
 ## 更早历史总览
+
+2026-10-26：Codex 完整历史可在发送前恢复不可用 turn-state，保留账号、会话和工具配对边界；详见 git history。
 
 2026-10-26：Codex 容量拒绝只在首输出前同账号有界重试，冷却返回 Retry-After，断流保留结构化证据；不明结果禁止重放，完整记录见 git history。
 

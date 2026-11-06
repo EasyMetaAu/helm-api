@@ -1,6 +1,6 @@
 # Claude 协议兼容与账户边界
 
-更新日期：2026-11-06。此文记录兼容性和授权边界，不承诺防止账号封禁。
+更新日期：2026-11-07。此文记录兼容性和授权边界，不承诺防止账号封禁。
 
 ## 使用范围
 
@@ -26,7 +26,7 @@ OAuth 登录与刷新从认证响应的 `account.uuid` 保存 `anthropicAccountU
 
 **已有账号的迁移：**网关管理的 Anthropic 订阅路径必须有经认证响应验证的账户 UUID，缺失时拒绝发送，直到重新连接或正常刷新返回真实 UUID。不会自动请求账户 profile。首次建立档案时沿用旧网关按账号生成的设备值，并持久保存；原生路径过去直接透传客户端设备值，升级后统一到该账号档案，因此这类请求的出站设备值会改变一次。
 
-空账户字段或普通 opaque `user_id` 仍可进入订阅路由，出站时改用已验证账号的 JSON 身份；它们不提供历史所属账户的证明。API key 路径不套用订阅身份改写。
+空账户字段或普通 opaque `user_id` 仍可进入订阅路由，出站时改用已验证账号的 JSON 身份；它们不提供历史所属账户的证明。API key 路径不套用订阅身份改写。 官方 Anthropic API Key 出站另行删除独立的 Claude Code 身份与 billing system 标记、CLI 专用 Header 和 OAuth beta，防止把订阅客户端标记带入付费 API；业务 system、metadata 与消息历史不变。第三方 relay 不自动执行该清理。
 
 ## 账号设备、业务会话与版本
 
@@ -34,7 +34,7 @@ OAuth 登录与刷新从认证响应的 `account.uuid` 保存 `anthropicAccountU
 
 出站会话由账号设备命名空间、经鉴权的租户/API key 所有者和业务会话共同决定。原始会话优先读取 `metadata.user_id.session_id`、会话 Header 和请求会话字段，再使用网关 thread ID；全部缺失时只在同一请求及其重试内稳定。不同账号或不同所有者不共用上游会话；同一业务会话 A→B→A 对应 A1→B1→A1，正文与 Header 的 session ID 同步。不会把账号全部请求合并成一个会话。已存在的 `session_id`、`session-id`、`x-session-id` 和 `x-claude-code-session-id` 同步到出站会话。已审查的 Agent/父 Agent Header 在同一业务会话内使用同一套账号映射以保留引用关系；Prompt ID 按原 prompt 映射，请求 ID 按本次网关请求映射，重试保持一致。未出现的 Agent/Prompt 字段不补造，幂等键不改写。
 
-Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.318`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
+Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.319`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
 
 按部署方要求，订阅出站 billing 的 `cc_entrypoint` 与 Claude UA 中的入口统一为 `cli`，同时统一 `cc_version` 和 `claude-cli/<version>`。只修改这些明确字段，保留已有构建后缀和其余归因信息。该入口是网关规范化标记：官方 CLI 的 `-p`、非 TTY 等非交互调用本来也可能报告 `sdk-cli`；`cli`/`sdk-cli` 不是订阅或 API key 的计费开关。修改标记不会把实际非交互执行变为交互执行，也不会升级实际客户端。订阅路径继续使用所选账号的 OAuth 凭证。
 
@@ -136,6 +136,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 引号内 `X-*`、`x-*`、`Anthropic-*`、`anthropic-*` 字段由 342 项变为 344 项：新增 `x-cc-internal-tool-provenance-server-url`（功能开关表中的内部开关名，与 beta `tool-provenance-2026-10-26` 并列，128134676）、`x-ccr-gmail-attachments`（远程 MCP 连接器字段，与 `x-mcp-server-origin` 同处定义，265111694）、`x-ccr-tool-container-host-draining`（读取 MCP 响应头，295173287）；删除 `x-ccr-ticket-mcp`。它们都不是推理入站头，已审查白名单不变，10 个已审查字段在新版中仍全部存在。
 - 新增 beta 值 `claude-code-side-query-2026-09-29`、`program-use-case-ids-2026-09-17`、`tool-provenance-2026-10-26`。Helm 原生透传只合并客户端实际发送的 `anthropic-beta`，不自行补造，因此无需修改。
 - 账号归因头（131506332）、附加保护头（261282352）、`x-client-app`、request-class／prompt-id 构造，以及 SSE 的文本、citation、JSON-input、thinking、signature、compaction 分支（262670538 附近）在归一化压缩变量名后与旧版结构一致。未发现需要调整 Helm 协议实现的 P0/P1 问题；有限静态审查不证明全部客户端行为一致，也不替代真实上游验收。
+
+2026-11-07 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.319`：新旧 2.1.318 平台包均通过 npm SHA512 integrity 校验，旧二进制与审核记录一致。新二进制 SHA256 为 `1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd`，内嵌 SDK 仍为 `0.128.0`（字节偏移 264557566）。只静态读取公开制品，没有执行 CLI 或访问账号。
+
+- 同口径引号字段扫描从 343 项变为 349 项，无删除，10 个已审查头仍全部存在。新增 `anthropic-ratelimit-unified-overage-daily-cap-paused`（264893829）为额度响应状态；`anthropic-use-case-id`（264609240）用于自定义头设置限制；`x-ccr-tool-container-restart`（286838608）、`x-mcp-error-code`（283296261）为 MCP 响应读取；`x-download-token`（264860537）为连接器下载凭据；`x-mcp-file`（286818760）为文件参数 schema 标记。它们均不加入 Messages 白名单，边界测试验证敏感下载凭据仍被剥离。
+- 新 beta `request-tags-2026-08-21`（293064506）属于网关 billing-group/tag 过滤；Helm 不自行生成。账号归因（267361233–267361919）保留来源优先级和受保护 metadata 覆盖顺序；billing 文本字段集合及附加保护头生成条件未变。
+- SDK SSE 发出（264782597–264783393）与累积（264785383–264786237）分支经局部标识符归一化后与旧版一致，包括工具 JSON、thinking、signature 和加密 compaction。独立只读审查无 P0/P1 协议实现发现。有限静态审查不涵盖全部动态字段或客户端工作流，真实上游验收仍单独进行。
 
 发布/同步流程在写版本快照前要求：
 

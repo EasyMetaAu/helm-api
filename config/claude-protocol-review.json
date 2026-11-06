@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "cliVersion": "2.1.318",
+  "cliVersion": "2.1.319",
   "observedSdkVersion": "0.128.0",
   "artifact": {
     "name": "@anthropic-ai/claude-code-darwin-arm64",
-    "integrity": "sha512-EBKlipLmKY+ZEY+yNft2NegA6Uz34ZMjkzYxUaLF37qitojBJbIcF71F6JwFRlpIPXmiWchftLa9XONg3KBaxQ==",
-    "binarySha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d"
+    "integrity": "sha512-dyAOFnsXbeyGgFJMlo2n6zSgLli5r4fTZ3Tj48eELxjccqM4s/wUmQ6P0DyCbxU0EC44VV44T2qj5xEpen25aA==",
+    "binarySha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd"
   },
   "reviewedHeaders": [
     "anthropic-version",

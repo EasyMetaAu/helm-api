@@ -60,6 +60,7 @@ export const ApiKeyAccountViewSchema = z.object({
   models: z.array(z.string()).nullable(),
   state: z.enum(["ready", "cooldown", "quota_exhausted", "invalid"]),
   reason: z.string().nullable(),
+  reasonMessage: z.string().max(4000).nullable().optional(),
   nextRetryAt: z.number().nullable(),
   probeUntil: z.number().nullable(),
   deniedModels: z.array(z.string()),

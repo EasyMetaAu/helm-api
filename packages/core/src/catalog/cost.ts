@@ -337,6 +337,20 @@ export function usageFromBody(body: unknown): TokenUsage {
   return out;
 }
 
+// Anthropic relays may report cumulative USD amounts as decimal strings.
+// Convert only these billing fields; never coerce token counts or arbitrary data.
+export function anthropicBilledCostFromUsage(usage: unknown): number | null {
+  if (!usage || typeof usage !== "object") return null;
+  const fields = usage as { cost_usd?: unknown; cost?: unknown };
+  for (const value of [fields.cost_usd, fields.cost]) {
+    const parsed =
+      typeof value === "string" && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) ? Number(value) : value;
+    const amount = finiteNonNegative(parsed);
+    if (amount !== undefined) return amount;
+  }
+  return null;
+}
+
 // An upstream-BILLED cost the provider returned alongside the response — the
 // relay's OWN computed price, in USD. Different relays surface it differently, so
 // we probe, in precedence order: `usage.cost_usd` → `usage.cost` (OpenRouter) →

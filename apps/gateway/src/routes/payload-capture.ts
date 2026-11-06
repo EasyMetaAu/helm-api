@@ -1,5 +1,6 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
 import {
+  anthropicBilledCostFromUsage,
   billedCostFromBody,
   PERSISTED_SESSION_MAX_REVISIONS,
   usageFromBody as parseUsage,
@@ -898,7 +899,9 @@ export function usageFromAnthropicResponse(body: unknown): StreamUsage | null {
     inTok !== undefined || cacheRead !== undefined || cacheCreation !== undefined
       ? (inTok ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0)
       : undefined;
+  const billedCost = anthropicBilledCostFromUsage(u);
   const normalized: StreamUsage = {
+    ...(billedCost !== null ? { cost_usd: billedCost } : {}),
     ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}),
     ...(outTok !== undefined ? { completion_tokens: outTok } : {}),
     ...(promptTokens !== undefined || outTok !== undefined
@@ -1232,6 +1235,7 @@ export function createAnthropicUsageAccumulator() {
   let cacheCreation1h = 0;
   let speed: string | undefined;
   let inferenceGeo: string | undefined;
+  let billedCost: number | null = null;
   return {
     push(raw: string): void {
       for (const frame of raw.split("\n\n")) {
@@ -1258,6 +1262,11 @@ export function createAnthropicUsageAccumulator() {
             string,
             unknown
           >;
+          const amount = anthropicBilledCostFromUsage(u);
+          if (amount !== null) {
+            billedCost = amount;
+            seenUsage = true;
+          }
           if (typeof u.speed === "string") speed = u.speed;
           if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
           if (typeof u.input_tokens === "number") {
@@ -1286,6 +1295,11 @@ export function createAnthropicUsageAccumulator() {
           }
         } else if (evt.type === "message_delta") {
           const u = (evt.usage ?? {}) as Record<string, unknown>;
+          const amount = anthropicBilledCostFromUsage(u);
+          if (amount !== null) {
+            billedCost = amount;
+            seenUsage = true;
+          }
           if (typeof u.speed === "string") speed = u.speed;
           if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
           if (typeof u.output_tokens === "number") {
@@ -1318,6 +1332,7 @@ export function createAnthropicUsageAccumulator() {
     value(): StreamUsage | null {
       if (!seenUsage) return null;
       return {
+        ...(billedCost !== null ? { cost_usd: billedCost } : {}),
         input_tokens: input,
         output_tokens: output,
         cache_read_input_tokens: cacheRead,

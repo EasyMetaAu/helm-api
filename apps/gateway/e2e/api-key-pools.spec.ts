@@ -107,12 +107,23 @@ test("API key provider import, pause, edit and delete through the real admin UI"
           new UpstreamError(
             "upstream_error",
             "billing",
-            { error: { code: "credit_balance_exhausted" } },
+            {
+              error: {
+                code: "credit_balance_exhausted",
+                message: "Provider reports insufficient credit for this request.",
+              },
+            },
             429,
           ),
         );
       }
       await page.reload();
+      const paused = section.getByRole("row").filter({ hasText: "API 1" });
+      await paused.getByText("Details", { exact: true }).click();
+      await expect(
+        paused.getByText("Provider reports insufficient credit for this request.", { exact: true }),
+      ).toBeVisible();
+      await paused.getByText("Details", { exact: true }).click();
       await section
         .getByRole("button", { name: "Batch test and recover", exact: true })
         .first()
