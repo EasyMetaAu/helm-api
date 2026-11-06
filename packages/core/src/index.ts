@@ -508,6 +508,11 @@ export {
   translateAnthropicSSE,
 } from "./provider/anthropic.js";
 export {
+  type AnthropicAccountProfileResolver,
+  createAnthropicAccountProfileResolver,
+  offeredAnthropicClientVersion,
+} from "./provider/anthropic-account-profile.js";
+export {
   AnthropicIdentityError,
   anthropicRequestAccountUuid,
 } from "./provider/anthropic-identity.js";

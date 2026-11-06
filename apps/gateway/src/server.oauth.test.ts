@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   __setWreqModuleForTesting,
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
@@ -15,7 +16,7 @@ import {
   XAI_GROK_CLIENT_VERSION,
 } from "@helm/core";
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
-import { ProviderConfigSchema } from "@helm/shared";
+import { createNativePassthroughCarrier, ProviderConfigSchema } from "@helm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getAccountSettings,
@@ -24,6 +25,7 @@ import {
 } from "./oauth/account-settings.js";
 import { createCodexModelCache } from "./oauth/codex-model-cache.js";
 import { createCodexModelCatalog } from "./oauth/codex-model-catalog.js";
+import { legacyAnthropicDeviceId } from "./oauth/device-identity.js";
 import { createOAuthModelDiscoveryCache } from "./oauth/model-discovery-cache.js";
 import { markServingAccount } from "./runtime/serving-account.js";
 import {
@@ -551,9 +553,10 @@ const FAR_FUTURE = 9_999_999_999_999; // ms epoch well past any clock skew → n
 
 function oauthStores(): { ctx: OAuthRuntimeCtx; config: SqliteConfigStore } {
   const db = createSqliteDb(":memory:");
+  const config = new SqliteConfigStore(db);
   return {
-    ctx: { store: new SqliteOAuthTokenStore(db), encKey: ENC_KEY },
-    config: new SqliteConfigStore(db),
+    ctx: { store: new SqliteOAuthTokenStore(db), encKey: ENC_KEY, config },
+    config,
   };
 }
 
@@ -564,7 +567,7 @@ async function seedAnthropic(ctx: OAuthRuntimeCtx, account: string): Promise<voi
     accessEnc: encryptSecret(`access-${account}`, ENC_KEY),
     refreshEnc: encryptSecret(`refresh-${account}`, ENC_KEY),
     expiresAt: FAR_FUTURE,
-    meta: null,
+    meta: JSON.stringify({ anthropicAccountUuid: randomUUID() }),
     updatedAt: 1,
   });
 }
@@ -645,6 +648,105 @@ function codexJwt(payload: Record<string, unknown>): string {
 
 describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
+  it.each([
+    "configured",
+    "pooled",
+  ])("persists Anthropic identity and newer versions through %s client rebuilds", async (mode) => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "work");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "work", {
+      enabledModels: ["claude-opus-4-6"],
+    });
+    const sent: { body: Record<string, unknown>; headers: Headers }[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected network request");
+    });
+    __setWreqModuleForTesting({
+      createTransport: async () => ({ close: vi.fn() }),
+      fetch: async (url, init = {}) => {
+        expect(url).toMatch(/\/v1\/messages$/);
+        sent.push({
+          body: JSON.parse(String(init.body)),
+          headers: new Headers(init.headers as Record<string, string>),
+        });
+        return Response.json({
+          id: "msg-profile",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const rebuild = async () => {
+      if (mode === "pooled") {
+        const result = await synthesizeOAuthProviders(
+          [],
+          ctx,
+          config,
+          "https://fallback/v1",
+          60_000,
+          noop,
+        );
+        return result.poolClients.get("anthropic");
+      }
+      return buildProviderClients(
+        [
+          provider({
+            name: "anthropic",
+            type: "anthropic",
+            base_url: "https://api.anthropic.com",
+            oauth: { provider: "anthropic", account: "work" },
+            models: [{ alias: "anthropic/opus", provider_model: "claude-opus-4-6" }],
+          }),
+        ],
+        "https://fallback/v1",
+        60_000,
+        ctx,
+      ).get("anthropic");
+    };
+    for (const version of ["2.2.10", "2.1.1"]) {
+      const client = await rebuild();
+      expect(client?.nativePassthrough).toBeTypeOf("function");
+      await client?.nativePassthrough?.(
+        createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          headers: { "user-agent": `claude-cli/${version} (external, cli)` },
+          body: {
+            model: "claude-opus-4-6",
+            max_tokens: 10,
+            messages: [{ role: "user", content: "hello" }],
+            metadata: {
+              user_id: JSON.stringify({
+                device_id: "client-device",
+                account_uuid: "",
+                session_id: "conversation",
+              }),
+            },
+          },
+        }),
+      );
+    }
+    expect(sent).toHaveLength(2);
+    const identities = sent.map(({ body }) =>
+      JSON.parse((body.metadata as { user_id: string }).user_id),
+    );
+    expect(identities[0]).toEqual(identities[1]);
+    expect(identities[0].device_id).toMatch(/^[0-9a-f]{64}$/);
+    expect(identities[0].device_id).toBe(legacyAnthropicDeviceId("work", ENC_KEY));
+    expect(identities[0].account_uuid).toMatch(/^[0-9a-f-]{36}$/);
+    for (const call of sent) {
+      expect(call.headers.get("user-agent")).toBe("claude-cli/2.2.10 (external, cli)");
+      expect(call.headers.get("x-claude-code-session-id")).toBe(identities[0].session_id);
+    }
+    expect(
+      JSON.parse(
+        (await config.get(`oauth.anthropic_client_profile.v1.${identities[0].account_uuid}`)) ??
+          "null",
+      ),
+    ).toEqual({ deviceId: identities[0].device_id, clientVersion: "2.2.10" });
+  });
   const mediaModels = [
     {
       alias: "xai/grok-imagine-image",
