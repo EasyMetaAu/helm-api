@@ -10,7 +10,7 @@
 ## 2026-11-07 · 官方 Claude API 身份边界与 ZenMux 成本（docs/04、05、07、11）
 
 - 官方 Anthropic API Key 路径只删除独立的 Claude Code 身份和 billing system 标记，以及专用 CLI Header／OAuth beta；业务 system、metadata、签名历史和工具内容保持原样。OAuth 订阅身份校验和第三方 relay 透传不变。清理使用请求副本，并记录 mutation ledger。
-- ZenMux 的点号模型 ID 保持原样，定价按完整 provider alias 查找，不跨供应商套价。新增三个 5.5 价格条目及已确认的 global=1；其他未知地区继续返回未计量。
+- ZenMux 的点号模型 ID 保持原样，定价按完整 provider alias 查找，不跨供应商套价。新增三个 5.5 价格条目、配套能力元数据及已确认的 global=1；其他未知地区继续返回未计量。
 - Anthropic 金额字段在用量边界统一接收非负有限数字或十进制金额字符串，流式按最后有效累计金额取值，不相加；优先使用上游金额，再按目录估算。原始响应保持不变。
 - API 账户额外保存经凭据清理的上游错误说明，旧记录可缺省；测试恢复或更换 key 后清空旧说明。未改余额故障的暂停策略，也未执行历史成本重算。
 - 验证：353 项定向单测／集成检查、1 项 API 账户管理浏览器流程通过；shared/core 构建、core/gateway/admin 类型检查及 admin 构建通过。改动文件 Biome 无错误，保留既有警告。独立只读审查无 P0/P1 发现。
