@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-11-08 · 官方 API 清理 Agent SDK 身份变体（docs/04、05）
+
+- 线上同账户 Sonnet 5.5 对照确认：仅加入独立的 `You are a Claude agent, built on Anthropic's Claude Agent SDK.` system 文本即可触发官方 HTTP 400 余额错误；移除后正常。错误不等于已经查实账户余额，上游内部判定原因未知。
+- 官方静态 API Key 出站补充精确识别这句 SDK 身份，复用既有副本清理；JSON、流式和 token 计数一致处理。业务文本中引用该句仍保留，OAuth 与第三方 relay 行为不变，未更改账户暂停策略。
+- 先复现 4 项失败再实现一行判定，相关身份、协议与账号池 201 项测试通过。发布准备执行 `pnpm release:prepare 0.30.71`，Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77 快照不变。
+
 ## 2026-11-07 · 官方 Claude API 身份边界与 ZenMux 成本（docs/04、05、07、11）
 
 - 官方 Anthropic API Key 路径只删除独立的 Claude Code 身份和 billing system 标记，以及专用 CLI Header／OAuth beta；业务 system、metadata、签名历史和工具内容保持原样。OAuth 订阅身份校验和第三方 relay 透传不变。清理使用请求副本，并记录 mutation ledger。
@@ -86,14 +92,9 @@
 - **范围**：Sol、Terra 的 provider、能力和价格均保留，原 reasoning effort 与 fallback 顺序不变。此次是 v0.30.56 默认路由选择的修正，不删除 Terra 支持、不更改账户权限或数据库结构；发布工具准备 v0.30.57 并重新核验稳定客户端快照。
 - **部署**：remote 保留订阅优先链；192.168.8.4 保留经过 remote Helm 的串联结构，分别恢复 Sol lane 并保留 Terra lane。部署时检查最新配置和 key 作用域，不覆盖无关运营设置。v0.30.56 已验证的 Codex 流式约束与 12 小时缓存计费限制继续适用。
 
-## 2026-10-27 · GPT-6.1 Terra 替换 Sol lane（docs/04、06、07）
-
-- **范围与兼容**：所有原 `gpt-6.1-sol` lane 名称及引用改为 `gpt-6.1-terra`，原 Sol 客户端别名转到 Terra，保留 Sol 显式 provider 配置和价格。档位、reasoning effort 与 fallback 顺序不变；新 Terra 官方 API 注册到 Responses，避免 Chat Completions 不支持工具调用。
-- **官方依据**：[模型页](https://developers.openai.com/api/docs/models/gpt-6.1-terra)与[价目表](https://developers.openai.com/api/docs/pricing)，2026-10-27 核对：API context 1,050,000、最大输入 922,000、最大输出 128,000；reasoning 为 none/low/medium（API 默认）/high/xhigh/max。标准每百万 token 输入 $1、输出 $5、缓存读取 $0.05，30 分钟写入 $1.25；超过 272K 输入时整次请求输入/缓存 2 倍、输出 1.5 倍；Flex 半价、Fast 两倍，区域处理 1.1 倍。
-- **订阅边界**：[官方 Codex 目录](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json)同日含 Terra：默认 context 500K、最大 context 872K、默认 low、Responses Lite。静态能力取 500K，账号实时目录继续决定可用性、推理等级、上下文与协议。当前固定 Codex 0.164.0 离线快照不含 Terra，本次不手改官方快照；只有离线旧目录时会走现有 fallback，manual 清单也需由运营方启用 Terra。未调用真实账号验证权限。
-- **计费限制**：订阅价格为 API 等价估算。现有 schema 不区分 OpenAI 12 小时缓存写入（标准短上下文 $2.50/MTok），也没有独立 max-input 字段；本次不扩展计费或请求模型，不将 12 小时价冒充 1 小时缓存价。发布准备按用户后续授权升级至 v0.30.56；Claude 2.1.311 已通过独立静态协议检查，新增四个字段继续剥离，详见 `docs/claude-protocol-safety.md`。Grok、Codex 稳定版按发布工具同步；部署与真实上游结果另行核验。
-
 ## 更早历史总览
+
+2026-10-27：新增 GPT-6.1 Terra 能力、价格与显式模型支持，初始默认路由随后恢复 Sol；订阅价格仅作 API 等价估算，完整依据与限制见 git history。
 
 2026-10-26：Codex 完整历史可在发送前恢复不可用 turn-state，保留账号、会话和工具配对边界；详见 git history。
 

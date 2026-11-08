@@ -1584,6 +1584,7 @@ function prepareOfficialPaidInput(input: NativePassthroughInput): NativePassthro
   const isIdentity = (text: unknown): boolean =>
     typeof text === "string" &&
     (text.trim() === SYSTEM_SPOOF ||
+      text.trim() === "You are a Claude agent, built on Anthropic's Claude Agent SDK." ||
       /^x-anthropic-billing-header:\s*cc_version=[^\r\n]+$/.test(text.trim()));
   let system = body.system;
   if (Array.isArray(system)) {

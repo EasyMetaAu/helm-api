@@ -26,7 +26,7 @@ OAuth 登录与刷新从认证响应的 `account.uuid` 保存 `anthropicAccountU
 
 **已有账号的迁移：**网关管理的 Anthropic 订阅路径必须有经认证响应验证的账户 UUID，缺失时拒绝发送，直到重新连接或正常刷新返回真实 UUID。不会自动请求账户 profile。首次建立档案时沿用旧网关按账号生成的设备值，并持久保存；原生路径过去直接透传客户端设备值，升级后统一到该账号档案，因此这类请求的出站设备值会改变一次。
 
-空账户字段或普通 opaque `user_id` 仍可进入订阅路由，出站时改用已验证账号的 JSON 身份；它们不提供历史所属账户的证明。API key 路径不套用订阅身份改写。 官方 Anthropic API Key 出站另行删除独立的 Claude Code 身份与 billing system 标记、CLI 专用 Header 和 OAuth beta，防止把订阅客户端标记带入付费 API；业务 system、metadata 与消息历史不变。第三方 relay 不自动执行该清理。
+空账户字段或普通 opaque `user_id` 仍可进入订阅路由，出站时改用已验证账号的 JSON 身份；它们不提供历史所属账户的证明。API key 路径不套用订阅身份改写。 官方 Anthropic API Key 出站另行删除独立的 Claude Code CLI／Claude Agent SDK 身份与 billing system 标记、CLI 专用 Header 和 OAuth beta，防止把订阅客户端标记带入付费 API；业务 system、metadata 与消息历史不变。第三方 relay 不自动执行该清理。
 
 ## 账号设备、业务会话与版本
 
