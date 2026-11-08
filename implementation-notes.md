@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-11-08 · Codex 出站客户端 Header 一致性（docs/04、05、07）
+
+- **决定**：订阅 provider 的 `User-Agent`、`version`、`originator` 由网关运行时生成；原生客户端不再覆盖，HTTP、SSE、compact、WebSocket 握手与认证重试使用同一规则。无配置时采用签入的稳定版本，消除 `0.0.0` 占位值。
+- **版本边界**：复用账号目录运行时已验证的版本，不把入站声明的更高版本当成协议升级，也不新增按账号保存最大客户端版本的状态。与 Claude 的版本上限持久化方式不同，避免版本标记先于模型目录和协议能力升级。
+- **限制**：入站客户端准入仍看到真实原始 Header；业务会话、缓存键、turn state 与 `previous_response_id` 的归属规则不变，跨账号相同业务标识仍可能被关联。Header 一致不能证明真实单人使用，也不构成防封保证。
+- **出站记录**：通过请求级回调在最终 HTTP 发送／WS 握手边界提取允许字段；复用连接记录实际握手快照，不冒充本轮重发 Header。现有 `provider_attempts[].outbound_requests` 保留最近 16 次观察及连续序号，覆盖转换、原生、重试和直接 compact；不新增表，沿用遥测权限和保留期。账号引用复用已有安装标识，原始凭证、邮箱、账号 UUID、会话／turn state 值不保存；会话仅保存来源和存在性，与现有业务会话记录关联。
+- **验证与发布准备**：身份、审计、路由投影、compact 和 Responses 路由共 854 项定向测试通过；shared/core 构建及 gateway 类型检查通过。v0.30.72 已执行 release:prepare，稳定快照为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77。
+
 ## 2026-11-08 · 官方 API 清理 Agent SDK 身份变体（docs/04、05）
 
 - 线上同账户 Sonnet 5.5 对照确认：仅加入独立的 `You are a Claude agent, built on Anthropic's Claude Agent SDK.` system 文本即可触发官方 HTTP 400 余额错误；移除后正常。错误不等于已经查实账户余额，上游内部判定原因未知。
@@ -86,13 +94,9 @@
 - **边界**：只改 lane 名和引用，不改真实上游 model ID、价格、能力、reasoning effort 或 fallback 顺序。Admin、Portal 与模型发现继续读取配置；192.168.8.4 的 Helm 串联模型与目录键同步改名，避免把新 lane 名直接发送给真实模型上游。
 - **部署**：检查所有配置引用与现役 key 的 lane 作用域，保留无关自定义配置。v0.30.58 按发布工具同步稳定快照，分别读回两台服务器的排序与路由，并验证新名称及旧别名的真实流式响应。后续显示顺序修正直接更新现役配置，保持 v0.30.58 镜像与路由内容不变。
 
-## 2026-10-27 · 恢复 Sol 默认路由并保留独立 Terra lane（docs/04、06）
-
-- **用户修正**：保留 `gpt-6.1-sol` 与 `gpt-6.1-terra` 两个独立 lane；balanced、json、vision 及旧 Sol／GPT-5.6 Terra 客户端别名恢复指向 Sol。只有明确请求 `gpt-6.1-terra` 及其命名变体时进入 Terra lane，不把 Terra 作为其他 lane 的候选。
-- **范围**：Sol、Terra 的 provider、能力和价格均保留，原 reasoning effort 与 fallback 顺序不变。此次是 v0.30.56 默认路由选择的修正，不删除 Terra 支持、不更改账户权限或数据库结构；发布工具准备 v0.30.57 并重新核验稳定客户端快照。
-- **部署**：remote 保留订阅优先链；192.168.8.4 保留经过 remote Helm 的串联结构，分别恢复 Sol lane 并保留 Terra lane。部署时检查最新配置和 key 作用域，不覆盖无关运营设置。v0.30.56 已验证的 Codex 流式约束与 12 小时缓存计费限制继续适用。
-
 ## 更早历史总览
+
+2026-10-27：恢复 Sol 为默认路由，保留显式 Terra lane；Remote 与 8.4 分别恢复对应链，账号权限与流式约束不变，完整记录见 git history。
 
 2026-10-27：新增 GPT-6.1 Terra 能力、价格与显式模型支持，初始默认路由随后恢复 Sol；订阅价格仅作 API 等价估算，完整依据与限制见 git history。
 

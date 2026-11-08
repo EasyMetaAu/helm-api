@@ -27,6 +27,7 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughCarrier,
   type NativePassthroughInput,
+  type OutboundRequestAudit,
   type ResponsesToolTranslation,
   ResponsesToolTranslationSchema,
 } from "@helm/shared";
@@ -54,6 +55,7 @@ import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
 } from "./native-passthrough.js";
+import { DEFAULT_OPENAI_CODEX_CLIENT_VERSION } from "./oauth/codex-client-version.generated.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { resolveOpenAICodexModelAlias } from "./oauth/models.js";
 import {
@@ -343,7 +345,7 @@ export class CodexResponsesWebSocketConnectError extends Error {
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_INSTRUCTIONS = "You are a helpful assistant.";
 const ORIGINATOR = "codex_cli_rs";
-const DEFAULT_CODEX_VERSION = "0.0.0";
+const DEFAULT_CODEX_VERSION = DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
 const CODEX_FAST_SERVICE_TIER = "priority";
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
@@ -2461,6 +2463,57 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
+  function outboundAudit(
+    headers: Record<string, string>,
+    transport: OutboundRequestAudit["transport"],
+    endpoint: OutboundRequestAudit["endpoint"],
+    reset = false,
+  ): OutboundRequestAudit {
+    const h = new Headers(headers);
+    const safe = (value: string | null): string | null => {
+      if (value === null) return null;
+      return String(scrub(value))
+        .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_.-]{30,}/gi, "[redacted]")
+        .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+        .slice(0, 512);
+    };
+    const session = h.get("session-id");
+    return {
+      transport,
+      endpoint,
+      observed_at_ms: Date.now(),
+      user_agent: safe(h.get("user-agent")),
+      version: safe(h.get("version")),
+      originator: safe(h.get("originator")),
+      account_ref: safe(cfg.installationId ?? null),
+      auth_scheme: h.has("authorization")
+        ? /^Bearer /i.test(h.get("authorization") ?? "")
+          ? "bearer"
+          : "other"
+        : "absent",
+      account_header_present: h.has("chatgpt-account-id"),
+      session_source:
+        session === null ? "absent" : session === cfg.sessionId ? "account" : "client",
+      thread_id_present: h.has("thread-id"),
+      turn_state_present: h.has(CODEX_TURN_STATE_HEADER),
+      installation_id_present: h.has(CODEX_INSTALLATION_ID_HEADER),
+      turn_state_reset: reset,
+    };
+  }
+
+  function publishOutboundAudit(
+    callback: ProviderCallOptions["onOutboundRequest"],
+    audit: OutboundRequestAudit,
+  ): void {
+    try {
+      callback?.(audit);
+    } catch {
+      /* Observability must not affect upstream execution. */
+    }
+  }
+
+  const websocketAudits = new WeakMap<CodexResponsesWebSocketConnection, OutboundRequestAudit>();
+
   type RequestTimeout = ReturnType<typeof withTimeout>;
   interface CodexHttpResponse {
     response: Response;
@@ -2501,14 +2554,13 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
       forwardCodexMetadata: true,
       mergeHeaders: ["x-codex-beta-features"],
+      // The gateway's Codex runtime owns client identity on every send/retry.
+      // Caller identity remains available to ingress policy; session state stays intact.
       preserveClientHeaders: [
         "accept",
         "accept-language",
-        "originator",
         "session-id",
         "thread-id",
-        "user-agent",
-        "version",
         "x-client-request-id",
         "x-codex-beta-features",
         "x-codex-installation-id",
@@ -2535,6 +2587,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       signal?: AbortSignal;
       overloadRetry?: ProviderCallOptions["overloadRetry"];
       capture?: (wireBody: string) => void;
+      onOutboundRequest?: ProviderCallOptions["onOutboundRequest"];
       timeoutThroughBody?: boolean;
       retry?: boolean;
       outcomeUnknownOnTransport?: boolean;
@@ -2561,6 +2614,15 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const send = async (): Promise<CodexHttpResponse> => {
         const t = withTimeout(timeoutMs, init.signal);
         try {
+          publishOutboundAudit(
+            init.onOutboundRequest,
+            outboundAudit(
+              prepared.headers,
+              "http",
+              init.endpoint === compactUrl ? "compact" : "responses",
+              init.resetCodexTurnState,
+            ),
+          );
           const response = await doFetch(init.endpoint, {
             method: "POST",
             headers: prepared.headers,
@@ -2689,6 +2751,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       signal?: AbortSignal;
       overloadRetry?: ProviderCallOptions["overloadRetry"];
       capture?: (wireBody: string) => void;
+      onOutboundRequest?: ProviderCallOptions["onOutboundRequest"];
       onResponseMeta?: (headers: Headers) => void;
       timeoutThroughBody?: boolean;
       resetCodexTurnState?: boolean;
@@ -2700,6 +2763,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       signal: init.signal,
       overloadRetry: init.overloadRetry ?? { attempt: 0 },
       capture: init.capture,
+      onOutboundRequest: init.onOutboundRequest,
       timeoutThroughBody: init.timeoutThroughBody,
       outcomeUnknownOnTransport: true,
       resetCodexTurnState: init.resetCodexTurnState,
@@ -2847,6 +2911,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         accept: "application/json",
         signal: opts?.signal,
         capture: opts?.captureUpstream,
+        onOutboundRequest: opts?.onOutboundRequest,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
       });
@@ -2895,6 +2960,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       accept: "text/event-stream",
       signal: opts?.signal,
       capture: opts?.captureUpstream,
+      onOutboundRequest: opts?.onOutboundRequest,
       retry: false,
     });
     captureTurnState(result);
@@ -2956,6 +3022,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function connectWebSocket(
     prepared: PreparedNativePassthroughRequest,
     signal: AbortSignal | undefined,
+    onOutboundRequest: ProviderCallOptions["onOutboundRequest"],
   ): Promise<CodexResponsesWebSocketConnection> {
     const connector = cfg.responsesWebSocketConnector;
     if (!connector) throw new Error("Codex Responses websocket connector is unavailable");
@@ -2974,11 +3041,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       delete connectHeaders.accept;
       delete connectHeaders["Content-Type"];
       delete connectHeaders["content-type"];
-      return await connector({
-        url: websocketUrl(),
-        headers: connectHeaders,
-        signal,
-      });
+      const audit = outboundAudit(connectHeaders, "websocket_handshake", "responses");
+      publishOutboundAudit(onOutboundRequest, audit);
+      const connection = await connector({ url: websocketUrl(), headers: connectHeaders, signal });
+      websocketAudits.set(connection, audit);
+      return connection;
     };
     const connectWithRetry = async (): Promise<CodexResponsesWebSocketConnection> =>
       await withConnectionRetry(connectOnce, {
@@ -3118,6 +3185,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     sessionId: string,
     prepared: PreparedNativePassthroughRequest,
     signal: AbortSignal | undefined,
+    onOutboundRequest: ProviderCallOptions["onOutboundRequest"],
   ): Promise<
     | {
         connection: CodexResponsesWebSocketConnection;
@@ -3128,8 +3196,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     while (!websocketHttpFallbackSessions.has(sessionId)) {
       if (signal?.aborted) throw signal.reason ?? new Error("client aborted");
       let state = websocketSessions.get(sessionId);
+      const reused = state !== undefined;
       if (!state) {
-        const connection = connectWebSocket(prepared, signal);
+        const connection = connectWebSocket(prepared, signal, onOutboundRequest);
         state = { connection, tail: Promise.resolve() };
         websocketSessions.set(sessionId, state);
         connection.catch(() => {
@@ -3151,7 +3220,15 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         continue;
       }
       try {
-        return { connection: await state.connection, release };
+        const connection = await state.connection;
+        const audit = websocketAudits.get(connection);
+        if (reused && audit)
+          publishOutboundAudit(onOutboundRequest, {
+            ...audit,
+            transport: "websocket_reuse",
+            observed_at_ms: Date.now(),
+          });
+        return { connection, release };
       } catch (error) {
         release();
         throw error;
@@ -3392,6 +3469,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           signal: opts?.signal,
           overloadRetry: opts?.overloadRetry,
           capture: opts?.captureUpstream,
+          onOutboundRequest: opts?.onOutboundRequest,
           onResponseMeta: opts?.onResponseMeta,
         },
       );
@@ -3417,6 +3495,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           signal: opts?.signal,
           overloadRetry: opts?.overloadRetry,
           capture: opts?.captureUpstream,
+          onOutboundRequest: opts?.onOutboundRequest,
           onResponseMeta: opts?.onResponseMeta,
         },
       );
@@ -3448,6 +3527,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         overloadRetry: opts?.overloadRetry,
         resetCodexTurnState: opts?.resetCodexTurnState,
         capture: opts?.captureUpstream,
+        onOutboundRequest: opts?.onOutboundRequest,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
       });
@@ -3536,7 +3616,12 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                 }
               | undefined;
             try {
-              lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
+              lease = await acquireWebSocketSession(
+                sessionId,
+                prepared,
+                opts?.signal,
+                opts?.onOutboundRequest,
+              );
               if (!lease) break;
             } catch (error) {
               if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
@@ -3846,6 +3931,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         overloadRetry: opts?.overloadRetry,
         resetCodexTurnState: opts?.resetCodexTurnState,
         capture: opts?.captureUpstream,
+        onOutboundRequest: opts?.onOutboundRequest,
         onResponseMeta: opts?.onResponseMeta,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
@@ -3870,6 +3956,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         signal: opts?.signal,
         overloadRetry: opts?.overloadRetry,
         capture: opts?.captureUpstream,
+        onOutboundRequest: opts?.onOutboundRequest,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
       });

@@ -1,4 +1,9 @@
-import { type InternalRequest, makeHelmError, type RoutingSignal } from "@helm/shared";
+import {
+  DecisionRecordSchema,
+  type InternalRequest,
+  makeHelmError,
+  type RoutingSignal,
+} from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { LanesConfig } from "../lanes/schema.js";
 import type { PoliciesConfig } from "./policy-schema.js";
@@ -1071,6 +1076,22 @@ describe("routeRequest — orchestration", () => {
   // Every attempt keeps the id it actually sent; the top-level field names the one the
   // SERVING attempt used, so the request detail header is never the failed account's id.
   it("lifts the serving attempt's Codex installation id to the decision record", async () => {
+    const audit = {
+      transport: "http" as const,
+      endpoint: "responses" as const,
+      observed_at_ms: 1000,
+      user_agent: "codex_cli_rs/1.2.3",
+      version: "1.2.3",
+      originator: "codex_cli_rs",
+      account_ref: "logical-account",
+      auth_scheme: "bearer" as const,
+      account_header_present: true,
+      session_source: "client" as const,
+      thread_id_present: true,
+      turn_state_present: false,
+      installation_id_present: true,
+      turn_state_reset: false,
+    };
     const d = deps({
       execute: vi.fn(
         async (): Promise<ExecuteOutcome> => ({
@@ -1088,6 +1109,7 @@ describe("routeRequest — orchestration", () => {
             },
             {
               alias: "coder_b",
+              outbound_requests: [audit],
               skipped: false,
               skip_reason: null,
               status: "ok",
@@ -1105,6 +1127,10 @@ describe("routeRequest — orchestration", () => {
       ),
     });
     const rec = (await routeRequest(req(), d)).decision;
+    expect(DecisionRecordSchema.parse(rec).provider_attempts[1]?.outbound_requests).toEqual([
+      audit,
+    ]);
+    expect(rec.provider_attempts[0]?.outbound_requests).toBeUndefined();
     expect(rec.codex_installation_id).toBe("bbbbbbbb-2222-4222-8222-222222222222");
     // The failed account's id is NOT lost — it stays on its own attempt row.
     expect(rec.provider_attempts[0]?.request_mutations?.codex_installation_id).toBe(

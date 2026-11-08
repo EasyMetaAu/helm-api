@@ -140,6 +140,7 @@ function providerAttemptRecord(a: AttemptRecord): DecisionRecord["provider_attem
       ? { passthrough_mutations: a.passthrough_mutations }
       : {}),
     ...(a.request_mutations !== undefined ? { request_mutations: a.request_mutations } : {}),
+    ...(a.outbound_requests !== undefined ? { outbound_requests: a.outbound_requests } : {}),
   };
 }
 

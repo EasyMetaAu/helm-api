@@ -34,4 +34,5 @@ export interface AttemptRecord {
   provider_model?: string | null;
   passthrough_mutations?: NativePassthroughMutationLedger;
   request_mutations?: NativePassthroughMutationLedger;
+  outbound_requests?: import("@helm/shared").OutboundRequestAudit[];
 }

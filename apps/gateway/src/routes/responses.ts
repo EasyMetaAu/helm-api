@@ -147,6 +147,7 @@ export interface ResponsesLifecyclePort {
 }
 
 export interface ResponsesCompactExecution {
+  outboundRequests?: import("@helm/shared").OutboundRequestAudit[];
   modelAlias: string;
   providerModel: string;
   providerName: string;
@@ -839,6 +840,7 @@ function compactUsageFromResponse(body: Record<string, unknown> | null): StreamU
 }
 
 function compactDecision(args: {
+  outboundRequests?: import("@helm/shared").OutboundRequestAudit[];
   requestId: string;
   traceId: string;
   keyPrefix: string | null;
@@ -915,6 +917,7 @@ function compactDecision(args: {
         source_protocol: "openai_responses",
         target_provider_protocol: "openai_responses",
         response_protocol: "openai_responses",
+        outbound_requests: args.outboundRequests,
         provider_name: args.providerName,
         provider_model: args.providerModel,
       },
@@ -1237,6 +1240,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               providerModel,
               providerName: execution?.providerName ?? "openai-codex",
               servingAccount: execution?.servingAccount ?? null,
+              outboundRequests: execution?.outboundRequests,
               latencyMs: Date.now() - startedAt,
               body,
               error: null,
@@ -1272,6 +1276,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               providerModel,
               providerName: execution?.providerName ?? "openai-codex",
               servingAccount: execution?.servingAccount ?? null,
+              outboundRequests: execution?.outboundRequests,
               latencyMs: Date.now() - startedAt,
               body,
               error: err,

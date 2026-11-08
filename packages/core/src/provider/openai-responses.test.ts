@@ -6,6 +6,7 @@ import {
   createResponseWorkAdmission,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
+import { DEFAULT_OPENAI_CODEX_CLIENT_VERSION } from "./oauth/codex-client-version.generated.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
@@ -1687,7 +1688,10 @@ describe("createCodexResponsesClient", () => {
 
     await client.chatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] });
 
-    expect(seen.get("user-agent")).toMatch(/^codex_cli_rs\/0\.0\.0 \(.+ .+; .+\) \S+$/);
+    expect(seen.get("user-agent")).toContain(
+      `codex_cli_rs/${DEFAULT_OPENAI_CODEX_CLIENT_VERSION} (`,
+    );
+    expect(seen.get("version")).toBe(DEFAULT_OPENAI_CODEX_CLIENT_VERSION);
     expect(seen.get("user-agent")).not.toMatch(/\bnode\//i);
   });
 
@@ -2808,7 +2812,7 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(sentHeaders.get("x-openai-internal-codex-responses-lite")).toBe("true");
   });
 
-  it("preserves client headers/raw body through the native carrier while replacing auth", async () => {
+  it("uses provider client identity while preserving native session headers and raw body", async () => {
     const body = nativeStreamBody();
     const rawBody = JSON.stringify(body, null, 2);
     let sentBody = "";
@@ -2863,9 +2867,10 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(h.get("Authorization")).toContain("Bearer ");
     expect(h.get("Authorization")).not.toContain("client-secret");
     expect(h.get("chatgpt-account-id")).toBe("acct_carrier");
-    expect(h.get("user-agent")).toBe("codex-client/9.9.9");
-    expect(h.get("version")).toBe("1.2.3");
-    expect(h.get("originator")).toBe("codex_vscode");
+    expect(h.get("user-agent")).toMatch(/^codex_cli_rs\/9\.9\.9 \(.+ .+; .+\) \S+$/);
+    expect(h.get("user-agent")).not.toMatch(/\bnode\//i);
+    expect(h.get("version")).toBe("9.9.9");
+    expect(h.get("originator")).toBe("codex_cli_rs");
     expect(h.get("session-id")).toBe("client-session");
     expect(h.get("thread-id")).toBe("client-thread");
     expect(h.get("x-client-request-id")).toBe("client-request-id");
@@ -2882,18 +2887,89 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect((carrier.mutations as Record<string, unknown>).headers_dropped).toEqual(
       expect.arrayContaining(["authorization", "content-length", "openai-beta", "x-helm-trace"]),
     );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
+      expect.arrayContaining(["originator", "user-agent", "version"]),
+    );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
+      expect.not.arrayContaining(["session-id"]),
+    );
     expect((carrier.mutations as Record<string, unknown>).headers_overwritten).not.toEqual(
       expect.arrayContaining([
         "accept",
-        "originator",
         "session-id",
         "thread-id",
-        "user-agent",
-        "version",
         "x-client-request-id",
         "x-codex-turn-state",
       ]),
     );
+  });
+
+  it("keeps provider client headers stable across different callers and a unary 401 retry", async () => {
+    const sent: Headers[] = [];
+    const audits: unknown[] = [];
+    let token = jwt("acct_before_refresh");
+    const userAgent = "codex_cli_rs/7.8.9 (Linux 6.8; x64) unknown private-marker";
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = jwt("acct_after_refresh");
+        },
+        userAgent,
+        currentSecrets: () => ["private-marker"],
+        installationId: "account-ref",
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers));
+        if (sent.length === 1) return jsonResponse({ error: "expired" }, 401);
+        return jsonResponse({ id: "response", output: [] });
+      }) as unknown as typeof fetch,
+    });
+    for (const version of ["1.2.3", "99.0.0"]) {
+      await client.nativePassthrough?.(
+        {
+          protocol: "openai_responses",
+          body: { model: "gpt-5.5", input: [] },
+          headers: {
+            "user-agent": `desktop/${version} (Mac OS 15.5; arm64) terminal`,
+            version,
+            originator: "codex_vscode",
+          },
+          mutations: {},
+        },
+        {
+          onOutboundRequest: (audit) => {
+            audits.push(audit);
+            throw new Error("observer unavailable");
+          },
+        },
+      );
+    }
+    expect(audits).toHaveLength(3);
+    expect(audits[2]).toMatchObject({
+      transport: "http",
+      endpoint: "responses",
+      user_agent: userAgent.replace("private-marker", "[redacted]"),
+      version: "7.8.9",
+      originator: "codex_cli_rs",
+      account_ref: "account-ref",
+      auth_scheme: "bearer",
+      account_header_present: true,
+      session_source: "absent",
+    });
+    expect(JSON.stringify(audits)).not.toContain("acct_after_refresh");
+    expect(JSON.stringify(audits)).not.toContain("Bearer");
+    expect(JSON.stringify(audits)).not.toContain(token);
+    expect(JSON.stringify(audits)).not.toContain("private-marker");
+    expect(sent).toHaveLength(3);
+    for (const headers of sent) {
+      expect(headers.get("user-agent")).toBe(userAgent);
+      expect(headers.get("version")).toBe("7.8.9");
+      expect(headers.get("originator")).toBe("codex_cli_rs");
+    }
+    expect(sent[0]?.get("chatgpt-account-id")).toBe("acct_before_refresh");
+    expect(sent[1]?.get("chatgpt-account-id")).toBe("acct_after_refresh");
   });
 
   it("throws UpstreamError with the real upstreamStatus + scrubbed body before the first chunk on a non-2xx", async () => {
@@ -4733,6 +4809,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         {
           "user-agent": "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
           version: "1.2.3",
+          originator: "codex_vscode",
         },
       ),
       carrier("ingress-1", {
@@ -4751,14 +4828,22 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       }),
     ];
     const turns: string[] = [];
+    const audits: unknown[] = [];
     for (const request of requests) {
       const chunks: string[] = [];
-      for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+      for await (const chunk of client.nativePassthroughStream?.(request, {
+        onOutboundRequest: (audit) => audits.push(audit),
+      }) ?? []) {
         chunks.push(chunk);
       }
       turns.push(chunks.join(""));
     }
 
+    expect(audits).toMatchObject([
+      { transport: "websocket_handshake", version: "9.9.9" },
+      { transport: "websocket_reuse", version: "9.9.9" },
+      { transport: "websocket_reuse", version: "9.9.9" },
+    ]);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(connect).toHaveBeenCalledTimes(1);
     const connectArgs = connect.mock.calls[0]?.[0];
@@ -4768,10 +4853,11 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(new Headers(connectArgs?.headers).get("openai-beta")).toBe(
       "responses_websockets=2026-02-06",
     );
-    expect(new Headers(connectArgs?.headers).get("user-agent")).toBe(
-      "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
+    expect(new Headers(connectArgs?.headers).get("user-agent")).toMatch(
+      /^codex_cli_rs\/9\.9\.9 \(.+ .+; .+\) \S+$/,
     );
-    expect(new Headers(connectArgs?.headers).get("version")).toBe("1.2.3");
+    expect(new Headers(connectArgs?.headers).get("version")).toBe("9.9.9");
+    expect(new Headers(connectArgs?.headers).get("originator")).toBe("codex_cli_rs");
     expect(new Headers(connectArgs?.headers).get("session-id")).toBe("client-session");
     expect(
       new Headers(connectArgs?.headers).get(CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER),
@@ -5618,18 +5704,25 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     });
 
     for await (const _chunk of client.nativePassthroughStream?.(
-      carrier("ingress-401", {
-        model: "gpt-5.6-luna",
-        input: [],
-        stream: true,
-        store: false,
-      }),
+      carrier(
+        "ingress-401",
+        { model: "gpt-5.6-luna", input: [], stream: true, store: false },
+        { "user-agent": "desktop/99.0.0", version: "99.0.0", originator: "codex_vscode" },
+      ),
     ) ?? []) {
       // drain
     }
 
     expect(connect).toHaveBeenCalledTimes(2);
     expect(authHeaders).toEqual(["Bearer expired-token", `Bearer ${jwt("acct_refreshed")}`]);
+    for (const [input] of connect.mock.calls) {
+      const headers = new Headers(input.headers);
+      expect(headers.get("user-agent")).toContain(
+        `codex_cli_rs/${DEFAULT_OPENAI_CODEX_CLIENT_VERSION} (`,
+      );
+      expect(headers.get("version")).toBe(DEFAULT_OPENAI_CODEX_CLIENT_VERSION);
+      expect(headers.get("originator")).toBe("codex_cli_rs");
+    }
   });
 
   it("maps a websocket handshake 429 to an account-scoped UpstreamError", async () => {
@@ -6283,11 +6376,9 @@ describe("createCodexResponsesClient — responsesCompact", () => {
     expect(seenHeaders.get("authorization")).not.toContain("client-secret");
     expect(seenHeaders.get("chatgpt-account-id")).toBe("acct_compact");
     expect(seenHeaders.get("accept")).toBe("application/json");
-    expect(seenHeaders.get("user-agent")).toBe(
-      "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
-    );
-    expect(seenHeaders.get("version")).toBe("1.2.3");
-    expect(seenHeaders.get("originator")).toBe("codex_vscode");
+    expect(seenHeaders.get("user-agent")).toMatch(/^codex_cli_rs\/9\.9\.9 \(.+ .+; .+\) \S+$/);
+    expect(seenHeaders.get("version")).toBe("9.9.9");
+    expect(seenHeaders.get("originator")).toBe("codex_cli_rs");
     expect(seenHeaders.get("session-id")).toBe("client-session");
     expect(seenHeaders.get("thread-id")).toBe("client-thread");
     expect(seenHeaders.get("x-client-request-id")).toBe("client-request");

@@ -93,6 +93,26 @@ export const AttemptErrorDetailSchema = z.object({
   upstream_event: z.string().nullable().optional(),
 });
 
+export const OutboundRequestAuditSchema = z.object({
+  transport: z.enum(["http", "websocket_handshake", "websocket_reuse"]),
+  endpoint: z.enum(["responses", "compact"]),
+  observed_at_ms: z.number().int().nonnegative(),
+  sequence: z.number().int().positive().optional(),
+  user_agent: z.string().max(512).nullable(),
+  version: z.string().max(512).nullable(),
+  originator: z.string().max(512).nullable(),
+  // Existing account-scoped installation reference; never a token/account UUID.
+  account_ref: z.string().max(512).nullable(),
+  auth_scheme: z.enum(["bearer", "other", "absent"]),
+  account_header_present: z.boolean(),
+  session_source: z.enum(["account", "client", "absent"]),
+  thread_id_present: z.boolean(),
+  turn_state_present: z.boolean(),
+  installation_id_present: z.boolean(),
+  turn_state_reset: z.boolean(),
+});
+export type OutboundRequestAudit = z.infer<typeof OutboundRequestAuditSchema>;
+
 export const ProviderAttemptSchema = z.object({
   alias: z.string(),
   skipped: z.boolean(),
@@ -129,6 +149,7 @@ export const ProviderAttemptSchema = z.object({
   // Target-protocol request shims on translated attempts. Body-free: codes,
   // counters, and field names only; never payload values.
   request_mutations: NativePassthroughMutationLedgerSchema.optional(),
+  outbound_requests: z.array(OutboundRequestAuditSchema).max(16).optional(),
 });
 
 export const FinalDecisionSchema = z.object({

@@ -182,6 +182,8 @@ export {
   LaneDecisionSchema,
   type MemoryDecision,
   MemoryDecisionSchema,
+  type OutboundRequestAudit,
+  OutboundRequestAuditSchema,
   type PolicyDecision,
   PolicyDecisionSchema,
   type ProviderAttempt,

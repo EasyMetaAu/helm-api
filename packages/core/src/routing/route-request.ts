@@ -124,6 +124,7 @@ export interface ProviderAttempt {
   passthrough_mutations?: NativePassthroughMutationLedger;
   /** Body-free translated-path request shims/warnings (field names + counters only). */
   request_mutations?: NativePassthroughMutationLedger;
+  outbound_requests?: import("@helm/shared").OutboundRequestAudit[];
 }
 
 // What execute() returns: the provider_attempts trail, the final landing, and
