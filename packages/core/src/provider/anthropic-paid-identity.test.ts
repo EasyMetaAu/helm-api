@@ -2,9 +2,11 @@ import { createNativePassthroughCarrier } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { createAnthropicClient } from "./anthropic.js";
 
+const sdkIdentity = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const identity = [
   { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.318; cc_entrypoint=cli;" },
   { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+  { type: "text", text: sdkIdentity },
 ];
 const business = {
   type: "text",
@@ -19,7 +21,7 @@ describe("official API key native identity boundary", () => {
     "json",
     "stream",
     "count",
-  ] as const)("removes only CLI identity on %s without mutating the source", async (mode) => {
+  ] as const)("removes only CLI and SDK identity on %s without mutating the source", async (mode) => {
     let sent: RequestInit | undefined;
     const body = {
       model: "claude-sonnet-5-5",
@@ -71,6 +73,25 @@ describe("official API key native identity boundary", () => {
       expect(headers.has(name)).toBe(false);
     expect(input.body.system).toEqual([...identity, business]);
     expect(input.headers["x-app"]).toBe("cli");
+  });
+  it("removes a standalone SDK identity line and retains business text mentioning it", async () => {
+    const businessText = `Document this example identity: ${sdkIdentity}`;
+    const body = {
+      model: "claude-sonnet-5-5",
+      system: `${sdkIdentity}\n${businessText}`,
+      messages: [{ role: "user", content: "OK" }],
+    };
+    let sent: RequestInit | undefined;
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-ant-test" },
+      fetch: (async (_url, init) => {
+        sent = init;
+        return Response.json({ content: [], usage: {} });
+      }) as typeof fetch,
+    });
+    await client.nativePassthrough!(body);
+    expect(JSON.parse(String(sent?.body)).system).toBe(businessText);
+    expect(body.system).toBe(`${sdkIdentity}\n${businessText}`);
   });
   it("preserves relay identity blocks and raw bytes", async () => {
     const body = {
