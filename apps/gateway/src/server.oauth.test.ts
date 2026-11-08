@@ -166,9 +166,26 @@ describe("buildCredential (issue #38 OAuth wiring)", () => {
 describe("buildProviderClients (issue #38 OAuth wiring)", () => {
   it("captures the compact wire request and actual serving account before reporting execution", async () => {
     const onExecution = vi.fn();
+    const audit = {
+      transport: "http" as const,
+      endpoint: "compact" as const,
+      observed_at_ms: 1000,
+      user_agent: "codex_cli_rs/1.2.3",
+      version: "1.2.3",
+      originator: "codex_cli_rs",
+      account_ref: "account-ref",
+      auth_scheme: "bearer" as const,
+      account_header_present: true,
+      session_source: "account" as const,
+      thread_id_present: false,
+      turn_state_present: false,
+      installation_id_present: false,
+      turn_state_reset: false,
+    };
     const signal = new AbortController().signal;
     const result = await runCodexCompactProviderCall({
       execute: async (options) => {
+        options.onOutboundRequest?.(audit);
         markServingAccount("openai-codex", "docker-live");
         options.captureUpstream('{"model":"gpt-5.6-terra","input":"compact this"}');
         return { id: "resp_compact" };
@@ -187,6 +204,7 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
       providerName: "openai-codex",
       upstreamRequest: '{"model":"gpt-5.6-terra","input":"compact this"}',
       servingAccount: { providerId: "openai-codex", account: "docker-live" },
+      outboundRequests: [{ ...audit, sequence: 1 }],
     });
   });
 

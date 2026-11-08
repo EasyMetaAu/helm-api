@@ -173,6 +173,7 @@ import {
   isOAuthPreset,
   makeHelmError,
   nativePassthroughBody,
+  OutboundRequestAuditSchema,
 } from "@helm/shared";
 import { createApp } from "./app.js";
 import { createSpeechSocketConnector } from "./audio-tts-websocket.js";
@@ -725,6 +726,7 @@ export async function runCodexCompactProviderCall(input: {
     signal: AbortSignal;
     onResponseMeta?: (headers: Headers) => void;
     captureUpstream: (wireBody: string) => void;
+    onOutboundRequest?: (audit: import("@helm/shared").OutboundRequestAudit) => void;
   }): Promise<unknown>;
   signal: AbortSignal;
   onResponseMeta?: (headers: Headers) => void;
@@ -734,6 +736,8 @@ export async function runCodexCompactProviderCall(input: {
   providerName: string;
 }): Promise<unknown> {
   let upstreamRequest: string | null = null;
+  const outboundRequests: import("@helm/shared").OutboundRequestAudit[] = [];
+  let outboundSequence = 0;
   const holder: { selected: ServingAccount | null } = { selected: null };
   const reportExecution = (): void => {
     input.onExecution?.({
@@ -742,6 +746,7 @@ export async function runCodexCompactProviderCall(input: {
       providerName: input.providerName,
       upstreamRequest,
       servingAccount: holder.selected,
+      ...(outboundRequests.length > 0 ? { outboundRequests } : {}),
     });
   };
   try {
@@ -749,6 +754,12 @@ export async function runCodexCompactProviderCall(input: {
       input.execute({
         signal: input.signal,
         ...(input.onResponseMeta ? { onResponseMeta: input.onResponseMeta } : {}),
+        onOutboundRequest: (audit) => {
+          const parsed = OutboundRequestAuditSchema.safeParse(audit);
+          if (!parsed.success) return;
+          if (outboundRequests.length === 16) outboundRequests.shift();
+          outboundRequests.push({ ...parsed.data, sequence: ++outboundSequence });
+        },
         captureUpstream: (wireBody) => {
           upstreamRequest = wireBody;
         },

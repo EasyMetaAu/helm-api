@@ -47,6 +47,24 @@ provider-profile repair, reasoning policy, optional media processing, and stream
 reframing can still mutate the request. See
 [Native Passthrough Fidelity](native-passthrough-fidelity-spec.md).
 
+Codex subscription requests use the gateway runtime's `User-Agent`, `version`,
+and `originator` on HTTP, SSE, compact, and WebSocket connections, including
+authentication retries. Inbound values do not override those three headers.
+The runtime uses its configured, catalog-compatible version or the bundled
+stable Codex version; a newer inbound version does not upgrade that runtime.
+Ingress client-policy checks still use the original caller headers. Session
+identifiers and continuation state retain their existing account-affinity rules.
+
+Codex send metadata is retained in each attempt's `outbound_requests` telemetry
+array, including direct compact requests. The last 16 observations carry sequence
+numbers, the final UA/version/originator, the existing account-scoped installation
+reference, credential scheme, and session/turn-state presence and source flags.
+No Bearer value, Cookie, account UUID, or opaque session/turn-state value is stored.
+`websocket_reuse` reports the established connection's handshake metadata, not
+newly prepared headers. HTTP/handshake observations precede the send and therefore
+do not prove upstream acceptance. These records follow existing telemetry access
+and retention rules, independently of payload capture.
+
 OpenAI Chat is the IR's lingua franca, so it does not use the separate native
 carrier path. Its translated identity covers fields modeled by the IR; arbitrary
 unknown top-level request fields are not guaranteed to survive schema parsing.

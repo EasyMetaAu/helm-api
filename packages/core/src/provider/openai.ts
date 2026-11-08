@@ -4,7 +4,7 @@
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
 import { Buffer } from "node:buffer";
-import type { ResponsesToolTranslation } from "@helm/shared";
+import type { OutboundRequestAudit, ResponsesToolTranslation } from "@helm/shared";
 import {
   type Capabilities,
   type NativePassthroughInput,
@@ -160,6 +160,8 @@ export interface ProviderCallOptions {
   previousToolTranslation?: ResponsesToolTranslation;
   onToolTranslation?: (state: ResponsesToolTranslation) => void;
   captureUpstream?: (wireBody: string) => void;
+  /** Allowlisted final-send metadata; no credentials or opaque session state. */
+  onOutboundRequest?: (audit: OutboundRequestAudit) => void;
   /** Request-scoped Anthropic defensive recovery switch. The gateway owns the live
    * runtime setting and passes its current value per attempt; provider clients keep
    * the default OFF when the option is absent so unrelated callers never opt in by

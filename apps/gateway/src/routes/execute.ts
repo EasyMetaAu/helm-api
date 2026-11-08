@@ -53,6 +53,7 @@ import {
   makeHelmError,
   nativePassthroughBody,
   nativePassthroughMutations,
+  OutboundRequestAuditSchema,
 } from "@helm/shared";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
@@ -216,6 +217,7 @@ interface PassthroughTelemetry {
   provider_model: string | null;
   passthrough_mutations?: NativePassthroughCarrier["mutations"];
   request_mutations?: NativePassthroughCarrier["mutations"];
+  outbound_requests?: import("@helm/shared").OutboundRequestAudit[];
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -1920,6 +1922,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // failure from here on is a PROVIDER fault, not a capability gap.
         attemptedAny = true;
 
+        const outboundRequests: import("@helm/shared").OutboundRequestAudit[] = [];
+        passthrough.outbound_requests = outboundRequests;
+        let outboundSequence = 0;
+        const onOutboundRequest = (audit: import("@helm/shared").OutboundRequestAudit): void => {
+          const parsed = OutboundRequestAuditSchema.safeParse(audit);
+          if (!parsed.success) return;
+          if (outboundRequests.length === 16) outboundRequests.shift();
+          outboundRequests.push({ ...parsed.data, sequence: ++outboundSequence });
+        };
         let attemptTelemetry: PassthroughTelemetry = passthrough;
 
         // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
@@ -2035,6 +2046,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       ...toolTranslationOptions,
                       captureUpstream,
                       onResponseMeta,
+                      onOutboundRequest,
                       codexBufferedStreamRecovery,
                       onStreamRecovery: (event) => {
                         const mutations = nativePassthroughMutations(passthroughBody);
@@ -2139,6 +2151,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       ...toolTranslationOptions,
                       captureUpstream,
                       onResponseMeta,
+                      onOutboundRequest,
                       optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
                     });
                     return translateClassifier
@@ -2224,6 +2237,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   ...toolTranslationOptions,
                   captureUpstream,
                   onResponseMeta,
+                  onOutboundRequest,
                   toolCallXmlRecovery:
                     target.targetProviderProtocol === "anthropic_messages" &&
                     (toolCallXmlRecoveryEnabled?.() ?? true),
@@ -2269,6 +2283,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               requestCompatibility: caps?.requestCompatibility,
               captureUpstream,
               onResponseMeta,
+              onOutboundRequest,
               optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
             }),
           );

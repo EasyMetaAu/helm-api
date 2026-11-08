@@ -116,6 +116,55 @@ it.each([
   });
 });
 
+it("retains allowlisted outbound audits in attempt telemetry and bounds retries", async () => {
+  const audit = {
+    transport: "http" as const,
+    endpoint: "responses" as const,
+    observed_at_ms: 1000,
+    user_agent: "codex_cli_rs/1.2.3",
+    version: "1.2.3",
+    originator: "codex_cli_rs",
+    account_ref: "logical-account",
+    auth_scheme: "bearer" as const,
+    account_header_present: true,
+    session_source: "client" as const,
+    thread_id_present: true,
+    turn_state_present: false,
+    installation_id_present: true,
+    turn_state_reset: false,
+    authorization: "Bearer should-never-persist",
+    cookie: "private",
+  };
+  const client: ProviderClient = {
+    async chatCompletion(_body, opts) {
+      for (let i = 0; i < 20; i++) opts?.onOutboundRequest?.(audit);
+      return { id: "r", choices: [], usage: {} };
+    },
+    chatCompletionStream: vi.fn(),
+  };
+  const execute = createExecute({
+    defaultProvider: client,
+    providers: new Map([["openai-codex", client]]),
+    registry: protocolRegistry({
+      model: {
+        providerName: "openai-codex",
+        providerModel: "gpt-test",
+        targetProviderProtocol: "openai_chat",
+      },
+    }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+  });
+  const out = await execute(plan(["model"]), req());
+  expect(out.attempts[0]?.outbound_requests).toHaveLength(16);
+  expect(out.attempts[0]?.outbound_requests?.[0]).toMatchObject({ sequence: 5, version: "1.2.3" });
+  expect(out.attempts[0]?.outbound_requests?.[15]).toMatchObject({ sequence: 20 });
+  expect(JSON.stringify(out.attempts)).not.toContain("should-never-persist");
+  expect(JSON.stringify(out.attempts)).not.toContain("private");
+});
+
 it("preserves exhausted Codex capacity advice without switching account or candidate", async () => {
   const error = new CodexCapacityRetryExhaustedError(
     new UpstreamError(
