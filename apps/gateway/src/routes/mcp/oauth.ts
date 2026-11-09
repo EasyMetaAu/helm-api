@@ -272,7 +272,7 @@ export function registerMcpOAuth(app: Hono<AppEnv>, deps: McpOAuthDeps): void {
     if (!apiKey) return c.html(loginForm(q, base, "Please paste your API key."), 400);
 
     const rec = await deps.keyStore.getByHash(hashKey(apiKey));
-    if (rec === null || rec.disabled) {
+    if (rec === null || rec.disabled || rec.suspended) {
       deps.log?.("authorize: invalid or disabled API key");
       return c.html(loginForm(q, base, "Invalid or disabled API key."), 401);
     }

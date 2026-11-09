@@ -60,7 +60,8 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
   // unless the serving subscription account itself has Fast mode forced on.
   allow_fast_mode: z.boolean().default(false),
-  disabled: z.boolean(),
+  disabled: z.boolean(), // legacy irreversible revocation
+  suspended: z.boolean().optional(), // absent on legacy fixtures = active
   // Per-key rate-limit overrides (docs/06). NULL = inherit the system default
   // (runtime setting rate_limit_default_{rpm,tpm}); a number overrides that ONE
   // dimension only (0 = explicitly unlimited for this key). present-but-nullable
@@ -189,6 +190,7 @@ export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 // = set, omit = leave.
 export const UpdateKeyRequestSchema = z
   .object({
+    suspended: z.boolean().optional(),
     // Rename a key after mint. Omit = leave unchanged; null = clear back to unnamed.
     name: KeyNameSchema.nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).min(1).nullable().optional(),

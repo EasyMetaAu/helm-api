@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SqliteKeyStore } from "./keystore.js";
 import { createSqliteDb } from "./migrate.js";
@@ -8,6 +11,78 @@ function freshStore() {
 }
 
 describe("SqliteKeyStore", () => {
+  it("upgrades existing keys without restoring revoked keys and survives reopen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-key-upgrade-"));
+    const file = join(dir, "keys.db");
+    try {
+      const legacy = createSqliteDb(file);
+      const store = new SqliteKeyStore(legacy);
+      await store.createKey({
+        keyId: "active",
+        hash: "active",
+        prefix: "a",
+        accountId: "a",
+        role: "user",
+      });
+      await store.createKey({
+        keyId: "revoked",
+        hash: "revoked",
+        prefix: "r",
+        accountId: "a",
+        role: "user",
+      });
+      await store.disable("revoked");
+      legacy.$sqlite.exec(
+        "ALTER TABLE api_keys DROP COLUMN suspended; DELETE FROM _migrations WHERE version = 56;",
+      );
+      legacy.$sqlite.close();
+      const upgraded = createSqliteDb(file);
+      const next = new SqliteKeyStore(upgraded);
+      expect(await next.getById("active")).toMatchObject({ disabled: false, suspended: false });
+      expect(await next.getById("revoked")).toMatchObject({ disabled: true, suspended: false });
+      await next.updateKey("active", { suspended: true });
+      upgraded.$sqlite.close();
+      const reopened = createSqliteDb(file);
+      try {
+        expect(await new SqliteKeyStore(reopened).getById("active")).toMatchObject({
+          suspended: true,
+        });
+      } finally {
+        reopened.$sqlite.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists reversible suspension without changing the secret or revocation", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteKeyStore(db);
+    try {
+      const original = await store.createKey({
+        keyId: "pause",
+        hash: "same-hash",
+        prefix: "same-prefix",
+        accountId: "a",
+        role: "user",
+      });
+      await store.updateKey("pause", { suspended: true });
+      expect(await store.getByHash("same-hash")).toMatchObject({
+        ...original,
+        suspended: true,
+        disabled: false,
+      });
+      expect((await store.list())[0]?.suspended).toBe(true);
+      await store.updateKey("pause", { suspended: false });
+      expect(await store.getById("pause")).toMatchObject({ ...original, suspended: false });
+      await store.disable("pause");
+      await store.updateKey("pause", { suspended: false });
+      expect((await store.getById("pause"))?.disabled).toBe(true);
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it("round-trips create -> getByHash with all fields", async () => {
     const store = freshStore();
     await store.createKey({

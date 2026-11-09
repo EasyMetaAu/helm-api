@@ -4,7 +4,6 @@
   "— none": "— none",
   "; edit that file and restart the gateway to retune.": "; edit that file and restart the gateway to retune.",
   "? Helm will forget its stored tokens.": "? Helm will forget its stored tokens.",
-  "? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.": "? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.",
   "? The current value stops working immediately. Key id, name, caps, and request history stay in place.": "? The current value stops working immediately. Key id, name, caps, and request history stay in place.",
   "? This permanently removes the revoked key. Past request logs keep an anonymized reference.": "? This permanently removes the revoked key. Past request logs keep an anonymized reference.",
   ". Keep it private.": ". Keep it private.",
@@ -1217,5 +1216,9 @@
   "Account {account} was kept for this conversation.": "Account {account} was kept for this conversation.",
   "Account {account} was assigned by session distribution.": "Account {account} was assigned by session distribution.",
   "Account {account} was selected by least recent use.": "Account {account} was selected by least recent use.",
-  "Account {account} was selected by {strategy}.": "Account {account} was selected by {strategy}."
+  "Account {account} was selected by {strategy}.": "Account {account} was selected by {strategy}.",
+  "Disable": "Disable",
+  "Enable": "Enable",
+  "Failed to update key status": "Failed to update key status",
+  "? This cannot be undone. Use Disable for a temporary pause.": "? This cannot be undone. Use Disable for a temporary pause."
 }

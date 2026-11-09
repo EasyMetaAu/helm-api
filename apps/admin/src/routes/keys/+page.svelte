@@ -10,6 +10,7 @@
     type RevealedKey,
     revokeKey,
     rotateKey,
+    updateKey,
   } from '$lib/api/keys.js';
   import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
@@ -21,7 +22,7 @@
   // API key management view. HARD security line (CLAUDE.md Principle 7 / docs/06): the
   // list shows ONLY the display prefix + sha256-backed reference — never plaintext.
   // Plaintext appears only in transient create/reveal/rotate modal state, then is
-  // wiped. Revocation is a SOFT disable (server flips disabled:true); rotation
+  // wiped. Revocation is irreversible (disabled:true); suspended is reversible. Rotation
   // preserves the key row and history. This view is a pure consumer of
   // /admin/api/* — it owns no auth logic and persists no credentials.
   let { data }: { data: { keys: ApiKeyView[]; lanes: string[]; usage: KeyUsage[] } } = $props();
@@ -50,6 +51,7 @@
   let showConnect = $state<boolean>(false);
   // The key_id currently pending a revoke confirmation, if any.
   let confirmingRevoke = $state<string | null>(null);
+  let changingStatus = $state<string | null>(null);
   let revoking = $state<string | null>(null);
   // The key_id currently pending a permanent-delete confirmation, if any.
   let confirmingDelete = $state<string | null>(null);
@@ -212,6 +214,20 @@
       error = e instanceof Error ? e.message : $t('Failed to rotate key');
     } finally {
       rotating = null;
+    }
+  }
+
+  async function toggleSuspended(key: ApiKeyView): Promise<void> {
+    error = null;
+    changingStatus = key.key_id;
+    const suspended = !key.suspended;
+    try {
+      await updateKey(key.key_id, { suspended });
+      keys = keys.map((k) => (k.key_id === key.key_id ? { ...k, suspended } : k));
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update key status');
+    } finally {
+      changingStatus = null;
     }
   }
 
@@ -420,6 +436,8 @@
               </td>
               <td data-label={$t('Status')} class="px-3 py-2">
                 {#if key.disabled}
+                  <span class="badge-neutral">{$t('revoked')}</span>
+                {:else if key.suspended}
                   <span class="badge-neutral">{$t('disabled')}</span>
                 {:else}
                   <span class="badge-ok">{$t('active')}</span>
@@ -429,6 +447,13 @@
                 <div class="flex items-center justify-end gap-2">
                   <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
                   {#if key.key_id !== INTERNAL_KEY_ID && !key.disabled}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={changingStatus !== null}
+                      onclick={() => toggleSuspended(key)}
+                      >{key.suspended ? $t('Enable') : $t('Disable')}</button
+                    >
                     <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
                       >{$t('Edit')}</button
                     >
@@ -613,7 +638,7 @@
       <p class="mt-2 text-sm text-amber-800">
         {$t('Revoke key')}
         <code class="font-mono">{confirmingPrefix}</code>{$t(
-          '? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.',
+          '? This cannot be undone. Use Disable for a temporary pause.',
         )}
       </p>
       <div class="mt-4 flex justify-end gap-2">

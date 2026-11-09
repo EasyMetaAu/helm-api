@@ -33,6 +33,7 @@ export const apiKeys = sqliteTable("api_keys", {
   blockedModels: text("blocked_models"), // JSON text array of model blacklist patterns; NULL = none
   allowFastMode: integer("allow_fast_mode", { mode: "boolean" }).notNull().default(false),
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
+  suspended: integer("suspended", { mode: "boolean" }).notNull().default(false),
   // Per-key rate-limit override (docs/06). Nullable: NULL = inherit the system
   // default at check time; a value (0 = unlimited) overrides that one dimension.
   rateLimitRpm: integer("rate_limit_rpm"),

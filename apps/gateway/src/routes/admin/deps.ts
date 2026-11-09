@@ -626,6 +626,7 @@ export interface KeySummary {
   client_policy?: ClientPolicy | null;
   allow_fast_mode: boolean;
   disabled: boolean;
+  suspended?: boolean;
   // Per-key rate-limit override (docs/06). null = inherit the system default; a
   // number (0 = unlimited) overrides that dimension. Surfaced so the admin UI can
   // display + edit it. No key material — just the quota numbers (principle 7).

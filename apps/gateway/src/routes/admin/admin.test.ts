@@ -6,12 +6,21 @@ import type {
   SessionRevisionRecord,
   TelemetryStore,
 } from "@helm/core";
-import { createResponseWorkAdmission, DEFAULT_LANES, parseLanesConfig } from "@helm/core";
+import {
+  createCachedKeyStore,
+  createResponseWorkAdmission,
+  createSqliteDb,
+  DEFAULT_LANES,
+  hashKey,
+  parseLanesConfig,
+  SqliteKeyStore,
+} from "@helm/core";
 import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
+import { authMiddleware } from "../../middleware/auth.js";
 import { basicAuth } from "../../middleware/basic-auth.js";
 import { handleError } from "../../middleware/error-handler.js";
 import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
@@ -678,6 +687,53 @@ describe("admin.api classifier", () => {
 });
 
 describe("admin.api keys", () => {
+  it("disables and re-enables the same key through persisted storage and cached auth", async () => {
+    const db = createSqliteDb(":memory:");
+    const keyStore = createCachedKeyStore(new SqliteKeyStore(db), {
+      ttlMs: 60_000,
+      maxEntries: 10,
+      now: Date.now,
+    });
+    const app = buildApp(buildDeps({ keyStore }));
+    app.use("/protected", authMiddleware({ keyStore, log: () => {} }));
+    app.get("/protected", (c) => c.json({ ok: true }));
+    const headers = { Authorization: "Bearer helm_live_pause" };
+    const patch = (suspended: unknown, id = "pause") =>
+      app.request(`/admin/api/keys/${id}`, {
+        method: "PATCH",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ suspended }),
+      });
+    try {
+      await keyStore.createKey({
+        keyId: "pause",
+        hash: hashKey("helm_live_pause"),
+        prefix: "helm_live_paus",
+        accountId: "a",
+        role: "user",
+      });
+      expect((await app.request("/protected", { headers })).status).toBe(200);
+      expect((await patch(true)).status).toBe(200);
+      expect((await app.request("/protected", { headers })).status).toBe(401);
+      expect(await (await app.request("/admin/api/keys")).json()).toEqual([
+        expect.objectContaining({ key_id: "pause", suspended: true, disabled: false }),
+      ]);
+      expect(
+        (await app.request("/admin/api/keys/pause?purge=true", { method: "DELETE" })).status,
+      ).toBe(409);
+      expect((await patch(false)).status).toBe(200);
+      expect((await app.request("/protected", { headers })).status).toBe(200);
+      expect((await patch("false")).status).toBe(400);
+      expect((await patch(true, "missing")).status).toBe(404);
+      expect((await patch(true, "k_internal")).status).toBe(403);
+      expect((await app.request("/admin/api/keys/pause", { method: "DELETE" })).status).toBe(200);
+      expect((await patch(false)).status).toBe(409);
+      expect((await app.request("/protected", { headers })).status).toBe(401);
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it("POST returns plaintext ONCE; GET list never exposes plaintext or hash", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);

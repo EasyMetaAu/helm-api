@@ -268,6 +268,8 @@ export interface KeyStore {
 // throwing on an unknown id). Mirrors the editable subset of the key record —
 // role and the immutable identity are deliberately absent.
 export interface KeyPatch {
+  // Reversible pause; never clears the independent revocation flag.
+  suspended?: boolean;
   // Rename: present (even null) => written; null clears back to unnamed.
   name?: string | null;
   allowedLanes?: string[] | null;

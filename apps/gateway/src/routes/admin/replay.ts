@@ -101,15 +101,16 @@ export async function runReplay(
   const keys = await deps.keyStore.list();
   const originalKey = keys.find((k) => k.key_id === keyId);
   let key: ApiKeyRecord;
-  if (originalKey && !originalKey.disabled) {
+  if (originalKey && !originalKey.disabled && !originalKey.suspended) {
     key = originalKey;
   } else {
-    const root = keys.find((k) => k.role === "root" && !k.disabled);
+    const root = keys.find((k) => k.role === "root" && !k.disabled && !k.suspended);
     if (!root) {
       return {
         ok: false,
         status: 409,
-        error: "original key is unavailable (deleted or revoked) and no active root key exists",
+        error:
+          "original key is unavailable (deleted, revoked, or disabled) and no active root key exists",
       };
     }
     key = root;

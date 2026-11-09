@@ -105,7 +105,7 @@ admin pages.
 
 ### Rule management
 
-- **Keys** (`/keys`) — create, reveal, rotate, revoke, and permanently delete API
+- **Keys** (`/keys`) — create, reveal, rotate, disable/enable, revoke, and permanently delete API
   keys; open copyable **Connect Client** snippets; and edit the full per-key cap
   set: operator-facing name, allowed lanes, custom-model permission, exact/glob
   blocked models, client-requested Fast-mode permission, rate limits (RPM/TPM),
@@ -115,7 +115,9 @@ admin pages.
   KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`), never YAML.
   Full key reveal works only for rows with encrypted recovery material; older
   hash-only keys must be rotated before they become recoverable. Revocation is a
-  soft disable. A revoked key can then be permanently deleted as
+  irreversible soft revoke. Disable/Enable is a separate reversible action that
+  preserves the same secret and history; the list and detail show active, disabled,
+  or revoked. A revoked key can then be permanently deleted as
   an explicit second step (DELETE `?purge=true`); the server refuses to purge an
   active key (409 'key must be revoked before deletion'). Telemetry keeps an
   unlinked key_id reference for audit history. See [06 · Auth, API Keys & Rate

@@ -4,7 +4,6 @@
   "— none": "— 無",
   "; edit that file and restart the gateway to retune.": "；編輯該檔案並重新啟動閘道即可重新調參。",
   "? Helm will forget its stored tokens.": "? Helm 將忘記其儲存的權杖。",
-  "? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.": "？它將被停用（保留以供稽核，不會刪除）。請建立一把新金鑰來完成輪換。",
   "? The current value stops working immediately. Key id, name, caps, and request history stay in place.": "？目前的值會立即失效。key id、名稱、權限上限與請求歷史都會保留。",
   "? This permanently removes the revoked key. Past request logs keep an anonymized reference.": "？此操作將永久刪除這把已撤銷的金鑰。歷史請求日誌仍會保留一個匿名參照。",
   ". Keep it private.": "。請妥善保密。",
@@ -1217,5 +1216,9 @@
   "Account {account} was kept for this conversation.": "本次繼續使用對話原有帳號 {account}。",
   "Account {account} was assigned by session distribution.": "依對話分配規則選中了帳號 {account}。",
   "Account {account} was selected by least recent use.": "優先選擇距上次使用時間最久的帳號，本次選中了 {account}。",
-  "Account {account} was selected by {strategy}.": "依{strategy}策略選中了帳號 {account}。"
+  "Account {account} was selected by {strategy}.": "依{strategy}策略選中了帳號 {account}。",
+  "Disable": "停用",
+  "Enable": "啟用",
+  "Failed to update key status": "更新金鑰狀態失敗",
+  "? This cannot be undone. Use Disable for a temporary pause.": "？撤銷後無法恢復。如需暫時停用，請選擇「停用」。"
 }

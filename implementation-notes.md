@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-11-09 · API Key 临时禁用与启用（docs/06、11）
+
+- **状态决定**：保留既有 `disabled=true` 的不可恢复吊销语义，新增独立 `suspended` 标志。管理员通过原 PATCH 接口禁用或启用；不改变密钥、配额、身份与历史，已吊销及内部系统 Key 不允许切换。
+- **持久化与鉴权**：SQLite v56、Postgres v55 为旧记录补默认 false，保留既有吊销。HTTP、原生协议、实时连接与 MCP 的新鉴权均拒绝临时禁用 Key；管理重放选用仍有效的身份。复用 updateKey 清理本进程缓存。
+- **边界**：不终止已接收的请求或已建立的连接；共享 Postgres 的其他网关实例按已有鉴权缓存 TTL 感知状态，默认最多 30 秒。页面区分启用、已禁用、已吊销，吊销确认明确不可恢复。
+- **发布准备**：v0.30.73 已执行 `pnpm release:prepare 0.30.73`；官方稳定快照仍为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77，无新增客户端协议变更。
+
 ## 2026-11-08 · Codex 出站客户端 Header 一致性（docs/04、05、07）
 
 - **决定**：订阅 provider 的 `User-Agent`、`version`、`originator` 由网关运行时生成；原生客户端不再覆盖，HTTP、SSE、compact、WebSocket 握手与认证重试使用同一规则。无配置时采用签入的稳定版本，消除 `0.0.0` 占位值。
@@ -88,13 +95,9 @@
 - **兼容与限制**：未配置新字段的模型维持现有行为；不推断其他模型的限制。定向回归覆盖原生 Anthropic 入站规范化、流式／非流式、零上游调用、fallback 参数保留及不计熔断故障。本条记录本地修复，生产需部署代码及能力配置后才能生效。
 - **发布准备**：按发布工具准备 v0.30.59，固定 Grok 1.0.70、经独立静态审查的 Claude Code 2.1.312、Codex 0.165.0 及同 tag 模型目录；新的远程 worker 票据头继续剥离。仅补齐官方目录中的 Terra 元数据，不修改 lane 默认路由。计划分别核验 remote 原生执行和 192.168.8.4 串联路径；LAN 的 remote-helm lane 代表远端候选链，不能误标成单个 Sonnet 模型不支持强制工具。
 
-## 2026-10-27 · GPT lane 去版本化并按优先档位排序（docs/04、06、11）
-
-- **命名**：`gpt-6-astra`、`gpt-6-luna`、`gpt-6.1-sol`、`gpt-6.1-terra` lane 分别改成 `gpt-astra`、`gpt-luna`、`gpt-sol`、`gpt-terra`；lane 配置先按 `economy`、`balanced`、`premium` 排列，其次是 coding、JSON、tool use、vision、transcription 等功能 lane，最后是厂商／模型 lane；功能组与厂商组分别保留原有相对顺序。旧模型名、日期及 `openai.` 客户端别名继续映射到新 lane。
-- **边界**：只改 lane 名和引用，不改真实上游 model ID、价格、能力、reasoning effort 或 fallback 顺序。Admin、Portal 与模型发现继续读取配置；192.168.8.4 的 Helm 串联模型与目录键同步改名，避免把新 lane 名直接发送给真实模型上游。
-- **部署**：检查所有配置引用与现役 key 的 lane 作用域，保留无关自定义配置。v0.30.58 按发布工具同步稳定快照，分别读回两台服务器的排序与路由，并验证新名称及旧别名的真实流式响应。后续显示顺序修正直接更新现役配置，保持 v0.30.58 镜像与路由内容不变。
-
 ## 更早历史总览
+
+2026-10-27：GPT lane 去版本化并按优先档位排序，真实模型、价格、能力与 fallback 顺序不变；完整记录见 git history。
 
 2026-10-27：恢复 Sol 为默认路由，保留显式 Terra lane；Remote 与 8.4 分别恢复对应链，账号权限与流式约束不变，完整记录见 git history。
 

@@ -1403,6 +1403,18 @@ CREATE TABLE request_payload_response_chunks (
     version: 54,
     sql: "ALTER TABLE responses_registry ADD COLUMN tool_translation JSONB;",
   },
+  {
+    version: 55,
+    async run(db) {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"])) {
+        await db.execute(
+          sql.raw(
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE;",
+          ),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

@@ -38,6 +38,7 @@ function toSummary(rec: {
   client_policy?: ClientPolicy | null;
   allow_fast_mode: boolean;
   disabled: boolean;
+  suspended?: boolean;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
   budget_requests: number | null;
@@ -64,6 +65,7 @@ function toSummary(rec: {
     client_policy: rec.client_policy ?? null,
     allow_fast_mode: rec.allow_fast_mode,
     disabled: rec.disabled,
+    suspended: rec.suspended ?? false,
     rate_limit_rpm: rec.rate_limit_rpm,
     rate_limit_tpm: rec.rate_limit_tpm,
     budget_requests: rec.budget_requests,
@@ -270,7 +272,17 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     // the wire snake_case to the store's camelCase KeyPatch. Zod leaves an omitted
     // field as `undefined`, distinguishing "clear" (null) from "leave unchanged".
     const d = parsed.data;
+    if (d.suspended !== undefined) {
+      if (id === INTERNAL_API_KEY_ID) {
+        return c.json({ error: "internal system key cannot be disabled or enabled" }, 403);
+      }
+      const existing = await deps.keyStore.getById(id);
+      if (!existing) return c.json({ error: "key not found" }, 404);
+      if (existing.disabled)
+        return c.json({ error: "revoked keys cannot be enabled or disabled" }, 409);
+    }
     const patch: {
+      suspended?: boolean;
       name?: string | null;
       allowedLanes?: string[] | null;
       allowCustomModel?: boolean;
@@ -292,6 +304,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       requestContentMode?: "none" | "payload" | "session" | null;
       maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
     } = {};
+    if (d.suspended !== undefined) patch.suspended = d.suspended;
     if (d.name !== undefined) patch.name = d.name;
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;

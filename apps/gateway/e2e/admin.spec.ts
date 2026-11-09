@@ -530,3 +530,56 @@ test("client policy persists through the admin UI and gates the public API", asy
     await admin.dispose();
   }
 });
+
+test("admin disables and re-enables an API key without changing its secret", async ({
+  page,
+  request,
+}, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await page.addInitScript(() => localStorage.setItem("helm_admin_locale", "zh-hans"));
+  const created = await request.post(`${BASE}/admin/api/keys`, {
+    data: { role: "user", name: "Temporary access" },
+  });
+  expect(created.status()).toBe(201);
+  const key = (await created.json()) as { key_id: string; plaintext: string };
+  const checkAuth = () =>
+    request.get(`${BASE}/v1/models`, { headers: { Authorization: `Bearer ${key.plaintext}` } });
+  try {
+    expect((await checkAuth()).status()).toBe(200);
+    await page.goto(`${BASE}/admin/keys`);
+    await expect(page).toHaveTitle(/Helm/i);
+    const row = page.getByTestId("key-row").filter({ hasText: "Temporary access" });
+    await row.getByRole("button", { name: "禁用", exact: true }).click();
+    await expect(row.getByText("已禁用", { exact: true })).toBeVisible();
+    expect((await checkAuth()).status()).toBe(401);
+    const headers = { Authorization: `Bearer ${key.plaintext}` };
+    for (const path of ["/v1/chat/completions", "/v1/messages", "/v1/responses"]) {
+      expect((await request.post(`${BASE}${path}`, { headers, data: {} })).status()).toBe(401);
+    }
+    expect((await request.get(`${BASE}/portal/api/me`, { headers })).status()).toBe(401);
+    await page.reload();
+    await expect(row.getByRole("button", { name: "启用", exact: true })).toBeVisible();
+    await row.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("key-disabled.png"), fullPage: false });
+    await row.getByRole("button", { name: "启用", exact: true }).click();
+    await expect(row.getByRole("button", { name: "禁用", exact: true })).toBeVisible();
+    expect((await checkAuth()).status()).toBe(200);
+    await page.reload();
+    await expect(row.getByRole("button", { name: "禁用", exact: true })).toBeVisible();
+    await row.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("key-enabled.png"), fullPage: false });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await row.scrollIntoViewIfNeeded();
+    await expect(row.getByRole("button", { name: "禁用", exact: true })).toBeInViewport();
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("key-mobile.png"), fullPage: false });
+    expect(errors).toEqual([]);
+  } finally {
+    await request.delete(`${BASE}/admin/api/keys/${key.key_id}`);
+    await request.delete(`${BASE}/admin/api/keys/${key.key_id}?purge=true`);
+  }
+});

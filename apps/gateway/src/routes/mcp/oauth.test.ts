@@ -219,8 +219,11 @@ describe("POST /authorize", () => {
     expect(await res.text()).toContain("Invalid or disabled API key");
   });
 
-  it("rejects a disabled key", async () => {
-    const { app } = build(record({ disabled: true }));
+  it.each([
+    { disabled: true },
+    { suspended: true },
+  ])("rejects an unavailable key: %j", async (state) => {
+    const { app } = build(record(state));
     const qs = new URLSearchParams({ redirect_uri: REDIRECT, code_challenge: "cc" }).toString();
     const res = await app.request("/authorize", {
       method: "POST",

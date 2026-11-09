@@ -51,6 +51,16 @@ function buildApp(deps: AuthDeps) {
 }
 
 describe("authMiddleware", () => {
+  it("rejects a temporarily suspended key before running downstream", async () => {
+    const getByHash = vi.fn().mockResolvedValue(record({ suspended: true }));
+    const { app, downstream } = buildApp({ keyStore: { getByHash }, log: () => {} });
+    const res = await app.request("/protected", {
+      headers: { Authorization: "Bearer helm_live_secret" },
+    });
+    expect(res.status).toBe(401);
+    expect(downstream).not.toHaveBeenCalled();
+  });
+
   it("rejects a request with no key (auth_error 401, downstream not run)", async () => {
     const getByHash = vi.fn();
     const { app, downstream } = buildApp({ keyStore: { getByHash }, log: () => {} });

@@ -227,6 +227,8 @@
       <h1 class="page-title">{key.name || $t('Unnamed')}</h1>
       <code class="font-mono text-sm text-ink-muted">{key.prefix}</code>
       {#if key.disabled}
+        <span class="badge-neutral">{$t('revoked')}</span>
+      {:else if key.suspended}
         <span class="badge-neutral">{$t('disabled')}</span>
       {:else}
         <span class="badge-ok">{$t('active')}</span>
