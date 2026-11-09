@@ -29,7 +29,7 @@ request is short-circuited before it can cost anything.
   `x-api-key` header. It is treated as case-sensitive and is never trimmed or
   lowercased before hashing.
 - The plaintext key is hashed with sha256 and looked up via
-  `KeyStore.getByHash`. A missing, unknown, or `disabled` key yields a
+  `KeyStore.getByHash`. A missing, unknown, revoked (`disabled`), or temporarily `suspended` key yields a
   structured `auth_error` (HTTP 401); see [07 · Error Model &
   Observability](07-observability.md).
 - On success, an `AuthIdentity` is attached to the request context: `keyId`,
@@ -122,7 +122,8 @@ The stored record (`ApiKeyRecord`, single source of truth in
   allow_custom_model: boolean,      // may the client pin a model OR lane directly?
   blocked_models: string[] | null,  // case-insensitive model denylist patterns; supports * and ?
   allow_fast_mode: boolean,         // may client-requested subscription Fast mode pass through?
-  disabled: boolean,
+  disabled: boolean, // irreversible revocation (legacy field name)
+  suspended?: boolean, // reversible disable; absent means false
 
   // Rate limit (null = inherit system default; 0 = explicitly unlimited)
   rate_limit_rpm: number | null,
@@ -192,6 +193,14 @@ the additive lease tables may remain safely and expire stale rows automatically.
   that writes only the fields present in the patch (name, rate limits, allowed
   lanes, custom/blocked/Fast-model controls, budgets, concurrency, memory defaults),
   leaving omitted columns untouched; it never mutates `role` or account identity.
+- **Temporary disable is reversible.** Admin `PATCH /admin/api/keys/:id` with
+  `{ "suspended": true }` pauses new requests; `{ "suspended": false }` restores
+  the same key, caps, and history. The separate legacy `disabled` flag still means
+  irreversible revocation: a revoked key cannot be enabled (`409`). Internal system
+  keys cannot be paused (`403`). Existing requests are not cancelled. The local auth
+  cache is invalidated by the edit; other gateway replicas observe it within their
+  existing auth-cache TTL (default 30 seconds). SQLite and Postgres migrations
+  initialize the new flag to false and preserve all existing revocations.
 - **Permanent deletion is an explicit second step.** An already-**revoked** key
   may be physically removed via `KeyStore.deleteKey` (admin:
   `DELETE /admin/api/keys/:id?purge=true`). The route gates it server-side: an

@@ -111,7 +111,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
     }
 
     const record = await deps.keyStore.getByHash(hashKey(plaintext));
-    if (record === null || record.disabled) {
+    if (record === null || record.disabled || record.suspended) {
       deps.log(`auth_error: unknown or disabled key trace_id=${traceId}`);
       return reject();
     }

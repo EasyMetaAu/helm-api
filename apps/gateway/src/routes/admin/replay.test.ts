@@ -462,7 +462,10 @@ describe("runReplay", () => {
     expect(logged).toContain("replay.root_key_fallback");
   });
 
-  it("falls back to a live root key when the original key is revoked", async () => {
+  it.each([
+    { disabled: true },
+    { suspended: true },
+  ])("falls back to a live root key when the original key is unavailable: %j", async (state) => {
     const rec = emptyRec();
     const root = fakeKey({
       key_id: "k_root",
@@ -481,7 +484,7 @@ describe("runReplay", () => {
       {
         replay: wiring(route, rec),
         telemetry: fakeTelemetry("key_1", rec),
-        keyStore: fakeKeyStore([fakeKey({ disabled: true }), root]),
+        keyStore: fakeKeyStore([fakeKey(state), root]),
       },
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
@@ -489,9 +492,12 @@ describe("runReplay", () => {
     expect(rec.inserts[0]?.apiKeyId).toBe("k_root");
   });
 
-  it("skips DISABLED root keys when picking the fallback", async () => {
+  it.each([
+    { disabled: true },
+    { suspended: true },
+  ])("skips unavailable root keys when picking the fallback: %j", async (state) => {
     const rec = emptyRec();
-    const deadRoot = fakeKey({ key_id: "k_root_old", role: "root", disabled: true });
+    const deadRoot = fakeKey({ key_id: "k_root_old", role: "root", ...state });
     const liveRoot = fakeKey({ key_id: "k_root_new", prefix: "helm_live_root2", role: "root" });
     const route: ReplayWiring["route"] = async (req) => ({
       decision: decision(req.request_id),

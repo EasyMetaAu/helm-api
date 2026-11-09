@@ -60,6 +60,36 @@ function renderPage(
 }
 
 describe('keys page', () => {
+  it('disables then enables a key without replacing or revoking it', async () => {
+    renderPage([key('k1', { name: 'Temporary' })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: 'Disable' }));
+    await waitFor(() => expect(updateKey).toHaveBeenCalledWith('k1', { suspended: true }));
+    await waitFor(() =>
+      expect(within(row).getByText('disabled', { exact: true })).toBeInTheDocument(),
+    );
+    await fireEvent.click(within(row).getByRole('button', { name: 'Enable' }));
+    await waitFor(() => expect(updateKey).toHaveBeenCalledWith('k1', { suspended: false }));
+    await waitFor(() =>
+      expect(within(row).getByText('active', { exact: true })).toBeInTheDocument(),
+    );
+    expect(revokeKey).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId('key-row')).toHaveLength(1);
+  });
+
+  it('keeps the current status and shows an error when a status change fails', async () => {
+    updateKey.mockRejectedValue(new Error('Status update failed'));
+    renderPage([key('k1')]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+    await waitFor(() => expect(screen.getByText('Status update failed')).toBeInTheDocument());
+    expect(screen.getByText('active', { exact: true })).toBeInTheDocument();
+  });
+
+  it('never offers Enable for revoked keys or Disable for the internal key', () => {
+    renderPage([key('revoked', { disabled: true }), key('k_internal')]);
+    expect(screen.queryByRole('button', { name: /^(Enable|Disable)$/ })).toBeNull();
+  });
+
   beforeEach(() => {
     createKey.mockReset();
     revokeKey.mockReset();
@@ -272,7 +302,7 @@ describe('keys page', () => {
     expect(within(row).getByTestId('root-warning')).toBeInTheDocument();
   });
 
-  it('revoking marks the row disabled in place — never removed (rotation semantics)', async () => {
+  it('revoking marks the row revoked in place and keeps the history', async () => {
     revokeKey.mockResolvedValue({ revoked: 'k1' });
     renderPage([key('k1', { prefix: 'helm_live_ab12' })]);
     const row = screen.getByTestId('key-row');
@@ -284,7 +314,7 @@ describe('keys page', () => {
     // Still present, just disabled.
     expect(screen.getAllByTestId('key-row')).toHaveLength(1);
     await waitFor(() =>
-      expect(within(screen.getByTestId('key-row')).getByText(/disabled/i)).toBeInTheDocument(),
+      expect(within(screen.getByTestId('key-row')).getByText(/revoked/i)).toBeInTheDocument(),
     );
   });
 

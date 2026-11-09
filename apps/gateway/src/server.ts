@@ -4612,7 +4612,7 @@ export async function buildServer(
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
         const record = await keyStore.getByHash(hashKey(credential));
-        if (record === null || record.disabled) return null;
+        if (record === null || record.disabled || record.suspended) return null;
         return {
           keyId: record.key_id,
           keyPrefix: record.prefix,
@@ -4806,7 +4806,7 @@ export async function buildServer(
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
         const record = await keyStore.getByHash(hashKey(credential));
-        if (record === null || record.disabled) return null;
+        if (record === null || record.disabled || record.suspended) return null;
         return {
           keyId: record.key_id,
           keyPrefix: record.prefix,
@@ -4872,7 +4872,7 @@ export async function buildServer(
   const resolveIdentity = async (credential: string | null): Promise<MessagesIdentity | null> => {
     if (credential === null) return null;
     const record = await keyStore.getByHash(hashKey(credential));
-    if (record === null || record.disabled) return null;
+    if (record === null || record.disabled || record.suspended) return null;
     return {
       keyId: record.key_id,
       keyPrefix: record.prefix,

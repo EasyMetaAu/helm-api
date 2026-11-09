@@ -114,6 +114,9 @@ test.describe("memory inject + worker", () => {
     request,
   }) => {
     const threadId = `t-drain-${Date.now()}`;
+    // Project observations are shared across threads. Keep this worker assertion
+    // separate from the compacted observations produced by the preceding test.
+    const headers = { ...memHeaders(threadId), "x-project-id": threadId };
 
     // Each turn enqueues an observer job (deduped to one pending) and returns
     // immediately — compaction happens LATER on the worker, never on the request
@@ -122,7 +125,7 @@ test.describe("memory inject + worker", () => {
     const filler = "the quick brown fox jumps over the lazy dog ".repeat(80); // ~3.5 KB/turn
     for (let i = 0; i < 5; i++) {
       const res = await request.post("/v1/chat/completions", {
-        headers: memHeaders(threadId),
+        headers,
         data: {
           model: "auto",
           messages: [{ role: "user", content: `drain-turn-${i}: ${filler}` }],
@@ -138,7 +141,7 @@ test.describe("memory inject + worker", () => {
     await new Promise((r) => setTimeout(r, 1500));
 
     const res = await request.post("/v1/chat/completions", {
-      headers: memHeaders(threadId),
+      headers,
       data: { model: "auto", messages: [{ role: "user", content: "final question" }] },
     });
     expect(res.status()).toBe(200);

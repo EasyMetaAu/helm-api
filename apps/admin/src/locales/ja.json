@@ -4,7 +4,6 @@
   "— none": "— なし",
   "; edit that file and restart the gateway to retune.": "; そのファイルを編集し、ゲートウェイを再起動して再調整してください。",
   "? Helm will forget its stored tokens.": "? Helm は保存済みのトークンを忘れます。",
-  "? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.": "? 無効化されます（監査用に保持され、削除はされません）。ローテーションするには新しいキーを発行してください。",
   "? The current value stops working immediately. Key id, name, caps, and request history stay in place.": "？現在の値はすぐに使えなくなります。key id、名前、上限設定、リクエスト履歴はそのまま残ります。",
   "? This permanently removes the revoked key. Past request logs keep an anonymized reference.": "? これにより、取り消されたキーが完全に削除されます。過去のリクエストログには匿名化された参照が保持されます。",
   ". Keep it private.": "。秘密として扱ってください。",
@@ -1217,5 +1216,9 @@
   "Account {account} was kept for this conversation.": "この会話では引き続きアカウント{account}を使用しました。",
   "Account {account} was assigned by session distribution.": "セッションの分散ルールでアカウント{account}が割り当てられました。",
   "Account {account} was selected by least recent use.": "最も長く使われていないアカウント{account}を選択しました。",
-  "Account {account} was selected by {strategy}.": "{strategy}でアカウント{account}を選択しました。"
+  "Account {account} was selected by {strategy}.": "{strategy}でアカウント{account}を選択しました。",
+  "Disable": "無効にする",
+  "Enable": "有効にする",
+  "Failed to update key status": "キーの状態を更新できませんでした",
+  "? This cannot be undone. Use Disable for a temporary pause.": "? 失効後は元に戻せません。一時停止には「無効にする」を使ってください。"
 }

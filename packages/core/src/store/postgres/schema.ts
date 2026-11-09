@@ -47,6 +47,7 @@ export const apiKeys = pgTable("api_keys", {
   blockedModels: jsonb("blocked_models").$type<string[]>(), // model blacklist patterns
   allowFastMode: boolean("allow_fast_mode").notNull().default(false),
   disabled: boolean("disabled").notNull().default(false),
+  suspended: boolean("suspended").notNull().default(false),
   // Per-key rate-limit override (docs/06). Nullable: NULL = inherit the system
   // default at check time; a value (0 = unlimited) overrides that one dimension.
   rateLimitRpm: integer("rate_limit_rpm"),

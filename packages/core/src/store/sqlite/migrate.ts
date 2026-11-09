@@ -1445,6 +1445,17 @@ CREATE TABLE request_payload_response_chunks (
     version: 55,
     sql: "ALTER TABLE responses_registry ADD COLUMN tool_translation TEXT;",
   },
+  {
+    version: 56,
+    run(db) {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["suspended"])
+      ) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

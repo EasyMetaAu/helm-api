@@ -41,6 +41,7 @@ export class SqliteKeyStore implements KeyStore {
       blockedModels: input.blockedModels ? JSON.stringify(input.blockedModels) : null,
       allowFastMode: input.allowFastMode ?? false,
       disabled: false,
+      suspended: false,
       // Per-key rate-limit override: undefined input => NULL => inherit system default.
       rateLimitRpm: input.rateLimitRpm ?? null,
       rateLimitTpm: input.rateLimitTpm ?? null,
@@ -118,6 +119,7 @@ export class SqliteKeyStore implements KeyStore {
     const set: Partial<
       Pick<
         ApiKeyRow,
+        | "suspended"
         | "name"
         | "allowedLanes"
         | "allowCustomModel"
@@ -140,6 +142,7 @@ export class SqliteKeyStore implements KeyStore {
         | "maxReasoningEffort"
       >
     > = {};
+    if (patch.suspended !== undefined) set.suspended = patch.suspended;
     // Rename (null clears back to unnamed). Cosmetic only.
     if (patch.name !== undefined) set.name = patch.name;
     // SQLite has no native array: store the whitelist as JSON text (null = no cap).
@@ -226,6 +229,7 @@ export class SqliteKeyStore implements KeyStore {
       blocked_models: row.blockedModels ? (JSON.parse(row.blockedModels) as string[]) : null,
       allow_fast_mode: row.allowFastMode,
       disabled: row.disabled,
+      suspended: row.suspended,
       rate_limit_rpm: row.rateLimitRpm ?? null,
       rate_limit_tpm: row.rateLimitTpm ?? null,
       budget_requests: row.budgetRequests ?? null,

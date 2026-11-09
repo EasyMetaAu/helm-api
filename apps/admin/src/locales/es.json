@@ -4,7 +4,6 @@
   "— none": "— ninguno",
   "; edit that file and restart the gateway to retune.": "; edita ese archivo y reinicia el gateway para reajustar.",
   "? Helm will forget its stored tokens.": "? Helm olvidará sus tokens almacenados.",
-  "? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.": "? Se deshabilitará (se conservará para auditoría, no se eliminará). Genera una clave nueva para rotar.",
   "? The current value stops working immediately. Key id, name, caps, and request history stay in place.": "? El valor actual dejará de funcionar inmediatamente. El id, nombre, caps e historial de solicitudes de la clave se mantienen.",
   "? This permanently removes the revoked key. Past request logs keep an anonymized reference.": "? Esto elimina permanentemente la clave revocada. Los logs de solicitudes anteriores conservan una referencia anonimizada.",
   ". Keep it private.": ". Mantenlo privado.",
@@ -1217,5 +1216,9 @@
   "Account {account} was kept for this conversation.": "Se mantuvo la cuenta {account} para esta conversación.",
   "Account {account} was assigned by session distribution.": "Se asignó la cuenta {account} según la distribución de sesiones.",
   "Account {account} was selected by least recent use.": "Se seleccionó la cuenta {account} por ser la menos recientemente utilizada.",
-  "Account {account} was selected by {strategy}.": "Se seleccionó la cuenta {account} según {strategy}."
+  "Account {account} was selected by {strategy}.": "Se seleccionó la cuenta {account} según {strategy}.",
+  "Disable": "Deshabilitar",
+  "Enable": "Habilitar",
+  "Failed to update key status": "No se pudo actualizar el estado de la clave",
+  "? This cannot be undone. Use Disable for a temporary pause.": "? No se puede deshacer. Usa Deshabilitar para una pausa temporal."
 }

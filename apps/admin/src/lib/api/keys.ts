@@ -22,6 +22,7 @@ export interface ApiKeyView {
   blocked_models: string[] | null; // case-insensitive exact/glob model ids denied across routes
   allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough
   disabled: boolean; // revoked state (soft)
+  suspended?: boolean; // reversible disable; omitted = active
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
   rate_limit_tpm: number | null; // per-key TPM override; null = inherit system default
   // Per-key usage budgets (docs/06). null = no cap for that dimension. When over a
@@ -92,6 +93,7 @@ export interface CreateKeyInput {
 // inherit the system default). `role` and the immutable identity are deliberately
 // absent — role cannot be edited (rotate by revoke + re-mint).
 export interface UpdateKeyInput {
+  suspended?: boolean;
   // Rename: omit = leave unchanged; null = clear back to unnamed.
   name?: string | null;
   allowed_lanes?: string[] | null;
@@ -211,6 +213,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     client_policy: raw.client_policy == null ? null : readStoredClientPolicy(raw.client_policy),
     allow_fast_mode: raw.allow_fast_mode === true,
     disabled: raw.disabled === true,
+    suspended: raw.suspended === true,
     // null/absent = inherit system default; a finite number (incl. 0) = override.
     rate_limit_rpm: typeof raw.rate_limit_rpm === 'number' ? raw.rate_limit_rpm : null,
     rate_limit_tpm: typeof raw.rate_limit_tpm === 'number' ? raw.rate_limit_tpm : null,
