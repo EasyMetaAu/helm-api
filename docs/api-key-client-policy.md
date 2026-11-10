@@ -6,6 +6,12 @@
 
 在成功鉴权后、读取正文和调用上游之前执行检查。不通过时返回协议对应的 403，错误类别为 `client_not_allowed`；不触发 provider 重试、熔断或 fallback。通过后原路由链不变：不绑定模型、厂商、订阅账号，不更改分类兜底或执行兜底，不覆盖任何出站身份头。
 
+## Helm 级联转发
+
+连接另一个 Helm 时使用 `type: helm`，并设置 `target_provider_protocol` 为 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `gemini`。base URL 沿用对应协议格式：Anthropic 为站点根地址，Chat/Responses 通常带 `/v1`，Gemini 通常带 `/v1beta`。已有 Anthropic/Gemini 级联配置只需更改类型并保留目标协议。
+
+网关在最终 HTTP 发送和 Responses WebSocket 握手时保留入站 User-Agent，不受协议转换、流式、媒体或重试影响；Realtime sideband 单独保留本次 upgrade 的 UA。缺失 UA 不会补成已知客户端。上游仍使用网关配置的密钥并执行自己的客户端策略。该行为只适用于显式 Helm relay；直连厂商的订阅身份契约保持不变。
+
 ## 按客户端显示模型
 
 开启客户端限制后，`GET /v1/models` 与 `GET /v1/models/:id` 按本次请求的实际客户端显示具体模型：Codex App/CLI 显示 GPT/Codex（含 OpenAI o 系列）；Claude CLI/Desktop 显示 Claude；Grok CLI 显示 Grok。允许多个客户端的同一把 key 在各客户端看到各自的列表，而不是这些客户端模型的并集。关闭限制后恢复原列表。

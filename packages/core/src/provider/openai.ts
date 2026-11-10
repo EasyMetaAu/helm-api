@@ -51,8 +51,8 @@ export interface ProviderConfig {
   // requires editor identity headers (Copilot-Integration-Id, Editor-Version…) on
   // each chat call; this is the generic seam for them.
   extraHeaders?: () => Record<string, string>;
-  /** Helm relays preserve client policy identity on image calls only. */
-  forwardImageClientUserAgent?: boolean;
+  /** Helm relays preserve client identity on image calls and Realtime sideband upgrades. */
+  forwardClientUserAgent?: boolean;
   // Per-request base URL resolver (issue #38). When set, the chat URL is computed
   // fresh on EACH request from this (so it tracks a rotating value) instead of the
   // static `baseUrl`. Copilot derives its API host from the current token's
@@ -105,6 +105,8 @@ export interface RealtimeCallRequest {
 }
 
 export interface RealtimeSidebandTarget {
+  /** Helm relays preserve the authenticated upgrade request's client identity. */
+  forwardClientUserAgent?: boolean;
   url: string;
   headers(): Promise<Record<string, string>>;
   onUnauthorized?: () => void;
@@ -138,7 +140,7 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   /** Authenticated owner scope and original conversation, never sent verbatim. */
   anthropicIdentityContext?: import("./anthropic-account-profile.js").AnthropicIdentityContext;
-  /** Inbound identity, forwarded only by explicitly configured Helm image relays. */
+  /** Inbound identity, forwarded only by explicitly configured Helm relays. */
   clientUserAgent?: string;
   /** Resolved alias policy; never inferred from the upstream model name. */
   requestCompatibility?: Capabilities["requestCompatibility"];
@@ -623,7 +625,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     multipart = false,
   ): Promise<Record<string, string>> {
     const next = multipart ? await headersWithoutContentType() : await headers();
-    if (cfg.forwardImageClientUserAgent && opts?.clientUserAgent) {
+    if (cfg.forwardClientUserAgent && opts?.clientUserAgent) {
       for (const name of Object.keys(next)) {
         if (name.toLowerCase() === "user-agent") delete next[name];
       }
@@ -1147,6 +1149,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         location,
         callId,
         sideband: {
+          ...(cfg.forwardClientUserAgent ? { forwardClientUserAgent: true } : {}),
           url: sideband.toString(),
           headers: forwardedHeaders,
           ...(cfg.onUnauthorized ? { onUnauthorized: cfg.onUnauthorized } : {}),

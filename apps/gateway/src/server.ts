@@ -192,6 +192,10 @@ import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { outboundPrivacyMiddleware } from "./middleware/outbound-privacy.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import {
+  helmRelayHeaders,
+  relayClientIdentityMiddleware,
+} from "./middleware/relay-client-identity.js";
+import {
   type AccountSettingsMap,
   getAccountSettings,
   loadAccountSettings,
@@ -1570,7 +1574,17 @@ export function makeProviderFetch(
   env: Record<string, string | undefined> = process.env,
 ): typeof globalThis.fetch | undefined {
   const profile = resolveProviderTransportProfile(p);
-  if (profile === "default") return proxy ? makeProxyFetch(proxy) : undefined;
+  if (profile === "default") {
+    const transport = proxy ? makeProxyFetch(proxy) : undefined;
+    if (p.type !== "helm") return transport;
+    return (input, init) =>
+      (transport ?? globalThis.fetch)(input, {
+        ...init,
+        headers: helmRelayHeaders(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        ),
+      });
+  }
   if (profile === "tls_chrome") {
     if (!isAnthropicPresetOAuth(p)) {
       throw new Error(
@@ -1813,7 +1827,10 @@ function createProviderClient(
     };
   }
 
-  if (p.type === "anthropic") {
+  if (
+    p.type === "anthropic" ||
+    (p.type === "helm" && p.targetProviderProtocol === "anthropic_messages")
+  ) {
     return createAnthropicClient({
       resolveEnvironmentTimezone,
       config: {
@@ -1988,6 +2005,15 @@ function createProviderClient(
   ) {
     const isXaiOAuth =
       p.oauth !== undefined && isOAuthPreset(p.oauth) && p.oauth.provider === "xai";
+    let relayConnector: CodexResponsesWebSocketConnector | undefined;
+    if (p.type === "helm") {
+      const connect = createCodexResponsesWebSocketConnector({ proxy, timeoutMs: base.timeoutMs });
+      relayConnector = (input) =>
+        connect({
+          ...input,
+          headers: Object.fromEntries(helmRelayHeaders(input.headers)),
+        });
+    }
     const responsesClient = createGenericOpenAIResponsesClient({
       resolveEnvironmentTimezone,
       config: { ...base, ...cred },
@@ -1995,10 +2021,7 @@ function createProviderClient(
       ...(p.type === "helm"
         ? {
             requestContract: { acceptsResponsesNativeItems: true, forwardCodexMetadata: true },
-            responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
-              proxy,
-              timeoutMs: base.timeoutMs,
-            }),
+            responsesWebSocketConnector: relayConnector,
           }
         : {}),
       ...(isXaiOAuth
@@ -2052,7 +2075,7 @@ function createProviderClient(
       ttsVoices: mediaClient.ttsVoices,
     };
   }
-  if (p.type === "gemini") {
+  if (p.type === "gemini" || (p.type === "helm" && p.targetProviderProtocol === "gemini")) {
     return createGeminiClient({
       config: {
         ...base,
@@ -2102,7 +2125,7 @@ function createProviderClient(
       ...base,
       ...cred,
       realtimeProxy: proxy,
-      forwardImageClientUserAgent: p.type === "helm",
+      forwardClientUserAgent: p.type === "helm",
       mapDeveloperRoleToSystem: p.map_developer_role_to_system,
       normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
     },
@@ -3800,6 +3823,7 @@ export async function buildServer(
     },
   });
 
+  app.use("*", relayClientIdentityMiddleware());
   app.use("*", outboundPrivacyMiddleware(config.runtime.outbound_privacy));
 
   // Mandatory auth for the OpenAI chat surface (Hono middleware -> HelmError on

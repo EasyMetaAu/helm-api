@@ -98,15 +98,17 @@ function forwardedCloseCode(code: number): number {
 async function openUpstream(
   target: RealtimeSidebandTarget,
   maxPayload: number,
+  userAgent: string | undefined,
 ): Promise<PendingUpstream> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const headers = await target.headers();
+      const headers = new Headers(await target.headers());
+      if (target.forwardClientUserAgent) headers.set("user-agent", userAgent ?? "");
       return await new Promise<PendingUpstream>((resolve, reject) => {
         const pending: PendingUpstream["pending"] = [];
         let pendingBytes = 0;
         const socket = new WebSocket(target.url, {
-          headers,
+          headers: Object.fromEntries(headers),
           agent: codexWebSocketAgent(target.proxy),
           perMessageDeflate: false,
           maxPayload,
@@ -283,7 +285,11 @@ export function installRealtimeWebSocketBridge(
       }
       let upstream: PendingUpstream;
       try {
-        upstream = await openUpstream(call.target, websocketMaxPayloadBytes);
+        upstream = await openUpstream(
+          call.target,
+          websocketMaxPayloadBytes,
+          request.headers["user-agent"],
+        );
       } catch (cause) {
         options.registry.put(callId, keyId, call.target);
         throw cause;
