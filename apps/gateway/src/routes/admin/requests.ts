@@ -11,7 +11,7 @@ import {
   runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
 } from "@helm/core";
-import { RequestsQuerySchema } from "@helm/shared";
+import { type DecisionRecord, RequestsQuerySchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -27,6 +27,46 @@ import type { AdminApiDeps } from "./deps.js";
 // the record — so projecting to a 4-field summary here would force the UI to
 // recompute/guess them (and conflate classification vs execution fallback,
 // breaking Principle 5). Returning the records keeps the UI a pure consumer (Principle 1).
+
+// Labels are admin-only decoration. Refresh each referenced pool once per page,
+// then resolve the recorded credential generation from the in-memory snapshot.
+async function enrichAccountLabels(
+  records: readonly DecisionRecord[],
+  deps: AdminApiDeps,
+  onUnavailable: (providerId: string) => void,
+) {
+  const poolIds = new Set(
+    records.flatMap((record) =>
+      record.serving_account ? [record.serving_account.provider_id] : [],
+    ),
+  );
+  const available = new Set<string>();
+  for (const id of poolIds) {
+    const accounts = deps.apiKeyPools?.get(id)?.accounts;
+    if (!accounts) continue;
+    try {
+      await accounts.refresh();
+      available.add(id);
+    } catch {
+      onUnavailable(id);
+    }
+  }
+  return records.map((record) => {
+    const account = record.serving_account;
+    if (!account || !deps.apiKeyPools?.has(account.provider_id)) return record;
+    return {
+      ...record,
+      serving_account: {
+        ...account,
+        kind: "api_key" as const,
+        label: available.has(account.provider_id)
+          ? (deps.apiKeyPools.get(account.provider_id)?.accounts?.accountLabel(account.account) ??
+            null)
+          : null,
+      },
+    };
+  });
+}
 
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   app.get("/admin/api/payload-blobs/:sha256", async (c) => {
@@ -74,6 +114,14 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     // keyStore — core stays headless, Principle 1). One list() per page, not per row.
     // The name is cosmetic (no key material — Principle 7); null when the key is
     // unnamed OR was since deleted, so the SPA falls back to the prefix.
+    const labeled = await enrichAccountLabels(
+      rows.map((row) => row.record),
+      deps,
+      (providerId) =>
+        c
+          .get("logger")
+          ?.log("warn", "admin.request_account_label_unavailable", { provider_id: providerId }),
+    );
     const keys = await deps.keyStore.list();
     const nameById = new Map(keys.map((k) => [k.key_id, k.name]));
     const sessionRefs = [
@@ -86,8 +134,8 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       sessionRows.map((session) => [session.sessionRef, session.externalSessionId]),
     );
     return c.json({
-      items: rows.map((r) => ({
-        ...r.record,
+      items: rows.map((r, index) => ({
+        ...labeled[index],
         ...(r.record.session
           ? {
               session: {
@@ -132,8 +180,13 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       rec.session && deps.telemetry.getSessionByRef
         ? await deps.telemetry.getSessionByRef(rec.session.ref)
         : null;
+    const [labeled] = await enrichAccountLabels([rec], deps, (providerId) =>
+      c
+        .get("logger")
+        ?.log("warn", "admin.request_account_label_unavailable", { provider_id: providerId }),
+    );
     return c.json({
-      ...rec,
+      ...labeled,
       ...(rec.session ? { session: { ...rec.session, label: sessionRow?.externalSessionId } } : {}),
       ...(createdAt ? { created_at: createdAt.getTime() } : {}),
       key_name: keyName,

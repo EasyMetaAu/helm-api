@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-11-11 · 请求页标识上游 API Key 并解释组织限制（docs/07、11）
+
+- **展示决定**：`serving_account` 也记录 API Key 池的路由身份，原页面却统一写“订阅账号”。Admin 列表／详情按原池与账号代次解析现有记录，显示 Key 名称及末四位，并在最后失败的执行行显示账号。数据库记录保持原身份；轮换后历史请求仅显示账号名，避免把新 Key 的末四位用于旧请求。名称不可用时保留请求可读，不向页面返回凭据。
+- **错误解释**：只匹配 OpenAI 的 `codex_byok_restricted_by_api_credit_promo` 代码，在摘要说明 OpenAI 将本次请求识别为 Codex BYOK 后按组织 API Credits 福利限制拒绝；不推断所有请求均失败或具体触发头，并提供官方计费设置链接；保留原始错误详情。此项改动不修改账号权益或池的错误重试语义。
+- **验证**：174 项定向测试通过；shared/core 构建、gateway 类型检查、admin Svelte 检查及生产构建通过。桌面与 390px 窄屏浏览器预览使用该请求的只读记录，确认名称、末四位、失败执行行和中文解释均可见，无横向溢出。
+
 ## 2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）
 
 - **根因与决定**：生产请求 `ed51ea9c-8a47-47ad-87f0-54b12f1e3669` 在 Codex 熔断后回退到 `openai/gpt-6-luna`，上游以 `unsupported_value` 拒绝 `temperature: 0`。在现有 `requestCompatibility.openaiChat` 中增加显式采样参数排除项，仅为该别名配置 `temperature`；发送前去除并记录 `temperature_removed_for_model`，保留原始请求和其他别名的参数。
@@ -77,15 +83,9 @@
 - 验证使用定向单测与本地替身浏览器流程，不修改生产配置或本机客户端文件，不代表真实客户端或真实上游验收。
 - 发布准备：执行 `pnpm release:prepare 0.30.67`，官方稳定版本仍为 Claude Code 2.1.316、Codex 0.166.0、Grok 1.0.70，生成快照无变化；本次不修改网关执行、存储或默认调度配置。
 
-## 2026-10-31 · 接入验证、账号解释、速度策略与可选隐私（docs/04、05、06、07、10、11、Portal）
-
-- 接入页通过正常协议入口执行一次用户主动发起的短请求，分别报告鉴权和完整推理结果；Codex 使用独立 `helm` profile。浏览器测试使用本地替身，不代表真实上游验收。
-- 账号选择快照复用 `serving_account.selection`，最多 20 个候选且不进入 Portal；不新增表或迁移。`fastest` 仅调整同 provider/model、同优先级的可用订阅账号，复用请求测速，默认策略不变。
-- 已开始的流出错不重播；对真实上游暂时故障冷却账号，下一次独立请求可选其他账号；客户端取消不触发冷却，强续接绑定保持。
-- `runtime.outbound_privacy`／`HELM_OUTBOUND_PRIVACY` 默认 off；mask/block 首期只检测明确 token 格式，支持自包含 HTTP 文本请求。每请求独立恢复映射，不持久化；原生字节与 memory 注入后的内容都检查。媒体、加密／签名输入、续接、绕过边界的测试与重放明确拒绝。历史数据和后台任务不在此保护范围，随机占位符可能降低缓存命中。
-- 本地助手采用 JSONC 字段编辑与独立 TOML 块，预览／配置／恢复文件禁止重合，应用前校验文件版本，撤销保留用户新改动；不读取钥匙串，不保存 key。详细契约与限制见 `docs/connection-routing-privacy.md`。
-
 ## 更早历史总览
+
+2026-10-31：接入验证、账号解释、速度策略与可选出站隐私，完整记录见 git history。
 
 2026-10-29：OpenAI／Claude API 密钥池、月度恢复及逐 Key 测试，完整行为与验证见 git history。
 

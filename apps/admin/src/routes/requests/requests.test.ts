@@ -571,6 +571,28 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
   });
 
+  it('shows the upstream API key name and suffix instead of the routing identity', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({
+          serving_account: {
+            provider_id: 'openai',
+            account: 'opaque-key@generation',
+            kind: 'api_key',
+            label: 'OpenAI work · ••••1234',
+          },
+        }),
+        payload: { captured: false },
+        requestId: 'tr_1',
+      },
+    });
+    const summary = screen.getByTestId('request-summary');
+    expect(summary).toHaveTextContent('Upstream API key');
+    expect(summary).toHaveTextContent('OpenAI work · ••••1234');
+    expect(summary).not.toHaveTextContent('opaque-key@generation');
+    expect(summary).not.toHaveTextContent('Subscription account');
+  });
+
   it('renders a Request summary card with identity, routing, latency, and request body size', () => {
     render(DetailPage, {
       data: {

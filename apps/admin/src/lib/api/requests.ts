@@ -116,6 +116,8 @@ export type StreamOutcome =
   | null;
 
 export interface ServingAccountView {
+  kind?: 'api_key';
+  label?: string | null;
   provider_id: string;
   account: string;
   selection?: AccountSelectionTrace;
@@ -340,6 +342,8 @@ interface RawDecisionRecord {
     } | null;
   };
   serving_account?: {
+    kind?: 'api_key';
+    label?: string | null;
     provider_id?: string | null;
     account?: string | null;
     selection?: unknown;
@@ -443,6 +447,9 @@ function normalizeServingAccount(raw: RawDecisionRecord): ServingAccountView | n
     ? {
         provider_id: providerId,
         account,
+        ...(raw.serving_account?.kind === 'api_key'
+          ? { kind: 'api_key' as const, label: nonEmptyString(raw.serving_account.label) }
+          : {}),
         ...(selection.success ? { selection: selection.data } : {}),
       }
     : null;
@@ -732,7 +739,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     matched_policy: raw.policy?.matched_policy_id ?? null,
     policy_reason: raw.policy?.reason ?? null,
     lane_candidates: Array.isArray(raw.lane?.candidate_chain) ? raw.lane.candidate_chain : [],
-    provider_attempts: attempts.map((a) => ({
+    provider_attempts: attempts.map((a, index) => ({
       model: String(a.alias ?? ''),
       provider:
         nonEmptyString(a.provider_name) ??
@@ -741,9 +748,10 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       provider_model: nonEmptyString(a.provider_model),
       serving_account:
         account &&
-        a.status === 'ok' &&
         a.skipped !== true &&
-        nonEmptyString(a.alias) === nonEmptyString(raw.final?.model_alias)
+        (raw.final?.model_alias
+          ? nonEmptyString(a.alias) === nonEmptyString(raw.final.model_alias)
+          : index === attempts.findLastIndex((attempt) => attempt.skipped !== true))
           ? account
           : null,
       outcome: attemptOutcome(a),

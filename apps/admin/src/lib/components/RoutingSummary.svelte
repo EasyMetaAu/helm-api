@@ -1,4 +1,8 @@
 <script lang="ts">
+  import {
+    isCodexCreditPromoRestriction,
+    servingAccountLabel,
+  } from '$lib/format/serving-account.js';
   import type { RequestDetail } from '$lib/api/requests.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import { t } from '$lib/i18n';
@@ -14,6 +18,11 @@
       : d.provider_attempts
           .slice(0, firstSuccess)
           .find((a) => !['success', 'skipped', 'circuit_open'].includes(a.outcome)),
+  );
+  const restrictedAttempt = $derived(
+    d.provider_attempts.find((attempt) =>
+      isCodexCreditPromoRestriction(attempt.error_detail ?? null),
+    ),
   );
   const selection = $derived(d.serving_account?.selection);
   const strategies = {
@@ -34,6 +43,10 @@
   <p class="font-medium text-ink-strong" role="status">
     {#if d.stream_outcome === 'client_aborted'}
       {$t('The client disconnected before the response completed.')}
+    {:else if d.status === 'error' && restrictedAttempt}
+      {$t('OpenAI blocked Codex usage for {account}.', {
+        account: d.serving_account ? servingAccountLabel(d.serving_account) : '—',
+      })}
     {:else if d.status === 'error' || (d.stream_outcome && d.stream_outcome !== 'completed')}
       {$t('The response did not complete. Check the execution details below.')}
     {:else if delivered && d.final_model}
@@ -48,6 +61,24 @@
       {$t('No completion evidence was recorded.')}
     {/if}
   </p>
+  {#if d.status === 'error' && restrictedAttempt}
+    <p class="text-ink-body">
+      {$t(
+        'OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.',
+      )}
+    </p>
+    <p class="text-ink-body">
+      {$t(
+        'An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.',
+      )}
+      <a
+        class="link underline"
+        href="https://platform.openai.com/settings/organization/billing/overview"
+        target="_blank"
+        rel="noopener noreferrer">{$t('OpenAI organization billing')}</a
+      >
+    </p>
+  {/if}
   {#if delivered && earlierFailure}
     <p class="text-ink-body">
       {earlierFailure.model}:
@@ -78,19 +109,19 @@
     <p class="text-ink-body">
       {#if selection.reason === 'sticky_hit'}
         {$t('Account {account} was kept for this conversation.', {
-          account: d.serving_account.account,
+          account: servingAccountLabel(d.serving_account),
         })}
       {:else if selection.reason === 'hash_assign'}
         {$t('Account {account} was assigned by session distribution.', {
-          account: d.serving_account.account,
+          account: servingAccountLabel(d.serving_account),
         })}
       {:else if selection.reason === 'lru'}
         {$t('Account {account} was selected by least recent use.', {
-          account: d.serving_account.account,
+          account: servingAccountLabel(d.serving_account),
         })}
       {:else}
         {$t('Account {account} was selected by {strategy}.', {
-          account: d.serving_account.account,
+          account: servingAccountLabel(d.serving_account),
           strategy: $t(strategies[selection.strategy]),
         })}
       {/if}

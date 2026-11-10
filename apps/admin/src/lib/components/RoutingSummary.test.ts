@@ -16,6 +16,39 @@ const base = () =>
   });
 
 describe('RoutingSummary', () => {
+  it('explains the exact organization restriction and names the affected key', () => {
+    const detail = toDetail({
+      request_id: 'restricted',
+      serving_account: {
+        provider_id: 'openai',
+        account: 'key@generation',
+        kind: 'api_key',
+        label: 'OpenAI work · ••••1234',
+      },
+      final: { status: 'error', error_reason: 'invalid_request' },
+      provider_attempts: [
+        {
+          alias: 'openai/m',
+          status: 'error',
+          error_detail: {
+            upstream_status: 400,
+            provider_raw: { error: { code: 'codex_byok_restricted_by_api_credit_promo' } },
+          },
+        },
+      ],
+    });
+    render(RoutingSummary, { detail });
+    expect(
+      screen.getByText('OpenAI blocked Codex usage for OpenAI work · ••••1234.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/OpenAI treated this request as Codex BYOK/)).toBeInTheDocument();
+    expect(screen.getByText(/does not show which request detail triggered/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'OpenAI organization billing' })).toHaveAttribute(
+      'href',
+      'https://platform.openai.com/settings/organization/billing/overview',
+    );
+  });
+
   it('explains completed fallback using recorded attempts', () => {
     render(RoutingSummary, { detail: base() });
     expect(

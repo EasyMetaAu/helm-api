@@ -1220,5 +1220,13 @@
   "Disable": "Disable",
   "Enable": "Enable",
   "Failed to update key status": "Failed to update key status",
-  "? This cannot be undone. Use Disable for a temporary pause.": "? This cannot be undone. Use Disable for a temporary pause."
+  "? This cannot be undone. Use Disable for a temporary pause.": "? This cannot be undone. Use Disable for a temporary pause.",
+  "Upstream API key": "Upstream API key",
+  "Upstream account": "Upstream account",
+  "Organization billing restriction": "Organization billing restriction",
+  "OpenAI blocked Codex usage for {account}.": "OpenAI blocked Codex usage for {account}.",
+  "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.",
+  "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.",
+  "OpenAI organization billing": "OpenAI organization billing",
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "The execution trail is shown in order. Some errors stop execution; others allow the next candidate."
 }
