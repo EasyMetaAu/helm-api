@@ -1220,5 +1220,13 @@
   "Disable": "비활성화",
   "Enable": "활성화",
   "Failed to update key status": "키 상태를 업데이트하지 못했습니다",
-  "? This cannot be undone. Use Disable for a temporary pause.": "? 폐기 후에는 복구할 수 없습니다. 일시 중지하려면 비활성화를 선택하세요."
+  "? This cannot be undone. Use Disable for a temporary pause.": "? 폐기 후에는 복구할 수 없습니다. 일시 중지하려면 비활성화를 선택하세요.",
+  "Upstream API key": "업스트림 API 키",
+  "Upstream account": "업스트림 계정",
+  "Organization billing restriction": "조직 결제 설정 제한",
+  "OpenAI blocked Codex usage for {account}.": "OpenAI가 {account}의 Codex 사용을 차단했습니다.",
+  "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI가 이 요청을 Codex BYOK로 판단하여 조직의 월간 API Credits 혜택을 이유로 거부했습니다. 이 키의 모든 요청이 실패한다는 뜻은 아닙니다. 기록된 오류만으로는 어떤 요청 정보가 이 판단을 유발했는지 알 수 없습니다.",
+  "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "조직 소유자는 OpenAI 결제 설정에서 혜택을 확인할 수 있습니다. 취소하면 결제 혜택이 변경됩니다. 혜택을 유지하려면 사용 조건을 충족하는 다른 키를 사용하세요.",
+  "OpenAI organization billing": "OpenAI 조직 결제 설정",
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "실제 실행 과정을 순서대로 표시합니다. 일부 오류는 요청을 중단하고, 다른 오류는 다음 후보를 시도할 수 있습니다."
 }

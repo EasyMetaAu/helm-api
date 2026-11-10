@@ -1,4 +1,8 @@
 <script lang="ts">
+  import {
+    isCodexCreditPromoRestriction,
+    servingAccountLabel,
+  } from '$lib/format/serving-account.js';
   const CHAIN_SHOWN = 5;
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import type { RequestDetail } from '$lib/api/requests.js';
@@ -292,7 +296,7 @@
     </h3>
     <p class="field-help mb-2">
       {$t(
-        'Each provider/model actually tried, in order. If one fails, Helm falls back to the next.',
+        'The execution trail is shown in order. Some errors stop execution; others allow the next candidate.',
       )}
     </p>
     <ul class="flex flex-col gap-2">
@@ -306,7 +310,7 @@
             <span class="font-mono text-ink-strong">{a.provider ?? '—'}</span>
             {#if a.serving_account}
               <span class="badge-neutral" title={accountTitle(a.serving_account)}
-                >{a.serving_account.account}</span
+                >{servingAccountLabel(a.serving_account)}</span
               >
             {/if}
             <span class="text-ink-muted">{a.model}</span>
@@ -322,7 +326,11 @@
             >
             <span class="text-ink-muted">{formatDurationMs(a.latency_ms)}</span>
             {#if a.error_class}<span class="text-red-600" title={a.error_class}
-                >{$t(attemptCodeLabel(a.error_class))}</span
+                >{$t(
+                  isCodexCreditPromoRestriction(a.error_detail ?? null)
+                    ? 'Organization billing restriction'
+                    : attemptCodeLabel(a.error_class),
+                )}</span
               >{/if}
             {#if a.skip_reason}<span class="text-ink-muted" title={a.skip_reason}
                 >{$t('skip:')} {$t(attemptCodeLabel(a.skip_reason))}</span
@@ -340,7 +348,11 @@
               <summary class="cursor-pointer select-none text-red-700">
                 {$t('Error detail')}{ed.upstream_status !== null
                   ? ` · HTTP ${ed.upstream_status}`
-                  : ''}{ed.message ? ` — ${ed.message}` : ''}
+                  : ''}{isCodexCreditPromoRestriction(ed)
+                  ? ` — ${$t('Organization billing restriction')}`
+                  : ed.message
+                    ? ` — ${ed.message}`
+                    : ''}
               </summary>
               {#if ed.provider_raw !== null || ed.provider_headers !== null || ed.cause !== null || ed.stack !== null}
                 <pre

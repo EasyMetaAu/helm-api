@@ -1220,5 +1220,13 @@
   "Disable": "無効にする",
   "Enable": "有効にする",
   "Failed to update key status": "キーの状態を更新できませんでした",
-  "? This cannot be undone. Use Disable for a temporary pause.": "? 失効後は元に戻せません。一時停止には「無効にする」を使ってください。"
+  "? This cannot be undone. Use Disable for a temporary pause.": "? 失効後は元に戻せません。一時停止には「無効にする」を使ってください。",
+  "Upstream API key": "上流 API キー",
+  "Upstream account": "上流アカウント",
+  "Organization billing restriction": "組織の請求設定による制限",
+  "OpenAI blocked Codex usage for {account}.": "OpenAI により {account} の Codex 利用が制限されました。",
+  "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI はこのリクエストを Codex BYOK と判定し、組織の月間 API Credits 特典を理由に拒否しました。このキーのすべてのリクエストが失敗するわけではありません。記録されたエラーだけでは、どのリクエスト情報が判定のきっかけになったかは分かりません。",
+  "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "組織のオーナーは OpenAI の請求設定で特典を確認できます。解除すると請求上の特典が変わります。特典を維持する場合は、利用条件を満たす別のキーを使ってください。",
+  "OpenAI organization billing": "OpenAI 組織の請求設定",
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "実行経路を順に表示します。エラーによっては処理を終了し、別の候補を試せる場合もあります。"
 }

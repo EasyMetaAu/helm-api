@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { servingAccountLabel } from '$lib/format/serving-account.js';
   import { base } from '$app/paths';
   import { invalidateAll } from '$app/navigation';
   import {
@@ -338,7 +339,7 @@
         </div>
         <div class={d.serving_account?.selection ? 'col-span-full' : ''}>
           <dt class="text-xs uppercase tracking-wide text-slate-400">
-            {$t('Subscription account')}
+            {$t(d.serving_account?.kind === 'api_key' ? 'Upstream API key' : 'Upstream account')}
           </dt>
           <dd
             class="mt-0.5 break-all font-mono text-ink-body"
@@ -346,7 +347,7 @@
               ? `${d.serving_account.provider_id}/${d.serving_account.account}`
               : undefined}
           >
-            {d.serving_account?.account ?? '—'}
+            {d.serving_account ? servingAccountLabel(d.serving_account) : '—'}
           </dd>
           {#if d.serving_account?.selection}
             {@const selection = d.serving_account.selection}

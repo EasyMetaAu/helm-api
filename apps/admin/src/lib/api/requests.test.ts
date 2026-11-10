@@ -219,6 +219,26 @@ describe('toListItem', () => {
     expect(toListItem(rawRecord()).session).toBeNull();
   });
 
+  it('preserves API key labels and attributes the final failed account to its attempt', () => {
+    const account = {
+      provider_id: 'openai',
+      account: 'key-id@generation',
+      kind: 'api_key',
+      label: 'OpenAI work · ••••1234',
+    };
+    const raw = rawRecord({
+      serving_account: account,
+      provider_attempts: [
+        { alias: 'openai-codex/m', skipped: true, status: 'error' },
+        { alias: 'openai/m', provider_name: 'openai-responses', status: 'error', skipped: false },
+      ],
+      final: { status: 'error', model_alias: null, error_reason: 'invalid_request' },
+    });
+    expect(toListItem(raw).serving_account).toEqual(account);
+    expect(toDetail(raw).provider_attempts[0]?.serving_account).toBeNull();
+    expect(toDetail(raw).provider_attempts[1]?.serving_account).toEqual(account);
+  });
+
   it('surfaces the served provider and final subscription account on list rows', () => {
     const row = toListItem(rawRecord());
     expect(row.served_provider).toBe('anthropic');

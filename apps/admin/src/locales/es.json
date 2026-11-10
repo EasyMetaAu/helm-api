@@ -1220,5 +1220,13 @@
   "Disable": "Deshabilitar",
   "Enable": "Habilitar",
   "Failed to update key status": "No se pudo actualizar el estado de la clave",
-  "? This cannot be undone. Use Disable for a temporary pause.": "? No se puede deshacer. Usa Deshabilitar para una pausa temporal."
+  "? This cannot be undone. Use Disable for a temporary pause.": "? No se puede deshacer. Usa Deshabilitar para una pausa temporal.",
+  "Upstream API key": "Clave API del proveedor",
+  "Upstream account": "Cuenta del proveedor",
+  "Organization billing restriction": "Restricción de facturación de la organización",
+  "OpenAI blocked Codex usage for {account}.": "OpenAI bloqueó el uso de Codex para {account}.",
+  "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI identificó esta solicitud como Codex BYOK y la rechazó por el beneficio mensual de API Credits de la organización. Esto no significa que todas las solicitudes con esta clave fallen; el error registrado no indica qué detalle de la solicitud provocó esa clasificación.",
+  "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "El propietario de la organización puede revisar el beneficio en la facturación de OpenAI. Cancelarlo cambia sus beneficios de facturación; use otra clave apta si desea conservarlo.",
+  "OpenAI organization billing": "Facturación de la organización en OpenAI",
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "Se muestra la secuencia de ejecución. Algunos errores detienen la solicitud; otros permiten probar el siguiente candidato."
 }

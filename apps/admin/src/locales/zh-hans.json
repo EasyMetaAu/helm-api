@@ -1220,5 +1220,13 @@
   "Disable": "禁用",
   "Enable": "启用",
   "Failed to update key status": "更新密钥状态失败",
-  "? This cannot be undone. Use Disable for a temporary pause.": "？吊销后无法恢复。如需临时停用，请选择“禁用”。"
+  "? This cannot be undone. Use Disable for a temporary pause.": "？吊销后无法恢复。如需临时停用，请选择“禁用”。",
+  "Upstream API key": "上游 API Key",
+  "Upstream account": "上游账号",
+  "Organization billing restriction": "组织计费限制",
+  "OpenAI blocked Codex usage for {account}.": "OpenAI 限制了 {account} 的 Codex 使用权限。",
+  "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI 将这次请求识别为 Codex BYOK，并因该组织的每月 API Credits 福利拒绝了请求。这不代表这个 Key 的所有请求都会失败；现有错误记录无法确定是哪个请求细节触发了识别。",
+  "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "请组织所有者到 OpenAI 计费页面查看这项福利。取消会改变计费权益；如需保留福利，请使用其他符合条件的 Key。",
+  "OpenAI organization billing": "OpenAI 组织计费设置",
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "按顺序显示实际执行过程。有些错误会终止请求，其他错误则允许尝试下一个候选模型。"
 }

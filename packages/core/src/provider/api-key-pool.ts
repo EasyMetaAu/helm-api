@@ -203,6 +203,17 @@ export class ApiKeyAccounts {
     }
     throw new Error("API key pool changed concurrently; retry the operation");
   }
+  // Resolve recorded routing identities without exposing credentials. A rotated
+  // key keeps its account name, but its new suffix must not describe an old call.
+  accountLabel(identity: string): string | null {
+    const id = identity.split("@", 1)[0];
+    const account = this.entries().find((entry) => entry.id === id);
+    if (!account) return null;
+    return identity === `${account.id}@${account.generation}`
+      ? `${account.name} · ••••${account.key.slice(-4)}`
+      : account.name;
+  }
+
   async list(): Promise<ApiKeyAccountView[]> {
     await this.refresh();
     return this.entries().map((a) =>

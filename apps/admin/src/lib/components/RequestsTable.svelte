@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { servingAccountLabel } from '$lib/format/serving-account.js';
   import { goto } from '$app/navigation';
   import type { RequestListItem } from '$lib/api/requests.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
@@ -234,7 +235,7 @@
         class="mt-1 max-w-[12rem] truncate font-mono text-xs text-ink-muted"
         title={accountTitle(r.serving_account)}
       >
-        {r.serving_account.account}
+        {servingAccountLabel(r.serving_account)}
       </div>
     {/if}
   </div>
