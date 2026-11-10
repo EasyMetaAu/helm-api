@@ -33,10 +33,17 @@ describe("Realtime websocket bridge", () => {
   it.each(["/v1/realtime?call_id=rtc_1", "/v1/live/rtc_1"])("matches %s", (path) =>
     expect(isRealtimeWebSocketPath(path)).toBe(true));
 
-  it("relays immediate upstream events plus text and binary frames", async () => {
+  it.each([
+    true,
+    false,
+  ])("relays frames and preserves client identity only for Helm targets (%s)", async (forwardClientUserAgent) => {
     const upstreamHttp = await listeningServer();
     const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
-    upstream.on("connection", (socket) => {
+    let receivedUa: string | undefined;
+    let receivedAuth: string | undefined;
+    upstream.on("connection", (socket, request) => {
+      receivedUa = request.headers["user-agent"];
+      receivedAuth = request.headers.authorization;
       socket.send('{"type":"session.started"}');
       socket.on("message", (data, isBinary) => socket.send(data, { binary: isBinary }));
     });
@@ -52,7 +59,8 @@ describe("Realtime websocket bridge", () => {
     const registry = createRealtimeCallRegistry();
     registry.put("rtc_1", "key-1", {
       url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime?call_id=rtc_1`,
-      headers: async () => ({ Authorization: "Bearer upstream" }),
+      headers: async () => ({ Authorization: "Bearer upstream", "User-Agent": "upstream-profile" }),
+      forwardClientUserAgent,
     });
     const bridge: RealtimeWebSocketBridge = installRealtimeWebSocketBridge({
       server: gateway.server,
@@ -62,12 +70,19 @@ describe("Realtime websocket bridge", () => {
     closers.push(() => bridge.close());
 
     const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
-      headers: { Authorization: "Bearer helm-key" },
+      headers: {
+        Authorization: "Bearer helm-key",
+        "User-Agent": "grok-shell/1.0.77 (macos; aarch64)",
+      },
     });
     const firstMessage = once(client, "message");
     await once(client, "open");
     const [started] = (await firstMessage) as [WebSocket.RawData, boolean];
     expect(started.toString()).toContain("session.started");
+    expect(receivedUa).toBe(
+      forwardClientUserAgent ? "grok-shell/1.0.77 (macos; aarch64)" : "upstream-profile",
+    );
+    expect(receivedAuth).toBe("Bearer upstream");
 
     const textMessage = once(client, "message");
     client.send("hello");

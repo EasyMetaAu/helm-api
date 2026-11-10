@@ -34,7 +34,7 @@ OAuth 登录与刷新从认证响应的 `account.uuid` 保存 `anthropicAccountU
 
 出站会话由账号设备命名空间、经鉴权的租户/API key 所有者和业务会话共同决定。原始会话优先读取 `metadata.user_id.session_id`、会话 Header 和请求会话字段，再使用网关 thread ID；全部缺失时只在同一请求及其重试内稳定。不同账号或不同所有者不共用上游会话；同一业务会话 A→B→A 对应 A1→B1→A1，正文与 Header 的 session ID 同步。不会把账号全部请求合并成一个会话。已存在的 `session_id`、`session-id`、`x-session-id` 和 `x-claude-code-session-id` 同步到出站会话。已审查的 Agent/父 Agent Header 在同一业务会话内使用同一套账号映射以保留引用关系；Prompt ID 按原 prompt 映射，请求 ID 按本次网关请求映射，重试保持一致。未出现的 Agent/Prompt 字段不补造，幂等键不改写。
 
-Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.319`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
+Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.322`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
 
 按部署方要求，订阅出站 billing 的 `cc_entrypoint` 与 Claude UA 中的入口统一为 `cli`，同时统一 `cc_version` 和 `claude-cli/<version>`。只修改这些明确字段，保留已有构建后缀和其余归因信息。该入口是网关规范化标记：官方 CLI 的 `-p`、非 TTY 等非交互调用本来也可能报告 `sdk-cli`；`cli`/`sdk-cli` 不是订阅或 API key 的计费开关。修改标记不会把实际非交互执行变为交互执行，也不会升级实际客户端。订阅路径继续使用所选账号的 OAuth 凭证。
 
@@ -142,6 +142,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 同口径引号字段扫描从 343 项变为 349 项，无删除，10 个已审查头仍全部存在。新增 `anthropic-ratelimit-unified-overage-daily-cap-paused`（264893829）为额度响应状态；`anthropic-use-case-id`（264609240）用于自定义头设置限制；`x-ccr-tool-container-restart`（286838608）、`x-mcp-error-code`（283296261）为 MCP 响应读取；`x-download-token`（264860537）为连接器下载凭据；`x-mcp-file`（286818760）为文件参数 schema 标记。它们均不加入 Messages 白名单，边界测试验证敏感下载凭据仍被剥离。
 - 新 beta `request-tags-2026-08-21`（293064506）属于网关 billing-group/tag 过滤；Helm 不自行生成。账号归因（267361233–267361919）保留来源优先级和受保护 metadata 覆盖顺序；billing 文本字段集合及附加保护头生成条件未变。
 - SDK SSE 发出（264782597–264783393）与累积（264785383–264786237）分支经局部标识符归一化后与旧版一致，包括工具 JSON、thinking、signature 和加密 compaction。独立只读审查无 P0/P1 协议实现发现。有限静态审查不涵盖全部动态字段或客户端工作流，真实上游验收仍单独进行。
+
+2026-11-10 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.322`：新旧 2.1.319 平台包均通过 npm SHA512 integrity 校验，旧二进制与审核记录一致。新二进制 SHA256 为 `a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450`，内嵌 SDK 仍为 `0.128.0`（字节偏移 267967233）。只静态读取公开制品，没有执行下载的 CLI 或访问账号。
+
+- 同口径扫描引号包围的 `x-*`／`anthropic-*` 小写字段，从 270 项变为 272 项，无删除，10 个已审查头全部存在。新增 `x-ccr-tool-container-stops-soon`（288849774）用于读取 MCP 工具容器响应；`x-claude-code-hook-deny`（268234991）由本地 hook 创建的拒绝响应设置，并结合进程随机标记判断是否停止重试（274879171、274879846）。两者不是 Messages 入站业务头，继续从出站白名单排除，并补充边界测试。
+- 附加保护头仍只在对应配置启用时生成（268332758）；请求身份、父 Agent、prompt、request class 和自定义头校验的构造结构保持。SDK SSE 发出（268121259）与累积（268124045）的文本、citation、工具 JSON、thinking、signature 和加密 compaction 分支与旧版一致，仅压缩符号变化。官方发行说明新增 Vertex fast mode 和 Fable 5.2，不据此扩大 Helm 模型或协议能力。
+- 有限静态审查未发现需要改变本次 Helm 协议实现的 P0/P1 问题；不涵盖全部客户端动态行为，发布后仍单独验收真实上游。
 
 发布/同步流程在写版本快照前要求：
 

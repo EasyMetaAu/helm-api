@@ -343,6 +343,8 @@ describe("Anthropic adapter header semantics", () => {
         "x-download-token",
         "x-mcp-error-code",
         "x-ccr-tool-container-restart",
+        "x-ccr-tool-container-stops-soon",
+        "x-claude-code-hook-deny",
         "anthropic-client-os",
       ]) {
         expect(headers.get(name), name).toBeNull();
@@ -382,6 +384,8 @@ describe("Anthropic adapter header semantics", () => {
         "x-tunnel-peer": "tool-server",
         "x-mcp-features": "private-feature",
         "x-download-token": "private-download-token",
+        "x-ccr-tool-container-stops-soon": "1",
+        "x-claude-code-hook-deny": "local-hook-marker",
         "x-mcp-error-code": "private-mcp-error",
         "x-ccr-tool-container-restart": "private-container-state",
         "anthropic-client-os": "private-platform",

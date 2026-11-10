@@ -4,7 +4,10 @@ import { createOpenAIClient } from "./openai.js";
 const SESSION = { type: "quicksilver", model: "gpt-realtime-1.5" };
 
 describe("createOpenAIClient.realtimeCall", () => {
-  it("forwards the public Realtime call as multipart and returns a bound sideband target", async () => {
+  it.each([
+    true,
+    false,
+  ])("returns a bound sideband target with Helm identity forwarding %s", async (forwardClientUserAgent) => {
     const fetch = vi.fn().mockResolvedValue(
       new Response("v=answer\r\n", {
         status: 201,
@@ -15,7 +18,11 @@ describe("createOpenAIClient.realtimeCall", () => {
       }),
     );
     const client = createOpenAIClient({
-      config: { baseUrl: "https://api.openai.test/openai/v1", apiKey: "sk-secret" },
+      config: {
+        baseUrl: "https://api.openai.test/openai/v1",
+        apiKey: "sk-secret",
+        forwardClientUserAgent,
+      },
       fetch,
     });
 
@@ -27,6 +34,7 @@ describe("createOpenAIClient.realtimeCall", () => {
       headers: { "openai-alpha": "quicksilver=v1", "x-session-id": "sess-1" },
     });
 
+    expect(result?.sideband.forwardClientUserAgent).toBe(forwardClientUserAgent || undefined);
     expect(result).toMatchObject({
       status: 201,
       sdp: "v=answer\r\n",
