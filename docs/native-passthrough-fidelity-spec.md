@@ -116,6 +116,10 @@ openai/gpt-6-sol:
     openaiChat:
       maxTokensField: max_completion_tokens
       toolReasoningEffort: none
+openai/gpt-6-luna:
+  requestCompatibility:
+    openaiChat:
+      unsupportedSamplingParameters: [temperature]
 ```
 
 Anthropic policies reach the final provider serialization boundary, including

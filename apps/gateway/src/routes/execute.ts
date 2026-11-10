@@ -1159,7 +1159,13 @@ function applyReasoningEffortPolicy(
         mutations,
       );
       const compatibility = caps?.requestCompatibility?.openaiChat;
-      const rendered = applyOpenAIChatToolReasoningPolicy(next, compatibility, mutations);
+      let rendered = applyOpenAIChatToolReasoningPolicy(next, compatibility, mutations);
+      for (const parameter of compatibility?.unsupportedSamplingParameters ?? []) {
+        if (!Object.hasOwn(rendered, parameter)) continue;
+        rendered = { ...rendered };
+        delete rendered[parameter];
+        appendReasoningPolicyShim(mutations, `${parameter}_removed_for_model`);
+      }
       if (
         compatibility?.maxTokensField !== "max_completion_tokens" ||
         rendered.max_tokens === undefined
