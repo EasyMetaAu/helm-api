@@ -111,6 +111,9 @@ export const CapabilitiesSchema = z.object({
         .optional(),
       openaiChat: z
         .strictObject({
+          unsupportedSamplingParameters: z
+            .array(z.enum(["temperature", "top_p", "top_k"]))
+            .optional(),
           maxTokensField: z.literal("max_completion_tokens").optional(),
           toolReasoningEffort: z.literal("none").optional(),
         })

@@ -507,6 +507,7 @@ openai/gpt-6-sol:
 openai/gpt-6-luna:
   requestCompatibility:
     openaiChat:
+      unsupportedSamplingParameters: [temperature]
       maxTokensField: max_completion_tokens
       toolReasoningEffort: none
   supportsTools: true

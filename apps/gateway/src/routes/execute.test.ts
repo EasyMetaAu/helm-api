@@ -608,6 +608,71 @@ describe("createExecute — gateway execution adapter", () => {
   });
 
   it.each([
+    ["openai_chat", false],
+    ["openai_chat", true],
+    ["anthropic_messages", false],
+    ["anthropic_messages", true],
+  ] as const)("omits configured Luna temperature for %s (stream=%s)", async (protocol, stream) => {
+    const sent: Record<string, unknown>[] = [];
+    const provider: ProviderClient = {
+      chatCompletion: vi.fn(async (body) => {
+        sent.push(body);
+        return { id: "ok", choices: [], usage: {} };
+      }),
+      chatCompletionStream: async function* (body) {
+        sent.push(body);
+        yield 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n';
+        yield "data: [DONE]\n\n";
+      },
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ "openai/gpt-6-luna": "gpt-6-luna" }),
+      breaker: breaker(),
+      catalog: loadRuntimeCatalog({ configDir: "config" }),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const input = req({ protocol, stream, temperature: 0, reasoning_effort: "high" });
+    const out = await execute(plan(["openai/gpt-6-luna"]), input);
+    if (out.stream)
+      for await (const _chunk of out.stream) {
+        /* drain */
+      }
+    expect(out.final.status).toBe("ok");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty("temperature");
+    expect(sent[0]).toMatchObject({ model: "gpt-6-luna", reasoning_effort: "high" });
+    expect(input.temperature).toBe(0);
+    expect(out.attempts[0]?.request_mutations?.body_shims_applied).toContain(
+      "temperature_removed_for_model",
+    );
+  });
+
+  it("preserves temperature for an alias without a sampling compatibility policy", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ "custom/gpt-6-luna": "gpt-6-luna" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["custom/gpt-6-luna"]), req({ temperature: 0 }));
+    expect(out.final.status).toBe("ok");
+    expect(provider.chatCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "gpt-6-luna", temperature: 0 }),
+      expect.anything(),
+    );
+  });
+
+  it.each([
     undefined,
     32,
   ])("applies configured Chat output caps, preserving explicit max_completion_tokens=%s", async (explicit) => {

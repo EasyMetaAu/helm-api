@@ -32,6 +32,7 @@ describe("loadRuntimeCatalog", () => {
       { anthropic: { unsupportedSamplingParameters: ["messages"] } },
       { anthropic: { unsupportedThinkingTypes: ["adaptive"] } },
       { openaiChat: { maxTokensField: "typo" } },
+      { openaiChat: { unsupportedSamplingParameters: ["messages"] } },
       { openaiChat: { toolReasoningEffot: "none" } },
     ]) {
       expect(() =>
