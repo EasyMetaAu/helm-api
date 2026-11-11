@@ -1228,5 +1228,17 @@
   "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.",
   "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.",
   "OpenAI organization billing": "OpenAI organization billing",
-  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "The execution trail is shown in order. Some errors stop execution; others allow the next candidate."
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.",
+  "Budget period": "Budget period",
+  "Rolling refill": "Rolling refill",
+  "Fixed 7-day cycle": "Fixed 7-day cycle",
+  "Cycle start (local time)": "Cycle start (local time)",
+  "Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.": "Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.",
+  "Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.": "Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.",
+  "Every 7 days": "Every 7 days",
+  "Choose a valid cycle start time.": "Choose a valid cycle start time.",
+  "Next reset": "Next reset",
+  "Spend (USD)": "Spend (USD)",
+  "{used} used, {remaining} remaining of {limit}": "{used} used, {remaining} remaining of {limit}",
+  "No spend limit.": "No spend limit."
 }

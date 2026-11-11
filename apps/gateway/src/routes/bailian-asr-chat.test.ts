@@ -41,13 +41,16 @@ it("preserves input_audio URLs and options without ordinary chat fallback", asyn
     "format",
   );
 });
-it("rejects spend-capped ASR before sending", async () => {
+it.each([
+  { spendUsd: 1 },
+  { weeklyAnchor: "2026-11-08T16:00:00Z", tokens: 100 },
+])("rejects unmetered capped ASR before sending", async (budget) => {
   const chatCompletion = vi.fn();
   const app = new Hono<AppEnv>();
   app.post("/", async (c) => {
     c.set("identity", {
       keyId: "key",
-      caps: { budget: { spendUsd: 1 }, allowCustomModel: true },
+      caps: { budget, allowCustomModel: true },
     } as never);
     return (
       (await handleBailianAsrChat(

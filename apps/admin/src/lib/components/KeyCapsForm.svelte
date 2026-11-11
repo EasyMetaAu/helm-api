@@ -33,6 +33,11 @@
     budgetTokens: number | null;
     budgetSpend: number | null;
     budgetWindow: number | null;
+    budgetPeriod: 'rolling' | 'weekly';
+    weeklyAnchor: string;
+    // Preserve seconds and timezone exactly unless the operator edits the input.
+    originalWeeklyAnchor: string | null;
+    originalWeeklyLocal: string;
     overBudgetBehavior: 'degrade' | 'reject';
     degradeLane: string;
     requestContentMode: 'inherit' | 'none' | 'payload' | 'session';
@@ -59,6 +64,10 @@
       budgetTokens: null,
       budgetSpend: null,
       budgetWindow: null,
+      budgetPeriod: 'rolling',
+      weeklyAnchor: mondayLocal(),
+      originalWeeklyAnchor: null,
+      originalWeeklyLocal: '',
       overBudgetBehavior: 'degrade',
       degradeLane: '',
       requestContentMode: 'inherit',
@@ -88,6 +97,12 @@
       budgetTokens: key.budget_tokens,
       budgetSpend: key.budget_spend_usd,
       budgetWindow: key.budget_window_seconds,
+      budgetPeriod: key.budget_weekly_anchor != null ? 'weekly' : 'rolling',
+      weeklyAnchor:
+        key.budget_weekly_anchor != null ? localDateTime(key.budget_weekly_anchor) : mondayLocal(),
+      originalWeeklyAnchor: key.budget_weekly_anchor ?? null,
+      originalWeeklyLocal:
+        key.budget_weekly_anchor != null ? localDateTime(key.budget_weekly_anchor) : '',
       overBudgetBehavior: key.over_budget_behavior,
       degradeLane: key.degrade_lane ?? '',
       requestContentMode: key.request_content_mode ?? 'inherit',
@@ -95,6 +110,25 @@
       memoryProject: key.memory_project_id ?? '',
       memoryThreadSource: key.memory_thread_source,
     };
+  }
+
+  function localDateTime(iso: string): string {
+    const date = new Date(iso);
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  }
+
+  function mondayLocal(): string {
+    const date = new Date();
+    date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+    date.setHours(0, 0, 0, 0);
+    return localDateTime(date.toISOString());
+  }
+
+  export function weeklyAnchorValue(form: KeyCaps): string | null {
+    if (form.budgetPeriod !== 'weekly') return null;
+    if (form.originalWeeklyAnchor != null && form.weeklyAnchor === form.originalWeeklyLocal)
+      return form.originalWeeklyAnchor;
+    return new Date(form.weeklyAnchor).toISOString();
   }
 
   export function parseBlockedModels(value: string): string[] {
@@ -150,7 +184,8 @@
         (form.budgetRequests != null ||
           form.budgetTokens != null ||
           form.budgetSpend != null ||
-          form.budgetWindow != null),
+          form.budgetWindow != null ||
+          form.budgetPeriod === 'weekly'),
     ),
   );
   let openRequestContent = $state(
@@ -186,7 +221,12 @@
     if (form.budgetTokens != null) parts.push($t('{n} tokens', { n: form.budgetTokens }));
     if (form.budgetSpend != null) parts.push(`$${form.budgetSpend}`);
     if (parts.length === 0) return $t('No budget');
-    parts.push(form.overBudgetBehavior === 'degrade' ? $t('degrade') : $t('reject'));
+    if (form.budgetPeriod === 'weekly') parts.push($t('Every 7 days'));
+    parts.push(
+      form.budgetPeriod === 'weekly' || form.overBudgetBehavior === 'reject'
+        ? $t('reject')
+        : $t('degrade'),
+    );
     return parts.join(' · ');
   });
   const requestContentSummary = $derived(
@@ -418,6 +458,31 @@
     {@render sectionHead($t('Usage budgets'), openBudget, budgetSummary)}
   </summary>
   <div class="form-section-body">
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t('Budget period')}</span>
+      <select class="select" bind:value={form.budgetPeriod} aria-label={$t('Budget period')}>
+        <option value="rolling">{$t('Rolling refill')}</option>
+        <option value="weekly">{$t('Fixed 7-day cycle')}</option>
+      </select>
+    </label>
+    {#if form.budgetPeriod === 'weekly'}
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="field-label">{$t('Cycle start (local time)')}</span>
+        <input
+          type="datetime-local"
+          class="input"
+          required
+          bind:value={form.weeklyAnchor}
+          aria-label={$t('Cycle start (local time)')}
+          aria-describedby="weekly-budget-help"
+        />
+      </label>
+      <p id="weekly-budget-help" class="field-help">
+        {$t(
+          'Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.',
+        )}
+      </p>
+    {/if}
     <div class="grid grid-cols-2 gap-3">
       <label class="flex flex-col gap-1 text-sm">
         <span class="field-label">{$t('Max requests')}</span>
@@ -455,46 +520,58 @@
           bind:value={form.budgetSpend}
         />
       </label>
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Window (seconds)')}</span>
-        <input
-          type="number"
-          min="1"
-          step="1"
-          aria-label={$t('Window (seconds)')}
-          placeholder={$t('Default')}
-          class="input"
-          bind:value={form.budgetWindow}
-        />
-      </label>
+      {#if form.budgetPeriod === 'rolling'}
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Window (seconds)')}</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            aria-label={$t('Window (seconds)')}
+            placeholder={$t('Default')}
+            class="input"
+            bind:value={form.budgetWindow}
+          />
+        </label>
+      {/if}
     </div>
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="field-label">{$t('When over budget')}</span>
-      <select
-        bind:value={form.overBudgetBehavior}
-        aria-label={$t('When over budget')}
-        class="select"
-      >
-        <option value="degrade">{$t('Degrade to a cheaper lane')}</option>
-        <option value="reject">{$t('Reject (429)')}</option>
-      </select>
-    </label>
-    {#if form.overBudgetBehavior === 'degrade'}
+    {#if form.budgetPeriod === 'rolling'}
       <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Degrade lane')}</span>
-        <select bind:value={form.degradeLane} aria-label={$t('Degrade lane')} class="select">
-          <option value="">{$t('Default (economy)')}</option>
-          {#each lanes as lane (lane)}
-            <option value={lane}>{lane}</option>
-          {/each}
+        <span class="field-label">{$t('When over budget')}</span>
+        <select
+          bind:value={form.overBudgetBehavior}
+          aria-label={$t('When over budget')}
+          class="select"
+        >
+          <option value="degrade">{$t('Degrade to a cheaper lane')}</option>
+          <option value="reject">{$t('Reject (429)')}</option>
         </select>
       </label>
+      {#if form.overBudgetBehavior === 'degrade'}
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Degrade lane')}</span>
+          <select bind:value={form.degradeLane} aria-label={$t('Degrade lane')} class="select">
+            <option value="">{$t('Default (economy)')}</option>
+            {#each lanes as lane (lane)}
+              <option value={lane}>{lane}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
     {/if}
-    <span class="field-help"
-      >{$t(
-        'Cap usage over a rolling window. Over budget, the key is degraded to a cheaper lane (cost-controlled, service continues) or rejected. Leave caps blank for no budget.',
-      )}</span
-    >
+    {#if form.budgetPeriod === 'weekly'}
+      <p class="field-help">
+        {$t(
+          'Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.',
+        )}
+      </p>
+    {:else}
+      <span class="field-help"
+        >{$t(
+          'Cap usage over a rolling window. Over budget, the key is degraded to a cheaper lane (cost-controlled, service continues) or rejected. Leave caps blank for no budget.',
+        )}</span
+      >
+    {/if}
   </div>
 </details>
 

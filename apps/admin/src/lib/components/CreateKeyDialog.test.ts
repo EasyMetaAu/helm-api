@@ -198,3 +198,25 @@ describe('CreateKeyDialog', () => {
     expect(document.body.textContent ?? '').not.toContain(PLAINTEXT);
   });
 });
+
+describe('weekly quota creation', () => {
+  beforeEach(() => {
+    createKey.mockReset();
+    createKey.mockResolvedValue({ key_id: 'weekly', plaintext: PLAINTEXT, prefix: PREFIX });
+  });
+  it('sends an explicit seven-day anchor and rejects over-budget requests', async () => {
+    setup();
+    await fireEvent.change(screen.getByLabelText('Budget period'), { target: { value: 'weekly' } });
+    await fireEvent.input(screen.getByLabelText('Cycle start (local time)'), {
+      target: { value: '2026-11-09T00:00' },
+    });
+    await fireEvent.input(screen.getByLabelText('Max requests'), { target: { value: '50' } });
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    expect(createKey.mock.calls[0][0]).toMatchObject({
+      budget_requests: 50,
+      budget_weekly_anchor: new Date('2026-11-09T00:00').toISOString(),
+      over_budget_behavior: 'reject',
+    });
+  });
+});

@@ -75,3 +75,19 @@ describe("settleBudget", () => {
     expect(debit).not.toHaveBeenCalled();
   });
 });
+
+it("settles weekly usage into the admitted cycle without charging requests twice", async () => {
+  const { store, debit } = debitStore();
+  const anchor = "2026-11-08T16:00:00Z";
+  const start = Date.parse(anchor);
+  await settleBudget(
+    { store, config: CONFIG },
+    "k1",
+    caps({ requests: 5, tokens: 100, spendUsd: 10, weeklyAnchor: anchor, admittedAtMs: start + 1 }),
+    { requests: 1, tokens: 9, costUsd: 0.5 },
+    start + 8 * 86_400_000,
+  );
+  expect(debit).toHaveBeenCalledTimes(2);
+  expect(debit).toHaveBeenCalledWith("k1", "tok", 100, 604800000, 9, start + 1, start);
+  expect(debit).toHaveBeenCalledWith("k1", "usd", 10, 604800000, 0.5, start + 1, start);
+});

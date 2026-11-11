@@ -1,5 +1,6 @@
 import type {
   ApiKeyAccounts,
+  BudgetStore,
   CreateKeyInput,
   ExecutionResult,
   KeyStore,
@@ -483,6 +484,7 @@ export interface AdminApiDeps {
   >;
   rules: RuleStore;
   keyStore: KeyStore;
+  budgetStore?: Pick<BudgetStore, "peek">;
   telemetry: TelemetryStore;
   responseWorkAdmission?: ResponseWorkAdmission;
   runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
@@ -639,6 +641,7 @@ export interface KeySummary {
   budget_tokens: number | null;
   budget_spend_usd: number | null;
   budget_window_seconds: number | null;
+  budget_weekly_anchor?: string | null;
   over_budget_behavior: "degrade" | "reject";
   degrade_lane: string | null;
   // Per-key max in-flight requests (issue #93). null = unlimited (0 rejected by

@@ -57,6 +57,7 @@ describe("audio speech route", () => {
   });
   it.each([
     { budget: { spendUsd: 1 } },
+    { budget: { weeklyAnchor: "2026-11-08T16:00:00Z", tokens: 100 } },
     { allowedLanes: [] },
     { blockedModels: ["MINIMAX/*"] },
   ])("rejects key restrictions before paid work", async (caps) => {

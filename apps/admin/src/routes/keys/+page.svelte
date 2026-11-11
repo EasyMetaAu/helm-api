@@ -109,7 +109,9 @@
     if (key.budget_tokens !== null) parts.push(`${formatTokens(key.budget_tokens)} tok`);
     if (key.budget_spend_usd !== null) parts.push(formatUsd(key.budget_spend_usd));
     // The rolling window only matters once a cap exists (no cap = no budget at all).
-    if (parts.length > 0 && key.budget_window_seconds !== null) {
+    if (parts.length > 0 && key.budget_weekly_anchor != null) {
+      parts.push($t('Every 7 days'));
+    } else if (parts.length > 0 && key.budget_window_seconds !== null) {
       parts.push(windowText(key.budget_window_seconds));
     }
     return parts;
@@ -407,7 +409,7 @@
                     <div>
                       {$t('Budget')}: {budgetParts(key).join(' · ')}
                       <span class="text-xs">
-                        {key.over_budget_behavior === 'reject'
+                        {key.budget_weekly_anchor != null || key.over_budget_behavior === 'reject'
                           ? $t('reject')
                           : `→ ${key.degrade_lane ?? 'economy'}`}
                       </span>

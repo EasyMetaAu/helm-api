@@ -47,6 +47,8 @@ export async function handleBailianAsrChat(
   if (caps?.allowedLanes && !caps.allowedLanes.includes(target.lane))
     return fail(403, "lane_not_allowed");
   const budget = caps?.budget;
+  if (budget?.weeklyAnchor != null && budget.tokens != null)
+    return fail(422, "media_usage_unavailable");
   if (budget?.spendUsd != null) return fail(422, "media_pricing_unavailable");
   if (
     budget &&

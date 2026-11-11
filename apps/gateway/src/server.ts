@@ -3890,7 +3890,8 @@ export async function buildServer(
     concurrencyGate,
     budgetGate,
     reserveRequest: async (keyId, caps, nowMs) => {
-      if (caps.requests === null) return true;
+      // The fixed-week gate has already reserved this request.
+      if (caps.requests === null || caps.weeklyAnchor != null) return true;
       if (!store.budget.reserveRequest) throw new Error("request reservation unavailable");
       return store.budget.reserveRequest(
         keyId,
@@ -4016,6 +4017,7 @@ export async function buildServer(
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
   registerPortalApi(app, {
+    budgetStore: store.budget,
     memoryAdmission: requestBodyMemoryAdmission,
     keyStore,
     telemetry,
@@ -4438,6 +4440,7 @@ export async function buildServer(
       apiKeyPools,
       rules: ruleStore,
       keyStore,
+      budgetStore: store.budget,
       telemetry,
       responseWorkAdmission: runtimeResponseWorkAdmission(),
       runInBackground: backgroundTasks.run,
@@ -4944,6 +4947,7 @@ export async function buildServer(
     rateLimiter,
     concurrencyGate,
     registry: realtimeCallRegistry,
+    budgetGate,
     resolve: resolveRealtimeTarget,
     auth: {
       resolve: async (credential) => {
@@ -4955,6 +4959,7 @@ export async function buildServer(
               clientPolicy: identity.caps?.clientPolicy,
               concurrencyLimit: identity.caps?.concurrencyLimit,
               rateLimit: identity.caps?.rateLimit,
+              budget: identity.caps?.budget,
             }
           : null;
       },

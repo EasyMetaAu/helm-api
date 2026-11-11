@@ -103,3 +103,41 @@ describe("createBudgetGate", () => {
     ).rejects.toThrow("db down");
   });
 });
+
+describe("weekly admission", () => {
+  const anchor = "2026-11-08T16:00:00Z";
+  it("forces reject and does not reserve a request when another dimension is exhausted", async () => {
+    const { store } = peekStore({ tok: 0 });
+    const reserveRequest = vi.fn().mockResolvedValue(true);
+    const gate = createBudgetGate({ store: { ...store, reserveRequest }, config: CONFIG });
+    const result = await gate.check({
+      keyId: "k1",
+      caps: caps({ requests: 5, tokens: 100, weeklyAnchor: anchor }),
+      nowMs: Date.parse(anchor),
+    });
+    expect(result).toMatchObject({ overBudget: true, behavior: "reject" });
+    expect(reserveRequest).not.toHaveBeenCalled();
+  });
+  it("fails closed when the atomic weekly request reservation loses a race", async () => {
+    const { store } = peekStore({});
+    const reserveRequest = vi.fn().mockResolvedValue(false);
+    const gate = createBudgetGate({ store: { ...store, reserveRequest }, config: CONFIG });
+    expect(
+      await gate.check({
+        keyId: "k1",
+        caps: caps({ requests: 1, weeklyAnchor: anchor }),
+        nowMs: Date.parse(anchor),
+      }),
+    ).toMatchObject({ overBudget: true, limitedBy: "req", behavior: "reject" });
+  });
+  it("fails closed if an adapter cannot reserve weekly requests", async () => {
+    const { store } = peekStore({});
+    await expect(
+      createBudgetGate({ store, config: CONFIG }).check({
+        keyId: "k1",
+        caps: caps({ requests: 1, weeklyAnchor: anchor }),
+        nowMs: Date.parse(anchor),
+      }),
+    ).rejects.toThrow("weekly request reservation unavailable");
+  });
+});

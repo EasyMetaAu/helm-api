@@ -135,6 +135,8 @@ export interface BudgetPeekResult {
 // FULL (= capacity) so a fresh key has its whole budget; debits deplete it and may
 // push it NEGATIVE (a budget is a soft cap settled post-served, not a hard
 // reservation — D5-style tolerance). key_id only; never a plaintext key (principle 7).
+// weeklyAnchorMs selects fixed seven-day counters instead of rolling buckets.
+// nowMs selects the accounting period; settlement uses the admitted request time.
 export interface BudgetStore {
   // Atomic hard request reservation against the existing req bucket. Optional for
   // older adapters; callers requiring hard admission must fail closed when absent.
@@ -143,6 +145,7 @@ export interface BudgetStore {
     capacity: number,
     windowMs: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<boolean>;
   // Pre-route sign check: refill (in memory) and read remaining for one
   // (keyId, dim). READ-ONLY — never writes (the refilled state is persisted by the
@@ -153,6 +156,7 @@ export interface BudgetStore {
     capacity: number,
     windowMs: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<BudgetPeekResult>;
   // Post-served settle: atomically refill + subtract `amount` from the (keyId, dim)
   // bucket and persist. ALWAYS debits (may go negative — soft cap). Returns the new
@@ -164,6 +168,7 @@ export interface BudgetStore {
     windowMs: number,
     amount: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<{ remaining: number }>;
 }
 
@@ -208,6 +213,7 @@ export interface CreateKeyInput {
   budgetTokens?: number;
   budgetSpendUsd?: number;
   budgetWindowSeconds?: number;
+  budgetWeeklyAnchor?: string;
   overBudgetBehavior?: "degrade" | "reject";
   degradeLane?: string;
   // Max in-flight requests (issue #93). Omitted => stored NULL => unlimited.
@@ -286,6 +292,7 @@ export interface KeyPatch {
   budgetTokens?: number | null;
   budgetSpendUsd?: number | null;
   budgetWindowSeconds?: number | null;
+  budgetWeeklyAnchor?: string | null;
   overBudgetBehavior?: "degrade" | "reject";
   degradeLane?: string | null;
   // Concurrency edit: present (even null) => written; null clears to unlimited.

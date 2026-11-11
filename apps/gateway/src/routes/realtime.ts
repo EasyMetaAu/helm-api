@@ -1,4 +1,11 @@
-import { createBlockedModelMatcher, type ProviderClient, UpstreamError } from "@helm/core";
+import {
+  type BudgetCaps,
+  type BudgetCheckResult,
+  type BudgetProbe,
+  createBlockedModelMatcher,
+  type ProviderClient,
+  UpstreamError,
+} from "@helm/core";
 import type { ClientPolicy } from "@helm/shared";
 import { RealtimeSessionSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
@@ -36,10 +43,12 @@ export interface RealtimeRouteDeps {
       clientPolicy?: ClientPolicy | null;
       concurrencyLimit?: number | null;
       rateLimit?: { rpm: number | null; tpm: number | null };
+      budget?: BudgetCaps;
     } | null>;
   };
   resolve(model: string): { client: ProviderClient; providerModel: string; alias: string } | null;
   registry: RealtimeCallRegistry;
+  budgetGate?: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
   rateLimiter?: GeminiRateLimiterPort;
   concurrencyGate?: ConcurrencyGatePort;
   memoryAdmission?: BodyMemoryAdmission;
@@ -52,7 +61,7 @@ function bearer(value: string | undefined): string | null {
 
 function error(
   c: Context<AppEnv>,
-  status: 400 | 401 | 403 | 404 | 413 | 429 | 502 | 503,
+  status: 400 | 401 | 403 | 404 | 413 | 422 | 429 | 502 | 503,
   message: string,
   code: string,
 ) {
@@ -78,6 +87,14 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
       caps: { clientPolicy: identity.clientPolicy },
     });
     if (denied) return denied;
+    const weeklyBudget = identity.budget?.weeklyAnchor == null ? null : identity.budget;
+    if (weeklyBudget && (weeklyBudget.tokens != null || weeklyBudget.spendUsd != null))
+      return error(
+        c,
+        422,
+        "realtime token usage and spend cannot be metered for this weekly-capped key",
+        "media_usage_unavailable",
+      );
 
     if (deps.rateLimiter) {
       const result = await deps.rateLimiter.check({
@@ -189,6 +206,15 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         `model '${model}' is not a configured realtime model`,
         "model_not_found",
       );
+    }
+    if (weeklyBudget) {
+      if (!deps.budgetGate) return error(c, 503, "weekly quota unavailable", "budget_unavailable");
+      const check = await deps.budgetGate.check({
+        keyId: identity.keyId,
+        caps: weeklyBudget,
+        nowMs: Date.now(),
+      });
+      if (check.overBudget) return error(c, 429, "weekly usage budget exceeded", "budget_exceeded");
     }
     const blocked = createBlockedModelMatcher(identity.blockedModels);
     if (blocked?.matches(model) || blocked?.matches(target.alias)) {

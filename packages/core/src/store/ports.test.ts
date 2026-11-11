@@ -408,6 +408,7 @@ describe("port type contracts", () => {
       | "budgetTokens"
       | "budgetSpendUsd"
       | "budgetWindowSeconds"
+      | "budgetWeeklyAnchor"
       | "overBudgetBehavior"
       | "degradeLane"
       | "concurrencyLimit"

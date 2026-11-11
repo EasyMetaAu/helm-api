@@ -1,3 +1,4 @@
+import { readWeeklyBudget } from "@helm/core";
 import type { ClientPolicy } from "@helm/shared";
 import { CreateKeyRequestSchema, StatsQuerySchema, UpdateKeyRequestSchema } from "@helm/shared";
 import type { Hono } from "hono";
@@ -45,6 +46,7 @@ function toSummary(rec: {
   budget_tokens: number | null;
   budget_spend_usd: number | null;
   budget_window_seconds: number | null;
+  budget_weekly_anchor?: string | null;
   over_budget_behavior: "degrade" | "reject";
   degrade_lane: string | null;
   concurrency_limit: number | null;
@@ -72,7 +74,8 @@ function toSummary(rec: {
     budget_tokens: rec.budget_tokens,
     budget_spend_usd: rec.budget_spend_usd,
     budget_window_seconds: rec.budget_window_seconds,
-    over_budget_behavior: rec.over_budget_behavior,
+    budget_weekly_anchor: rec.budget_weekly_anchor ?? null,
+    over_budget_behavior: rec.budget_weekly_anchor != null ? "reject" : rec.over_budget_behavior,
     degrade_lane: rec.degrade_lane,
     concurrency_limit: rec.concurrency_limit,
     memory_mode: rec.memory_mode,
@@ -200,7 +203,23 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     const id = c.req.param("id");
     const rec = (await deps.keyStore.list()).find((r) => r.key_id === id);
     if (!rec) return c.json({ error: "key not found" }, 404);
-    return c.json(toSummary(rec));
+    const weeklyBudget = deps.budgetStore
+      ? await readWeeklyBudget(
+          deps.budgetStore,
+          id,
+          {
+            requests: rec.budget_requests,
+            tokens: rec.budget_tokens,
+            spendUsd: rec.budget_spend_usd,
+            weeklyAnchor: rec.budget_weekly_anchor,
+            windowSeconds: rec.budget_window_seconds,
+            behavior: rec.over_budget_behavior,
+            degradeLane: rec.degrade_lane,
+          },
+          Date.now(),
+        )
+      : null;
+    return c.json({ ...toSummary(rec), weekly_budget: weeklyBudget });
   });
 
   // POST /keys -> { key_id, plaintext } (plaintext returned ONCE).
@@ -230,6 +249,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       budgetTokens: parsed.data.budget_tokens,
       budgetSpendUsd: parsed.data.budget_spend_usd,
       budgetWindowSeconds: parsed.data.budget_window_seconds,
+      budgetWeeklyAnchor: parsed.data.budget_weekly_anchor,
       overBudgetBehavior: parsed.data.over_budget_behavior,
       degradeLane: parsed.data.degrade_lane,
       concurrencyLimit: parsed.data.concurrency_limit,
@@ -295,6 +315,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       budgetTokens?: number | null;
       budgetSpendUsd?: number | null;
       budgetWindowSeconds?: number | null;
+      budgetWeeklyAnchor?: string | null;
       overBudgetBehavior?: "degrade" | "reject";
       degradeLane?: string | null;
       concurrencyLimit?: number | null;
@@ -313,6 +334,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.allow_fast_mode !== undefined) patch.allowFastMode = d.allow_fast_mode;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;
     if (d.rate_limit_tpm !== undefined) patch.rateLimitTpm = d.rate_limit_tpm;
+    if (d.budget_weekly_anchor !== undefined) patch.budgetWeeklyAnchor = d.budget_weekly_anchor;
     if (d.budget_requests !== undefined) patch.budgetRequests = d.budget_requests;
     if (d.budget_tokens !== undefined) patch.budgetTokens = d.budget_tokens;
     if (d.budget_spend_usd !== undefined) patch.budgetSpendUsd = d.budget_spend_usd;

@@ -1,10 +1,12 @@
 import type {
+  BudgetStore,
   KeyStore,
   RequestPayload,
   RequestPayloadMeta,
   RequestPayloadPartRecord,
   TelemetryStore,
 } from "@helm/core";
+import { readWeeklyBudget } from "@helm/core";
 import {
   PortalMemorySettingsRequestSchema,
   RequestsQuerySchema,
@@ -28,6 +30,7 @@ import { assertOwnsTrace } from "./ownership.js";
 // a scopeless read. Memory CRUD is deliberately absent: the SPA calls the existing
 // POST /mcp JSON-RPC directly (§4.2 endpoint 6 — zero new backend).
 export interface PortalApiDeps {
+  budgetStore?: Pick<BudgetStore, "peek">;
   memoryAdmission?: BodyMemoryAdmission;
   keyStore: Pick<KeyStore, "updateKey">;
   telemetry: Pick<
@@ -55,7 +58,7 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
   // GET /portal/api/me — a SAFE projection of the caller's identity/caps for the
   // account menu + budget bar. NEVER the hash/plaintext/secret_enc (principle 7):
   // authMiddleware already dropped them — identity carries only prefix + caps.
-  app.get("/portal/api/me", (c) => {
+  app.get("/portal/api/me", async (c) => {
     const identity = c.get("identity");
     const b = identity.caps.budget;
     return c.json({
@@ -68,8 +71,12 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         requests: b.requests,
         tokens: b.tokens,
         spend_usd: b.spendUsd,
-        window_seconds: b.windowSeconds,
-        behavior: b.behavior,
+        window_seconds: b.weeklyAnchor == null ? b.windowSeconds : 604800,
+        weekly_anchor: b.weeklyAnchor ?? null,
+        current_cycle: deps.budgetStore
+          ? await readWeeklyBudget(deps.budgetStore, identity.keyId, b, (deps.now ?? Date.now)())
+          : null,
+        behavior: b.weeklyAnchor == null ? b.behavior : "reject",
       },
       memory: {
         mode: identity.caps.memory.mode,
@@ -185,8 +192,12 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         requests: b.requests,
         tokens: b.tokens,
         spend_usd: b.spendUsd,
-        window_seconds: b.windowSeconds,
-        behavior: b.behavior,
+        window_seconds: b.weeklyAnchor == null ? b.windowSeconds : 604800,
+        weekly_anchor: b.weeklyAnchor ?? null,
+        current_cycle: deps.budgetStore
+          ? await readWeeklyBudget(deps.budgetStore, identity.keyId, b, (deps.now ?? Date.now)())
+          : null,
+        behavior: b.weeklyAnchor == null ? b.behavior : "reject",
       },
     });
   });

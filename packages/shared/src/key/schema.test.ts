@@ -467,3 +467,23 @@ describe("PortalMemorySettingsRequestSchema", () => {
     }
   });
 });
+
+describe("fixed weekly budget anchor", () => {
+  it("accepts an explicit timezone and allows clearing the cycle", () => {
+    expect(
+      CreateKeyRequestSchema.parse({ budget_weekly_anchor: "2026-11-09T00:00:00+08:00" })
+        .budget_weekly_anchor,
+    ).toBe("2026-11-09T00:00:00+08:00");
+    expect(
+      UpdateKeyRequestSchema.parse({ budget_weekly_anchor: null }).budget_weekly_anchor,
+    ).toBeNull();
+  });
+  it.each([
+    "Monday",
+    "2026-11-09T00:00:00",
+    "2026-02-30T00:00:00Z",
+    123,
+  ])("rejects invalid or ambiguous anchor %s", (anchor) => {
+    expect(CreateKeyRequestSchema.safeParse({ budget_weekly_anchor: anchor }).success).toBe(false);
+  });
+});

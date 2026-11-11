@@ -138,11 +138,15 @@ describe("TTS routes", () => {
     expect(ttsSpeech).not.toHaveBeenCalled();
   });
 
-  it("rejects spend-capped keys until TTS pricing exists", async () => {
+  it.each([
+    false,
+    true,
+  ])("rejects caps that TTS cannot meter (weekly tokens: %s)", async (weekly) => {
     const budget = {
       requests: null,
-      tokens: null,
-      spendUsd: 1,
+      tokens: weekly ? 100 : null,
+      spendUsd: weekly ? null : 1,
+      weeklyAnchor: weekly ? "2026-11-08T16:00:00Z" : null,
       windowSeconds: null,
       behavior: "reject" as const,
       degradeLane: null,

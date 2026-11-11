@@ -213,7 +213,9 @@
     if (k.budget_requests !== null) parts.push(`${formatCount(k.budget_requests)} req`);
     if (k.budget_tokens !== null) parts.push(`${formatTokens(k.budget_tokens)} tok`);
     if (k.budget_spend_usd !== null) parts.push(formatUsd(k.budget_spend_usd));
-    if (parts.length > 0 && k.budget_window_seconds !== null) {
+    if (parts.length > 0 && k.budget_weekly_anchor != null) {
+      parts.push($t('Every 7 days'));
+    } else if (parts.length > 0 && k.budget_window_seconds !== null) {
       parts.push(windowText(k.budget_window_seconds));
     }
     return parts;
@@ -280,9 +282,27 @@
         <dd class="mt-0.5 text-ink-body">
           {#if budgetParts(key).length > 0}
             {budgetParts(key).join(' · ')}
-            ({key.over_budget_behavior === 'reject'
+            ({key.budget_weekly_anchor != null || key.over_budget_behavior === 'reject'
               ? $t('reject')
               : `→ ${key.degrade_lane ?? 'economy'}`})
+            {#if key.weekly_budget}
+              <div class="mt-1">
+                {$t('Next reset')}: {new Date(key.weekly_budget.resets_at).toLocaleString()}
+              </div>
+              {#each [{ label: $t('Requests'), unit: key.weekly_budget.requests }, { label: $t('Tokens'), unit: key.weekly_budget.tokens }, { label: $t('Spend (USD)'), unit: key.weekly_budget.spend_usd }] as item (item.label)}
+                {#if item.unit}
+                  <div class="mt-1">
+                    {item.label}: {$t('{used} used, {remaining} remaining of {limit}', {
+                      used: Number(item.unit.used.toFixed(6)).toLocaleString(),
+                      remaining: Number(
+                        Math.max(0, item.unit.remaining).toFixed(6),
+                      ).toLocaleString(),
+                      limit: item.unit.limit.toLocaleString(),
+                    })}
+                  </div>
+                {/if}
+              {/each}
+            {/if}
           {:else}
             {$t('None')}
           {/if}

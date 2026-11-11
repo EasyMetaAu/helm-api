@@ -427,3 +427,31 @@ describe("SqliteKeyStore", () => {
     expect((await store.getByHash("h1"))?.name).toBe("Keep me");
   });
 });
+
+it("persists, edits and clears a weekly cycle without changing unrelated caps", async () => {
+  const db = createSqliteDb(":memory:");
+  const store = new SqliteKeyStore(db);
+  try {
+    await store.createKey({
+      keyId: "weekly",
+      hash: "weekly",
+      prefix: "w",
+      accountId: "a",
+      role: "user",
+      budgetTokens: 100,
+      budgetWeeklyAnchor: "2026-11-08T16:00:00Z",
+    });
+    await store.updateKey("weekly", { budgetWeeklyAnchor: "2026-11-10T00:00:00+08:00" });
+    expect(await store.getById("weekly")).toMatchObject({
+      budget_tokens: 100,
+      budget_weekly_anchor: "2026-11-10T00:00:00+08:00",
+    });
+    await store.updateKey("weekly", { budgetWeeklyAnchor: null });
+    expect(await store.getById("weekly")).toMatchObject({
+      budget_tokens: 100,
+      budget_weekly_anchor: null,
+    });
+  } finally {
+    db.$sqlite.close();
+  }
+});

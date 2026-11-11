@@ -1228,5 +1228,17 @@
   "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI はこのリクエストを Codex BYOK と判定し、組織の月間 API Credits 特典を理由に拒否しました。このキーのすべてのリクエストが失敗するわけではありません。記録されたエラーだけでは、どのリクエスト情報が判定のきっかけになったかは分かりません。",
   "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "組織のオーナーは OpenAI の請求設定で特典を確認できます。解除すると請求上の特典が変わります。特典を維持する場合は、利用条件を満たす別のキーを使ってください。",
   "OpenAI organization billing": "OpenAI 組織の請求設定",
-  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "実行経路を順に表示します。エラーによっては処理を終了し、別の候補を試せる場合もあります。"
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "実行経路を順に表示します。エラーによっては処理を終了し、別の候補を試せる場合もあります。",
+  "Budget period": "利用枠の期間",
+  "Rolling refill": "継続的に回復",
+  "Fixed 7-day cycle": "固定の7日周期",
+  "Cycle start (local time)": "周期の開始日時（現地時間）",
+  "Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.": "初期値は現地時間の月曜日0時です。この日時を基準に7日ごとにすべての上限がリセットされます。未使用分は繰り越されません。",
+  "Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.": "いずれかの上限に達すると、次のリセットまで新しいリクエストを拒否します（429）。受付済みのリクエストは失敗しても回数に含まれます。トークンと費用は完了後に計上されるため、処理中のリクエストで上限を超える場合があります。空欄は無制限です。",
+  "Every 7 days": "7日ごと",
+  "Choose a valid cycle start time.": "有効な周期開始日時を指定してください。",
+  "Next reset": "次のリセット",
+  "Spend (USD)": "費用（USD）",
+  "{used} used, {remaining} remaining of {limit}": "上限 {limit}、使用済み {used}、残り {remaining}",
+  "No spend limit.": "費用の上限なし。"
 }

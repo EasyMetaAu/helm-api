@@ -50,6 +50,7 @@ export class SqliteKeyStore implements KeyStore {
       budgetTokens: input.budgetTokens ?? null,
       budgetSpendUsd: input.budgetSpendUsd ?? null,
       budgetWindowSeconds: input.budgetWindowSeconds ?? null,
+      budgetWeeklyAnchor: input.budgetWeeklyAnchor ?? null,
       overBudgetBehavior: input.overBudgetBehavior ?? "degrade",
       degradeLane: input.degradeLane ?? null,
       // Max in-flight requests: undefined => NULL => unlimited.
@@ -132,6 +133,7 @@ export class SqliteKeyStore implements KeyStore {
         | "budgetTokens"
         | "budgetSpendUsd"
         | "budgetWindowSeconds"
+        | "budgetWeeklyAnchor"
         | "overBudgetBehavior"
         | "degradeLane"
         | "concurrencyLimit"
@@ -161,6 +163,7 @@ export class SqliteKeyStore implements KeyStore {
     if (patch.allowFastMode !== undefined) set.allowFastMode = patch.allowFastMode;
     if (patch.rateLimitRpm !== undefined) set.rateLimitRpm = patch.rateLimitRpm;
     if (patch.rateLimitTpm !== undefined) set.rateLimitTpm = patch.rateLimitTpm;
+    if (patch.budgetWeeklyAnchor !== undefined) set.budgetWeeklyAnchor = patch.budgetWeeklyAnchor;
     if (patch.budgetRequests !== undefined) set.budgetRequests = patch.budgetRequests;
     if (patch.budgetTokens !== undefined) set.budgetTokens = patch.budgetTokens;
     if (patch.budgetSpendUsd !== undefined) set.budgetSpendUsd = patch.budgetSpendUsd;
@@ -236,6 +239,7 @@ export class SqliteKeyStore implements KeyStore {
       budget_tokens: row.budgetTokens ?? null,
       budget_spend_usd: row.budgetSpendUsd ?? null,
       budget_window_seconds: row.budgetWindowSeconds ?? null,
+      budget_weekly_anchor: row.budgetWeeklyAnchor ?? null,
       over_budget_behavior: row.overBudgetBehavior === "reject" ? "reject" : "degrade",
       degrade_lane: row.degradeLane ?? null,
       concurrency_limit: row.concurrencyLimit ?? null,

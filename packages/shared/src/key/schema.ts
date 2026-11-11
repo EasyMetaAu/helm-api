@@ -83,6 +83,8 @@ export const ApiKeyRecordSchema = z.object({
   // Rolling window the budgets are measured over (seconds). null = the system
   // default window. Continuous token-bucket refill, no hard reset.
   budget_window_seconds: z.number().int().positive().nullable().default(null),
+  // Non-null selects fixed seven-day periods, aligned to this timezone-qualified instant.
+  budget_weekly_anchor: z.iso.datetime({ offset: true }).nullable().optional(),
   over_budget_behavior: OverBudgetBehaviorSchema.default("degrade"),
   // Lane to fall back to when degrading. null = `economy` (the cheapest ranked lane).
   degrade_lane: z.string().min(1).nullable().default(null),
@@ -158,6 +160,7 @@ export const CreateKeyRequestSchema = z
     budget_tokens: z.number().int().positive().optional(),
     budget_spend_usd: z.number().positive().optional(),
     budget_window_seconds: z.number().int().positive().optional(),
+    budget_weekly_anchor: z.iso.datetime({ offset: true }).optional(),
     over_budget_behavior: OverBudgetBehaviorSchema.optional(),
     degrade_lane: z.string().min(1).optional(),
     // Optional max in-flight requests at mint time. Omitted => unlimited (null);
@@ -207,6 +210,7 @@ export const UpdateKeyRequestSchema = z
     budget_tokens: z.number().int().positive().nullable().optional(),
     budget_spend_usd: z.number().positive().nullable().optional(),
     budget_window_seconds: z.number().int().positive().nullable().optional(),
+    budget_weekly_anchor: z.iso.datetime({ offset: true }).nullable().optional(),
     over_budget_behavior: OverBudgetBehaviorSchema.optional(),
     degrade_lane: z.string().min(1).nullable().optional(),
     // Omit = leave unchanged; null = clear back to unlimited; a number must be
@@ -240,3 +244,17 @@ export const PortalMemorySettingsRequestSchema = z
   .strict();
 
 export type PortalMemorySettingsRequest = z.infer<typeof PortalMemorySettingsRequestSchema>;
+
+const BudgetDimensionStatusSchema = z.object({
+  limit: z.number().positive(),
+  used: z.number(),
+  remaining: z.number(),
+});
+export const WeeklyBudgetStatusSchema = z.object({
+  period_start: z.string(),
+  resets_at: z.string(),
+  requests: BudgetDimensionStatusSchema.nullable(),
+  tokens: BudgetDimensionStatusSchema.nullable(),
+  spend_usd: BudgetDimensionStatusSchema.nullable(),
+});
+export type WeeklyBudgetStatus = z.infer<typeof WeeklyBudgetStatusSchema>;

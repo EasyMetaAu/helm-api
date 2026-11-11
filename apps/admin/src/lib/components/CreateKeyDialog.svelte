@@ -6,7 +6,7 @@
     type CreatedKey,
   } from '$lib/api/keys.js';
   import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
-  import KeyCapsForm, { emptyKeyCaps } from '$lib/components/KeyCapsForm.svelte';
+  import KeyCapsForm, { emptyKeyCaps, weeklyAnchorValue } from '$lib/components/KeyCapsForm.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
@@ -50,6 +50,10 @@
 
   async function handleCreate(): Promise<void> {
     error = null;
+    if (form.budgetPeriod === 'weekly' && !Number.isFinite(new Date(form.weeklyAnchor).getTime())) {
+      error = $t('Choose a valid cycle start time.');
+      return;
+    }
     if (form.restrictClients && form.allowedClients.length === 0) {
       error = $t('Select at least one allowed client.');
       return;
@@ -74,7 +78,10 @@
     if (form.budgetTokens != null) input.budget_tokens = form.budgetTokens;
     if (form.budgetSpend != null) input.budget_spend_usd = form.budgetSpend;
     if (form.budgetWindow != null) input.budget_window_seconds = form.budgetWindow;
-    input.over_budget_behavior = form.overBudgetBehavior;
+    const anchor = weeklyAnchorValue(form);
+    if (anchor != null) input.budget_weekly_anchor = anchor;
+    input.over_budget_behavior =
+      form.budgetPeriod === 'weekly' ? 'reject' : form.overBudgetBehavior;
     if (form.degradeLane.length > 0) input.degrade_lane = form.degradeLane;
     if (form.requestContentMode !== 'inherit') {
       input.request_content_mode = form.requestContentMode;
@@ -136,7 +143,8 @@
         budget_tokens: form.budgetTokens ?? null,
         budget_spend_usd: form.budgetSpend ?? null,
         budget_window_seconds: form.budgetWindow ?? null,
-        over_budget_behavior: form.overBudgetBehavior,
+        budget_weekly_anchor: weeklyAnchorValue(form),
+        over_budget_behavior: form.budgetPeriod === 'weekly' ? 'reject' : form.overBudgetBehavior,
         degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
         request_content_mode:
           form.requestContentMode === 'inherit' ? null : form.requestContentMode,

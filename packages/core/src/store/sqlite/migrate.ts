@@ -1456,6 +1456,23 @@ CREATE TABLE request_payload_response_chunks (
       }
     },
   },
+  {
+    version: 57,
+    run(db) {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["budget_weekly_anchor"])
+      )
+        db.exec("ALTER TABLE api_keys ADD COLUMN budget_weekly_anchor TEXT;");
+      db.exec(`CREATE TABLE IF NOT EXISTS weekly_budget_usage (
+        key_id TEXT NOT NULL,
+        dim TEXT NOT NULL,
+        period_start_ms INTEGER NOT NULL,
+        used REAL NOT NULL,
+        PRIMARY KEY (key_id, dim, period_start_ms)
+      );`);
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

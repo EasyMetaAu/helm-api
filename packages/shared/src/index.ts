@@ -233,6 +233,8 @@ export {
   RequestContentModeSchema,
   type UpdateKeyRequest,
   UpdateKeyRequestSchema,
+  type WeeklyBudgetStatus,
+  WeeklyBudgetStatusSchema,
 } from "./key/schema.js";
 // Memory middleware background-job queue contracts (docs/08 Phase 2).
 export {

@@ -12,6 +12,9 @@ export interface BudgetCaps {
   tokens: number | null;
   spendUsd: number | null;
   windowSeconds: number | null;
+  weeklyAnchor?: string | null;
+  // Pin accounting to the period in which authentication admitted this request.
+  admittedAtMs?: number;
   behavior: OverBudgetBehavior;
   degradeLane: string | null;
 }

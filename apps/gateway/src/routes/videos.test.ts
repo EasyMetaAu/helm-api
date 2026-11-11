@@ -705,14 +705,18 @@ describe("registerVideosRoute", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("fails closed before reservation when a spend-capped key uses unpriced media", async () => {
+  it.each([
+    false,
+    true,
+  ])("fails closed for unmetered task caps (weekly tokens: %s)", async (weekly) => {
     const spendCappedIdentity: MessagesIdentity = {
       ...identity,
       caps: {
         budget: {
           requests: null,
-          tokens: null,
-          spendUsd: 5,
+          tokens: weekly ? 100 : null,
+          spendUsd: weekly ? null : 5,
+          weeklyAnchor: weekly ? "2026-11-08T16:00:00Z" : null,
           windowSeconds: null,
           behavior: "reject",
           degradeLane: null,
@@ -727,7 +731,7 @@ describe("registerVideosRoute", () => {
 
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({
-      error: { code: "media_pricing_unavailable" },
+      error: { code: weekly ? "media_usage_unavailable" : "media_pricing_unavailable" },
     });
     expect(putIfAbsent).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();

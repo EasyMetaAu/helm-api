@@ -1035,5 +1035,8 @@
   "Start Codex with the helm profile in the configured terminal and send a short message.": "在已設定的終端機中使用 helm profile 啟動 Codex，傳送一則簡短訊息。",
   "Run the configured SDK example once to send a real client request.": "執行一次設定好的 SDK 範例，傳送一筆實際用戶端請求。",
   "Find that request in your history and check its time and result. Browser test requests also appear there.": "在請求記錄中核對這次呼叫的時間和結果。瀏覽器測試請求也會顯示在這裡，請注意區分。",
-  "Open request history": "開啟請求記錄"
+  "Open request history": "開啟請求記錄",
+  "Next reset": "下次重設",
+  "{used} used, {remaining} remaining of {limit}": "已用 {used}，剩餘 {remaining}，上限 {limit}",
+  "No spend limit.": "未設定金額上限。"
 }
