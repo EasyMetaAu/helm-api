@@ -18,3 +18,4 @@ export type {
   BudgetUsage,
   OverBudgetBehavior,
 } from "./types.js";
+export { readWeeklyBudget } from "./weekly.js";

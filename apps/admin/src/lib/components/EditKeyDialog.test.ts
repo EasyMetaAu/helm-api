@@ -87,3 +87,45 @@ describe('EditKeyDialog client policy', () => {
     );
   });
 });
+
+describe('weekly quota editing', () => {
+  beforeEach(() => {
+    updateKey.mockReset();
+    updateKey.mockResolvedValue(undefined);
+  });
+  it('preserves the exact anchor during unrelated edits', async () => {
+    const anchor = '2026-11-08T16:00:31.123Z';
+    render(EditKeyDialog, {
+      key: { ...key, budget_requests: 10, budget_weekly_anchor: anchor },
+      lanes: ['balanced'],
+      onsaved: vi.fn(),
+      onclose: vi.fn(),
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateKey).toHaveBeenCalledWith(
+        'key',
+        expect.objectContaining({ budget_weekly_anchor: anchor }),
+      ),
+    );
+  });
+});
+
+it('clears the weekly anchor when switching to rolling refill', async () => {
+  updateKey.mockReset();
+  updateKey.mockResolvedValue(undefined);
+  render(EditKeyDialog, {
+    key: { ...key, budget_requests: 10, budget_weekly_anchor: '2026-11-08T16:00:00Z' },
+    lanes: ['balanced'],
+    onsaved: vi.fn(),
+    onclose: vi.fn(),
+  });
+  await fireEvent.change(screen.getByLabelText('Budget period'), { target: { value: 'rolling' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(updateKey).toHaveBeenCalledWith(
+      'key',
+      expect.objectContaining({ budget_weekly_anchor: null }),
+    ),
+  );
+});

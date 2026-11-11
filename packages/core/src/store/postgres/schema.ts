@@ -58,6 +58,7 @@ export const apiKeys = pgTable("api_keys", {
   budgetTokens: integer("budget_tokens"),
   budgetSpendUsd: doublePrecision("budget_spend_usd"),
   budgetWindowSeconds: integer("budget_window_seconds"),
+  budgetWeeklyAnchor: text("budget_weekly_anchor"),
   overBudgetBehavior: text("over_budget_behavior").notNull().default("degrade"),
   degradeLane: text("degrade_lane"),
   // Max in-flight requests for this key (issue #93). NULL = unlimited (0 is not
@@ -534,3 +535,15 @@ export type ResponsesRegistryTable = typeof responsesRegistry;
 export type RequestPayloadsTable = typeof requestPayloads;
 export type PayloadBlobsTable = typeof payloadBlobs;
 export type OAuthTokensTable = typeof oauthTokens;
+
+// Fixed-period consumption is separate from continuously refilling budgets.
+export const weeklyBudgetUsage = pgTable(
+  "weekly_budget_usage",
+  {
+    keyId: text("key_id").notNull(),
+    dim: text("dim").notNull(),
+    periodStartMs: bigint("period_start_ms", { mode: "number" }).notNull(),
+    used: doublePrecision("used").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.keyId, t.dim, t.periodStartMs] })],
+);

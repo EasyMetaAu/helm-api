@@ -78,6 +78,12 @@ export async function admitSpeechIdentity(
       "This API key does not allow this client.",
     );
   const budget = identity.caps?.budget;
+  if (budget?.weeklyAnchor != null && budget.tokens != null)
+    throw new SpeechAdmissionError(
+      422,
+      "media_usage_unavailable",
+      "speech token usage cannot be metered for this weekly-capped key",
+    );
   if (budget?.spendUsd != null)
     throw new SpeechAdmissionError(
       422,

@@ -17,7 +17,11 @@ function multipart(session: Record<string, unknown>): FormData {
   return body;
 }
 
-function setup(blockedModels: string[] = [], concurrencyGate?: ConcurrencyGatePort) {
+function setup(
+  blockedModels: string[] = [],
+  concurrencyGate?: ConcurrencyGatePort,
+  weeklyBudget = false,
+) {
   const sideband = {
     url: "wss://upstream.test/v1/realtime?call_id=rtc_1",
     headers: async () => ({ Authorization: "Bearer upstream" }),
@@ -36,7 +40,23 @@ function setup(blockedModels: string[] = [], concurrencyGate?: ConcurrencyGatePo
   registerRealtimeRoutes(app, {
     auth: {
       resolve: async (credential) =>
-        credential === "helm-key" ? { keyId: "key-1", blockedModels } : null,
+        credential === "helm-key"
+          ? {
+              keyId: "key-1",
+              blockedModels,
+              budget: weeklyBudget
+                ? {
+                    requests: null,
+                    tokens: 100,
+                    spendUsd: null,
+                    windowSeconds: null,
+                    weeklyAnchor: "2026-11-08T16:00:00Z",
+                    behavior: "reject" as const,
+                    degradeLane: null,
+                  }
+                : undefined,
+            }
+          : null,
     },
     resolve: (model) =>
       model === "gpt-realtime-1.5"
@@ -201,4 +221,15 @@ describe("Realtime multipart fidelity", () => {
     expect(response.status).toBe(400);
     expect(realtimeCall).not.toHaveBeenCalled();
   });
+});
+
+it("rejects weekly token-capped realtime sessions before unmetered upstream use", async () => {
+  const { app, realtimeCall } = setup([], undefined, true);
+  const response = await app.request("/v1/realtime/calls", {
+    method: "POST",
+    headers: { Authorization: "Bearer helm-key" },
+    body: multipart({ model: "gpt-realtime-1.5" }),
+  });
+  expect(response.status).toBe(422);
+  expect(realtimeCall).not.toHaveBeenCalled();
 });

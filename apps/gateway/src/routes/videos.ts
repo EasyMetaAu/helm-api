@@ -451,6 +451,13 @@ export function registerMediaTaskRoutes(
     ) {
       return errorJson(c, 400, "video model is blocked for this key", "model_blocked");
     }
+    if (identity.caps?.budget?.weeklyAnchor != null && identity.caps.budget.tokens != null)
+      return errorJson(
+        c,
+        422,
+        "task token usage cannot be metered for this weekly-capped key",
+        "media_usage_unavailable",
+      );
     if ((identity.caps?.budget?.spendUsd ?? 0) > 0) {
       return errorJson(
         c,

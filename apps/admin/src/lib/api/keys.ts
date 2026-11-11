@@ -1,4 +1,9 @@
-import { readStoredClientPolicy, type ClientPolicy } from '@helm/shared';
+import {
+  readStoredClientPolicy,
+  type ClientPolicy,
+  WeeklyBudgetStatusSchema,
+  type WeeklyBudgetStatus,
+} from '@helm/shared';
 // Admin API key client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and owns
 // NO auth logic (CLAUDE.md Principle 1). Normal list/detail responses are redacted
@@ -32,6 +37,8 @@ export interface ApiKeyView {
   budget_tokens: number | null;
   budget_spend_usd: number | null;
   budget_window_seconds: number | null;
+  budget_weekly_anchor?: string | null;
+  weekly_budget?: WeeklyBudgetStatus | null;
   over_budget_behavior: 'degrade' | 'reject';
   degrade_lane: string | null;
   // Per-key max in-flight requests (issue #93). null = unlimited. Enforced only
@@ -73,6 +80,7 @@ export interface CreateKeyInput {
   budget_tokens?: number;
   budget_spend_usd?: number;
   budget_window_seconds?: number;
+  budget_weekly_anchor?: string;
   over_budget_behavior?: 'degrade' | 'reject';
   degrade_lane?: string;
   // Optional max in-flight requests at mint time. Omitted => unlimited.
@@ -107,6 +115,7 @@ export interface UpdateKeyInput {
   budget_tokens?: number | null;
   budget_spend_usd?: number | null;
   budget_window_seconds?: number | null;
+  budget_weekly_anchor?: string | null;
   over_budget_behavior?: 'degrade' | 'reject';
   degrade_lane?: string | null;
   // Omit = leave unchanged; null = clear back to unlimited.
@@ -223,6 +232,10 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     budget_spend_usd: typeof raw.budget_spend_usd === 'number' ? raw.budget_spend_usd : null,
     budget_window_seconds:
       typeof raw.budget_window_seconds === 'number' ? raw.budget_window_seconds : null,
+    budget_weekly_anchor:
+      typeof raw.budget_weekly_anchor === 'string' ? raw.budget_weekly_anchor : null,
+    weekly_budget:
+      raw.weekly_budget == null ? null : WeeklyBudgetStatusSchema.parse(raw.weekly_budget),
     over_budget_behavior: raw.over_budget_behavior === 'reject' ? 'reject' : 'degrade',
     degrade_lane: typeof raw.degrade_lane === 'string' ? raw.degrade_lane : null,
     concurrency_limit: typeof raw.concurrency_limit === 'number' ? raw.concurrency_limit : null,
@@ -281,6 +294,8 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   if (input.budget_window_seconds !== undefined) {
     out.budget_window_seconds = input.budget_window_seconds;
   }
+  if (input.budget_weekly_anchor !== undefined)
+    out.budget_weekly_anchor = input.budget_weekly_anchor;
   if (input.over_budget_behavior !== undefined) {
     out.over_budget_behavior = input.over_budget_behavior;
   }

@@ -1,8 +1,9 @@
 import { and, eq, sql } from "drizzle-orm";
+import { weeklyPeriodStart } from "../../budget/weekly.js";
 import { type BucketState, refill } from "../../ratelimit/token-bucket.js";
 import type { BudgetDim, BudgetPeekResult, BudgetStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
-import { usageBudgetBuckets } from "./schema.js";
+import { usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
 
 // Postgres adapter for BudgetStore (docs/06 "usage budgets") — the supabase
 // implementation. `peek` (pre-route sign check) is READ-ONLY. `debit` (post-served
@@ -19,7 +20,24 @@ export class PgBudgetStore implements BudgetStore {
     capacity: number,
     windowMs: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<BudgetPeekResult> {
+    if (weeklyAnchorMs !== undefined) {
+      const periodStartMs = weeklyPeriodStart(nowMs, weeklyAnchorMs);
+      const query = this.db
+        .select()
+        .from(weeklyBudgetUsage)
+        .where(
+          and(
+            eq(weeklyBudgetUsage.keyId, keyId),
+            eq(weeklyBudgetUsage.dim, dim),
+            eq(weeklyBudgetUsage.periodStartMs, periodStartMs),
+          ),
+        );
+      const [row] = await query.limit(1);
+      const remaining = capacity - (row?.used ?? 0);
+      return { remaining, ok: remaining > 0 };
+    }
     const rows = await this.db
       .select()
       .from(usageBudgetBuckets)
@@ -41,7 +59,10 @@ export class PgBudgetStore implements BudgetStore {
     windowMs: number,
     amount: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<{ remaining: number }> {
+    if (weeklyAnchorMs !== undefined)
+      return this.changeWeekly(keyId, dim, capacity, amount, nowMs, weeklyAnchorMs, false);
     const result = await this.change(keyId, dim, capacity, windowMs, amount, nowMs, false);
     return { remaining: result.remaining };
   }
@@ -51,7 +72,11 @@ export class PgBudgetStore implements BudgetStore {
     capacity: number,
     windowMs: number,
     nowMs: number,
+    weeklyAnchorMs?: number,
   ): Promise<boolean> {
+    if (weeklyAnchorMs !== undefined)
+      return (await this.changeWeekly(keyId, "req", capacity, 1, nowMs, weeklyAnchorMs, true))
+        .accepted;
     return (await this.change(keyId, "req", capacity, windowMs, 1, nowMs, true)).accepted;
   }
 
@@ -95,6 +120,35 @@ export class PgBudgetStore implements BudgetStore {
         });
 
       return { remaining: tokens, accepted: true };
+    });
+  }
+  private async changeWeekly(
+    keyId: string,
+    dim: BudgetDim,
+    capacity: number,
+    amount: number,
+    nowMs: number,
+    anchorMs: number,
+    requireAvailable: boolean,
+  ): Promise<{ remaining: number; accepted: boolean }> {
+    const periodStartMs = weeklyPeriodStart(nowMs, anchorMs);
+    const where = and(
+      eq(weeklyBudgetUsage.keyId, keyId),
+      eq(weeklyBudgetUsage.dim, dim),
+      eq(weeklyBudgetUsage.periodStartMs, periodStartMs),
+    );
+    return this.db.transaction(async (tx) => {
+      await tx
+        .insert(weeklyBudgetUsage)
+        .values({ keyId, dim, periodStartMs, used: 0 })
+        .onConflictDoNothing();
+      const [row] = await tx.select().from(weeklyBudgetUsage).where(where).limit(1).for("update");
+      if (!row) throw new Error("weekly budget row unavailable");
+      if (requireAvailable && capacity - row.used < amount)
+        return { remaining: capacity - row.used, accepted: false };
+      const used = row.used + amount;
+      await tx.update(weeklyBudgetUsage).set({ used }).where(where);
+      return { remaining: capacity - used, accepted: true };
     });
   }
 }

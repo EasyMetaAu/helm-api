@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SqliteBudgetStore } from "./budget.js";
+import { SqliteKeyStore } from "./keystore.js";
 import { createSqliteDb, type SqliteDb } from "./migrate.js";
 
 const DAY = 86_400_000;
@@ -75,4 +79,100 @@ describe("SqliteBudgetStore", () => {
       close();
     }
   });
+});
+
+describe("Sqlite fixed weekly budget", () => {
+  const week = 7 * DAY;
+  const anchor = Date.parse("2026-11-08T16:00:00Z");
+  it("never refills midweek, resets exactly on the boundary and keeps keys isolated", async () => {
+    const { store, close } = freshStore();
+    try {
+      await store.debit("weekly", "tok", 100, week, 100, anchor, anchor);
+      expect(
+        (await store.peek("weekly", "tok", 100, week, anchor + week - 1, anchor)).remaining,
+      ).toBe(0);
+      expect((await store.peek("weekly", "tok", 100, week, anchor + week, anchor)).remaining).toBe(
+        100,
+      );
+      expect((await store.peek("other", "tok", 100, week, anchor + DAY, anchor)).remaining).toBe(
+        100,
+      );
+      // Changing a cap preserves consumption; changing modes preserves the old rolling bucket.
+      expect((await store.peek("weekly", "tok", 150, week, anchor + DAY, anchor)).remaining).toBe(
+        50,
+      );
+      expect((await store.peek("weekly", "tok", 100, week, anchor + DAY)).remaining).toBe(100);
+    } finally {
+      close();
+    }
+  });
+  it("atomically admits only N requests and starts the next cycle full", async () => {
+    const { store, close } = freshStore();
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          store.reserveRequest("weekly", 2, week, anchor + DAY, anchor),
+        ),
+      );
+      expect(results.filter(Boolean)).toHaveLength(2);
+      expect(await store.reserveRequest("weekly", 2, week, anchor + week - 1, anchor)).toBe(false);
+      expect(await store.reserveRequest("weekly", 2, week, anchor + week, anchor)).toBe(true);
+      await store.debit("weekly", "usd", 10, week, 12, anchor, anchor);
+      expect((await store.peek("weekly", "usd", 10, week, anchor + DAY, anchor)).remaining).toBe(
+        -2,
+      );
+      expect(
+        (await store.peek("weekly", "usd", 10, week, anchor + 3 * week, anchor)).remaining,
+      ).toBe(10);
+    } finally {
+      close();
+    }
+  });
+});
+
+it("preserves weekly limits across restart, secret rotation and unrelated key edits", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "helm-weekly-"));
+  const file = join(dir, "db.sqlite");
+  let db = createSqliteDb(file);
+  try {
+    const anchor = "2026-11-08T16:00:00Z";
+    const keys = new SqliteKeyStore(db);
+    await keys.createKey({
+      keyId: "k",
+      hash: "old",
+      prefix: "old",
+      accountId: "a",
+      role: "user",
+      budgetRequests: 1,
+      budgetWeeklyAnchor: anchor,
+    });
+    await new SqliteBudgetStore(db).reserveRequest(
+      "k",
+      1,
+      604800000,
+      Date.parse(anchor),
+      Date.parse(anchor),
+    );
+    await keys.rotateKey("k", { hash: "new", prefix: "new" });
+    await keys.updateKey("k", { name: "renamed" });
+    db.$sqlite.close();
+    db = createSqliteDb(file);
+    expect(await new SqliteKeyStore(db).getByHash("new")).toMatchObject({
+      budget_weekly_anchor: anchor,
+      budget_requests: 1,
+      name: "renamed",
+    });
+    expect(
+      await new SqliteBudgetStore(db).reserveRequest(
+        "k",
+        1,
+        604800000,
+        Date.parse(anchor) + DAY,
+        Date.parse(anchor),
+      ),
+    ).toBe(false);
+  } finally {
+    db.$sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -25,9 +25,23 @@ export async function settleBudget(
   if (dims.length === 0) return;
   const windowMs = windowMsFor(caps, deps.config);
 
+  const anchorMs = caps.weeklyAnchor == null ? undefined : Date.parse(caps.weeklyAnchor);
   for (const { dim, capacity } of dims) {
+    // Weekly requests were charged atomically at admission, including failed attempts.
+    if (anchorMs !== undefined && dim === "req") continue;
     const amount =
       dim === "req" ? usage.requests : dim === "tok" ? usage.tokens : (usage.costUsd ?? 0);
-    await deps.store.debit(keyId, dim, capacity, windowMs, amount, nowMs);
+    if (anchorMs === undefined)
+      await deps.store.debit(keyId, dim, capacity, windowMs, amount, nowMs);
+    else
+      await deps.store.debit(
+        keyId,
+        dim,
+        capacity,
+        windowMs,
+        amount,
+        caps.admittedAtMs ?? nowMs,
+        anchorMs,
+      );
   }
 }

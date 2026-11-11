@@ -1228,5 +1228,17 @@
   "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI 將這次請求識別為 Codex BYOK，並因該組織的每月 API Credits 福利拒絕了請求。這不代表這個 Key 的所有請求都會失敗；現有錯誤記錄無法確定是哪個請求細節觸發了識別。",
   "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "請組織擁有者到 OpenAI 計費頁面查看這項福利。取消會改變計費權益；如需保留福利，請使用其他符合條件的 Key。",
   "OpenAI organization billing": "OpenAI 組織計費設定",
-  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "按順序顯示實際執行過程。有些錯誤會終止請求，其他錯誤則允許嘗試下一個候選模型。"
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "按順序顯示實際執行過程。有些錯誤會終止請求，其他錯誤則允許嘗試下一個候選模型。",
+  "Budget period": "配額週期",
+  "Rolling refill": "逐步恢復",
+  "Fixed 7-day cycle": "固定 7 天重設",
+  "Cycle start (local time)": "週期起點（本地時間）",
+  "Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.": "預設從本地時間週一 00:00 開始，每隔 7 天統一重設，未用配額不結轉。",
+  "Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.": "任一項配額用盡後，新請求將被拒絕（429），直到下次重設。請求放行時計次，失敗嘗試也計入；Token 與金額按完成後的實際用量結算，已放行的請求可能超額。上限留空表示不限制。",
+  "Every 7 days": "每 7 天重設",
+  "Choose a valid cycle start time.": "請選擇有效的週期起點。",
+  "Next reset": "下次重設",
+  "Spend (USD)": "金額（美元）",
+  "{used} used, {remaining} remaining of {limit}": "已用 {used}，剩餘 {remaining}，上限 {limit}",
+  "No spend limit.": "未設定金額上限。"
 }

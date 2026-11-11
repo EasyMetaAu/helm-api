@@ -136,6 +136,8 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
           tokens: record.budget_tokens,
           spendUsd: record.budget_spend_usd,
           windowSeconds: record.budget_window_seconds,
+          weeklyAnchor: record.budget_weekly_anchor,
+          admittedAtMs: Date.now(),
           behavior: record.over_budget_behavior,
           degradeLane: record.degrade_lane,
         },

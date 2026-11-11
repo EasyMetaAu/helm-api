@@ -191,9 +191,12 @@
   // Budget: percent used against the cap when there is one (docs/12 §4.3).
   const budget = $derived(stats?.budget ?? null);
   const spent = $derived(stats?.totals.cost_usd ?? 0);
+  const budgetSpent = $derived(budget?.current_cycle?.spend_usd?.used ?? spent);
   const spendCap = $derived(budget?.spend_usd ?? null);
   const spendPct = $derived(
-    spendCap && spendCap > 0 ? Math.min(100, (spent / spendCap) * 100) : null,
+    spendCap && spendCap > 0
+      ? Math.min(100, (budgetSpent / spendCap) * 100)
+      : null,
   );
 
   const successRate = $derived(
@@ -316,11 +319,29 @@
   <!-- Budget -->
   <section class="card mt-4">
     <h2 class="section-header mb-2">{$t("Your budget")}</h2>
+    {#if budget?.current_cycle}
+      <p class="field-help">
+        {$t("Next reset")}: {new Date(
+          budget.current_cycle.resets_at,
+        ).toLocaleString()}
+      </p>
+      {#each [{ label: $t("Requests"), unit: budget.current_cycle.requests }, { label: $t("Tokens"), unit: budget.current_cycle.tokens }] as item (item.label)}
+        {#if item.unit}
+          <p class="mt-1 text-sm">
+            {item.label}: {$t("{used} used, {remaining} remaining of {limit}", {
+              used: item.unit.used.toLocaleString(),
+              remaining: Math.max(0, item.unit.remaining).toLocaleString(),
+              limit: item.unit.limit.toLocaleString(),
+            })}
+          </p>
+        {/if}
+      {/each}
+    {/if}
     {#if spendCap === null}
-      <p class="section-desc">{$t("No spend limit — usage is unlimited.")}</p>
+      <p class="section-desc">{$t("No spend limit.")}</p>
     {:else}
       <div class="flex items-center justify-between text-sm">
-        <span>{formatUsd(spent)} {$t("of")} {formatUsd(spendCap)}</span>
+        <span>{formatUsd(budgetSpent)} {$t("of")} {formatUsd(spendCap)}</span>
         <span class="text-ink-muted"
           >{spendPct !== null ? `${Math.round(spendPct)}%` : ""}</span
         >
@@ -328,7 +349,7 @@
       <div class="progress-track mt-1.5">
         <div class="progress-bar" style:width={`${spendPct ?? 0}%`}></div>
       </div>
-      {#if budget?.window_seconds}
+      {#if budget?.window_seconds && budget.weekly_anchor == null}
         <p class="field-help mt-1.5">
           {$t("Resets every {hours}h. Over budget: {behavior}.", {
             hours: Math.round((budget.window_seconds ?? 0) / 3600),

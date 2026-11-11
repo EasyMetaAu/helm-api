@@ -134,6 +134,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   budget_tokens: number | null,
   budget_spend_usd: number | null,
   budget_window_seconds: number | null,        // null = system default (~30 days)
+  budget_weekly_anchor: string | null,         // fixed 7-day cycle; null = rolling
   over_budget_behavior: "degrade" | "reject",  // default "degrade"
   degrade_lane: string | null,                 // null = economy
 
@@ -323,6 +324,38 @@ image-generation surfaces — `/v1/images/generations`, the Gemini
 metered per image (output tokens × the model's image rate). All budget config is
 editable per key in the admin API Keys page and applies on the next request (no
 restart).
+
+### Fixed seven-day budgets
+
+Set `budget_weekly_anchor` to a timezone-qualified ISO timestamp to select fixed
+seven-day periods for a key. For example, `2026-11-09T00:00:00+08:00` resets every
+Monday at 00:00 UTC+08:00. Any other start time is supported. The schedule extends
+in both directions from the anchor; a future anchor does not delay activation.
+Each period is exactly 168 hours, so a daylight-saving change can shift local time.
+
+The same `budget_requests`, `budget_tokens`, and `budget_spend_usd` caps apply to
+each period. Any exhausted dimension rejects new requests with 429 until reset;
+`over_budget_behavior` and `budget_window_seconds` apply only to rolling budgets.
+Unused quota does not carry over. Request attempts are reserved atomically at
+admission, including failed attempts; tokens and spend settle from actual upstream
+usage. Already admitted requests can exceed a token/spend cap, and their usage is
+charged to their admission period even if they finish after reset. Unknown model
+pricing retains the existing unmeasured-cost behavior; it must not be interpreted
+as proof that the request was free.
+
+Counters are persisted separately from telemetry and rolling buckets, keyed by
+key ID, dimension, and period start. Restart, secret rotation, and telemetry
+retention do not reset them. Raising or lowering a cap preserves consumption;
+changing the anchor changes the cycle alignment. Setting the anchor to null
+returns to the saved rolling budget, without rewriting its old balance. Enabling
+weekly mode starts its own counter; previous rolling usage is not imported.
+
+Admin Create/Edit Key offers **Fixed 7-day cycle** with a local-time start (default:
+this Monday at 00:00). Key detail and the bearer-scoped portal report actual cycle
+usage, remaining balance, and next reset independently of chart date filters.
+Unmetered speech, realtime, and asynchronous media tasks reject weekly token or
+spend caps when the relevant usage cannot be measured; request-only weekly caps
+remain supported. These rejections happen before paid upstream work.
 
 ## OAuth subscription quotas and reset credits
 

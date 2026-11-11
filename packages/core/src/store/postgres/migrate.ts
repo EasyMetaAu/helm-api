@@ -1415,6 +1415,24 @@ CREATE TABLE request_payload_response_chunks (
       }
     },
   },
+  {
+    version: 56,
+    async run(db) {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"]))
+        await db.execute(
+          sql.raw("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS budget_weekly_anchor TEXT;"),
+        );
+      await db.execute(
+        sql.raw(`CREATE TABLE IF NOT EXISTS weekly_budget_usage (
+        key_id TEXT NOT NULL,
+        dim TEXT NOT NULL,
+        period_start_ms BIGINT NOT NULL,
+        used DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (key_id, dim, period_start_ms)
+      );`),
+      );
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

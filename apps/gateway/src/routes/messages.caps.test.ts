@@ -75,3 +75,11 @@ describe("capsFromRecord", () => {
     });
   });
 });
+
+it("preserves weekly quota identity for every self-auth protocol", () => {
+  const caps = capsFromRecord(
+    record({ budget_weekly_anchor: "2026-11-08T16:00:00Z", budget_requests: 10 }),
+  );
+  expect(caps.budget).toMatchObject({ weeklyAnchor: "2026-11-08T16:00:00Z", requests: 10 });
+  expect(caps.budget?.admittedAtMs).toEqual(expect.any(Number));
+});

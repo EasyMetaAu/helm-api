@@ -1,7 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { type ApiKeyView, type UpdateKeyInput, updateKey } from '$lib/api/keys.js';
-  import KeyCapsForm, { keyCapsFromView } from '$lib/components/KeyCapsForm.svelte';
+  import KeyCapsForm, {
+    keyCapsFromView,
+    weeklyAnchorValue,
+  } from '$lib/components/KeyCapsForm.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
@@ -39,6 +42,10 @@
 
   async function handleSave(): Promise<void> {
     error = null;
+    if (form.budgetPeriod === 'weekly' && !Number.isFinite(new Date(form.weeklyAnchor).getTime())) {
+      error = $t('Choose a valid cycle start time.');
+      return;
+    }
     if (form.restrictClients && form.allowedClients.length === 0) {
       error = $t('Select at least one allowed client.');
       return;
@@ -60,7 +67,8 @@
       budget_tokens: form.budgetTokens ?? null,
       budget_spend_usd: form.budgetSpend ?? null,
       budget_window_seconds: form.budgetWindow ?? null,
-      over_budget_behavior: form.overBudgetBehavior,
+      budget_weekly_anchor: weeklyAnchorValue(form),
+      over_budget_behavior: form.budgetPeriod === 'weekly' ? 'reject' : form.overBudgetBehavior,
       degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
       request_content_mode: form.requestContentMode === 'inherit' ? null : form.requestContentMode,
       max_reasoning_effort: form.maxReasoningEffort === 'inherit' ? null : form.maxReasoningEffort,
@@ -89,7 +97,8 @@
         budget_tokens: patch.budget_tokens ?? null,
         budget_spend_usd: patch.budget_spend_usd ?? null,
         budget_window_seconds: patch.budget_window_seconds ?? null,
-        over_budget_behavior: form.overBudgetBehavior,
+        budget_weekly_anchor: patch.budget_weekly_anchor ?? null,
+        over_budget_behavior: form.budgetPeriod === 'weekly' ? 'reject' : form.overBudgetBehavior,
         degrade_lane: patch.degrade_lane ?? null,
         request_content_mode: patch.request_content_mode ?? null,
         max_reasoning_effort: patch.max_reasoning_effort ?? null,

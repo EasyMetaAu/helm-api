@@ -241,6 +241,13 @@ export function registerTtsRoute(app: Hono<AppEnv>, deps: TtsRouteDeps): void {
         admitted.materialized();
       }
       const budget = identity.caps?.budget;
+      if (budget?.weeklyAnchor != null && budget.tokens != null)
+        return errorJson(
+          c,
+          422,
+          "TTS token usage cannot be metered for this weekly-capped key",
+          "media_usage_unavailable",
+        );
       if (budget?.spendUsd !== null && budget?.spendUsd !== undefined) {
         return errorJson(
           c,

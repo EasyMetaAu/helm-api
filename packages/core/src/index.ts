@@ -27,6 +27,7 @@ export {
   type BudgetProbe,
   type BudgetUsage,
   createBudgetGate,
+  readWeeklyBudget,
   type SettleBudgetDeps,
   settleBudget,
   windowMsFor,

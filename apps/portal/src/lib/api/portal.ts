@@ -1,4 +1,4 @@
-import type { ClientPolicy } from "@helm/shared";
+import type { ClientPolicy, WeeklyBudgetStatus } from "@helm/shared";
 import { apiGet, apiPatch } from "./client";
 
 // Portal API response contracts — mirror the /portal/api/* JSON the gateway emits.
@@ -15,6 +15,8 @@ export interface Me {
     tokens: number | null;
     spend_usd: number | null;
     window_seconds: number | null;
+    weekly_anchor?: string | null;
+    current_cycle?: WeeklyBudgetStatus | null;
     behavior: string;
   };
   memory: {
