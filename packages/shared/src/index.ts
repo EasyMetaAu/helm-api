@@ -307,6 +307,12 @@ export {
 } from "./native-passthrough.js";
 export { type AnthropicPlanType, AnthropicPlanTypeSchema } from "./oauth/anthropic-plan.js";
 export * from "./oauth/anthropic-reset.js";
+export {
+  type ProviderUsageSnapshot,
+  ProviderUsageSnapshotSchema,
+  type UpstreamProviderUsage,
+  UpstreamProviderUsageSchema,
+} from "./oauth/provider-usage.js";
 // Per-account OAuth subscription usage + quota observability (providers page).
 // Fail-open artifacts: usage = today's served traffic; quota = latest rate-limit
 // window snapshot; plus the (untrusted) Anthropic usage-endpoint response shape.

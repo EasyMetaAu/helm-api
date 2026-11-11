@@ -239,10 +239,12 @@ import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-cred
 import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { createResponsesRegistry } from "./responses-registry.js";
 import { responsesWebSocketPreflightPending } from "./responses-websocket.js";
+import { readApiKeyPools } from "./routes/admin/api-key-pools.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import type { OAuthMutationOptions } from "./routes/admin/deps.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
+import { createOAuthUsageReader } from "./routes/admin/oauth-usage-reader.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
 import { mountAdminLogin } from "./routes/admin-login.js";
@@ -269,6 +271,11 @@ import { nativeMediaProfile } from "./routes/native-media-profile.js";
 import { clearSessionCaptureCache } from "./routes/payload-capture.js";
 import { registerPortalApi } from "./routes/portal/index.js";
 import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
+import {
+  providerUsageConfig,
+  registerProviderUsageExport,
+  registerUpstreamUsageProxy,
+} from "./routes/provider-usage.js";
 import { registerRealtimeRoutes } from "./routes/realtime.js";
 import {
   type ResponsesCompactExecution,
@@ -2256,6 +2263,7 @@ export async function buildServer(
     >;
   } = {},
 ): Promise<ServerHandle> {
+  const usageConfig = providerUsageConfig(process.env);
   // Validate even when no OAuth account is currently eligible for synthesis.
   CodexImageControllerModelSchema.parse(process.env.HELM_CODEX_IMAGE_CONTROLLER_MODEL);
   const logger = opts.logger ?? createJsonLogger();
@@ -3999,6 +4007,46 @@ export async function buildServer(
     authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
   );
   registerUsageStatsRoute(app, { telemetry });
+  const usageReader = createOAuthUsageReader(
+    {
+      oauth: oauthAdmin,
+      oauthUsage: store.oauthUsage,
+      oauthQuota: store.oauthQuota,
+      oauthResetPeriod: store.oauthResetPeriod,
+      settings: { get: () => settings },
+    },
+    false,
+  );
+  registerProviderUsageExport(app, {
+    tokenHash: usageConfig.HELM_USAGE_EXPORT_TOKEN_SHA256,
+    overview: async (tz) => {
+      const status = await oauthAdmin?.listCachedStatus();
+      const localStatus = status ?? { providers: [], selectionStrategy: "balanced" as const };
+      const [usage, quota] = await Promise.all([
+        usageReader.readUsage(tz, localStatus),
+        usageReader.readCachedQuota(localStatus),
+      ]);
+      return {
+        schemaVersion: 1,
+        generatedAt: Date.now(),
+        providers: localStatus.providers,
+        usage,
+        quota,
+        apiKeyPools: await readApiKeyPools({ apiKeyPools, oauthUsage: store.oauthUsage }),
+      };
+    },
+    periods: async (provider, account, tz) => {
+      const status = await oauthAdmin?.listCachedStatus();
+      if (
+        !status?.providers.some(
+          (p) => p.id === provider && p.accounts.some((a) => a.account === account),
+        )
+      ) {
+        throw new Error("subscription account unavailable");
+      }
+      return usageReader.readPeriods(provider, account, tz);
+    },
+  });
 
   // Self-service portal REST (docs/12). Bearer-scoped like /v1/usage — NOT Basic
   // Auth, never accepts a caller-supplied key_id/account_id (every handler
@@ -4373,6 +4421,16 @@ export async function buildServer(
       },
     });
     app.use("/admin/api/*", basicAuth(adminAuth, { allowSession: true }));
+    registerUpstreamUsageProxy(
+      app,
+      usageConfig.HELM_UPSTREAM_USAGE_URL && usageConfig.HELM_UPSTREAM_USAGE_TOKEN
+        ? {
+            origin: usageConfig.HELM_UPSTREAM_USAGE_URL,
+            token: usageConfig.HELM_UPSTREAM_USAGE_TOKEN,
+          }
+        : undefined,
+    );
+
     // Routable model catalog for the Lanes admin combobox: each alias + the
     // subscription account(s) exposing it (so the picker can show the account under
     // each model). CONFIGURED-provider aliases are static (config is immutable) and

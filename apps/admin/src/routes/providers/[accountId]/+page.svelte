@@ -143,6 +143,9 @@
     <a class="link-inline text-sm" href={`${base}/providers`}>← {$t('Providers')}</a>
     <div class="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
       <h1 class="page-title">{data.account}</h1>
+      {#if data.source}<p class="text-sm text-ink-muted">
+          {$t('Upstream usage')}: {data.source} · {$t('Read-only')}
+        </p>{/if}
       <code class="font-mono text-sm text-ink-muted">{data.providerId}</code>
     </div>
     <p class="mt-1 text-sm text-ink-muted">
