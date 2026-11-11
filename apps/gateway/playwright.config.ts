@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 import { ADMIN_PASSWORD, ADMIN_USER, adminEnv, basicHeader } from "./e2e/fixtures/admin.js";
@@ -19,6 +20,9 @@ const e2eEnv = {
   // Resolved against the gateway CWD (repo root, set on the webServer below).
   HELM_DATA_DIR: "./apps/gateway/.e2e-data",
   HELM_TEST_KEY: "helm_live_e2e_testkey",
+  HELM_USAGE_EXPORT_TOKEN_SHA256: createHash("sha256")
+    .update("e2e-read-only-usage-token")
+    .digest("hex"),
   // Key the primary (deepseek) provider so routing tests exercise it. A dummy
   // value is enough: HELM_PROVIDER_BASE_URL points every provider at the offline
   // mock, so no real key is ever used.

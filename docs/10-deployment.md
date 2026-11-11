@@ -428,3 +428,54 @@ account smoke. **Remove temporary `HELM_XAI_GROK_CLIENT_VERSION` or
 `HELM_OPENAI_CODEX_CLIENT_VERSION` recovery overrides once the new image default
 reaches that version**; otherwise the old override masks future release updates.
 Intentional operator pins remain supported and take precedence.
+
+## Read-only upstream provider usage
+
+A downstream Helm can display the upstream Providers usage without receiving its
+OAuth credentials or admin password. On the upstream, set
+`HELM_USAGE_EXPORT_TOKEN_SHA256` to the lowercase SHA-256 of a dedicated random
+read-only token. On the downstream, set `HELM_UPSTREAM_USAGE_URL` to the upstream
+HTTPS origin (for example `https://helm.example.com`, without `/v1`) and
+`HELM_UPSTREAM_USAGE_TOKEN` to that token. Keep the token in the deployment's
+protected environment file. The URL and token must be configured together;
+malformed configuration stops startup. HTTP is allowed only for loopback tests.
+The export works independently of the admin UI. Omit its hash to disable it.
+
+The token grants read access to **all** exported provider accounts on that instance.
+It is separate from inference API keys and cannot administer accounts or reset
+quota. Rotate it by replacing the upstream hash and downstream token together.
+
+- `GET /v1/provider-usage?tzOffsetMinutes=480` returns schema version 1, snapshot
+  generation time, subscription accounts, daily traffic, quota snapshots and
+  API key pool usage over the last 24 hours.
+- `GET /v1/provider-usage/periods?provider=anthropic&account=team&tzOffsetMinutes=480`
+  returns the existing current/reset-period/daily/weekly subscription history.
+- Both require `Authorization: Bearer <read-only-token>` and return `Cache-Control:
+  no-store`. Missing/wrong credentials receive 401, invalid queries 400, disabled
+  export 404, and failed data reads 503. No write or refresh endpoint is exposed.
+
+The downstream admin proxies only those fixed GET paths under
+`/admin/api/upstream/provider-usage`, using its existing admin authentication.
+Redirects are rejected; browser code never receives the export credential.
+Providers shows an additional read-only upstream section, refreshes it every
+60 seconds while visible, and retains the last successful in-page snapshot with
+an error when the upstream is unreachable. Account links keep the upstream source
+when opening history. No extra database, migration, or synchronization job is needed.
+
+### Data freshness and scope
+
+A GET reads cached account and quota state. It does not perform provider discovery,
+refresh OAuth tokens, change scheduling, or consume reset credits. Quota collection
+continues through the upstream's existing traffic and Providers refresh behavior;
+a downstream-only viewer must not assume its poll caused a new provider pull.
+Every quota includes its original capture time; the UI marks captures older than
+five minutes as stale. The overview generation time is not the quota capture time.
+
+Subscription quota describes the provider account's overall allowance, including
+other clients where the provider counts them. Request/token totals describe only
+traffic recorded by the upstream Helm and must not be added to downstream totals.
+Subscription usage uses the viewer's current local-day offset; API key pools retain
+the existing rolling 24-hour view. Unknown quota/price stays unavailable, not a
+measured zero. History retains the existing approximate/partial flags and retention
+limits. Exported API key accounts contain status and usage, never key masks or
+secrets; subscription accounts contain display identity and plan, not proxy settings.

@@ -1,3 +1,4 @@
+import { getUpstreamUsage, getUpstreamUsagePeriods } from '$lib/api/upstream-usage.js';
 import { error } from '@sveltejs/kit';
 import { getOAuthQuota, getOAuthUsagePeriods, type OAuthUsagePeriods } from '$lib/api/oauth.js';
 import type { OAuthQuotaSnapshot } from '$lib/api/oauth.js';
@@ -10,6 +11,7 @@ import type { PageLoad } from './$types.js';
 // quota) rather than erroring the page — same fail-open posture as the providers list.
 
 export interface AccountDetailData {
+  source?: string;
   providerId: string;
   account: string;
   periods: OAuthUsagePeriods;
@@ -18,17 +20,32 @@ export interface AccountDetailData {
   quota: OAuthQuotaSnapshot | null;
 }
 
-export const load: PageLoad = async ({ params }): Promise<AccountDetailData> => {
+export const load: PageLoad = async ({ params, url }): Promise<AccountDetailData> => {
   const decoded = decodeAccountId(params.accountId);
   if (!decoded) throw error(404, 'Unknown account');
   const { providerId, account } = decoded;
+  if (url?.searchParams.get('source') === 'upstream') {
+    try {
+      const [upstream, periods] = await Promise.all([
+        getUpstreamUsage(),
+        getUpstreamUsagePeriods(providerId, account),
+      ]);
+      if (!upstream.configured) error(503, 'Upstream usage is not configured');
+      const quota =
+        upstream.snapshot.quota.find(
+          (row) => row.providerId === providerId && row.account === account,
+        ) ?? null;
+      return { source: upstream.source, providerId, account, periods, quota };
+    } catch {
+      error(503, 'Upstream usage history is unavailable');
+    }
+  }
 
   const [periods, allQuota] = await Promise.all([
     getOAuthUsagePeriods(providerId, account),
     getOAuthQuota(),
   ]);
-  const quota =
-    allQuota.find((q) => q.providerId === providerId && q.account === account) ?? null;
+  const quota = allQuota.find((q) => q.providerId === providerId && q.account === account) ?? null;
 
   return { providerId, account, periods, quota };
 };

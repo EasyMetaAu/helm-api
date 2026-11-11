@@ -1,4 +1,5 @@
 <script lang="ts">
+  import UpstreamProviderUsage from '$lib/components/UpstreamProviderUsage.svelte';
   import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
@@ -926,6 +927,8 @@
       <p class="section-desc">{$t('Manage subscriptions and API key accounts in one place.')}</p>
     </div>
   </header>
+
+  <UpstreamProviderUsage />
 
   <section class="flex flex-col gap-2" aria-labelledby="subscription-providers">
     <header class="flex flex-wrap items-center gap-x-4 gap-y-2">

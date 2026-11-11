@@ -139,6 +139,8 @@ describe('providers page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
+        if (url.startsWith('/admin/api/upstream/provider-usage'))
+          return Response.json({ configured: false });
         if (url === '/admin/api/api-key-pools') return Response.json({ pools: [] });
         throw new Error(`Unexpected request: ${url}`);
       }),
