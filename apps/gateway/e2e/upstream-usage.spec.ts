@@ -24,6 +24,55 @@ test("upstream usage renders quota and history without account mutations", async
     credits: { hasCredits: true, balance: "87008.6848637500", unlimited: false },
     rateLimitReachedType: "rate_limit_reached",
   };
+  await page.route("**/admin/api/oauth/overview*", (route) =>
+    route.fulfill({
+      json: {
+        configured: true,
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "anthropic",
+            name: "Remote Claude",
+            flow: "manual_paste",
+            accounts: [
+              {
+                account: "local-team",
+                healthy: true,
+                expiresAt: null,
+                updatedAt: Date.now(),
+                priority: 50,
+                schedulable: true,
+                fastMode: false,
+                models: ["claude-sonnet"],
+                anthropicPlanType: "max",
+              },
+            ],
+          },
+        ],
+        usage: [
+          {
+            providerId: "anthropic",
+            account: "local-team",
+            requests: 42,
+            tokens: 1536,
+            costUsd: null,
+            rpm: 1,
+          },
+        ],
+        quota: [{ ...quota, account: "local-team", credits: null, rateLimitReachedType: null }],
+        refresh: {
+          state: "idle",
+          jobId: null,
+          requestedAt: null,
+          startedAt: null,
+          finishedAt: null,
+          lastSuccessAt: null,
+          nextAllowedAt: null,
+          error: null,
+        },
+      },
+    }),
+  );
   let offline = false;
   await page.route("**/admin/api/upstream/provider-usage**", async (route) => {
     expect(route.request().method()).toBe("GET");
@@ -109,28 +158,48 @@ test("upstream usage renders quota and history without account mutations", async
   await expect(section.getByRole("progressbar")).toHaveCount(2);
   await expect(section.locator(".progress-bar.bg-red-500")).toHaveCount(1);
   await expect(section.getByText("Ready", { exact: true })).toHaveClass("badge-ok");
-  await section.getByText("Details", { exact: true }).click();
+  await section.locator("summary").click();
   await expect(section.getByText("87,008.68", { exact: true })).toHaveAttribute(
     "title",
     "87008.6848637500",
   );
+  await section.locator("summary").click();
   for (const width of [1440, 768, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     await section.scrollIntoViewIfNeeded();
-    await expect(section.getByRole("link", { name: "remote-team" })).toBeVisible();
+    await expect(section.getByRole("link", { name: /remote-team/ })).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
-    await page.screenshot({ path: `/tmp/helm-ui-${width}.png` });
+    expect((await section.locator("header").boundingBox())?.height).toBeLessThan(130);
+    if (width === 1440) {
+      const upstreamBar = await section.locator(".progress-track").first().boundingBox();
+      const localBar = await page
+        .getByTestId("provider-quota-cell")
+        .locator(".progress-track")
+        .first()
+        .boundingBox();
+      expect(upstreamBar?.width).toBe(localBar?.width);
+    }
+    await page.screenshot({ path: `/tmp/helm-opus-${width}.png` });
+    await section.locator("summary").click();
+    const panel = section.locator(".menu-panel");
+    await expect(panel).toBeVisible();
+    const box = await panel.boundingBox();
+    expect(box?.x).toBeGreaterThanOrEqual(0);
+    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: `/tmp/helm-opus-details-${width}.png` });
+    await page.keyboard.press("Escape");
+    await expect(panel).not.toBeVisible();
   }
   offline = true;
   await section.getByRole("button", { name: "Refresh upstream usage" }).click();
   await expect(section.getByRole("alert")).toBeVisible();
   await expect(section.getByText("74%", { exact: true })).toBeVisible();
   offline = false;
-  await section.getByRole("link", { name: "remote-team" }).click();
+  await section.getByRole("link", { name: /remote-team/ }).click();
   await expect(page).toHaveURL(/source=upstream/);
-  await expect(page.getByRole("heading", { name: "remote-team" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /remote-team/ })).toBeVisible();
   await expect(page.getByText(/https:\/\/upstream.example/)).toBeVisible();
 });
 
