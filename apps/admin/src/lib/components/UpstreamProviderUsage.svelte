@@ -264,12 +264,12 @@
         {#if provider.accounts.length > 0}
           <h3 class="font-semibold text-ink-strong">{provider.name}</h3>
           <div class="cards-table-frame compact">
-            <table class="cards-table">
+            <table class="cards-table table-mode:table-fixed">
               <caption class="sr-only">{provider.name}</caption>
               <thead class="table-head">
                 <tr>
-                  <th class="px-3 py-2">{$t('Account')}</th>
-                  <th class="px-3 py-2">{$t('Quota')}</th>
+                  <th class="px-3 py-2 table-mode:w-1/4">{$t('Account')}</th>
+                  <th class="px-3 py-2 table-mode:w-[45%]">{$t('Quota')}</th>
                   <th class="px-3 py-2">{$t('Today')}</th>
                 </tr>
               </thead>
@@ -296,10 +296,7 @@
                     quota?.resetCredits != null ||
                     resetDetails.length > 0}
                   <tr class="align-top">
-                    <td
-                      data-label={$t('Account')}
-                      class="table-mode:w-72 table-mode:whitespace-normal"
-                    >
+                    <td data-label={$t('Account')} class="table-mode:whitespace-normal">
                       <a
                         class="link-inline break-all font-medium"
                         href={`${accountDetailHref(base, provider.id, account.account)}?source=upstream`}
@@ -435,7 +432,7 @@
                       </div>
                     </td>
 
-                    <td data-label={$t('Today')}>
+                    <td data-label={$t('Today')} class="table-mode:whitespace-normal">
                       {@render trafficCell(usage, true)}
                     </td>
                   </tr>
@@ -449,12 +446,12 @@
         {#if pool.accounts.length > 0}
           <h3 class="font-semibold text-ink-strong">{pool.id} · {$t('API key accounts')}</h3>
           <div class="cards-table-frame compact">
-            <table class="cards-table">
+            <table class="cards-table table-mode:table-fixed">
               <caption class="sr-only">{pool.id} · {$t('API key accounts')}</caption>
               <thead class="table-head">
                 <tr>
-                  <th class="px-3 py-2">{$t('Account')}</th>
-                  <th class="px-3 py-2">{$t('Status')}</th>
+                  <th class="px-3 py-2 table-mode:w-1/4">{$t('Account')}</th>
+                  <th class="px-3 py-2 table-mode:w-[45%]">{$t('Status')}</th>
                   <th class="px-3 py-2">{$t('Last 24 hours')}</th>
                 </tr>
               </thead>
@@ -462,10 +459,7 @@
                 {#each pool.accounts as account (account.id)}
                   {@const usage = pool.usage.find((row) => row.account === account.id)}
                   <tr class="align-top">
-                    <td
-                      data-label={$t('Account')}
-                      class="table-mode:w-72 table-mode:whitespace-normal"
-                    >
+                    <td data-label={$t('Account')} class="table-mode:whitespace-normal">
                       <span class="break-all font-medium text-ink-body">{account.name}</span>
                     </td>
                     <td data-label={$t('Status')} class="table-mode:whitespace-normal">
@@ -483,7 +477,7 @@
                           {$t('Retry at')}: {timestamp(account.nextRetryAt)}
                         </div>{/if}
                     </td>
-                    <td data-label={$t('Last 24 hours')}>
+                    <td data-label={$t('Last 24 hours')} class="table-mode:whitespace-normal">
                       {@render trafficCell(usage, false)}
                     </td>
                   </tr>
