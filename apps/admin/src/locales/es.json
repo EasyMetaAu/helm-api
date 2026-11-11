@@ -1228,5 +1228,17 @@
   "OpenAI treated this request as Codex BYOK and rejected it because of the organization’s monthly API Credits benefit. This does not mean all requests using this key will fail; the recorded error does not show which request detail triggered this classification.": "OpenAI identificó esta solicitud como Codex BYOK y la rechazó por el beneficio mensual de API Credits de la organización. Esto no significa que todas las solicitudes con esta clave fallen; el error registrado no indica qué detalle de la solicitud provocó esa clasificación.",
   "An organization owner can review the benefit in OpenAI billing. Cancelling it changes billing benefits; use another eligible key if you want to keep it.": "El propietario de la organización puede revisar el beneficio en la facturación de OpenAI. Cancelarlo cambia sus beneficios de facturación; use otra clave apta si desea conservarlo.",
   "OpenAI organization billing": "Facturación de la organización en OpenAI",
-  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "Se muestra la secuencia de ejecución. Algunos errores detienen la solicitud; otros permiten probar el siguiente candidato."
+  "The execution trail is shown in order. Some errors stop execution; others allow the next candidate.": "Se muestra la secuencia de ejecución. Algunos errores detienen la solicitud; otros permiten probar el siguiente candidato.",
+  "Budget period": "Periodo del presupuesto",
+  "Rolling refill": "Recarga continua",
+  "Fixed 7-day cycle": "Ciclo fijo de 7 días",
+  "Cycle start (local time)": "Inicio del ciclo (hora local)",
+  "Defaults to Monday at 00:00 in your local time. Limits reset together every 7 days from this time. Unused quota does not carry over.": "Por defecto, el lunes a las 00:00 en tu hora local. Todos los límites se restablecen cada 7 días desde ese momento. La cuota no utilizada no se acumula.",
+  "Any exhausted limit rejects new requests (429) until the next reset. Requests count when admitted, including failed attempts. Tokens and spend settle after completion, so in-flight requests may exceed these limits. Leave a cap blank for no limit.": "Al agotarse cualquier límite, se rechazan las nuevas solicitudes (429) hasta el siguiente reinicio. Las solicitudes cuentan al admitirse, aunque fallen. Los tokens y el gasto se contabilizan al finalizar, por lo que las solicitudes en curso pueden superar los límites. Deja un límite vacío para no aplicarlo.",
+  "Every 7 days": "Cada 7 días",
+  "Choose a valid cycle start time.": "Elige una fecha y hora de inicio válidas.",
+  "Next reset": "Próximo reinicio",
+  "Spend (USD)": "Gasto (USD)",
+  "{used} used, {remaining} remaining of {limit}": "{used} usados, {remaining} restantes de {limit}",
+  "No spend limit.": "Sin límite de gasto."
 }

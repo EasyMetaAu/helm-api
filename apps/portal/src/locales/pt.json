@@ -1035,5 +1035,8 @@
   "Start Codex with the helm profile in the configured terminal and send a short message.": "Inicie o Codex com o perfil helm no terminal configurado e envie uma mensagem curta.",
   "Run the configured SDK example once to send a real client request.": "Execute o exemplo de SDK configurado para enviar uma solicitação real do cliente.",
   "Find that request in your history and check its time and result. Browser test requests also appear there.": "Localize a solicitação no histórico e confira a hora e o resultado. Os testes do navegador também aparecem lá.",
-  "Open request history": "Abrir histórico de solicitações"
+  "Open request history": "Abrir histórico de solicitações",
+  "Next reset": "Próximo reinício",
+  "{used} used, {remaining} remaining of {limit}": "{used} usados, {remaining} restantes de {limit}",
+  "No spend limit.": "Sem limite de gasto."
 }
