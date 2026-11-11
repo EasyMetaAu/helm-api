@@ -117,10 +117,12 @@
     return 'bg-indigo-500';
   }
 
-  // Keep the bar within its bounds; the visible label and ARIA text retain actual usage.
+  // ARIA keeps the clamped value; the drawn bar keeps the Providers page's 2% sliver so
+  // a measured 0% still reads as a track with data rather than an empty one.
   const barWidth = (pct: number) => (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0);
   const percentText = (pct: number) =>
     Number.isFinite(pct) ? `${numberFormat.format(pct)}%` : '—';
+  const roundedPercent = (pct: number) => (Number.isFinite(pct) ? `${Math.round(pct)}%` : '—');
 
   // Countdown from an absolute reset timestamp; elapsed/absent ⇒ "". Shares
   // `durationParts` with the Providers page so a weekly window reads "4d 16h".
@@ -132,6 +134,15 @@
     if (p.unit === 'dh') return $t('resets in {d}d {h}h', { d: p.d, h: p.h });
     if (p.unit === 'hm') return $t('resets in {h}h {m}m', { h: p.h, m: p.m });
     return $t('resets in {m}m', { m: p.m });
+  }
+
+  function autoRecoverIn(ms: number): string {
+    const left = ms - now;
+    if (left <= 0) return '';
+    const p = durationParts(left);
+    if (p.unit === 'dh') return $t('auto-recovers in {d}d {h}h', { d: p.d, h: p.h });
+    if (p.unit === 'hm') return $t('auto-recovers in {h}h {m}m', { h: p.h, m: p.m });
+    return $t('auto-recovers in {m}m', { m: p.m });
   }
 
   // Credit amounts arrive as long decimal strings; show a short number and keep the
@@ -200,51 +211,57 @@
   }
 </script>
 
-{#snippet usageBar(pct: number, label: string)}
-  <div
-    class="progress-track"
-    role="progressbar"
-    aria-label={label}
-    aria-valuemin="0"
-    aria-valuemax="100"
-    aria-valuenow={Number.isFinite(pct) ? barWidth(pct) : undefined}
-    aria-valuetext={percentText(pct)}
-  >
-    <div class={`progress-bar ${barColor(pct)}`} style={`width:${barWidth(pct)}%`}></div>
+{#snippet quotaTrack(pct: number, label: string, resetsAtMs: number | null | undefined)}
+  {@const countdown = resetIn(resetsAtMs)}
+  <div>
+    <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
+      <span>{label}</span>
+      <span class="shrink-0 tabular-nums" title={Number.isFinite(pct) ? `${pct}%` : undefined}
+        >{roundedPercent(pct)}</span
+      >
+    </div>
+    <div
+      class="progress-track"
+      role="progressbar"
+      aria-label={`${label} ${$t('Used')}`}
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow={Number.isFinite(pct) ? barWidth(pct) : undefined}
+      aria-valuetext={percentText(pct)}
+    >
+      <div
+        class={`progress-bar ${barColor(pct)}`}
+        style={`width:${Math.max(2, barWidth(pct))}%`}
+      ></div>
+    </div>
+    {#if countdown}
+      <div
+        class="text-[10px] text-ink-muted"
+        title={`${$t('Resets at')}: ${timestamp(resetsAtMs)}`}
+      >
+        {countdown}
+      </div>
+    {/if}
   </div>
 {/snippet}
 
-{#snippet trafficCell(
-  usage:
-    | { requests: number; tokens: number; costUsd?: number | null; rpm?: number | null }
-    | undefined,
-  showRpm: boolean,
-)}
-  {#if usage}
-    <div class="text-sm tabular-nums text-ink-strong">
-      {$t('{requests} requests · {tokens} tokens', {
-        requests: formatCount(usage.requests),
-        tokens: formatTokens(usage.tokens),
-      })}
-    </div>
-    <div class="text-xs tabular-nums text-ink-muted">
-      {$t('Estimated cost')}: {formatUsd(usage.costUsd)}{#if showRpm}
-        · {$t('Average RPM')}: {usage.rpm == null ? '—' : numberFormat.format(usage.rpm)}{/if}
-    </div>
-  {:else}
-    <span class="text-xs text-ink-muted">—</span>
-  {/if}
-{/snippet}
-
 {#if result?.configured || error}
-  <section class="flex flex-col gap-3" aria-labelledby="upstream-usage-title">
-    <header class="flex flex-wrap items-start justify-between gap-3">
-      <div class="min-w-0">
-        <h2 id="upstream-usage-title" class="section-header">{$t('Upstream usage')}</h2>
-        {#if result?.configured}<p class="section-desc break-all">{result.source}</p>{/if}
-      </div>
-      <button type="button" class="btn-secondary" disabled={busy} aria-busy={busy} onclick={refresh}
-        >{$t('Refresh upstream usage')}</button
+  <section class="flex flex-col gap-2" aria-labelledby="upstream-usage-title">
+    <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h2 id="upstream-usage-title" class="section-header shrink-0">{$t('Upstream usage')}</h2>
+      {#if result?.configured}
+        <p class="field-help order-2 w-full min-w-0 tabular-nums md:order-none md:w-auto md:flex-1">
+          <span class="break-all">{result.source}</span> · {$t('Snapshot read at')}: {timestamp(
+            result.snapshot.generatedAt,
+          )}
+        </p>
+      {/if}
+      <button
+        type="button"
+        class="btn-secondary ml-auto shrink-0"
+        disabled={busy}
+        aria-busy={busy}
+        onclick={refresh}>{$t('Refresh upstream usage')}</button
       >
     </header>
     <p class="field-help">
@@ -257,241 +274,302 @@
       </p>{/if}
     {#if result?.configured}
       {@const snapshot = result.snapshot}
-      <p class="field-help tabular-nums">
-        {$t('Snapshot read at')}: {timestamp(snapshot.generatedAt)}
-      </p>
-      {#each snapshot.providers as provider (provider.id)}
-        {#if provider.accounts.length > 0}
-          <h3 class="font-semibold text-ink-strong">{provider.name}</h3>
-          <div class="cards-table-frame compact">
-            <table class="cards-table table-mode:table-fixed">
-              <caption class="sr-only">{provider.name}</caption>
-              <thead class="table-head">
-                <tr>
-                  <th class="px-3 py-2 table-mode:w-1/4">{$t('Account')}</th>
-                  <th class="px-3 py-2 table-mode:w-[45%]">{$t('Quota')}</th>
-                  <th class="px-3 py-2">{$t('Today')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each provider.accounts as account (account.account)}
-                  {@const usage = snapshot.usage.find(
-                    (r) => r.providerId === provider.id && r.account === account.account,
-                  )}
-                  {@const quota = snapshot.quota.find(
-                    (r) => r.providerId === provider.id && r.account === account.account,
-                  )}
-                  {@const plan =
-                    quota?.planType ?? account.anthropicPlanType ?? account.chatgptPlanType}
-                  {@const limitedUntil =
-                    quota?.usageLimitedUntilMs && quota.usageLimitedUntilMs > now
-                      ? quota.usageLimitedUntilMs
-                      : null}
-                  {@const credits = quota?.credits}
-                  {@const spend = quota?.individualLimit}
-                  {@const spendUsed = spend ? spendUsedPercent(spend.remainingPercent) : null}
-                  {@const resetDetails = quota?.resetCreditDetails ?? []}
-                  {@const hasDetails =
-                    Boolean(credits || spend) ||
-                    quota?.resetCredits != null ||
-                    resetDetails.length > 0}
-                  <tr class="align-top">
-                    <td data-label={$t('Account')} class="table-mode:whitespace-normal">
-                      <a
-                        class="link-inline break-all font-medium"
-                        href={`${accountDetailHref(base, provider.id, account.account)}?source=upstream`}
-                        title={$t('View token usage per reset period')}>{account.account}</a
+      {@const rows = snapshot.providers.flatMap((provider) =>
+        provider.accounts.map((account) => ({ provider, account })),
+      )}
+      {@const keyRows = snapshot.apiKeyPools.flatMap((pool) =>
+        pool.accounts.map((account) => ({ pool, account })),
+      )}
+      {#if rows.length > 0}
+        <div class="cards-table-frame overflow-visible">
+          <table class="cards-table">
+            <caption class="sr-only">{$t('Upstream usage')}</caption>
+            <thead class="table-head">
+              <tr>
+                <th class="px-3 py-2">{$t('Provider')}</th>
+                <th class="px-3 py-2">{$t('Today')}</th>
+                <th class="px-3 py-2">{$t('Quota')}</th>
+                <th class="px-3 py-2 table-mode:text-right">{$t('Details')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each rows as { provider, account } (`${provider.id}/${account.account}`)}
+                {@const usage = snapshot.usage.find(
+                  (r) => r.providerId === provider.id && r.account === account.account,
+                )}
+                {@const quota = snapshot.quota.find(
+                  (r) => r.providerId === provider.id && r.account === account.account,
+                )}
+                {@const plan =
+                  quota?.planType ?? account.anthropicPlanType ?? account.chatgptPlanType}
+                {@const limitedUntil =
+                  quota?.usageLimitedUntilMs && quota.usageLimitedUntilMs > now
+                    ? quota.usageLimitedUntilMs
+                    : null}
+                {@const recovery = limitedUntil ? autoRecoverIn(limitedUntil) : ''}
+                {@const stale = quota ? now - quota.capturedAt > STALE_QUOTA_MS : false}
+                {@const spend = quota?.individualLimit}
+                {@const spendUsed = spend ? spendUsedPercent(spend.remainingPercent) : null}
+                <tr class="align-top">
+                  <!-- Provider / account + health, mirroring the subscription table. The
+                     account links to its usage detail, read from the upstream source. -->
+                  <td
+                    data-label={$t('Provider')}
+                    class="table-mode:w-56 table-mode:whitespace-normal"
+                  >
+                    <a
+                      class="group block"
+                      href={`${accountDetailHref(base, provider.id, account.account)}?source=upstream`}
+                      title={$t('View token usage per reset period')}
+                    >
+                      <div
+                        class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline"
                       >
-                      {#if account.email && account.email !== account.account}<div
-                          class="break-all text-xs text-ink-muted"
-                        >
-                          {account.email}
-                        </div>{/if}
-                      <div class="mt-1.5 flex flex-wrap items-center gap-1">
-                        <span class="badge-neutral">{plan ? planLabel(plan) : $t('Unknown')}</span>
-                        <span class={account.healthy ? 'badge-ok' : 'badge-error'}
-                          >{account.healthy ? $t('Healthy') : $t('Needs attention')}</span
-                        >
-                        <span class={account.schedulable ? 'badge-neutral' : 'badge-warning'}
-                          >{account.schedulable ? $t('Enabled') : $t('Paused')}</span
+                        {provider.name}
+                      </div>
+                      <code
+                        class="break-all font-mono text-xs text-ink-strong group-hover:text-indigo-600"
+                      >
+                        {account.account}
+                      </code>
+                    </a>
+                    {#if (account.email && account.email !== account.account) || plan}
+                      <div class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs">
+                        {#if account.email && account.email !== account.account}
+                          <span class="break-all text-ink-body">{account.email}</span>
+                        {/if}
+                        {#if plan}<span class="badge-neutral">{planLabel(plan)}</span>{/if}
+                      </div>
+                    {/if}
+                    <!-- Health (+ parked / rate-limit pill and its recovery time) -->
+                    <div class="mt-1.5 flex flex-wrap items-center gap-1">
+                      {#if account.healthy}
+                        <span class="badge-ok">{$t('connected')}</span>
+                      {:else}
+                        <span class="badge-error">{$t('needs reconnect')}</span>
+                      {/if}
+                      {#if !account.schedulable}
+                        <span class="badge-neutral">{$t('parked')}</span>
+                      {/if}
+                      {#if limitedUntil}
+                        <span class="badge-error">{$t('Rate limited')}</span>
+                        {#if recovery}
+                          <span
+                            class="basis-full text-[10px] text-ink-muted"
+                            title={`${$t('Limited until')}: ${timestamp(limitedUntil)}`}
+                            >{recovery}</span
+                          >
+                        {/if}
+                      {/if}
+                    </div>
+                  </td>
+
+                  <!-- Today's usage; an absent row is unavailable, a zero row is measured. -->
+                  <td data-label={$t('Today')} class="text-xs tabular-nums">
+                    {#if usage}
+                      <div class="text-ink-body">
+                        <span>{$t('{n} req', { n: formatCount(usage.requests) })}</span>
+                        <span class="text-ink-muted">
+                          · {usage.rpm == null ? '—' : numberFormat.format(usage.rpm)} RPM</span
                         >
                       </div>
-                    </td>
+                      <div class="text-ink-muted">
+                        <span>{formatTokens(usage.tokens)} tok</span> ·
+                        <span>{formatUsd(usage.costUsd)}</span>
+                      </div>
+                    {:else}
+                      <span class="text-ink-muted">—</span>
+                    {/if}
+                  </td>
 
-                    <td data-label={$t('Quota')} class="table-mode:whitespace-normal">
-                      <div class="flex w-full max-w-sm flex-col gap-2">
-                        {#if quota}
-                          {#each quota.windows as window (`${window.limitId ?? ''}/${window.key}`)}
-                            {@const label = quotaWindowLabel(window)}
-                            {@const countdown = resetIn(window.resetsAtMs)}
-                            <div>
-                              <div class="mb-1 flex items-baseline justify-between gap-2 text-xs">
-                                <span class="min-w-0 font-medium text-ink-strong">{label}</span>
-                                <span class="shrink-0 tabular-nums text-ink-body"
-                                  >{percentText(window.usedPercent)}</span
-                                >
-                              </div>
-                              {@render usageBar(window.usedPercent, `${label} ${$t('Used')}`)}
-                              <div class="mt-0.5 text-[11px] tabular-nums text-ink-muted">
-                                {#if countdown}{countdown} ·
-                                {/if}{$t('Resets at')}: {timestamp(window.resetsAtMs)}
-                              </div>
-                            </div>
-                          {/each}
-                          {#if quota.windows.length === 0}
-                            <span class="text-xs text-ink-muted">{$t('Quota unavailable')}</span>
-                          {/if}
-                          {#if limitedUntil || quota.rateLimitReachedType}
-                            <div class="flex flex-wrap items-center gap-1">
-                              {#if quota.rateLimitReachedType}
-                                <span class="badge-error"
-                                  >{$t('Limit reached')}: {rateLimitLabel(
-                                    quota.rateLimitReachedType,
-                                  )}</span
-                                >
-                              {/if}
-                              {#if limitedUntil}
-                                <span class="badge-warning tabular-nums"
-                                  >{$t('Limited until')}: {timestamp(limitedUntil)}</span
-                                >
-                              {/if}
-                            </div>
-                          {/if}
-                          {#if hasDetails}
-                            <details class="text-xs">
-                              <summary
-                                class="w-fit cursor-pointer select-none rounded text-xs font-medium text-ink-muted hover:text-ink-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-                                >{$t('Details')}</summary
-                              >
-                              <dl
-                                class="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 tabular-nums"
-                              >
-                                {#if credits}
-                                  {@const balance = amount(credits.balance)}
-                                  <dt class="text-ink-muted">{$t('Credits')}</dt>
-                                  <dd
-                                    class="text-ink-body"
-                                    title={credits.unlimited ? undefined : balance.full}
-                                  >
-                                    {credits.unlimited ? $t('Unlimited') : balance.text}
-                                  </dd>
-                                {/if}
-                                {#if quota.resetCredits != null}
-                                  <dt class="text-ink-muted">{$t('Reset credits')}</dt>
-                                  <dd class="text-ink-body">{quota.resetCredits}</dd>
-                                {/if}
-                                {#if spend}
-                                  {@const used = amount(spend.used)}
-                                  {@const limit = amount(spend.limit)}
-                                  <dt class="text-ink-muted">{$t('Spend limit')}</dt>
-                                  <dd class="text-ink-body">
-                                    <span title={used.full}>{used.text}</span> /
-                                    <span title={limit.full}>{limit.text}</span>
-                                  </dd>
-                                  <dt class="text-ink-muted">{$t('Remaining')}</dt>
-                                  <dd class="text-ink-body">
-                                    {percentText(spend.remainingPercent)}
-                                  </dd>
-                                  {#if spendUsed != null}
-                                    <dd class="col-span-2">
-                                      {@render usageBar(
-                                        spendUsed,
-                                        `${$t('Spend limit')} ${$t('Used')}`,
-                                      )}
-                                    </dd>
-                                  {/if}
-                                  <dt class="text-ink-muted">{$t('Resets at')}</dt>
-                                  <dd class="text-ink-body">{timestamp(spend.resetsAtMs)}</dd>
-                                {/if}
-                              </dl>
-                              {#if resetDetails.length > 0}
-                                <ul class="mt-1.5 flex flex-col gap-1 text-ink-muted">
-                                  {#each resetDetails as credit (credit.id)}
-                                    <li class="tabular-nums">
-                                      {credit.title ??
-                                        (credit.resetType === 'codexRateLimits'
-                                          ? $t('Reset credits')
-                                          : $t('Unknown'))} · {creditStatusLabel(credit.status)} · {$t(
-                                        'Expires',
-                                      )}: {timestamp(credit.expiresAt)}
-                                    </li>
-                                  {/each}
-                                </ul>
-                              {/if}
-                            </details>
-                          {/if}
-                          <div class="text-[11px] tabular-nums text-ink-muted">
-                            {$t('Quota captured at')}: {timestamp(quota.capturedAt)}
-                            {#if now - quota.capturedAt > STALE_QUOTA_MS}
-                              <span class="badge-warning ml-1">{$t('Stale quota snapshot')}</span>
-                            {/if}
-                          </div>
-                        {:else}
-                          <span class="text-xs text-ink-muted">{$t('Quota unavailable')}</span>
+                  <!-- Quota windows (+ monthly credit limit), countdowns only; exact
+                     timestamps and amounts live in Details. -->
+                  <td data-label={$t('Quota')}>
+                    {#if quota && (quota.windows.length > 0 || spendUsed != null)}
+                      <div class="flex w-full flex-col gap-1.5 table-mode:w-36">
+                        {#each quota.windows as window (`${window.limitId ?? ''}/${window.key}`)}
+                          {@render quotaTrack(
+                            window.usedPercent,
+                            quotaWindowLabel(window),
+                            window.resetsAtMs,
+                          )}
+                        {/each}
+                        {#if spend && spendUsed != null}
+                          {@render quotaTrack(
+                            spendUsed,
+                            $t('Monthly credit limit'),
+                            spend.resetsAtMs,
+                          )}
                         {/if}
                       </div>
-                    </td>
-
-                    <td data-label={$t('Today')} class="table-mode:whitespace-normal">
-                      {@render trafficCell(usage, true)}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      {/each}
-      {#each snapshot.apiKeyPools as pool (pool.id)}
-        {#if pool.accounts.length > 0}
-          <h3 class="font-semibold text-ink-strong">{pool.id} · {$t('API key accounts')}</h3>
-          <div class="cards-table-frame compact">
-            <table class="cards-table table-mode:table-fixed">
-              <caption class="sr-only">{pool.id} · {$t('API key accounts')}</caption>
-              <thead class="table-head">
-                <tr>
-                  <th class="px-3 py-2 table-mode:w-1/4">{$t('Account')}</th>
-                  <th class="px-3 py-2 table-mode:w-[45%]">{$t('Status')}</th>
-                  <th class="px-3 py-2">{$t('Last 24 hours')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each pool.accounts as account (account.id)}
-                  {@const usage = pool.usage.find((row) => row.account === account.id)}
-                  <tr class="align-top">
-                    <td data-label={$t('Account')} class="table-mode:whitespace-normal">
-                      <span class="break-all font-medium text-ink-body">{account.name}</span>
-                    </td>
-                    <td data-label={$t('Status')} class="table-mode:whitespace-normal">
-                      <div class="flex flex-wrap items-center gap-1">
-                        <span class={account.enabled ? 'badge-neutral' : 'badge-warning'}
-                          >{account.enabled ? $t('Enabled') : $t('Paused')}</span
-                        >
-                        <span class={apiKeyStateBadge(account.state)}
-                          >{apiKeyStateLabel(account.state)}</span
+                    {:else}
+                      <span class="text-xs text-ink-muted" title={$t('Quota unavailable')}>—</span>
+                    {/if}
+                    {#if quota?.rateLimitReachedType}
+                      <div class="mt-1 text-[10px] text-ink-muted">
+                        {rateLimitLabel(quota.rateLimitReachedType)}
+                      </div>
+                    {/if}
+                    {#if stale && quota}
+                      <div class="mt-1.5">
+                        <span
+                          class="badge-warning"
+                          title={`${$t('Quota captured at')}: ${timestamp(quota.capturedAt)}`}
+                          >{$t('Stale quota snapshot')}</span
                         >
                       </div>
-                      {#if account.nextRetryAt}<div
-                          class="mt-1 text-xs tabular-nums text-ink-muted"
+                    {/if}
+                  </td>
+
+                  <!-- Details: exact timestamps, credits and limits for this snapshot. -->
+                  <td data-label={$t('Details')} class="table-mode:text-right">
+                    {#if quota}
+                      {@const credits = quota.credits}
+                      {@const resetDetails = quota.resetCreditDetails ?? []}
+                      <details class="menu">
+                        <summary class="btn-secondary list-none [&::-webkit-details-marker]:hidden"
+                          >{$t('Details')}</summary
                         >
-                          {$t('Retry at')}: {timestamp(account.nextRetryAt)}
-                        </div>{/if}
-                    </td>
-                    <td data-label={$t('Last 24 hours')} class="table-mode:whitespace-normal">
-                      {@render trafficCell(usage, false)}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      {/each}
-      {#if !snapshot.providers.some((provider) => provider.accounts.length) && !snapshot.apiKeyPools.some((pool) => pool.accounts.length)}<p
-          class="empty-state"
-        >
-          {$t('No upstream accounts')}
-        </p>{/if}
+                        <div
+                          class="menu-panel max-h-96 w-72 max-w-[calc(100vw-3rem)] overflow-y-auto whitespace-normal p-3 text-left text-xs"
+                        >
+                          <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 tabular-nums">
+                            <dt class="text-ink-muted">{$t('Quota captured at')}</dt>
+                            <dd class="text-ink-body">
+                              {timestamp(quota.capturedAt)}{#if stale}
+                                · {$t('Stale quota snapshot')}{/if}
+                            </dd>
+                            {#each quota.windows as window (`${window.limitId ?? ''}/${window.key}`)}
+                              <dt class="text-ink-muted">{quotaWindowLabel(window)}</dt>
+                              <dd class="text-ink-body">
+                                {percentText(window.usedPercent)} · {$t('Resets at')}: {timestamp(
+                                  window.resetsAtMs,
+                                )}
+                              </dd>
+                            {/each}
+                            {#if limitedUntil}
+                              <dt class="text-ink-muted">{$t('Limited until')}</dt>
+                              <dd class="text-ink-body">{timestamp(limitedUntil)}</dd>
+                            {/if}
+                            {#if quota.rateLimitReachedType}
+                              <dt class="text-ink-muted">{$t('Limit reached')}</dt>
+                              <dd class="text-ink-body">
+                                {rateLimitLabel(quota.rateLimitReachedType)}
+                              </dd>
+                            {/if}
+                            {#if credits}
+                              {@const balance = amount(credits.balance)}
+                              <dt class="text-ink-muted">{$t('Credits')}</dt>
+                              <dd
+                                class="text-ink-body"
+                                title={credits.unlimited ? undefined : balance.full}
+                              >
+                                {credits.unlimited ? $t('Unlimited') : balance.text}
+                              </dd>
+                            {/if}
+                            {#if quota.resetCredits != null}
+                              <dt class="text-ink-muted">{$t('Reset credits')}</dt>
+                              <dd class="text-ink-body">{quota.resetCredits}</dd>
+                            {/if}
+                            {#if spend}
+                              {@const used = amount(spend.used)}
+                              {@const limit = amount(spend.limit)}
+                              <dt class="text-ink-muted">{$t('Monthly credit limit')}</dt>
+                              <dd class="text-ink-body">
+                                <span title={used.full}>{used.text}</span> /
+                                <span title={limit.full}>{limit.text}</span>
+                              </dd>
+                              <dt class="text-ink-muted">{$t('Remaining')}</dt>
+                              <dd class="text-ink-body">{percentText(spend.remainingPercent)}</dd>
+                              <dt class="text-ink-muted">{$t('Resets at')}</dt>
+                              <dd class="text-ink-body">{timestamp(spend.resetsAtMs)}</dd>
+                            {/if}
+                          </dl>
+                          {#if resetDetails.length > 0}
+                            <ul class="mt-2 flex flex-col gap-1 tabular-nums text-ink-muted">
+                              {#each resetDetails as credit (credit.id)}
+                                <li>
+                                  {credit.title ??
+                                    (credit.resetType === 'codexRateLimits'
+                                      ? $t('Reset credits')
+                                      : $t('Unknown'))} · {creditStatusLabel(credit.status)} · {$t(
+                                    'Expires',
+                                  )}: {timestamp(credit.expiresAt)}
+                                </li>
+                              {/each}
+                            </ul>
+                          {/if}
+                        </div>
+                      </details>
+                    {:else}
+                      <span class="text-xs text-ink-muted">—</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
+      {#if keyRows.length > 0}
+        <h3 class="mt-2 text-sm font-semibold text-ink-strong">{$t('API key accounts')}</h3>
+        <div class="cards-table-frame">
+          <table class="cards-table">
+            <caption class="sr-only">{$t('API key accounts')}</caption>
+            <thead class="table-head">
+              <tr>
+                <th class="px-3 py-2">{$t('Provider')}</th>
+                <th class="px-3 py-2">{$t('Last 24 hours')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each keyRows as { pool, account } (`${pool.id}/${account.id}`)}
+                {@const usage = pool.usage.find((row) => row.account === account.id)}
+                <tr class="align-top">
+                  <td
+                    data-label={$t('Provider')}
+                    class="table-mode:w-56 table-mode:whitespace-normal"
+                  >
+                    <div class="font-medium text-ink-body">{pool.id}</div>
+                    <code class="break-all font-mono text-xs text-ink-strong">{account.name}</code>
+                    <div class="mt-1.5 flex flex-wrap items-center gap-1">
+                      <span class={apiKeyStateBadge(account.state)}
+                        >{apiKeyStateLabel(account.state)}</span
+                      >
+                      {#if !account.enabled}
+                        <span class="badge-neutral">{$t('Paused')}</span>
+                      {/if}
+                      {#if account.nextRetryAt}
+                        <span class="basis-full text-[10px] tabular-nums text-ink-muted"
+                          >{$t('Retry at')}: {timestamp(account.nextRetryAt)}</span
+                        >
+                      {/if}
+                    </div>
+                  </td>
+                  <td data-label={$t('Last 24 hours')} class="text-xs tabular-nums">
+                    {#if usage}
+                      <div class="text-ink-body">
+                        {$t('{n} req', { n: formatCount(usage.requests) })}
+                      </div>
+                      <div class="text-ink-muted">
+                        <span>{formatTokens(usage.tokens)} tok</span> ·
+                        <span>{formatUsd(usage.costUsd)}</span>
+                      </div>
+                    {:else}
+                      <span class="text-ink-muted">—</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
+      {#if rows.length === 0 && keyRows.length === 0}
+        <p class="empty-state">{$t('No upstream accounts')}</p>
+      {/if}
     {/if}
   </section>
 {/if}
