@@ -1258,5 +1258,15 @@
   "Average RPM": "平均每分钟請求數",
   "API key accounts": "API key 帳号",
   "Read-only": "只讀",
-  "Resets at": "重置時間"
+  "Resets at": "重置時間",
+  "Cooldown": "冷卻中",
+  "Credits": "點數餘額",
+  "Enabled": "已啟用",
+  "Healthy": "正常",
+  "Invalid": "需重新驗證",
+  "Needs attention": "需處理",
+  "Paused": "已暫停",
+  "Redeemed": "已兌換",
+  "Redeeming": "兌換中",
+  "Remaining": "剩餘"
 }

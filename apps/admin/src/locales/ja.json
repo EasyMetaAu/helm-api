@@ -1258,5 +1258,15 @@
   "Average RPM": "平均リクエスト数/分",
   "API key accounts": "API キーのアカウント",
   "Read-only": "読み取り専用",
-  "Resets at": "リセット日時"
+  "Resets at": "リセット日時",
+  "Cooldown": "クールダウン中",
+  "Credits": "クレジット",
+  "Enabled": "有効",
+  "Healthy": "正常",
+  "Invalid": "無効",
+  "Needs attention": "要確認",
+  "Paused": "一時停止",
+  "Redeemed": "交換済み",
+  "Redeeming": "交換中",
+  "Remaining": "残り"
 }

@@ -1258,5 +1258,15 @@
   "Average RPM": "Average RPM",
   "API key accounts": "API key accounts",
   "Read-only": "Read-only",
-  "Resets at": "Resets at"
+  "Resets at": "Resets at",
+  "Cooldown": "Cooldown",
+  "Credits": "Credits",
+  "Enabled": "Enabled",
+  "Healthy": "Healthy",
+  "Invalid": "Invalid",
+  "Needs attention": "Needs attention",
+  "Paused": "Paused",
+  "Redeemed": "Redeemed",
+  "Redeeming": "Redeeming",
+  "Remaining": "Remaining"
 }
