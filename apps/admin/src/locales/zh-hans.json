@@ -1258,5 +1258,15 @@
   "Average RPM": "平均每分钟请求数",
   "API key accounts": "API key 账号",
   "Read-only": "只读",
-  "Resets at": "重置时间"
+  "Resets at": "重置时间",
+  "Cooldown": "冷却中",
+  "Credits": "点数余额",
+  "Enabled": "已启用",
+  "Healthy": "正常",
+  "Invalid": "无效",
+  "Needs attention": "需处理",
+  "Paused": "已暂停",
+  "Redeemed": "已兑换",
+  "Redeeming": "兑换中",
+  "Remaining": "剩余"
 }

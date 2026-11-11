@@ -49,7 +49,7 @@ describe('upstream provider usage', () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(response));
     vi.stubGlobal('fetch', fetcher);
     render(UpstreamProviderUsage);
-    await screen.findByText('Claude upstream');
+    await screen.findByRole('heading', { name: 'Claude upstream' });
     expect(screen.getByText('https://helm.example')).toBeInTheDocument();
     expect(screen.getByText('74%')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'remote-account' })).toHaveAttribute(
@@ -65,6 +65,31 @@ describe('upstream provider usage', () => {
       ),
     ).toBe(true);
   });
+  it('shows exhausted quota in danger colors with a readable weekly reset', async () => {
+    const fixture = structuredClone(response);
+    fixture.snapshot.quota[0].windows = [
+      {
+        key: 'primary',
+        usedPercent: 100,
+        resetsAtMs: Date.now() + 5 * 86400000 + 4 * 3600000 + 1800000,
+        windowMinutes: 10080,
+      },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json(fixture)),
+    );
+    const { container } = render(UpstreamProviderUsage);
+    await screen.findByText('100%');
+    expect(screen.getByText('Weekly')).toBeInTheDocument();
+    expect(screen.getByText(/resets in 5d 4h/)).toBeInTheDocument();
+    const progress = screen.getByRole('progressbar');
+    expect(progress).toHaveAttribute('aria-valuenow', '100');
+    expect(progress).toHaveAccessibleName(/Used/i);
+    expect(container.querySelector('.progress-bar.bg-red-500')).toBeInTheDocument();
+    expect(container.querySelector('progress')).toBeNull();
+  });
+
   it('keeps the last successful snapshot and shows failure instead of zero', async () => {
     vi.stubGlobal(
       'fetch',
@@ -74,7 +99,7 @@ describe('upstream provider usage', () => {
         .mockRejectedValue(new Error('offline')),
     );
     render(UpstreamProviderUsage);
-    await screen.findByText('Claude upstream');
+    await screen.findByRole('heading', { name: 'Claude upstream' });
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh upstream usage' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('unavailable'));
     expect(screen.getByText('74%')).toBeInTheDocument();

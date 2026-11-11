@@ -1258,5 +1258,15 @@
   "Average RPM": "평균 분당 요청 수",
   "API key accounts": "API 키 계정",
   "Read-only": "읽기 전용",
-  "Resets at": "초기화 시간"
+  "Resets at": "초기화 시간",
+  "Cooldown": "대기 중",
+  "Credits": "크레딧",
+  "Enabled": "활성화됨",
+  "Healthy": "정상",
+  "Invalid": "유효하지 않음",
+  "Needs attention": "확인 필요",
+  "Paused": "일시 중지",
+  "Redeemed": "사용 완료",
+  "Redeeming": "사용 중",
+  "Remaining": "남은 양"
 }

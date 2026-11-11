@@ -1258,5 +1258,15 @@
   "Average RPM": "Solicitudes por minuto de media",
   "API key accounts": "Cuentas de claves API",
   "Read-only": "Solo lectura",
-  "Resets at": "Se restablece el"
+  "Resets at": "Se restablece el",
+  "Cooldown": "En espera",
+  "Credits": "Créditos",
+  "Enabled": "Habilitado",
+  "Healthy": "Correcto",
+  "Invalid": "No válido",
+  "Needs attention": "Requiere atención",
+  "Paused": "En pausa",
+  "Redeemed": "Canjeado",
+  "Redeeming": "Canjeando",
+  "Remaining": "Restante"
 }
