@@ -11,6 +11,7 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ```text
 blocked direct model           # per-key hard reject; lane names are not model patterns
   > image-output model         # exact candidate (telemetry lane `image`), any key; suppressed while over-budget degrading
+  > explicitly granted lane    # allowed_lanes contains the exact lane; no custom-model capability needed
   > exact lane name            # configured lane; full fallback chain; allow_custom_model keys only
   > exact known model          # deployment-known model; single candidate; allow_custom_model keys only
   > exact model-alias entry    # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
@@ -23,10 +24,15 @@ blocked direct model           # per-key hard reject; lane names are not model p
   > signal feedback (opt-in)   # post-selection promotion of degraded ranked lanes inside caps
 ```
 
-The **model-alias compatibility shim** and explicit model/lane passthrough are
-both **gated on `allow_custom_model`** (and suppressed while over-budget
-degrading). A key **without** `allow_custom_model` skips both — its `model` field
-is ignored and **every** request is classified (the `auto` path). For a
+An exact configured lane listed in the key’s non-null `allowed_lanes` can be
+selected directly even when `allow_custom_model` is false. That request skips
+classification and paid eval, while preserving blocked-model filtering and budget
+degradation. This does not grant direct provider-model access. Other model input
+and `auto` retain their previous classified behavior for non-custom keys.
+
+The **model-alias compatibility shim** and other explicit model/lane passthrough
+remain **gated on `allow_custom_model`** (and suppressed while over-budget
+degrading). A key **without** `allow_custom_model` skips these paths. For a
 custom-model key, an exact configured lane or deployment-known model is
 authoritative and skips classification/policy. Only otherwise does the shim try
 an exact map entry and then the most-specific wildcard. This prevents a broad
@@ -85,8 +91,9 @@ aliases, so left alone they would get a `400 unknown model`. The shim rewrites
 that inbound `model` field onto a lane (or the `auto` sentinel) **before**
 routing, so a fixed-model client routes cleanly while Helm still only exposes the
 lane abstraction (principle 6 — the literal vendor id is never sent upstream). A
-key **without** `allow_custom_model` does not use the shim at all: its `model`
-field is ignored and the request is classified like `auto` (still no `400`).
+key **without** `allow_custom_model` does not use the shim at all: other `model`
+input is ignored and classified like `auto` (still no `400`); an explicitly
+granted lane uses the direct lane path described above.
 
 The map is [`config/model-aliases.yaml`](../config/model-aliases.yaml): a flat
 table of vendor model id → a lane name or `auto`. After exact configured names
@@ -101,8 +108,9 @@ The shim is **operator-authorized** (the operator owns the mapping) but is
 capability:
 
 1. It applies **only to `allow_custom_model` keys**. A key **without** that
-   capability routes **everything through classification (`auto`)** — its `model`
-   field, even a known vendor id, is **ignored** (never a 400) and the alias map
+   capability classifies other model input as `auto`; explicitly granted lanes skip
+   classification. Other `model` values, even known vendor ids, are **ignored**
+   (never a 400) and the alias map
    is not consulted (see "Explicit client model" below — one rule covers explicit
    models, lanes, and alias-mapped ids).
 2. It runs only after exact lane/model resolution. An unknown fixed vendor id can
@@ -123,8 +131,8 @@ capability:
 
 When a client specifies a concrete model **or a lane name**, classification and
 policy are skipped and the request is executed directly (the nginx pass-through
-equivalent). Whether this is allowed is controlled by the key's
-`allow_custom_model` capability (see
+equivalent). This requires the key's `allow_custom_model` capability, or an exact
+lane explicitly included in the key's `allowed_lanes` (see
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)). The sentinel
 value `auto` is **never** treated as an explicit model — it means "let the router
 decide" and forces classification.
@@ -147,9 +155,9 @@ For an `allow_custom_model` key the `model` field resolves in this order:
 4. Over-budget `degrade` (docs/06) suppresses all explicit and compatibility forms
    — the request is forced onto the degrade lane.
 
-Keys **without** `allow_custom_model` never let the `model` field steer the lane
-(any value classifies like `auto`); it is recorded in telemetry as
-`requested_model`. It is not wholly inert, though — see
+Keys **without** `allow_custom_model` can select an explicitly granted lane.
+Other values retain the classified `auto` behavior and are recorded in telemetry
+as `requested_model`. The requested value is not wholly inert — see
 [In-chain model promotion](#in-chain-model-promotion) below.
 
 ### In-chain model promotion
