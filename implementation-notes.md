@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-11-12 · 受限 Key 显式选择已授权 lane（docs/04、06）
+
+- 明确列在 Key `allowed_lanes` 中的已知 lane 可直接选择，无需 `allow_custom_model`，避免该固定入口触发付费分类 eval；继续使用 lane 内模型禁用过滤及预算降级。
+- 保留其他 model、auto、空 model 以及无 lane 白名单的普通 Key 既有分类语义，不新增模型白名单或数据库字段。现有两把 lane 受限 Key 过去 30 天无遥测记录，不把该缺失当作不受影响的证明。
+- Luma 本批后端固定 lane、max_output_tokens=512、最多 3 次文本与 10 句/2000 码点语音；正文长度与串行由其后端执行。生产 concurrency_queue_enabled 仍关闭，Key concurrency_limit 不宣称生效，不修改其他项目的全局 eval 或并发设置。
+- `pnpm release:prepare 0.30.83` 已核实 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录保持不变。CI 沿用 docs/g4-speech-media-ci-sql-review.md 已审查且未改动的隔离合成数据库查询范围；本次无 schema 或 SQL 改动。
+
 ## 2026-11-12 · G4 语音、时间戳与费用（docs/05、06、15）
 
 - 线上验收补正（0.30.82）：百炼未传 sample_rate 时按官方默认使用 22050 Hz；MiniMax 仍为 32000 Hz，显式合法值保留。百炼不支持的采样率在连接前拒绝，HTTP 与 WS 一致。v0.30.81 已通过 MiniMax／百炼 Qwen-Audio HTTP、WS 原生时戳及百炼 ASR；百炼美元费用仍缺 FX，CosyVoice 3.5 缺匹配音色，不据此宣布全部验收完成。
@@ -73,16 +80,9 @@
 - 官方静态 API Key 出站补充精确识别这句 SDK 身份，复用既有副本清理；JSON、流式和 token 计数一致处理。业务文本中引用该句仍保留，OAuth 与第三方 relay 行为不变，未更改账户暂停策略。
 - 先复现 4 项失败再实现一行判定，相关身份、协议与账号池 201 项测试通过。发布准备执行 `pnpm release:prepare 0.30.71`，Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77 快照不变。
 
-## 2026-11-07 · 官方 Claude API 身份边界与 ZenMux 成本（docs/04、05、07、11）
-
-- 官方 Anthropic API Key 路径只删除独立的 Claude Code 身份和 billing system 标记，以及专用 CLI Header／OAuth beta；业务 system、metadata、签名历史和工具内容保持原样。OAuth 订阅身份校验和第三方 relay 透传不变。清理使用请求副本，并记录 mutation ledger。
-- ZenMux 的点号模型 ID 保持原样，定价按完整 provider alias 查找，不跨供应商套价。新增三个 5.5 价格条目、配套能力元数据及已确认的 global=1；其他未知地区继续返回未计量。
-- Anthropic 金额字段在用量边界统一接收非负有限数字或十进制金额字符串，流式按最后有效累计金额取值，不相加；优先使用上游金额，再按目录估算。原始响应保持不变。
-- API 账户额外保存经凭据清理的上游错误说明，旧记录可缺省；测试恢复或更换 key 后清空旧说明。未改余额故障的暂停策略，也未执行历史成本重算。
-- 验证：353 项定向单测／集成检查、1 项 API 账户管理浏览器流程通过；shared/core 构建、core/gateway/admin 类型检查及 admin 构建通过。改动文件 Biome 无错误，保留既有警告。独立只读审查无 P0/P1 发现。
-- 发布准备：执行 `pnpm release:prepare 0.30.70`；Codex 稳定快照升至 0.167.0，同 tag 模型目录内容未变，Claude Code 同步至经增量静态审查的 2.1.319，Grok 1.0.77 保持不变。协议头白名单不变，审查证据见 `docs/claude-protocol-safety.md`。另 24 项版本／模型兼容定向测试通过。
-
 ## 更早历史总览
+
+2026-11-07：官方 Claude API 清理客户端身份、ZenMux 精确别名计价与金额字段验证；完整记录见 git history。
 
 2026-11-06：Claude 账号设备、会话及版本一致性与边界验证；完整记录见 git history。
 

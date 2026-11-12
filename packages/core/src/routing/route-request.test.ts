@@ -120,6 +120,101 @@ function deps(over: Partial<RouteDeps> = {}): RouteDeps {
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
+describe("routeRequest — lane-restricted keys without custom models", () => {
+  const lane = "luma-text-acceptance";
+  const model = "deepseek-responses/deepseek-flash";
+  function restrictedDeps() {
+    return deps({
+      lanes: {
+        ...LANES,
+        [lane]: { primary: model, fallback: [], constraints: {} },
+      } as LanesConfig,
+      isKnownModel: (candidate) => candidate === model || candidate === "image-model",
+      isImageModel: (candidate) => candidate === "image-model",
+    });
+  }
+  const options = {
+    allowCustomModel: false,
+    keyCaps: { allowedLanes: [lane] },
+  };
+
+  it.each([
+    "openai_chat",
+    "openai_responses",
+    "anthropic_messages",
+    "gemini",
+  ] as const)("selects the allowed lane without classification for %s", async (protocol) => {
+    const d = restrictedDeps();
+    const result = await routeRequest(req({ requested_model: lane, protocol }), d, options);
+
+    expect(result.final.status).toBe("ok");
+    expect(d.classify).not.toHaveBeenCalled();
+    expect(d.execute).toHaveBeenCalledOnce();
+    expect((d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toEqual({
+      selected_lane: lane,
+      candidate_chain: [model],
+      explicit_model: null,
+    });
+    const record = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(record.cost_breakdown.eval_usd).toBeNull();
+  });
+
+  it.each([
+    "premium",
+    model,
+  ])("keeps the existing classified behavior for other model input %s", async (requested_model) => {
+    const d = restrictedDeps();
+    const result = await routeRequest(req({ requested_model }), d, options);
+
+    expect(d.classify).toHaveBeenCalledOnce();
+    if (result.final.status === "ok") {
+      const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+      expect(plan.explicit_model).toBeNull();
+      expect(plan.candidate_chain).toEqual([model]);
+    }
+  });
+
+  it("still rejects a blocked candidate in the allowed lane", async () => {
+    const d = restrictedDeps();
+    const result = await routeRequest(req({ requested_model: lane }), d, {
+      ...options,
+      keyCaps: { allowedLanes: [lane], blockedModels: [model] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(d.classify).not.toHaveBeenCalled();
+    expect(d.execute).not.toHaveBeenCalled();
+  });
+
+  it("keeps auto and unrestricted default keys on the classified path", async () => {
+    for (const [requested_model, keyCaps] of [
+      ["auto", { allowedLanes: ["coding"] }],
+      ["coding", { allowedLanes: null }],
+    ] as const) {
+      const d = restrictedDeps();
+      const result = await routeRequest(req({ requested_model }), d, {
+        allowCustomModel: false,
+        keyCaps: { allowedLanes: keyCaps.allowedLanes ? [...keyCaps.allowedLanes] : null },
+      });
+
+      expect(result.final.status).toBe("ok");
+      expect(d.classify).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("preserves budget degradation instead of pinning the requested allowed lane", async () => {
+    const d = restrictedDeps();
+    const result = await routeRequest(req({ requested_model: lane }), d, {
+      allowCustomModel: false,
+      keyCaps: { allowedLanes: [lane, "economy"], degradeLane: "economy" },
+    });
+
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+});
+
 describe("routeRequest — orchestration", () => {
   it("pins a registry-validated Responses continuation before classification", async () => {
     const d = deps();

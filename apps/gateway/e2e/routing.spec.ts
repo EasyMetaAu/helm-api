@@ -202,6 +202,56 @@ test.describe("routing e2e", () => {
     expect(body.error.message).toContain("totally-made-up-model");
   });
 
+  test("a lane-restricted key selects its allowed lane without custom-model access", async ({
+    request,
+  }) => {
+    const admin = { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) };
+    const lane = "restricted-lane-e2e";
+    const laneResponse = await request.put(`/admin/api/lanes/${lane}`, {
+      headers: admin,
+      data: { primary: EXPLICIT_DIRECT_OPENAI_ALIAS, fallback: [] },
+    });
+    expect(laneResponse.status()).toBe(200);
+    let keyId: string | undefined;
+    try {
+      const minted = await request.post("/admin/api/keys", {
+        headers: admin,
+        data: { allowed_lanes: [lane], allow_custom_model: false, request_content_mode: "none" },
+      });
+      expect(minted.status()).toBe(201);
+      const key = await minted.json();
+      keyId = key.key_id;
+      const res = await request.post("/v1/chat/completions", {
+        headers: { Authorization: `Bearer ${key.plaintext}` },
+        data: chat("Prove step by step the theorem and derive the integral.", { model: lane }),
+      });
+      expect(res.status()).toBe(200);
+      expect(res.headers()["x-helm-lane"]).toBe(lane);
+      expect(res.headers()["x-helm-final-model"]).toBe(EXPLICIT_DIRECT_OPENAI_ALIAS);
+      const requestId = res.headers()["x-helm-request-id"];
+      expect(requestId).toBeTruthy();
+      await expect
+        .poll(async () => {
+          const detail = await request.get(`/admin/api/requests/${requestId}`, { headers: admin });
+          return detail.status() === 200 ? detail.json() : null;
+        })
+        .toMatchObject({
+          policy: { reason: "explicit lane passthrough" },
+          lane: { candidate_chain: [EXPLICIT_DIRECT_OPENAI_ALIAS] },
+          cost_breakdown: { eval_usd: null },
+        });
+    } finally {
+      if (keyId) {
+        expect((await request.delete(`/admin/api/keys/${keyId}`, { headers: admin })).ok()).toBe(
+          true,
+        );
+      }
+      expect((await request.delete(`/admin/api/lanes/${lane}`, { headers: admin })).ok()).toBe(
+        true,
+      );
+    }
+  });
+
   test("explicit KNOWN model alias still passes through verbatim", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat("hi thanks, ok", { model: EXPLICIT_DIRECT_OPENAI_ALIAS }),

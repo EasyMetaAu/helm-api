@@ -808,7 +808,13 @@ async function plan(
   //     loud allowed_lanes rejection; exact models remain single-candidate passthrough.
   //     Both are suppressed while over-budget degrading, just like before.
   const explicitEligible = isExplicitRequestEligible(req, opts);
-  if (explicitEligible && hasLane(deps.lanes, req.requested_model)) {
+  // A key's explicit lane grant is sufficient to select that lane without the
+  // custom-model capability or a potentially paid classification call. Other
+  // model input keeps the existing classified behavior for non-custom keys.
+  const allowedLaneRequested =
+    opts.keyCaps?.allowedLanes?.includes(req.requested_model) === true &&
+    (opts.keyCaps.degradeLane === undefined || opts.keyCaps.degradeLane === null);
+  if ((explicitEligible || allowedLaneRequested) && hasLane(deps.lanes, req.requested_model)) {
     return explicitLaneDecision(req, deps, opts);
   }
   const exactModelKnown = explicitEligible ? deps.isKnownModel?.(req.requested_model) : undefined;
