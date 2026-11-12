@@ -2,6 +2,7 @@ import { consumeResponseTextWithinBudget, ResponseWorkCapacityError } from "@hel
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import { registerApiKeyPoolRoutes } from "./api-key-pools.js";
+import { registerArkAssetRoutes } from "./ark-assets.js";
 import { registerClassifierRoutes } from "./classifier.js";
 import { registerCleanupRoutes } from "./cleanup.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -51,6 +52,7 @@ export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerPoliciesRoutes(app, deps);
   registerClassifierRoutes(app, deps);
   registerKeysRoutes(app, deps);
+  registerArkAssetRoutes(app, deps);
   registerMemoryRoutes(app, deps);
   registerRequestsRoutes(app, deps);
   registerStatsRoutes(app, deps);

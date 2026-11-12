@@ -120,20 +120,31 @@ const VideoText = z.strictObject({
     "Use structured parameters; inline command flags are unsupported",
   ),
 });
+export const ArkAssetIdSchema = z
+  .string()
+  .max(128)
+  .regex(/^asset-[A-Za-z0-9-]+$/);
+const AssetUri = z
+  .string()
+  .refine(
+    (value) => value.startsWith("asset://") && ArkAssetIdSchema.safeParse(value.slice(8)).success,
+    "Expected an enrolled asset URI",
+  );
 const Source = z.strictObject({ url: ArkMediaUrlSchema });
+const SeedanceSource = z.strictObject({ url: z.union([ArkMediaUrlSchema, AssetUri]) });
 const VideoImage = z.strictObject({
   type: z.literal("image_url"),
-  image_url: Source,
+  image_url: SeedanceSource,
   role: z.enum(["first_frame", "last_frame", "reference_image"]),
 });
 const VideoSource = z.strictObject({
   type: z.literal("video_url"),
-  video_url: Source,
+  video_url: SeedanceSource,
   role: z.literal("reference_video"),
 });
 const AudioSource = z.strictObject({
   type: z.literal("audio_url"),
-  audio_url: Source,
+  audio_url: SeedanceSource,
   role: z.literal("reference_audio"),
 });
 const VideoRatio = z.enum(["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]);

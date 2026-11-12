@@ -16,6 +16,7 @@ import {
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { ArkAssetAccessError, type ArkAssetReference } from "../ark-asset-grants.js";
 import { clientPolicyRejection } from "../middleware/client-policy.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
@@ -63,6 +64,7 @@ type MediaTaskKind = ArkTaskKind | "transcription";
 const VIDEO_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface VideoCreateTarget {
+  arkAssetScope?: string;
   nativeTask?: NativeMediaTaskProfile;
   providerType?: "ark";
   laneName?: string;
@@ -85,6 +87,11 @@ export interface VideoCreateTarget {
 export type VideoCreateOperation = "generation" | "extension";
 
 export interface VideosRouteDeps {
+  authorizeArkAssets?: (
+    identity: MessagesIdentity,
+    target: VideoCreateTarget,
+    assets: ArkAssetReference[],
+  ) => Promise<void>;
   isNativeSelection?: (model: string) => boolean;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   registry: AtomicResponsesRegistryPort;
@@ -311,6 +318,7 @@ export function registerMediaTaskRoutes(
         : new Set<string>();
   app.use(createPath, concurrencyReleaseGuard());
   app.use(createPath, memoryAdmissionReleaseGuard());
+  if (kind === "video") app.use(`${root}/validate`, memoryAdmissionReleaseGuard());
   app.use(`${root}/extensions`, concurrencyReleaseGuard());
   app.use(`${root}/extensions`, memoryAdmissionReleaseGuard());
   app.use(`${root}/:requestId`, concurrencyReleaseGuard());
@@ -319,6 +327,7 @@ export function registerMediaTaskRoutes(
   const createVideo = async (
     c: Context<AppEnv>,
     operation: VideoCreateOperation,
+    validateOnly = false,
   ): Promise<Response> => {
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (identity === null)
@@ -454,6 +463,39 @@ export function registerMediaTaskRoutes(
     ) {
       return errorJson(c, 400, "video model is blocked for this key", "model_blocked");
     }
+    if (isArk && kind === "video") {
+      const parsed = parseArkTaskRequest("video", body, target.providerModel);
+      const assets: ArkAssetReference[] = [];
+      if (parsed.success)
+        for (const item of parsed.data.content) {
+          if (item.type === "text") continue;
+          const mediaType =
+            item.type === "image_url" ? "image" : item.type === "video_url" ? "video" : "audio";
+          const url =
+            item.type === "image_url"
+              ? item.image_url.url
+              : item.type === "video_url"
+                ? item.video_url.url
+                : item.audio_url.url;
+          if (url.startsWith("asset://")) assets.push({ assetId: url.slice(8), mediaType });
+        }
+      if (assets.length) {
+        try {
+          if (!deps.authorizeArkAssets) throw new ArkAssetAccessError(403, "Asset access denied");
+          await deps.authorizeArkAssets(identity, target, assets);
+        } catch (error) {
+          const denied = error instanceof ArkAssetAccessError && error.status === 403;
+          return errorJson(
+            c,
+            denied ? 403 : 503,
+            denied ? "Asset access denied" : "Asset authorization unavailable",
+            denied ? "asset_access_denied" : "asset_authorization_unavailable",
+          );
+        }
+      }
+    }
+    if (validateOnly && (!isArk || kind !== "video"))
+      return errorJson(c, 400, "Validation is available for Seedance only", "invalid_request");
     if (identity.caps?.budget?.weeklyAnchor != null && identity.caps.budget.tokens != null)
       return errorJson(
         c,
@@ -480,6 +522,7 @@ export function registerMediaTaskRoutes(
       }
     }
 
+    if (validateOnly) return c.json({ valid: true, upstream_verified: false });
     const now = deps.now ?? Date.now;
     const startedAt = now();
     const upstreamBody = isArk || isNative ? body : normalizeVideoCreateBody(body, operation);
@@ -652,6 +695,7 @@ export function registerMediaTaskRoutes(
   };
 
   app.post(createPath, (c) => createVideo(c, "generation"));
+  if (kind === "video") app.post(`${root}/validate`, (c) => createVideo(c, "generation", true));
   if (kind === "video") app.post(`${root}/extensions`, (c) => createVideo(c, "extension"));
 
   app.use(`${root}/operations/:operationId`, concurrencyReleaseGuard());

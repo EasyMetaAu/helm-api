@@ -605,6 +605,43 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           },
         ]),
       ),
+      "/v1/videos/validate": {
+        post: {
+          tags: ["Inference"],
+          summary: "Validate Seedance input and enrolled asset grants without generation",
+          description:
+            "Checks the current Helm key, model policy, request schema and per-key asset grants. Does not contact Ark, reserve a task or verify upstream enrollment. A later create is checked again.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ArkVideoGenerationRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Local validation passed; no task created",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: { valid: { const: true }, upstream_verified: { const: false } },
+                    required: ["valid", "upstream_verified"],
+                  },
+                },
+              },
+            },
+            "400": errorResponse("Invalid Seedance request"),
+            "401": errorResponse("Invalid key"),
+            "403": errorResponse("Asset or lane access denied"),
+            "422": errorResponse("Unsupported budget"),
+            "429": errorResponse("Budget exceeded"),
+            "503": errorResponse("Provider or authorization storage unavailable"),
+          },
+        },
+      },
       "/v1/videos/generations": {
         post: {
           tags: ["Inference"],
@@ -612,7 +649,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           description:
             "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
             "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
-            "the paid create is attempted once. Seedance uses model seedance-video with Ark content items; its request_id is a Helm-owned UUID retained for seven days. Unknown USD pricing rejects spend-capped keys.",
+            "the paid create is attempted once. Seedance uses model seedance-video with Ark content items; its request_id is a Helm-owned UUID retained for seven days. Enrolled asset:// references require an administrator grant bound to this Helm key and the current Ark credential. Unknown USD pricing rejects spend-capped keys.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,

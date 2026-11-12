@@ -19,7 +19,7 @@
 
 所有请求对象及其嵌套对象均为严格 Zod 对象：未知字段报错，不剥离、不透传、不强制转换、不自动补默认值。已省略的默认值交由上游处理。类型统一 `z.infer`。响应同样严格；未来字段或状态需显式评估，不能误报成功。响应解析失败不允许重发创建请求。
 
-本期输入统一只接受 **HTTPS DNS 主机名 URL**，允许 query（例如签名 URL）。拒绝 HTTP、data/Base64 输入、素材 ID、相对地址、IP 字面量（含 URL 规范化后的十进制 IP）、localhost/`.local`/`.internal`/`.lan`/`.home`/`.invalid`、自定义端口、userinfo、fragment、空白和反斜线。该限制是 Helm 本期约束，方舟官方还支持部分 Base64/素材输入。`b64_json` **输出**仍受支持。
+普通媒体输入接受 **HTTPS DNS 主机名 URL**，允许 query（例如签名 URL）。Seedance 另支持经过下文逐 key 授权的 `asset://` 入库素材；其他输入拒绝素材 ID。所有媒体 URL 拒绝 HTTP、data/Base64 输入、相对地址、IP 字面量（含 URL 规范化后的十进制 IP）、localhost/`.local`/`.internal`/`.lan`/`.home`/`.invalid`、自定义端口、userinfo、fragment、空白和反斜线。该限制是 Helm 本期约束，方舟官方还支持部分 Base64/素材输入。`b64_json` **输出**仍受支持。
 
 URL schema 只做语法准入，不做 DNS 解析、不声称证明地址公网可达，也不检测 DNS 重绑定。Helm 不下载输入媒体或代理输出。DNS 指向、媒体大小/时长/编码/透明通道由上游校验；集成不得引入未授权远程探测。若以后在 Helm 下载，须另加连接时 IP/重定向验证与大小限制，不能依赖此 schema 防 SSRF。
 
@@ -211,3 +211,22 @@ Seed3D：`POST /v1/3d/generations`，单图GLB。
 ## 2026-10-14 实测字段补充
 
 Seed3D 查询实测 running 响应包含 `service_tier`、`execution_expires_after`、`draft`、`priority`。这些公共任务字段已加入严格响应 schema；请求字段与未知字段拒绝保持不变。真实模型状态见后续 T13 验收记录。
+
+
+## Enrolled Seedance assets
+
+Seedance image, video and audio input sources accept `asset://asset-...` in addition to the existing HTTPS URLs. Seedream, Seed3D and output URLs retain the HTTPS-only contract. Enrollment, identity certification and consent remain Ark account operations; Helm does not enroll or inspect media.
+
+An administrator must grant each asset and its media type to one Helm key. Grants bind the immutable key ID and tenant to the actual static Ark client credential and normalized endpoint. Sibling keys receive no implicit access. Replacing an Ark credential or endpoint invalidates grants; changing the Helm key secret with the same key ID preserves them. Each create rereads the grant before reserving or sending a task. Revocation affects new requests; an already-authorized in-flight create cannot be recalled.
+
+Behind existing admin authentication, `GET /admin/api/keys/:id/ark-assets` returns the current revision and grants. `PUT` replaces the list with optimistic concurrency (409 on a stale revision). An empty list revokes all assets. Example using synthetic identifiers:
+
+```json
+{"revision":null,"providerName":"ark","attestation":"same-account-project-enrolled","assets":[{"assetId":"asset-example-001","mediaType":"image"}]}
+```
+
+The attestation records the operator's confirmation that enrollment and the configured Ark credential belong to the same account/project. `attestedAt` records when the grant was saved. It is **not an upstream lookup or certification result**. The private credential binding is never returned. `active` means the stored binding matches the running client, not that Ark has accepted a generation.
+
+Clients use `model: "seedance-video"`, `omni_reference_task_type: "reference"`, and e.g. `{"type":"image_url","image_url":{"url":"asset://asset-example-001"},"role":"reference_image"}`. Explicit `watermark:false` is preserved. Every asset must match both the granted ID and media type. A missing or mismatched grant returns generic 403 `asset_access_denied`; malformed/unavailable authorization storage returns 503. Neither sends upstream traffic.
+
+`POST /v1/videos/validate` accepts the same body and Bearer key. It returns `{"valid":true,"upstream_verified":false}` after local schema, model, lane, budget and asset checks, without calling Ark or reserving a task. It is not a promise that a future create will succeed; create rechecks current grants. No paid generation is required for deployment verification. A real upstream generation remains a separately authorized acceptance step.

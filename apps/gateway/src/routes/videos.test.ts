@@ -2,6 +2,7 @@ import { createArkMediaClient, type ResponsesRegistryRecord } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { RecordServedDeps } from "./payload-capture.js";
 import { registerVideosRoute, type VideosRouteDeps } from "./videos.js";
@@ -1231,4 +1232,70 @@ it("keeps the legacy invalid-model boundary when a non-native target is unavaila
   const response = await post(app, { model: "static/video", prompt: "bird" });
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+});
+
+it("checks every Seedance asset before reserving; validate never creates", async () => {
+  const s = setupArk();
+  const body = {
+    ...arkBody(),
+    watermark: false,
+    omni_reference_task_type: "reference",
+    content: [
+      {
+        type: "image_url",
+        image_url: { url: "asset://asset-synthetic-001" },
+        role: "reference_image",
+      },
+    ],
+  };
+  const denied = await post(s.app, body);
+  expect(denied.status).toBe(403);
+  expect(s.records.size).toBe(0);
+  expect(s.create).not.toHaveBeenCalled();
+  const authorizeArkAssets = vi.fn(async () => {});
+  const app = s.restart({ authorizeArkAssets });
+  const preflight = await app.request("/v1/videos/validate", {
+    method: "POST",
+    headers: { Authorization: "Bearer k", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  expect(preflight.status).toBe(200);
+  expect(await preflight.json()).toEqual({ valid: true, upstream_verified: false });
+  expect(s.create).not.toHaveBeenCalled();
+  expect(s.records.size).toBe(0);
+  expect((await post(app, body)).status).toBe(200);
+  expect(s.create).toHaveBeenCalledTimes(1);
+  expect(s.create.mock.calls[0]?.[0]).toMatchObject({ watermark: false, content: body.content });
+  expect(authorizeArkAssets).toHaveBeenCalledTimes(2);
+});
+
+it.each([true, false])("releases validation request memory when authorized=%s", async (allowed) => {
+  const s = setupArk();
+  const memoryAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: 100000,
+    jsonAmplification: 2,
+  });
+  const app = s.restart({
+    memoryAdmission,
+    ...(allowed ? { authorizeArkAssets: async () => {} } : {}),
+  });
+  const body = {
+    ...arkBody(),
+    omni_reference_task_type: "reference",
+    content: [
+      {
+        type: "image_url",
+        image_url: { url: "asset://asset-synthetic-001" },
+        role: "reference_image",
+      },
+    ],
+  };
+  const response = await app.request("/v1/videos/validate", {
+    method: "POST",
+    headers: { Authorization: "Bearer k", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  expect(response.status).toBe(allowed ? 200 : 403);
+  expect(memoryAdmission.reservedBytes).toBe(0);
+  expect(s.create).not.toHaveBeenCalled();
 });

@@ -426,3 +426,26 @@ describe("Ark boundary integration", () => {
     }
   });
 });
+
+it("binds asset grants to captured static credential and normalized endpoint", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ id: "task-test" }));
+  const config = { baseUrl, apiKey };
+  const client = createArkMediaClient({ config, fetch });
+  expect(client.arkAssetScope).toBe(setup(fetch, { baseUrl: `${baseUrl}/` }).client.arkAssetScope);
+  expect(client.arkAssetScope).not.toBe(setup(fetch, { apiKey: "new-key" }).client.arkAssetScope);
+  expect(client.arkAssetScope).not.toBe(
+    setup(fetch, { baseUrl: "https://other.example.test" }).client.arkAssetScope,
+  );
+  expect(
+    setup(fetch, { resolveBaseUrl: async () => baseUrl }).client.arkAssetScope,
+  ).toBeUndefined();
+  expect(
+    setup(fetch, { apiKey: undefined, getAuthHeader: async () => "Bearer dynamic" }).client
+      .arkAssetScope,
+  ).toBeUndefined();
+  config.apiKey = "mutated";
+  await client.videoGeneration(video);
+  expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+    `Bearer ${apiKey}`,
+  );
+});
