@@ -24,6 +24,7 @@ export const MediaSpeechCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("start"),
     request: MediaSpeechRequestSchema.omit({ input: true, stream: true }).extend({
+      sample_rate: MediaSpeechRequestSchema.shape.sample_rate.removeDefault().optional(),
       max_input_characters: z.number().int().positive().max(10000).optional(),
     }),
   }),

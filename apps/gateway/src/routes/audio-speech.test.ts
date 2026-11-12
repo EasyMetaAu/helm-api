@@ -35,6 +35,24 @@ function setup(caps: Record<string, unknown> = {}) {
   return { call, speech, release, resolve, identity, deps };
 }
 describe("audio speech route", () => {
+  it.each([
+    undefined,
+    24000,
+  ])("uses the selected provider default only when sample_rate is omitted (%s)", async (sampleRate) => {
+    const x = setup();
+    x.resolve.mockReturnValue({ ...x.resolve(), defaultSampleRate: 22050 });
+    const result = await x.call({
+      ...body,
+      ...(sampleRate === undefined ? {} : { sample_rate: sampleRate }),
+    });
+    expect(result.status).toBe(200);
+    expect(x.speech.mock.calls[0]?.[0].sample_rate).toBe(sampleRate ?? 22050);
+  });
+  it("keeps the existing sample rate when no provider default is supplied", async () => {
+    const x = setup();
+    expect((await x.call()).status).toBe(200);
+    expect(x.speech.mock.calls[0]?.[0].sample_rate).toBe(32000);
+  });
   it("preserves successful paid audio when accounting fails", async () => {
     const x = setup();
     x.deps.record = async () => {

@@ -280,7 +280,11 @@ export function mountAudioTtsWebSocket({
                 "unsupported_profile",
                 "speech sessions are unavailable",
               );
-            const { max_input_characters, ...speechRequest } = command.request;
+            const { max_input_characters, ...input } = command.request;
+            const speechRequest = {
+              ...input,
+              sample_rate: input.sample_rate ?? selection.defaultSampleRate ?? 32000,
+            };
             textLimit = max_input_characters;
             if (account.caps?.budget?.spendUsd != null && textLimit === undefined)
               throw new SpeechAdmissionError(

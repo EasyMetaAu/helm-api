@@ -5447,6 +5447,7 @@ export async function buildServer(
             streamSpeech: client.streamSpeech,
             openSpeechSession: client.openSpeechSession,
           },
+          ...(p.type === "bailian-media" ? { defaultSampleRate: 22050 } : {}),
           pricing: catalog.get(alias)?.pricing.media,
           model: target.value.providerModel,
           alias,

@@ -29,6 +29,7 @@ import type { GeminiRateLimiterPort } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
 
 export interface SpeechSelection {
+  defaultSampleRate?: number;
   pricing?: MediaPricing;
   client: Pick<SpeechClient, "ttsSpeech"> & Partial<SpeechClient>;
   model: string;
@@ -248,7 +249,8 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         c.req.header("user-agent") ?? null,
         !!deps.accounting,
       );
-      const parsed = MediaSpeechRequestSchema.safeParse(await readBody(c.req.raw));
+      const requestBody = await readBody(c.req.raw);
+      const parsed = MediaSpeechRequestSchema.safeParse(requestBody);
       if (!parsed.success)
         throw new SpeechAdmissionError(
           400,
@@ -265,7 +267,15 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           "timestamps require non-streaming JSON output; use WebSocket for timestamp events",
         );
       const selection = await resolveSpeechSelection(deps, parsed.data.model, identity);
-      const req = { ...parsed.data, model: selection.model };
+      const sampleRateProvided =
+        typeof requestBody === "object" && requestBody !== null && "sample_rate" in requestBody;
+      const req = {
+        ...parsed.data,
+        model: selection.model,
+        sample_rate: sampleRateProvided
+          ? parsed.data.sample_rate
+          : (selection.defaultSampleRate ?? parsed.data.sample_rate),
+      };
       lease = await acquireSpeechLease(
         deps,
         identity,
