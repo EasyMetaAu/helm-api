@@ -9,6 +9,7 @@
 
 ## 2026-11-12 · G4 语音、时间戳与费用（docs/05、06、15）
 
+- 线上验收补正（0.30.82）：百炼未传 sample_rate 时按官方默认使用 22050 Hz；MiniMax 仍为 32000 Hz，显式合法值保留。百炼不支持的采样率在连接前拒绝，HTTP 与 WS 一致。v0.30.81 已通过 MiniMax／百炼 Qwen-Audio HTTP、WS 原生时戳及百炼 ASR；百炼美元费用仍缺 FX，CosyVoice 3.5 缺匹配音色，不据此宣布全部验收完成。
 - 增加显式 JSON 音频／原生时间戳结果，旧二进制调用兼容；MiniMax、百炼与豆包事件统一毫秒，缺值不补造。MiniMax 原生时长返回 durationMs。
 - OpenAI gpt-transcribe／Deepgram 文件转写使用独立 provider；豆包 TTS 2.0 使用官方 SSE，WS 在 finish 后发送缓冲文本；豆包录音 ASR 请求 UUID 提交前持久化，未知提交只查询同一 ID。
 - SQLite v58／Postgres v57 增加 media_spend_records，原子预留及幂等结算沿用现有预算表。价格需明确币种转换和计费上界；无依据时 spend-capped key 拒绝。同步 ASR 预算首批仅支持可本地验证时长的单声道 PCM16 WAV；未知结果保留预留，费用为价卡计算值，不冒充供应商发票。

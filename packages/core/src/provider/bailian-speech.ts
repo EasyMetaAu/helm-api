@@ -54,6 +54,8 @@ export function createBailianSpeechClient(
       const req = MediaSpeechRequestSchema.parse({ ...request, input: "session" });
       if (!["mp3", "wav", "pcm"].includes(req.response_format))
         throw new SpeechParameterError("unsupported Bailian speech format");
+      if (![8000, 16000, 22050, 24000, 44100, 48000].includes(req.sample_rate))
+        throw new SpeechParameterError("unsupported Bailian sample_rate");
       const taskId = crypto.randomUUID();
       const signal = AbortSignal.any([
         AbortSignal.timeout(deps.config.timeoutMs ?? 60_000),

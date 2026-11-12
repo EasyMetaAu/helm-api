@@ -7,6 +7,65 @@ import WebSocket from "ws";
 import { mountAudioTtsWebSocket } from "./audio-tts-websocket.js";
 
 describe("speech websocket boundary", () => {
+  it.each([
+    undefined,
+    24000,
+  ])("applies the provider sample rate default to WS only when omitted (%s)", async (sampleRate) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const events = speechQueue<SpeechEvent>(4, 1024, () => {});
+    const openSpeechSession = vi.fn(async (_request: { sample_rate: number }) => ({
+      events,
+      capabilities: { flush: false, cancel: false },
+      append: async () => {},
+      flush: async () => {},
+      cancel: async () => {},
+      finish: async () => {},
+      close: () => events.end(),
+    }));
+    const mount = mountAudioTtsWebSocket({
+      server,
+      deps: {
+        auth: { resolve: async () => ({ keyId: "k", accountId: "a" }) },
+        concurrencyGate: { acquire: async () => ({ ok: true, release: () => {} }) },
+        resolve: () => ({
+          lane: "speech",
+          alias: "ali/tts",
+          model: "tts",
+          customModel: false,
+          defaultSampleRate: 22050,
+          client: {
+            ttsSpeech: async () => ({ audio: new Uint8Array(), contentType: "audio/mpeg" }),
+            openSpeechSession,
+          },
+        }),
+      },
+    });
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${(server.address() as { port: number }).port}/v1/audio/tts`,
+      { headers: { Authorization: "Bearer key" } },
+    );
+    try {
+      await once(ws, "open");
+      ws.send(
+        JSON.stringify({
+          type: "start",
+          request: {
+            model: "speech",
+            voice: "voice",
+            ...(sampleRate === undefined ? {} : { sample_rate: sampleRate }),
+          },
+        }),
+      );
+      await vi.waitFor(() => expect(openSpeechSession).toHaveBeenCalledTimes(1));
+      expect(openSpeechSession.mock.calls[0]?.[0].sample_rate).toBe(sampleRate ?? 22050);
+    } finally {
+      ws.terminate();
+      await mount.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
   it("authenticates upgrade, holds lease until terminal and releases once", async () => {
     const server = createServer();
     server.listen(0, "127.0.0.1");

@@ -24,6 +24,28 @@ const config = {
   speed: 1,
 };
 describe("speech sessions", () => {
+  it.each([
+    32000, 12000,
+  ])("rejects unsupported Bailian sample rate %s before connecting", async (sampleRate) => {
+    let connects = 0;
+    const client = createBailianSpeechClient(
+      { config: { baseUrl: "https://example.test", apiKey: "test" } },
+      {
+        url: "wss://example.test/inference",
+        connect: async () => {
+          connects++;
+          return socket().transport;
+        },
+      },
+    );
+    await expect(
+      client.openSpeechSession(
+        { ...config, sample_rate: sampleRate },
+        { signal: AbortSignal.timeout(25) },
+      ),
+    ).rejects.toThrow("unsupported Bailian sample_rate");
+    expect(connects).toBe(0);
+  });
   it("uses current Ali inference events, emits audio before task finish, rejects flush", async () => {
     const s = socket();
     const pending = createBailianSpeechClient(
