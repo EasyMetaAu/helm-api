@@ -13,6 +13,7 @@
 - OpenAI gpt-transcribe／Deepgram 文件转写使用独立 provider；豆包 TTS 2.0 使用官方 SSE，WS 在 finish 后发送缓冲文本；豆包录音 ASR 请求 UUID 提交前持久化，未知提交只查询同一 ID。
 - SQLite v58／Postgres v57 增加 media_spend_records，原子预留及幂等结算沿用现有预算表。价格需明确币种转换和计费上界；无依据时 spend-capped key 拒绝。同步 ASR 预算首批仅支持可本地验证时长的单声道 PCM16 WAV；未知结果保留预留，费用为价卡计算值，不冒充供应商发票。
 - 供应商真实收费调用、部署与 GPU 后备未验收。WhisperX 旧同步 adapter 已完成本地协议验证，调用后自动后备及新 compute.v1 的接入阻塞与字段交接见 docs/g4-speech-media.md。
+- 发布准备：`pnpm release:prepare 0.30.81` 同步 Codex 0.167.2；Grok 1.0.77、Claude Code 2.1.322 与 Codex 模型目录内容不变。Codex 补丁仅将 Vertex AI 增量工具更新改为默认开启，不增加网关协议能力。完整 CI 既有跨表查询的三角色批准范围和独立测试库条件见 docs/g4-speech-media-ci-sql-review.md。
 
 ## 2026-11-11 · 上游 Providers 只读用量（docs/07、10、11）
 
