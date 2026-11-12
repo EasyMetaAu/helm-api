@@ -1,4 +1,4 @@
-import type { ResponsesRegistryRecord } from "@helm/core";
+import { createArkMediaClient, type ResponsesRegistryRecord } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
@@ -79,6 +79,7 @@ function setup(over: Partial<VideosRouteDeps> = {}) {
   registerVideosRoute(app, deps);
   return {
     app,
+    deps,
     create,
     retrieve,
     registry,
@@ -817,6 +818,112 @@ const pollArk = (app: Hono<AppEnv>, id: string) =>
   app.request(`/v1/videos/${id}`, { headers: { Authorization: "Bearer k" } });
 
 describe("Ark video tasks", () => {
+  it.each([
+    400, 503,
+  ])("persists only safe Ark diagnostics for HTTP %i without retry", async (status) => {
+    const credential = "private-ark-credential";
+    const signedUrl = "https://private.example.test/portrait.png?signature=private-signature";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            code: "InvalidParameter.InputImage",
+            param: "content[1].image_url.url",
+            message: `Failed to download ${signedUrl}; ${credential}; private transcript`,
+          },
+          request_id: "body-request-id",
+        },
+        { status, headers: { "x-request-id": "ark-request-123", location: signedUrl } },
+      ),
+    );
+    const client = createArkMediaClient({
+      config: { apiKey: credential, baseUrl: "https://ark.example.test" },
+      fetch,
+    });
+    const { restart, create } = setupArk();
+    create.mockImplementation((body, signal) => client.videoGeneration(body, { signal }));
+    const { deps, enqueueTelemetry, enqueuePayload } = setup();
+    const log = vi.fn();
+    if (!deps.record) throw new Error("Missing test recorder");
+    const app = restart({ record: { ...deps.record, capturePayloads: () => false }, log });
+    const response = await post(app, arkBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({
+      error: { code: status === 400 ? "upstream_rejected" : "outcome_unknown" },
+    });
+    const detail = enqueueTelemetry.mock.calls[0]?.[0]?.decision.provider_attempts[0]?.error_detail;
+    expect(detail).toEqual({
+      upstream_status: status,
+      message: "Ark media request failed",
+      provider_raw: {
+        error: { code: "InvalidParameter.InputImage", param: "content[1].image_url.url" },
+        request_id: "ark-request-123",
+      },
+    });
+    expect(log).toHaveBeenCalledWith(
+      "video.create_failed",
+      expect.objectContaining({ error_detail: detail, request_id: expect.any(String) }),
+    );
+    const recorded = JSON.stringify([
+      enqueueTelemetry.mock.calls,
+      enqueuePayload.mock.calls,
+      log.mock.calls,
+    ]);
+    for (const secret of [
+      credential,
+      signedUrl,
+      "private-signature",
+      "private transcript",
+      "location",
+    ])
+      expect(recorded).not.toContain(secret);
+    expect(enqueuePayload.mock.calls[0]?.[0]?.responseJson).toBeNull();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      code: "https://private.test/?sig=secret",
+      param: "private transcript",
+      requestId: "data:audio/wav;base64,AAAA",
+    },
+    {
+      code: "private-ark-credential",
+      param: "private-ark-credential",
+      requestId: "private-ark-credential",
+    },
+  ])("omits unsafe diagnostic values and all raw error text", async ({
+    code,
+    param,
+    requestId,
+  }) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { error: { code, param, message: "private transcript" }, request_id: requestId },
+          { status: 400, headers: { "x-request-id": requestId } },
+        ),
+      );
+    const client = createArkMediaClient({
+      config: { apiKey: "private-ark-credential", baseUrl: "https://ark.example.test" },
+      fetch,
+    });
+    const { restart, create } = setupArk();
+    create.mockImplementation((body, signal) => client.videoGeneration(body, { signal }));
+    const { deps, enqueueTelemetry } = setup();
+    const response = await post(restart({ record: deps.record }), arkBody());
+    expect(response.status).toBe(400);
+    expect(
+      enqueueTelemetry.mock.calls[0]?.[0]?.decision.provider_attempts[0]?.error_detail,
+    ).toEqual({
+      upstream_status: 400,
+      message: "Ark media request failed",
+      provider_raw: {},
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each([
     "seedance-video",
     "ark/seedance-2.5",

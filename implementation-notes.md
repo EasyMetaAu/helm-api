@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-11-12 · Ark 媒体失败诊断（docs/07、Ark media）
+
+- 视频／3D 创建错误复用现有 `provider_attempts[].error_detail` 持久化，并写入带 Helm 请求 ID 的结构化事件。只保留状态、格式受限的上游错误码、已支持参数路径和请求 ID；不保存上游消息、响应头全集或素材地址，不新增数据库字段。既有请求正文保存策略不变。
+- 保持客户端 `upstream_rejected` / `outcome_unknown`、零创建重试和原有任务归属语义。未知结果不能因新诊断字段变成确定失败；旧版丢失的错误不补造。
+- 官方真人素材要求认证、授权和素材入库；当前 HTTPS 子集不支持 `asset://`。本次仅恢复错误诊断，不宣称人像口播已接通；没有新增付费生成。
+- `pnpm release:prepare 0.30.84` 已核对 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录无变化。CI 沿用 `docs/g4-speech-media-ci-sql-review.md` 中已完成三角色审查的未改动隔离合成查询；本次无 SQL 或迁移改动。
+
 ## 2026-11-12 · 受限 Key 显式选择已授权 lane（docs/04、06）
 
 - 明确列在 Key `allowed_lanes` 中的已知 lane 可直接选择，无需 `allow_custom_model`，避免该固定入口触发付费分类 eval；继续使用 lane 内模型禁用过滤及预算降级。
@@ -74,13 +81,9 @@
 - **出站记录**：通过请求级回调在最终 HTTP 发送／WS 握手边界提取允许字段；复用连接记录实际握手快照，不冒充本轮重发 Header。现有 `provider_attempts[].outbound_requests` 保留最近 16 次观察及连续序号，覆盖转换、原生、重试和直接 compact；不新增表，沿用遥测权限和保留期。账号引用复用已有安装标识，原始凭证、邮箱、账号 UUID、会话／turn state 值不保存；会话仅保存来源和存在性，与现有业务会话记录关联。
 - **验证与发布准备**：身份、审计、路由投影、compact 和 Responses 路由共 854 项定向测试通过；shared/core 构建及 gateway 类型检查通过。v0.30.72 已执行 release:prepare，稳定快照为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77。
 
-## 2026-11-08 · 官方 API 清理 Agent SDK 身份变体（docs/04、05）
-
-- 线上同账户 Sonnet 5.5 对照确认：仅加入独立的 `You are a Claude agent, built on Anthropic's Claude Agent SDK.` system 文本即可触发官方 HTTP 400 余额错误；移除后正常。错误不等于已经查实账户余额，上游内部判定原因未知。
-- 官方静态 API Key 出站补充精确识别这句 SDK 身份，复用既有副本清理；JSON、流式和 token 计数一致处理。业务文本中引用该句仍保留，OAuth 与第三方 relay 行为不变，未更改账户暂停策略。
-- 先复现 4 项失败再实现一行判定，相关身份、协议与账号池 201 项测试通过。发布准备执行 `pnpm release:prepare 0.30.71`，Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77 快照不变。
-
 ## 更早历史总览
+
+2026-11-08：官方 Claude API 清理 Agent SDK system 身份并保留 OAuth／第三方行为；完整记录见 git history。
 
 2026-11-07：官方 Claude API 清理客户端身份、ZenMux 精确别名计价与金额字段验证；完整记录见 git history。
 

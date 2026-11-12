@@ -32,6 +32,7 @@ import {
   ARK_THREE_D_MODELS,
   ARK_VIDEO_MODELS,
   type ArkTaskKind,
+  arkMediaErrorDetail,
   decodeArkTaskBinding,
   encodeArkTaskBinding,
   isArkTaskRecord,
@@ -182,6 +183,7 @@ function buildVideoDecision(input: {
   errorClass: string | null;
   latencyMs: number;
   upstreamRequestId?: string;
+  errorDetail?: ProviderAttempt["error_detail"];
 }): DecisionRecord {
   const attempt: ProviderAttempt = {
     alias: input.target.providerAlias,
@@ -191,7 +193,7 @@ function buildVideoDecision(input: {
     error_class: input.errorClass,
     latency_ms: input.latencyMs,
     cost_usd: null,
-    error_detail: null,
+    error_detail: input.errorDetail ?? null,
     provider_name: input.target.providerName,
     provider_model: input.target.providerModel,
     ...(input.upstreamRequestId
@@ -486,6 +488,7 @@ export function registerMediaTaskRoutes(
       status: "ok" | "error",
       errorClass: string | null,
       response: unknown,
+      errorDetail?: ProviderAttempt["error_detail"],
     ) => {
       if (captureRecord === undefined) return;
       try {
@@ -504,6 +507,7 @@ export function registerMediaTaskRoutes(
               target,
               status,
               errorClass,
+              errorDetail,
               latencyMs: Math.max(0, now() - startedAt),
               upstreamRequestId:
                 response !== null &&
@@ -560,6 +564,18 @@ export function registerMediaTaskRoutes(
         },
       );
     } catch (failure) {
+      const errorDetail = isArk ? arkMediaErrorDetail(failure) : null;
+      if (errorDetail !== null) {
+        try {
+          deps.log?.(`${kind}.create_failed`, {
+            request_id: helmRequestId,
+            trace_id: traceId,
+            error_detail: errorDetail,
+          });
+        } catch {
+          // Diagnostics must not change a paid request's failure or retry semantics.
+        }
+      }
       if (isArk && failure !== null && typeof failure === "object") {
         const rejected = failure as { outcome?: unknown; upstreamStatus?: unknown };
         if (
@@ -569,7 +585,7 @@ export function registerMediaTaskRoutes(
           rejected.upstreamStatus < 500 &&
           rejected.upstreamStatus !== 408
         ) {
-          await recordStart("error", "upstream_rejected", null);
+          await recordStart("error", "upstream_rejected", null, errorDetail);
           return errorJson(
             c,
             rejected.upstreamStatus as ContentfulStatusCode,
@@ -578,7 +594,7 @@ export function registerMediaTaskRoutes(
           );
         }
       }
-      await recordStart("error", "outcome_unknown", null);
+      await recordStart("error", "outcome_unknown", null, errorDetail);
       return errorJson(c, 503, "video create outcome is unknown", "outcome_unknown");
     }
     const upstreamRequestId = isArk ? parseArkTaskCreate(upstream) : upstream.request_id;

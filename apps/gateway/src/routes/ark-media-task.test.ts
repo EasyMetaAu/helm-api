@@ -1,7 +1,32 @@
-import type { ResponsesRegistryRecord } from "@helm/core";
+import { type ResponsesRegistryRecord, UpstreamError } from "@helm/core";
 import { ArkPublicTaskResultSchema } from "@helm/shared";
 import { expect, it } from "vitest";
-import { encodeArkTaskBinding, normalizeArkTaskResult } from "./ark-media-task.js";
+import {
+  arkMediaErrorDetail,
+  encodeArkTaskBinding,
+  normalizeArkTaskResult,
+} from "./ark-media-task.js";
+
+it.each([
+  { raw: { request_id: "body-id" }, headers: null, id: "body-id" },
+  {
+    raw: { error: { message: "Private detail. Request id: documented-id." } },
+    headers: null,
+    id: "documented-id",
+  },
+  { raw: {}, headers: { "x-tt-logid": "log-id" }, id: "log-id" },
+  {
+    raw: { error: { message: "Private detail. Request id: https://private.test/?sig=secret" } },
+    headers: null,
+    id: undefined,
+  },
+  { raw: { request_id: "x".repeat(129) }, headers: null, id: undefined },
+])("retains only the supported request identifier: $id", ({ raw, headers, id }) => {
+  const detail = arkMediaErrorDetail(
+    new UpstreamError("upstream_error", "private", raw, 400, headers),
+  );
+  expect(detail?.provider_raw).toEqual(id ? { request_id: id } : {});
+});
 
 const publicId = "00000000-0000-4000-8000-000000000001";
 const model = "doubao-seedance-2-5-260628";

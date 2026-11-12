@@ -164,6 +164,41 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
       expect(body.status).toBe("done");
     }
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(4);
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      Response.json(
+        {
+          error: {
+            code: "InvalidParameter.InputImage",
+            param: "content[1].image_url.url",
+            message: "https://private.example.test/portrait?signature=private-signature",
+          },
+        },
+        { status: 400, headers: { "x-request-id": "ark-integration-request" } },
+      ),
+    );
+    const rejected = await server.app.request("/v1/videos/generations", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(video),
+    });
+    expect(rejected.status).toBe(400);
+    const rejectedId = rejected.headers.get("x-helm-request-id");
+    expect(rejectedId).toBeTruthy();
+    await server.dispose?.();
+    server = undefined;
+    const row = db.$sqlite
+      .prepare("SELECT decision_json FROM telemetry WHERE request_id = ?")
+      .get(rejectedId) as { decision_json: string };
+    expect(JSON.parse(row.decision_json).provider_attempts[0].error_detail).toEqual({
+      upstream_status: 400,
+      message: "Ark media request failed",
+      provider_raw: {
+        error: { code: "InvalidParameter.InputImage", param: "content[1].image_url.url" },
+        request_id: "ark-integration-request",
+      },
+    });
+    expect(row.decision_json).not.toContain("private-signature");
+    expect(row.decision_json).not.toContain("private.example.test");
   } finally {
     await server?.dispose?.();
     db.$sqlite.close();

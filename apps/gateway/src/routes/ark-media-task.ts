@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
-import type { ResponsesRegistryRecord } from "@helm/core";
+import { type ResponsesRegistryRecord, UpstreamError } from "@helm/core";
 import {
   ArkTaskCreateResponseSchema,
   ArkThreeDGenerationRequestSchema,
   ArkThreeDRetrieveResponseSchema,
   ArkVideoGenerationRequestSchema,
   ArkVideoRetrieveResponseSchema,
+  type ProviderAttempt,
 } from "@helm/shared";
 import { z } from "zod";
 
@@ -31,6 +32,72 @@ export const ARK_VIDEO_MODELS = new Set([
   "doubao-seedance-2-5-260628",
 ]);
 export const ARK_THREE_D_MODELS = new Set(["ark/seed3d-2.0", "seed3d", "doubao-seed3d-2-0-260328"]);
+
+// Transport errors already scrub the actual credential. Only protocol identifiers
+// may leave that boundary: raw messages/headers can still contain signed asset URLs.
+const DiagnosticCode = z
+  .string()
+  .max(128)
+  .regex(/^[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)*\.?$/);
+const DiagnosticRequestId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/);
+const DiagnosticParam = z
+  .string()
+  .max(128)
+  .regex(
+    /^(?:model|duration|ratio|resolution|generate_audio|watermark|output_format|omni_reference_task_type|file_format|subdivision_level|content(?:\[\d{1,2}\]|\.\d{1,2})?(?:\.(?:type|text|role|(?:image|video|audio)_url(?:\.url)?))?)$/,
+  );
+const DiagnosticBody = z.object({
+  error: z
+    .object({
+      code: z.unknown().optional(),
+      param: z.unknown().optional(),
+      message: z.unknown().optional(),
+    })
+    .optional(),
+  request_id: z.unknown().optional(),
+});
+
+export function arkMediaErrorDetail(failure: unknown): ProviderAttempt["error_detail"] {
+  if (!(failure instanceof UpstreamError)) return null;
+  const parsed = DiagnosticBody.safeParse(failure.providerRaw);
+  const body = parsed.success ? parsed.data : undefined;
+  const code = DiagnosticCode.safeParse(body?.error?.code);
+  const param = DiagnosticParam.safeParse(body?.error?.param);
+  const message = body?.error?.message;
+  // Ark also documents a trailing "Request id: ..." in its error message.
+  // Extract that identifier alone; never retain any of the surrounding text.
+  const messageId =
+    typeof message === "string"
+      ? /\bRequest[ _-]?id:\s*([A-Za-z0-9_-]{1,128})\.?\s*$/i.exec(message)?.[1]
+      : undefined;
+  const requestId = [
+    failure.upstreamHeaders?.["x-request-id"],
+    failure.upstreamHeaders?.["x-tt-logid"],
+    body?.request_id,
+    messageId,
+  ]
+    .map((value) => DiagnosticRequestId.safeParse(value))
+    .find((result) => result.success);
+  return {
+    upstream_status: failure.upstreamStatus,
+    message: "Ark media request failed",
+    provider_raw: {
+      ...(code.success || param.success
+        ? {
+            error: {
+              ...(code.success ? { code: code.data } : {}),
+              ...(param.success ? { param: param.data } : {}),
+            },
+          }
+        : {}),
+      ...(requestId?.success ? { request_id: requestId.data } : {}),
+    },
+  };
+}
 
 export function parseArkTaskCreate(raw: unknown): string | null {
   const parsed = ArkTaskCreateResponseSchema.safeParse(raw);
