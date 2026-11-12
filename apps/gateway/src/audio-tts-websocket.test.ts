@@ -62,6 +62,16 @@ describe("speech websocket boundary", () => {
     const message = once(ws, "message");
     events.push({ type: "started", sequence: 0, format: "mp3", sampleRate: 32000 });
     await message;
+    const timestamp = once(ws, "message");
+    events.push({
+      type: "timestamp",
+      sequence: 1,
+      timestamp: { text: "Hi", startMs: 20, endMs: 100 },
+    });
+    expect(JSON.parse(String((await timestamp)[0]))).toMatchObject({
+      type: "timestamp",
+      timestamp: { startMs: 20, endMs: 100 },
+    });
     const closed = once(ws, "close");
     events.push({ type: "completed", sequence: 1 });
     events.end();

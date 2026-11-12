@@ -49,15 +49,61 @@ describe("speech sessions", () => {
     expect((await iter.next()).value.type).toBe("completed");
     expect((await iter.next()).done).toBe(true);
   });
+  it("preserves Bailian word timestamps and converts cumulative billing to session deltas", async () => {
+    const s = socket();
+    const pending = createBailianSpeechClient(
+      { config: { baseUrl: "https://example.test" } },
+      { url: "wss://example.test/inference", connect: async () => s.transport },
+    ).openSpeechSession({ ...config, timestamps: "word" });
+    await new Promise((r) => setTimeout(r, 0));
+    const task = (s.sent[0]?.header as { task_id: string }).task_id;
+    expect(s.sent[0]).toMatchObject({ payload: { parameters: { word_timestamp_enabled: true } } });
+    s.input.push(JSON.stringify({ header: { event: "task-started", task_id: task } }));
+    const session = await pending;
+    const iter = session.events[Symbol.asyncIterator]();
+    await iter.next();
+    for (const characters of [5, 8]) {
+      s.input.push(
+        JSON.stringify({
+          header: { event: "result-generated", task_id: task },
+          payload: {
+            output: {
+              type: "sentence-end",
+              original_text: "Hi",
+              sentence: { index: 0, words: [{ text: "Hi", begin_time: 12, end_time: 144 }] },
+            },
+            usage: { characters },
+          },
+        }),
+      );
+      expect((await iter.next()).value).toMatchObject({
+        type: "timestamp",
+        timestamp: {
+          text: "Hi",
+          startMs: 12,
+          endMs: 144,
+          words: [{ text: "Hi", startMs: 12, endMs: 144 }],
+        },
+      });
+      expect((await iter.next()).value).toMatchObject({
+        type: "usage",
+        usage: { usage_characters: characters === 5 ? 5 : 3 },
+      });
+    }
+    session.close();
+  });
   it("keeps MiniMax completion layers distinct and supports bidi controls", async () => {
     const s = socket();
-    const pending = createMiniMaxSpeechSession(config, {
-      url: "wss://example.test/ws/v1/t2a_v2_bidi",
-      connect: async () => s.transport,
-      headers: {},
-      signal: new AbortController().signal,
-      profile: "minimax-bidi",
-    });
+    const pending = createMiniMaxSpeechSession(
+      { ...config, timestamps: "word" },
+      {
+        url: "wss://example.test/ws/v1/t2a_v2_bidi",
+        connect: async () => s.transport,
+        headers: {},
+        signal: new AbortController().signal,
+        profile: "minimax-bidi",
+      },
+    );
     s.input.push(JSON.stringify({ event: "connected_success" }));
     await new Promise((r) => setTimeout(r, 0));
     s.input.push(JSON.stringify({ event: "task_started" }));
@@ -66,9 +112,21 @@ describe("speech sessions", () => {
     await iter.next();
     await session.append("Hi.");
     s.input.push(
-      JSON.stringify({ event: "task_continued", data: { audio: "0102" }, is_final: false }),
+      JSON.stringify({
+        event: "task_continued",
+        data: {
+          audio: "0102",
+          subtitle: { text: "Hi.", text_begin: 0, text_end: 3, time_begin: 10, time_end: 100 },
+        },
+        is_final: false,
+      }),
     );
     expect((await iter.next()).value.type).toBe("audio");
+    expect((await iter.next()).value).toMatchObject({
+      type: "timestamp",
+      timestamp: { text: "Hi.", startMs: 10, endMs: 100 },
+    });
+    expect(s.sent[0]).toMatchObject({ subtitle_enable: true, subtitle_type: "word" });
     s.input.push(JSON.stringify({ event: "task_continued", is_final: true }));
     expect((await iter.next()).value.type).toBe("request_final");
     s.input.push(JSON.stringify({ event: "sentence_end" }));

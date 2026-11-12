@@ -1,4 +1,9 @@
-import { MediaSpeechRequestSchema, MediaSpeechUsageSchema } from "@helm/shared";
+import {
+  MediaSpeechRequestSchema,
+  type MediaSpeechTimestamp,
+  type MediaSpeechUsage,
+  MediaSpeechUsageSchema,
+} from "@helm/shared";
 import { z } from "zod";
 import { readSSE } from "../protocol/streaming.js";
 import {
@@ -12,6 +17,7 @@ import {
   createMiniMaxSpeechSession,
   type MiniMaxSpeechTransport,
 } from "./minimax-speech-session.js";
+import { MiniMaxSubtitleSchema, minimaxTimestamp } from "./minimax-subtitle.js";
 import {
   type OpenAIClientDeps,
   type ProviderCallOptions,
@@ -21,7 +27,13 @@ import {
 
 const Packet = z.object({
   base_resp: z.object({ status_code: z.number() }),
-  data: z.object({ audio: z.string().optional(), status: z.number().optional() }).optional(),
+  data: z
+    .object({
+      audio: z.string().optional(),
+      status: z.number().optional(),
+      subtitle: MiniMaxSubtitleSchema.optional(),
+    })
+    .optional(),
   extra_info: MediaSpeechUsageSchema.optional(),
 });
 export function createMiniMaxSpeechClient(
@@ -41,6 +53,7 @@ export function createMiniMaxSpeechClient(
       text: req.input,
       stream,
       output_format: "hex",
+      ...(req.timestamps ? { subtitle_enable: true, subtitle_type: req.timestamps } : {}),
       voice_setting: { voice_id: req.voice, speed: req.speed },
       audio_setting: { format: req.response_format, sample_rate: req.sample_rate },
       ...(stream ? { stream_options: { exclude_aggregated_audio: true } } : {}),
@@ -91,7 +104,7 @@ export function createMiniMaxSpeechClient(
       );
     return parsed.data;
   }
-  return {
+  const client: SpeechClient = {
     ...(transport
       ? {
           openSpeechSession: async (
@@ -114,6 +127,27 @@ export function createMiniMaxSpeechClient(
         }
       : {}),
     async ttsSpeech(raw, opts) {
+      if (raw.timestamps) {
+        const chunks: Uint8Array[] = [];
+        const timestamps: MediaSpeechTimestamp[] = [];
+        let size = 0;
+        let usage: MediaSpeechUsage | undefined;
+        for await (const event of client.streamSpeech(raw, opts)) {
+          if (event.type === "audio") {
+            size += event.audio.length;
+            if (size > 16 * 1024 * 1024) throw new Error("speech response exceeds limit");
+            chunks.push(event.audio);
+          }
+          if (event.type === "timestamp") timestamps.push(event.timestamp);
+          if (event.type === "usage") usage = { ...usage, ...event.usage };
+        }
+        return {
+          audio: new Uint8Array(Buffer.concat(chunks)),
+          contentType: speechMime(MediaSpeechRequestSchema.parse(raw).response_format),
+          usage,
+          ...(timestamps.length ? { timestamps } : {}),
+        };
+      }
       const { req, response } = await request(raw, false, opts);
       const result = packet(
         await readUpstreamJsonWithinBudget(response, deps.responseWorkAdmission),
@@ -149,6 +183,12 @@ export function createMiniMaxSpeechClient(
             sawAudio = true;
             yield { type: "audio", sequence: sequence++, audio } satisfies SpeechEvent;
           }
+          if (result.data?.subtitle)
+            yield {
+              type: "timestamp",
+              sequence: sequence++,
+              timestamp: minimaxTimestamp(result.data.subtitle),
+            };
           if (result.extra_info)
             yield {
               type: "usage",
@@ -168,4 +208,5 @@ export function createMiniMaxSpeechClient(
       }
     },
   };
+  return client;
 }

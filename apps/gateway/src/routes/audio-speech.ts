@@ -210,6 +210,15 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           "invalid_request",
           "invalid or unsupported speech parameters",
         );
+      if (
+        (parsed.data.timestamps && parsed.data.output !== "json") ||
+        (parsed.data.stream && parsed.data.output === "json")
+      )
+        throw new SpeechAdmissionError(
+          422,
+          "unsupported_parameter",
+          "timestamps require non-streaming JSON output; use WebSocket for timestamp events",
+        );
       const selection = await resolveSpeechSelection(deps, parsed.data.model, identity);
       const req = { ...parsed.data, model: selection.model };
       lease = await acquireSpeechLease(
@@ -247,6 +256,10 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         try {
           const result = await selection.client.ttsSpeech(req, { signal: lease.signal });
           await finish("completed", result.usage);
+          if (req.output === "json")
+            return c.json({ ...result, audio: Buffer.from(result.audio).toString("base64") }, 200, {
+              "cache-control": "no-store",
+            });
           return new Response(result.audio as Uint8Array<ArrayBuffer>, {
             headers: { "content-type": result.contentType, "cache-control": "no-store" },
           });

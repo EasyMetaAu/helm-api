@@ -1,5 +1,7 @@
 import {
   type MediaSpeechRequest,
+  type MediaSpeechTimestamp,
+  MediaSpeechTimestampSchema,
   type MediaSpeechUsage,
   MediaSpeechUsageSchema,
 } from "@helm/shared";
@@ -19,6 +21,7 @@ export const SpeechEventSchema = z.discriminatedUnion("type", [
     type: z.literal("audio"),
     audio: z.custom<Uint8Array>((value) => value instanceof Uint8Array),
   }),
+  z.object({ ...sequence, type: z.literal("timestamp"), timestamp: MediaSpeechTimestampSchema }),
   z.object({ ...sequence, type: z.literal("usage"), usage: MediaSpeechUsageSchema }),
   z.object({
     ...sequence,
@@ -46,7 +49,12 @@ export interface SpeechClient {
   ttsSpeech(
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,
-  ): Promise<{ audio: Uint8Array; contentType: string; usage?: MediaSpeechUsage }>;
+  ): Promise<{
+    audio: Uint8Array;
+    contentType: string;
+    usage?: MediaSpeechUsage;
+    timestamps?: MediaSpeechTimestamp[];
+  }>;
   streamSpeech(
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,

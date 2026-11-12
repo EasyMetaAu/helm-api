@@ -7,12 +7,15 @@ import {
 import { z } from "zod";
 import { decodeSpeechHex, type SpeechSocketConnector } from "./media-speech.js";
 import { runSpeechSession } from "./media-speech-session.js";
+import { MiniMaxSubtitleSchema, minimaxTimestamp } from "./minimax-subtitle.js";
 
 const Packet = z.object({
   event: z.string().optional(),
   is_final: z.boolean().optional(),
   base_resp: z.object({ status_code: z.number() }).optional(),
-  data: z.object({ audio: z.string().optional() }).optional(),
+  data: z
+    .object({ audio: z.string().optional(), subtitle: MiniMaxSubtitleSchema.optional() })
+    .optional(),
   extra_info: MediaSpeechUsageSchema.optional(),
 });
 export interface MiniMaxSpeechTransport {
@@ -85,6 +88,7 @@ export async function createMiniMaxSpeechSession(
       if (packet.event === "connected_success") {
         await send("task_start", {
           model: req.model,
+          ...(req.timestamps ? { subtitle_enable: true, subtitle_type: req.timestamps } : {}),
           voice_setting: { voice_id: req.voice, speed: req.speed },
           audio_setting: { format: req.response_format, sample_rate: req.sample_rate },
         });
@@ -99,6 +103,8 @@ export async function createMiniMaxSpeechSession(
         for (const input of pending) input.accepted = true;
         emit({ type: "audio", audio: decodeSpeechHex(packet.data.audio) });
       }
+      if (packet.data?.subtitle)
+        emit({ type: "timestamp", timestamp: minimaxTimestamp(packet.data.subtitle) });
       if (packet.extra_info) requestUsage = { ...requestUsage, ...packet.extra_info };
       if (packet.is_final) {
         if (requestUsage) emit({ type: "usage", usage: requestUsage });

@@ -148,3 +148,31 @@ describe("audio speech route", () => {
     expect(x.speech).not.toHaveBeenCalled();
   });
 });
+
+describe("structured speech response", () => {
+  it("returns audio and actual alignment only when JSON is requested", async () => {
+    const x = setup();
+    x.speech.mockResolvedValueOnce({
+      audio: new Uint8Array([1, 2]),
+      contentType: "audio/mpeg",
+      usage: { usage_characters: 5, usage_voice_count: 1 },
+      timestamps: [{ text: "Hello", startMs: 10, endMs: 200 }],
+    } as never);
+    const response = await x.call({
+      ...body,
+      output: "json",
+      timestamps: "sentence",
+    } as typeof body);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      audio: "AQI=",
+      contentType: "audio/mpeg",
+      timestamps: [{ text: "Hello", startMs: 10, endMs: 200 }],
+    });
+  });
+  it("rejects timestamp requests on binary responses before paid generation", async () => {
+    const x = setup();
+    expect((await x.call({ ...body, timestamps: "word" } as typeof body)).status).toBe(422);
+    expect(x.speech).not.toHaveBeenCalled();
+  });
+});

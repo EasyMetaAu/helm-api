@@ -9,9 +9,12 @@ export const MediaSpeechRequestSchema = z.strictObject({
   speed: z.number().min(0.5).max(2).default(1),
   sample_rate: z.number().int().positive().max(48000).default(32000),
   stream: z.boolean().default(false),
+  output: z.enum(["audio", "json"]).optional(),
+  timestamps: z.enum(["sentence", "word"]).optional(),
 });
 export type MediaSpeechRequest = z.infer<typeof MediaSpeechRequestSchema>;
 export const MediaSpeechUsageSchema = z.object({
+  audio_length: z.number().nonnegative().optional(),
   usage_characters: z.number().nonnegative().optional(),
   usage_voice_count: z.number().nonnegative().optional(),
 });
@@ -26,3 +29,17 @@ export const MediaSpeechCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("cancel") }),
   z.strictObject({ type: z.literal("finish") }),
 ]);
+
+const TimedTextSchema = z
+  .object({
+    text: z.string(),
+    startMs: z.number().nonnegative(),
+    endMs: z.number().nonnegative(),
+  })
+  .refine((value) => value.endMs >= value.startMs, "timestamp end precedes start");
+export const MediaSpeechTimestampSchema = TimedTextSchema.safeExtend({
+  textBegin: z.number().int().nonnegative().optional(),
+  textEnd: z.number().int().nonnegative().optional(),
+  words: z.array(TimedTextSchema).optional(),
+});
+export type MediaSpeechTimestamp = z.infer<typeof MediaSpeechTimestampSchema>;
