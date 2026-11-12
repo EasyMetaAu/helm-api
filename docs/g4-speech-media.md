@@ -50,7 +50,7 @@ MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执�
 
 ## 限制与待验收
 
-尚未执行收费调用、真实音质／时戳评测、远程 CI 或生产部署。Mock／受控传输测试只证明本地协议处理。
+真实供应商收费调用及音质／时戳评测仍需按实际账户、音色和预算验收。Mock／受控传输测试只证明协议处理；部署版本须从目标服务 `/version` 核对。
 
 GPU 协议核实：旧 asr-service `/transcribe` 接收 multipart，WhisperX 时间单位秒；其 `/transcription/{file_id}` 在缓存不存在时均返回 processing，不能区分失败／未接受，且无已确认鉴权。新 asr-node／alignment-node 的 compute.v1 固定 `application=dictogo`、不可变 artifact 与回调协调方；Chatterbox 节点文档注明尚未构建部署。此次无权修改旧业务或 GPU 服务，不能宣称已有可直接切换的安全后备。
 
@@ -95,7 +95,7 @@ lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未�
 | H03 | HTTP/WS TTS 与同步文件 ASR 原生 usage、持久账本、原子预留和幂等结算 | 硬上限只在可核定价卡下放行；默认国际字符上界、FX、异步 ASR 预留仍有缺口 |
 | H04 | WhisperX 同步协议 adapter 与 lane 选择入口 | 实际 GPU 服务、未知结果对账及调用后自动切换尚未验收／交付 |
 
-按句 TTS 先使用 MiniMax JSON 的 audio、contentType、原生 durationMs；Luma 上传自有存储后形成 url + durationMs，不依赖逐词字幕。当前包版本未发布；未推送、合并、部署或执行收费调用，生产入口尚不可依赖这些新增字段。
+按句 TTS 先使用 MiniMax JSON 的 audio、contentType、原生 durationMs；Luma 上传自有存储后形成 url + durationMs，不依赖逐词字幕。新增接口目标版本为 0.30.81；调用方须确认目标 Helm 已部署包含本次改动的版本，并完成所选供应商的真实验收。
 
 ## 本地验证
 
