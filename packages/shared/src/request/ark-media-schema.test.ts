@@ -441,3 +441,48 @@ it("validates the four public request examples directly from the contract docume
     expect(schema.safeParse(examples[index]).success).toBe(true);
   }
 });
+
+describe("Seedance enrolled assets", () => {
+  it.each(["image", "video", "audio"])("accepts %s assets only on Seedance input", (media) => {
+    const source = { url: "asset://asset-synthetic-001" };
+    const body = {
+      ...simpleVideo,
+      watermark: false,
+      omni_reference_task_type: "reference",
+      content: [
+        text,
+        { type: `${media}_url`, [`${media}_url`]: source, role: `reference_${media}` },
+      ],
+    };
+    expect(VideoRequest.parse(body)).toEqual(body);
+    expect(
+      ThreeDRequest.safeParse({ ...simple3D, content: [{ type: "image_url", image_url: source }] })
+        .success,
+    ).toBe(false);
+    expect(
+      ImageRequest.safeParse({ model: flash, prompt: "test", image: source.url }).success,
+    ).toBe(false);
+    expect(
+      VideoResponse.safeParse({
+        id: "task",
+        model: videoModel,
+        status: "succeeded",
+        content: { video_url: source.url },
+      }).success,
+    ).toBe(false);
+    for (const url of [
+      "asset://",
+      "asset://asset-a?token=x",
+      "asset://asset-a/other",
+      "asset://other",
+      "asset://asset-a#x",
+    ]) {
+      expect(
+        VideoRequest.safeParse({
+          ...body,
+          content: [{ type: "image_url", image_url: { url }, role: "reference_image" }],
+        }).success,
+      ).toBe(false);
+    }
+  });
+});

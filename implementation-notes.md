@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-11-12 · Seedance 入库素材授权（docs/06、Ark media）
+
+- `asset://` 仅扩展 Seedance 输入。管理员通过现有 Basic/session 管理入口，将素材 ID、类型绑定指定 key/租户及实际静态 Ark 客户端凭证与 endpoint；ConfigStore 单表 CAS，无新迁移。每次创建读取授权，缺失 403、存储异常 503，均不调用上游。
+- 公开文档未提供可用的推理 key 只读素材查询；因此采用明确标注的管理员同账号/项目及入库确认，不伪装成上游认证结果。凭证更换使旧授权失效，已授权且发送中的任务不因撤销召回。
+- 新增 `/v1/videos/validate` 供持有者按同一请求无收费核对本地权限；不会生成或预留任务，也不能证明上游最终接受。显式 watermark=false、零创建重试和原有 HTTPS 行为保留。
+- `pnpm release:prepare 0.30.85` 核对 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录无变化。定向测试覆盖租户/key/类型/凭证隔离、CAS、撤销、损坏存储、服务重启及校验内存释放。CI 沿用 docs/g4-speech-media-ci-sql-review.md 已批准且未改变的隔离查询范围。
+
 ## 2026-11-12 · Ark 媒体失败诊断（docs/07、Ark media）
 
 - 视频／3D 创建错误复用现有 `provider_attempts[].error_detail` 持久化，并写入带 Helm 请求 ID 的结构化事件。只保留状态、格式受限的上游错误码、已支持参数路径和请求 ID；不保存上游消息、响应头全集或素材地址，不新增数据库字段。既有请求正文保存策略不变。
@@ -73,15 +80,9 @@
 - **边界**：不终止已接收的请求或已建立的连接；共享 Postgres 的其他网关实例按已有鉴权缓存 TTL 感知状态，默认最多 30 秒。页面区分启用、已禁用、已吊销，吊销确认明确不可恢复。
 - **发布准备**：v0.30.73 已执行 `pnpm release:prepare 0.30.73`；官方稳定快照仍为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77，无新增客户端协议变更。
 
-## 2026-11-08 · Codex 出站客户端 Header 一致性（docs/04、05、07）
-
-- **决定**：订阅 provider 的 `User-Agent`、`version`、`originator` 由网关运行时生成；原生客户端不再覆盖，HTTP、SSE、compact、WebSocket 握手与认证重试使用同一规则。无配置时采用签入的稳定版本，消除 `0.0.0` 占位值。
-- **版本边界**：复用账号目录运行时已验证的版本，不把入站声明的更高版本当成协议升级，也不新增按账号保存最大客户端版本的状态。与 Claude 的版本上限持久化方式不同，避免版本标记先于模型目录和协议能力升级。
-- **限制**：入站客户端准入仍看到真实原始 Header；业务会话、缓存键、turn state 与 `previous_response_id` 的归属规则不变，跨账号相同业务标识仍可能被关联。Header 一致不能证明真实单人使用，也不构成防封保证。
-- **出站记录**：通过请求级回调在最终 HTTP 发送／WS 握手边界提取允许字段；复用连接记录实际握手快照，不冒充本轮重发 Header。现有 `provider_attempts[].outbound_requests` 保留最近 16 次观察及连续序号，覆盖转换、原生、重试和直接 compact；不新增表，沿用遥测权限和保留期。账号引用复用已有安装标识，原始凭证、邮箱、账号 UUID、会话／turn state 值不保存；会话仅保存来源和存在性，与现有业务会话记录关联。
-- **验证与发布准备**：身份、审计、路由投影、compact 和 Responses 路由共 854 项定向测试通过；shared/core 构建及 gateway 类型检查通过。v0.30.72 已执行 release:prepare，稳定快照为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77。
-
 ## 更早历史总览
+
+2026-11-08 Codex 出站 Header 一致性：默认版本由发布快照管理，保留客户端兼容规则；完整记录见 Git history。
 
 2026-11-08：官方 Claude API 清理 Agent SDK system 身份并保留 OAuth／第三方行为；完整记录见 git history。
 

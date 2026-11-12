@@ -182,6 +182,7 @@ import {
   OutboundRequestAuditSchema,
 } from "@helm/shared";
 import { createApp } from "./app.js";
+import { ArkAssetGrants } from "./ark-asset-grants.js";
 import { createSpeechSocketConnector } from "./audio-tts-websocket.js";
 import { readBuildInfo } from "./build-info.js";
 import { createCodexResponsesWebSocketConnector } from "./codex-responses-websocket.js";
@@ -4543,6 +4544,11 @@ export async function buildServer(
       });
     }
     registerAdminApi(app, {
+      arkAssets: new ArkAssetGrants(
+        store.config,
+        store.keys,
+        (name) => providerClients.get(name)?.arkAssetScope,
+      ),
       apiKeyPools,
       rules: ruleStore,
       keyStore,
@@ -5283,7 +5289,7 @@ export async function buildServer(
       const create = operation === "extension" ? client?.videoExtension : client?.videoGeneration;
       if (!create) continue;
       const target: VideoCreateTarget = {
-        ...(isArk ? { providerType: "ark" as const } : {}),
+        ...(isArk ? { providerType: "ark" as const, arkAssetScope: client?.arkAssetScope } : {}),
         ...(nativeTask ? { nativeTask } : {}),
         laneName: Object.hasOwn(lanes, selectionModel) ? selectionModel : undefined,
         providerAlias,
@@ -5307,7 +5313,14 @@ export async function buildServer(
     return null;
   };
 
+  const arkAssets = new ArkAssetGrants(
+    store.config,
+    store.keys,
+    (name) => providerClients.get(name)?.arkAssetScope,
+  );
   const mediaRoutes: VideosRouteDeps = {
+    authorizeArkAssets: (identity, target, assets) =>
+      arkAssets.authorize(identity, target.providerName, target.arkAssetScope, assets),
     isNativeSelection: (model) => {
       const selection = resolveMediaSelection(model);
       const aliases = Object.hasOwn(lanes, selection)

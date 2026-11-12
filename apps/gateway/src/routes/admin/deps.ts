@@ -471,6 +471,7 @@ export interface CleanupAccess {
 }
 
 export interface AdminApiDeps {
+  arkAssets?: import("../../ark-asset-grants.js").ArkAssetGrants;
   apiKeyPools?: ReadonlyMap<
     string,
     {

@@ -164,6 +164,88 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
       expect(body.status).toBe("done");
     }
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(4);
+    const assetBody = {
+      ...video,
+      watermark: false,
+      omni_reference_task_type: "reference",
+      content: [
+        {
+          type: "image_url",
+          image_url: { url: "asset://asset-synthetic-001" },
+          role: "reference_image",
+        },
+      ],
+    };
+    const adminHeaders = {
+      Authorization: `Basic ${Buffer.from("test-admin:test-password").toString("base64")}`,
+      "content-type": "application/json",
+    };
+    const grantsPath = "/admin/api/keys/owner/ark-assets";
+    const grant = {
+      revision: null,
+      providerName: "ark",
+      attestation: "same-account-project-enrolled",
+      assets: [{ assetId: "asset-synthetic-001", mediaType: "image" }],
+    };
+    const validate = (key = "owner") => {
+      if (!server) throw new Error("Server not running");
+      return server.app.request("/v1/videos/validate", {
+        method: "POST",
+        headers: headers(key),
+        body: JSON.stringify(assetBody),
+      });
+    };
+    const noGrant = await validate();
+    expect(noGrant.status).toBe(403);
+    expect(
+      (
+        await server.app.request(grantsPath, {
+          method: "PUT",
+          headers: headers(),
+          body: JSON.stringify(grant),
+        })
+      ).status,
+    ).toBe(401);
+    const savedResponse = await server.app.request(grantsPath, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify(grant),
+    });
+    expect(savedResponse.status, await savedResponse.clone().text()).toBe(200);
+    const saved = (await savedResponse.json()) as { revision: string };
+    expect(saved).not.toHaveProperty("providerScope");
+    expect(
+      (
+        await server.app.request(grantsPath, {
+          method: "PUT",
+          headers: adminHeaders,
+          body: JSON.stringify(grant),
+        })
+      ).status,
+    ).toBe(409);
+    const beforeAssets = calls.length;
+    expect((await validate()).status).toBe(200);
+    expect((await validate("other")).status).toBe(403);
+    expect(calls).toHaveLength(beforeAssets);
+    const assetCreate = await server.app.request("/v1/videos/generations", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(assetBody),
+    });
+    expect(assetCreate.status, await assetCreate.text()).toBe(200);
+    expect(calls).toHaveLength(beforeAssets + 1);
+    expect(calls.at(-1)?.body).toMatchObject({ watermark: false, content: assetBody.content });
+    await server.dispose?.();
+    server = await start();
+    expect((await validate()).status).toBe(200);
+    const revoke = await server.app.request(grantsPath, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ ...grant, revision: saved.revision, assets: [] }),
+    });
+    expect(revoke.status).toBe(200);
+    expect((await validate()).status).toBe(403);
+
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(
       Response.json(
         {

@@ -191,6 +191,8 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  /** Internal Ark asset authorization binding; never expose in API responses or logs. */
+  arkAssetScope?: string;
   transcribe?: import("./audio-transcription.js").AudioTranscriptionClient["transcribe"];
   shortAsr?: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream">;
   streamSpeech?: import("./media-speech.js").SpeechClient["streamSpeech"];

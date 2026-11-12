@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import { z } from "zod";
 import {
@@ -44,7 +45,7 @@ class ArkMediaAbortError extends Error {
 
 /** Transport only: public schemas, model policy, task ownership and billing live upstream. */
 export function createArkMediaClient(deps: OpenAIClientDeps) {
-  const cfg = deps.config;
+  const cfg = { ...deps.config };
   if ((cfg.apiKey !== undefined) === (cfg.getAuthHeader !== undefined)) {
     throw new Error("provider client requires exactly one of `apiKey` or `getAuthHeader`");
   }
@@ -268,6 +269,16 @@ export function createArkMediaClient(deps: OpenAIClientDeps) {
   }
 
   return {
+    // Private local binding to the exact static credential and endpoint used by this client.
+    // Dynamic auth/endpoints cannot grant assets without a stable account boundary.
+    arkAssetScope:
+      cfg.apiKey && !cfg.resolveBaseUrl && !cfg.getAuthHeader
+        ? createHash("sha256")
+            .update(
+              JSON.stringify([new URL(cfg.baseUrl).toString().replace(/\/+$/, ""), cfg.apiKey]),
+            )
+            .digest("hex")
+        : undefined,
     imageGeneration: (body: Record<string, unknown>, opts?: ProviderCallOptions) =>
       call("image", body, opts),
     videoGeneration: (body: Record<string, unknown>, opts?: ProviderCallOptions) =>
