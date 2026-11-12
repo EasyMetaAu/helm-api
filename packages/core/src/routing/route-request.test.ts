@@ -127,8 +127,12 @@ describe("routeRequest — lane-restricted keys without custom models", () => {
     return deps({
       lanes: {
         ...LANES,
-        [lane]: { primary: model, fallback: [], constraints: {} },
-      } as LanesConfig,
+        [lane]: {
+          primary: model,
+          fallback: [],
+          constraints: { require_tools: false, require_json: false, require_vision: false },
+        },
+      },
       isKnownModel: (candidate) => candidate === model || candidate === "image-model",
       isImageModel: (candidate) => candidate === "image-model",
     });
