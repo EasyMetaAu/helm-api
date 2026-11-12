@@ -67,6 +67,9 @@ Then GET `/v1/3d/{request_id}` using the same Helm key. A successful response is
 
 ## Failures and acceptance limits
 
+- Ark 视频和 3D 创建失败时，请在管理后台对应请求的执行详情查看 `error_detail`。记录包含上游 HTTP 状态，以及通过格式校验的 `provider_raw.error.code`、`provider_raw.error.param` 和 `provider_raw.request_id`；上游未提供或不符合格式的字段省略。结构化日志的 `video.create_failed` / `three-d.create_failed` 同时记录这些字段，并携带 Helm 请求 ID。客户端继续使用 `upstream_rejected` / `outcome_unknown` 判断失败类别。
+- 诊断记录不保存上游原始消息、完整响应头或素材 URL；它不改变现有请求正文保存策略。旧版未记录的上游错误无法补回。错误参数只保存已支持字段名或 `content` 路径，上游请求 ID 从专用响应头、结构化字段或消息末尾的 `Request id:` 提取。
+- [官方人像素材说明](https://ark.volcengine.com/docs/seedance-portrait-asset-guide)要求真人认证和本人授权后，将素材入库并通过 `asset://` 引用。直接上传含真人人脸的参考图／视频不在普通参考输入的支持范围。Helm 当前仅接受 HTTPS 素材 URL，尚未接入 `asset://`，也没有素材 ID 与 Helm 租户、Ark 账号的授权绑定；仅放开 URL 校验会允许调用共享上游账号中的私有素材。本次错误诊断改进不代表真人口播链路已经可用。仅凭 HTTP 400 不能认定具体审核原因。
 - Paid POSTs have **zero automatic retries**, including timeout/503/connection errors. `outcome_unknown` means the provider may have accepted the task; reconcile before any manual new create. A failed local ownership write must not trigger replay.
 - `SetLimitExceeded` means the upstream account generation limit was reached. It does not mean the integration can fix the quota. Do not silently change safe experience settings, recharge or retry.
 - 本期不支持 Seedance 编辑/延长、Draft、webhook、账户任务列表/删除。现有 Grok 视频扩展接口仍按原契约运行。
