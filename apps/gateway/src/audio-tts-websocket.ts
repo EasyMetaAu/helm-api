@@ -14,6 +14,7 @@ import {
   type AudioSpeechRouteDeps,
   acquireSpeechLease,
   admitSpeechIdentity,
+  isUnbilledSpeechFailure,
   resolveSpeechSelection,
   SpeechAdmissionError,
   type SpeechSelection,
@@ -145,6 +146,7 @@ export function mountAudioTtsWebSocket({
         textCharacters = 0;
       let done = false,
         started = false;
+      let unbilledFailure = false;
       const traceId = crypto.randomUUID();
       let identity: Awaited<ReturnType<typeof admitSpeechIdentity>> | undefined;
       const timer = setTimeout(() => abort.abort(), sessionTimeoutMs);
@@ -158,6 +160,7 @@ export function mountAudioTtsWebSocket({
       const end = async (status: "completed" | "error" | "canceled") => {
         if (done) return;
         done = true;
+        const notSent = unbilledFailure || session?.dispatched === false;
         clearTimeout(timer);
         clearTimeout(idle);
         active.delete(abort);
@@ -180,6 +183,7 @@ export function mountAudioTtsWebSocket({
                   selection.pricing,
                   usage,
                   status === "completed",
+                  notSent,
                 )) ?? spend;
             if (identity.caps?.budget && deps.settleBudget)
               await deps.settleBudget(
@@ -343,7 +347,8 @@ export function mountAudioTtsWebSocket({
                   }
                 }
                 if (!done) await end("error");
-              } catch {
+              } catch (error) {
+                unbilledFailure = isUnbilledSpeechFailure(error);
                 if (!done) {
                   await send(
                     client,
@@ -392,6 +397,8 @@ export function mountAudioTtsWebSocket({
           }
         }
       } catch (error) {
+        // Command validation after a session opened cannot undo earlier dispatches.
+        unbilledFailure = !session && isUnbilledSpeechFailure(error);
         if (!ws && !socket.destroyed)
           reject(socket, error instanceof SpeechAdmissionError ? error.status : 503);
         if (ws?.readyState === WebSocket.OPEN)

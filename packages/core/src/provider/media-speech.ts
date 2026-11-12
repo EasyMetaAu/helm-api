@@ -38,6 +38,8 @@ export type SpeechEventData = SpeechEvent extends infer E
 export class SpeechParameterError extends Error {}
 export interface SpeechSession {
   readonly events: AsyncIterable<SpeechEvent>;
+  /** Only false proves that this session has not dispatched upstream yet. */
+  readonly dispatched?: boolean;
   readonly capabilities: { flush: boolean; cancel: boolean };
   append(text: string): Promise<void>;
   flush(): Promise<void>;

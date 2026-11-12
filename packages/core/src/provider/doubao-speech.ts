@@ -197,6 +197,9 @@ export function createDoubaoSpeechClient(deps: OpenAIClientDeps): SpeechClient {
       // This is a buffered session over Doubao's one-input HTTP API. Only finish dispatches.
       return {
         events,
+        get dispatched() {
+          return finished;
+        },
         capabilities: { flush: false, cancel: false },
         async append(text) {
           if (finished || closed) throw new SpeechParameterError("speech session ended");
@@ -218,8 +221,10 @@ export function createDoubaoSpeechClient(deps: OpenAIClientDeps): SpeechClient {
               for await (const event of client.streamSpeech({ ...req, input }, { ...opts, signal }))
                 events.push(event);
               events.end();
-            } catch {
-              events.end(new Error("Doubao speech outcome unknown"));
+            } catch (error) {
+              events.end(
+                error instanceof Error ? error : new Error("Doubao speech outcome unknown"),
+              );
             }
           })();
         },

@@ -73,6 +73,14 @@ export class SpeechAdmissionError extends Error {
     super(message);
   }
 }
+export function isUnbilledSpeechFailure(error: unknown): boolean {
+  if (error instanceof MediaHttpError) return error.outcome !== "unknown";
+  return (
+    error instanceof SpeechParameterError ||
+    (error instanceof UpstreamError &&
+      [400, 401, 402, 403, 404, 413, 422, 429].includes(error.upstreamStatus ?? 0))
+  );
+}
 export async function admitSpeechIdentity(
   deps: Pick<AudioSpeechRouteDeps, "auth" | "budgetGate" | "rateLimiter">,
   credential: string | null,
@@ -355,10 +363,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           await finish(
             lease.signal.aborted ? "canceled" : "error",
             undefined,
-            error instanceof SpeechParameterError ||
-              (error instanceof MediaHttpError && error.outcome !== "unknown") ||
-              (error instanceof UpstreamError &&
-                [400, 401, 402, 403, 404, 413, 422, 429].includes(error.upstreamStatus ?? 0)),
+            isUnbilledSpeechFailure(error),
           );
           throw error;
         }
@@ -393,7 +398,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         first = await nextAudio();
       } catch (error) {
         await iterator.return?.();
-        await finish("error", usage);
+        await finish("error", usage, isUnbilledSpeechFailure(error));
         throw error;
       }
       if (!first)
