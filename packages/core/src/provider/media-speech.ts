@@ -1,5 +1,7 @@
 import {
   type MediaSpeechRequest,
+  type MediaSpeechTimestamp,
+  MediaSpeechTimestampSchema,
   type MediaSpeechUsage,
   MediaSpeechUsageSchema,
 } from "@helm/shared";
@@ -19,6 +21,7 @@ export const SpeechEventSchema = z.discriminatedUnion("type", [
     type: z.literal("audio"),
     audio: z.custom<Uint8Array>((value) => value instanceof Uint8Array),
   }),
+  z.object({ ...sequence, type: z.literal("timestamp"), timestamp: MediaSpeechTimestampSchema }),
   z.object({ ...sequence, type: z.literal("usage"), usage: MediaSpeechUsageSchema }),
   z.object({
     ...sequence,
@@ -35,6 +38,8 @@ export type SpeechEventData = SpeechEvent extends infer E
 export class SpeechParameterError extends Error {}
 export interface SpeechSession {
   readonly events: AsyncIterable<SpeechEvent>;
+  /** Only false proves that this session has not dispatched upstream yet. */
+  readonly dispatched?: boolean;
   readonly capabilities: { flush: boolean; cancel: boolean };
   append(text: string): Promise<void>;
   flush(): Promise<void>;
@@ -46,7 +51,13 @@ export interface SpeechClient {
   ttsSpeech(
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,
-  ): Promise<{ audio: Uint8Array; contentType: string; usage?: MediaSpeechUsage }>;
+  ): Promise<{
+    audio: Uint8Array;
+    contentType: string;
+    durationMs?: number;
+    usage?: MediaSpeechUsage;
+    timestamps?: MediaSpeechTimestamp[];
+  }>;
   streamSpeech(
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,
@@ -79,4 +90,21 @@ export function decodeSpeechHex(value: string): Uint8Array {
   if (!value || value.length % 2 !== 0 || !/^[\da-f]+$/i.test(value))
     throw new Error("invalid speech audio hex");
   return new Uint8Array(Buffer.from(value, "hex"));
+}
+
+/** Usage events carry deltas; provider cumulative counters are converted at their adapter. */
+export function accumulateSpeechUsage(
+  previous: MediaSpeechUsage | undefined,
+  next: MediaSpeechUsage,
+): MediaSpeechUsage {
+  const usage = { ...previous };
+  for (const key of [
+    "usage_characters",
+    "usage_voice_count",
+    "audio_length",
+    "text_words",
+  ] as const) {
+    if (next[key] !== undefined) usage[key] = (previous?.[key] ?? 0) + next[key];
+  }
+  return usage;
 }

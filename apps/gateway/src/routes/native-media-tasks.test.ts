@@ -214,3 +214,22 @@ describe("native media task route", () => {
     expect(t.create).toHaveBeenCalledTimes(1);
   });
 });
+
+it("persists a client-assigned ASR id before submit and recovers unknown submissions by query", async () => {
+  const t = setup("transcription");
+  t.profile.clientAssignedRequestId = true;
+  let submittedId: string | undefined;
+  t.target.client.create = async (_body, _signal, _account, id) => {
+    submittedId = id;
+    const stored = [...t.records.values()][0];
+    expect(stored?.status).toContain(id);
+    throw new Error("response connection lost");
+  };
+  const failed = Failed.parse(await (await t.post()).json());
+  expect(submittedId).toBeTruthy();
+  const recovered = await t.app.request(`${t.root}/operations/${failed.error.operation_id}`);
+  const result = z.object({ request_id: z.string() }).parse(await recovered.json());
+  t.retrieve.mockResolvedValue({ id: submittedId ?? "", status: "done" });
+  expect((await t.app.request(`${t.root}/${result.request_id}`)).status).toBe(200);
+  expect(t.retrieve).toHaveBeenCalledWith(submittedId, expect.any(AbortSignal));
+});

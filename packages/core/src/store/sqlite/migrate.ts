@@ -1473,6 +1473,14 @@ CREATE TABLE request_payload_response_chunks (
       );`);
     },
   },
+  {
+    version: 58,
+    run(db) {
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS media_spend_records (id TEXT PRIMARY KEY, key_id TEXT NOT NULL, record_json TEXT NOT NULL);",
+      );
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

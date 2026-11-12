@@ -138,6 +138,8 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Pre-dispatch durable request ID for providers that query client-assigned tasks. */
+  providerRequestId?: string;
   /** Authenticated owner scope and original conversation, never sent verbatim. */
   anthropicIdentityContext?: import("./anthropic-account-profile.js").AnthropicIdentityContext;
   /** Inbound identity, forwarded only by explicitly configured Helm relays. */
@@ -189,6 +191,7 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  transcribe?: import("./audio-transcription.js").AudioTranscriptionClient["transcribe"];
   shortAsr?: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream">;
   streamSpeech?: import("./media-speech.js").SpeechClient["streamSpeech"];
   openSpeechSession?: import("./media-speech.js").SpeechClient["openSpeechSession"];
@@ -261,10 +264,7 @@ export interface ProviderClient {
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   threeDRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
-  ttsSpeech?(
-    req: Record<string, unknown>,
-    opts?: ProviderCallOptions,
-  ): Promise<{ audio: Uint8Array; contentType: string }>;
+  ttsSpeech?: import("./media-speech.js").SpeechClient["ttsSpeech"];
   ttsVoices?(opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(

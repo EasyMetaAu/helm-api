@@ -1,9 +1,10 @@
+import { type MediaSpendRecord, MediaSpendRecordSchema } from "@helm/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { weeklyPeriodStart } from "../../budget/weekly.js";
 import { type BucketState, refill } from "../../ratelimit/token-bucket.js";
 import type { BudgetDim, BudgetPeekResult, BudgetStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
-import { usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
+import { mediaSpendRecords, usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
 
 // Postgres adapter for BudgetStore (docs/06 "usage budgets") — the supabase
 // implementation. `peek` (pre-route sign check) is READ-ONLY. `debit` (post-served
@@ -12,8 +13,95 @@ import { usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
 // and never lose an update. A debit ALWAYS applies (may go negative — soft cap
 // settled after the request, not a hard reservation). key_id only (principle 7).
 export class PgBudgetStore implements BudgetStore {
-  constructor(private readonly db: PgDb) {}
+  constructor(private readonly db: Pick<PgDb, "select" | "insert" | "update" | "transaction">) {}
 
+  async getMediaSpend(id: string, keyId: string): Promise<MediaSpendRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(mediaSpendRecords)
+      .where(and(eq(mediaSpendRecords.id, id), eq(mediaSpendRecords.keyId, keyId)))
+      .limit(1);
+    return row ? MediaSpendRecordSchema.parse(JSON.parse(row.recordJson)) : null;
+  }
+  async reserveMediaSpend(raw: MediaSpendRecord): Promise<boolean> {
+    const record = MediaSpendRecordSchema.parse(raw);
+    if (record.state !== "reserved" || record.costUsd !== null)
+      throw new Error("invalid media reservation");
+    return this.db.transaction(async (tx) => {
+      const store = new PgBudgetStore(tx);
+      if (record.capacity !== null) {
+        const debit =
+          record.anchorMs === null
+            ? await store.change(
+                record.keyId,
+                "usd",
+                record.capacity,
+                record.windowMs,
+                record.reservedUsd,
+                record.admittedAtMs,
+                true,
+              )
+            : await store.changeWeekly(
+                record.keyId,
+                "usd",
+                record.capacity,
+                record.reservedUsd,
+                record.admittedAtMs,
+                record.anchorMs,
+                true,
+              );
+        if (!debit.accepted) return false;
+      }
+      await tx
+        .insert(mediaSpendRecords)
+        .values({ id: record.id, keyId: record.keyId, recordJson: JSON.stringify(record) });
+      return true;
+    });
+  }
+  async settleMediaSpend(
+    id: string,
+    keyId: string,
+    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    nowMs: number,
+  ): Promise<MediaSpendRecord | null> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(mediaSpendRecords)
+        .where(and(eq(mediaSpendRecords.id, id), eq(mediaSpendRecords.keyId, keyId)))
+        .limit(1)
+        .for("update");
+      if (!row) return null;
+      const record = MediaSpendRecordSchema.parse(JSON.parse(row.recordJson));
+      if (record.state === "settled") return record;
+      const next = MediaSpendRecordSchema.parse({
+        ...record,
+        ...result,
+        state: result.costUsd === null ? "outcome_unknown" : "settled",
+      });
+      if (record.capacity !== null && next.costUsd !== null) {
+        const store = new PgBudgetStore(tx);
+        const amount = next.costUsd - record.reservedUsd;
+        if (record.anchorMs === null)
+          await store.change(keyId, "usd", record.capacity, record.windowMs, amount, nowMs, false);
+        else
+          await store.changeWeekly(
+            keyId,
+            "usd",
+            record.capacity,
+            amount,
+            record.admittedAtMs,
+            record.anchorMs,
+            false,
+          );
+      }
+      await tx
+        .update(mediaSpendRecords)
+        .set({ recordJson: JSON.stringify(next) })
+        .where(eq(mediaSpendRecords.id, id));
+      return next;
+    });
+  }
   async peek(
     keyId: string,
     dim: BudgetDim,

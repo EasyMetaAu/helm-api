@@ -30,3 +30,19 @@ it("preserves existing provider shapes", () => {
     ProviderConfigSchema.safeParse({ name: "x", type: "ark", api_key_env: "KEY" }).success,
   ).toBe(true);
 });
+
+for (const type of ["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"]) {
+  it(`${type} requires an explicit authenticated HTTPS configuration`, () => {
+    expect(
+      ProviderConfigSchema.safeParse({ ...base, type, base_url: "https://voice.example.test" })
+        .success,
+    ).toBe(true);
+    for (const base_url of [
+      undefined,
+      "http://voice.example.test",
+      "https://user:pass@voice.example.test",
+      "https://voice.example.test?key=value",
+    ])
+      expect(ProviderConfigSchema.safeParse({ ...base, type, base_url }).success).toBe(false);
+  });
+}

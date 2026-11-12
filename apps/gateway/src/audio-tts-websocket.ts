@@ -1,8 +1,12 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { SpeechSession, SpeechSocketConnector } from "@helm/core";
-import { speechQueue } from "@helm/core";
-import { MediaSpeechCommandSchema, type MediaSpeechUsage } from "@helm/shared";
+import { accumulateSpeechUsage, SpeechAccountingError, speechQueue } from "@helm/core";
+import {
+  MediaSpeechCommandSchema,
+  type MediaSpeechUsage,
+  type MediaSpendRecord,
+} from "@helm/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { codexWebSocketAgent } from "./codex-responses-websocket.js";
 import type { RealtimeWebSocketUpgradeServer } from "./realtime-websocket.js";
@@ -10,6 +14,7 @@ import {
   type AudioSpeechRouteDeps,
   acquireSpeechLease,
   admitSpeechIdentity,
+  isUnbilledSpeechFailure,
   resolveSpeechSelection,
   SpeechAdmissionError,
   type SpeechSelection,
@@ -136,8 +141,12 @@ export function mountAudioTtsWebSocket({
         session: SpeechSession | undefined,
         selection: SpeechSelection | undefined,
         usage: MediaSpeechUsage | undefined;
+      let spend: MediaSpendRecord | undefined;
+      let textLimit: number | undefined,
+        textCharacters = 0;
       let done = false,
         started = false;
+      let unbilledFailure = false;
       const traceId = crypto.randomUUID();
       let identity: Awaited<ReturnType<typeof admitSpeechIdentity>> | undefined;
       const timer = setTimeout(() => abort.abort(), sessionTimeoutMs);
@@ -151,6 +160,7 @@ export function mountAudioTtsWebSocket({
       const end = async (status: "completed" | "error" | "canceled") => {
         if (done) return;
         done = true;
+        const notSent = unbilledFailure || session?.dispatched === false;
         clearTimeout(timer);
         clearTimeout(idle);
         active.delete(abort);
@@ -166,14 +176,31 @@ export function mountAudioTtsWebSocket({
         } else if (!ws) socket.destroy();
         try {
           if (identity && selection) {
+            if (spend && deps.accounting)
+              spend =
+                (await deps.accounting.settle(
+                  spend,
+                  selection.pricing,
+                  usage,
+                  status === "completed",
+                  notSent,
+                )) ?? spend;
             if (identity.caps?.budget && deps.settleBudget)
               await deps.settleBudget(
                 identity.keyId,
-                identity.caps.budget,
+                spend ? { ...identity.caps.budget, spendUsd: null } : identity.caps.budget,
                 { requests: 1, tokens: 0, costUsd: null },
                 Date.now(),
               );
-            await deps.record?.({ identity, selection, usage, status, traceId });
+            await deps.record?.({
+              identity,
+              selection,
+              usage,
+              status,
+              traceId,
+              costUsd: spend?.costUsd,
+              operationId: spend?.id,
+            });
           }
         } catch {
           console.warn(
@@ -196,6 +223,7 @@ export function mountAudioTtsWebSocket({
           deps,
           /^Bearer\s+(.+)$/.exec(header ?? "")?.[1] ?? null,
           request.headers["user-agent"] ?? null,
+          !!deps.accounting,
         );
         abort.signal.throwIfAborted();
         lease = await acquireSpeechLease(deps, identity, abort.signal);
@@ -252,8 +280,42 @@ export function mountAudioTtsWebSocket({
                 "unsupported_profile",
                 "speech sessions are unavailable",
               );
+            const { max_input_characters, ...speechRequest } = command.request;
+            textLimit = max_input_characters;
+            if (account.caps?.budget?.spendUsd != null && textLimit === undefined)
+              throw new SpeechAdmissionError(
+                422,
+                "media_pricing_unavailable",
+                "spend-capped sessions require max_input_characters",
+              );
+            if (deps.accounting) {
+              spend = await deps.accounting.reserve({
+                id: crypto.randomUUID(),
+                keyId: account.keyId,
+                alias: selection.alias,
+                model: selection.model,
+                pricing: selection.pricing,
+                caps: account.caps?.budget,
+                request: {
+                  ...speechRequest,
+                  model: selection.model,
+                  stream: true,
+                  input: " ".repeat(textLimit ?? 1),
+                },
+              });
+              if (max_input_characters !== undefined || speechRequest.output === "json")
+                await send(
+                  client,
+                  JSON.stringify({
+                    type: "accounting",
+                    operationId: spend.id,
+                    state: spend.state,
+                    reservedUsd: spend.reservedUsd,
+                  }),
+                );
+            }
             session = await selection.client.openSpeechSession(
-              { ...command.request, model: selection.model },
+              { ...speechRequest, model: selection.model },
               { signal: lease.signal },
             );
             if (done) {
@@ -266,17 +328,7 @@ export function mountAudioTtsWebSocket({
                 for await (const event of current.events) {
                   if (done) break;
                   resetIdle();
-                  if (event.type === "usage")
-                    usage = {
-                      usage_characters:
-                        event.usage.usage_characters === undefined
-                          ? usage?.usage_characters
-                          : (usage?.usage_characters ?? 0) + event.usage.usage_characters,
-                      usage_voice_count:
-                        event.usage.usage_voice_count === undefined
-                          ? usage?.usage_voice_count
-                          : (usage?.usage_voice_count ?? 0) + event.usage.usage_voice_count,
-                    };
+                  if (event.type === "usage") usage = accumulateSpeechUsage(usage, event.usage);
                   await send(
                     client,
                     JSON.stringify(
@@ -295,7 +347,8 @@ export function mountAudioTtsWebSocket({
                   }
                 }
                 if (!done) await end("error");
-              } catch {
+              } catch (error) {
+                unbilledFailure = isUnbilledSpeechFailure(error);
                 if (!done) {
                   await send(
                     client,
@@ -330,11 +383,22 @@ export function mountAudioTtsWebSocket({
               );
               continue;
             }
-            if (command.type === "append") await session.append(command.text);
-            else await session[command.type]();
+            if (command.type === "append") {
+              const next = textCharacters + Array.from(command.text).length;
+              if (textLimit !== undefined && next > textLimit)
+                throw new SpeechAdmissionError(
+                  422,
+                  "input_limit_exceeded",
+                  "speech session input bound exceeded",
+                );
+              textCharacters = next;
+              await session.append(command.text);
+            } else await session[command.type]();
           }
         }
       } catch (error) {
+        // Command validation after a session opened cannot undo earlier dispatches.
+        unbilledFailure = !session && isUnbilledSpeechFailure(error);
         if (!ws && !socket.destroyed)
           reject(socket, error instanceof SpeechAdmissionError ? error.status : 503);
         if (ws?.readyState === WebSocket.OPEN)
@@ -342,7 +406,10 @@ export function mountAudioTtsWebSocket({
             ws,
             JSON.stringify({
               type: "error",
-              code: error instanceof SpeechAdmissionError ? error.code : "speech_failed",
+              code:
+                error instanceof SpeechAdmissionError || error instanceof SpeechAccountingError
+                  ? error.code
+                  : "speech_failed",
               message:
                 error instanceof SpeechAdmissionError ? error.message : "speech session failed",
             }),

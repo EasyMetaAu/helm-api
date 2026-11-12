@@ -138,6 +138,18 @@ export interface BudgetPeekResult {
 // weeklyAnchorMs selects fixed seven-day counters instead of rolling buckets.
 // nowMs selects the accounting period; settlement uses the admitted request time.
 export interface BudgetStore {
+  reserveMediaSpend?(record: import("@helm/shared").MediaSpendRecord): Promise<boolean>;
+  settleMediaSpend?(
+    id: string,
+    keyId: string,
+    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    nowMs: number,
+  ): Promise<import("@helm/shared").MediaSpendRecord | null>;
+  getMediaSpend?(
+    id: string,
+    keyId: string,
+  ): Promise<import("@helm/shared").MediaSpendRecord | null>;
+
   // Atomic hard request reservation against the existing req bucket. Optional for
   // older adapters; callers requiring hard admission must fail closed when absent.
   reserveRequest?(

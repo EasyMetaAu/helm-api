@@ -350,6 +350,7 @@ export {
   ArkPublicTaskResultSchema,
 } from "./request/ark-media-public-schema.js";
 export * from "./request/ark-media-schema.js";
+export * from "./request/audio-transcription.js";
 export * from "./request/bailian-media.js";
 export {
   type GrokImagineImageGenerationRequest,
@@ -373,6 +374,7 @@ export {
   InteractionsResponseSchema,
 } from "./request/interactions-schema.js";
 export * from "./request/media-speech-schema.js";
+export * from "./request/media-spend.js";
 export * from "./request/minimax-video.js";
 export {
   type RealtimeSession,

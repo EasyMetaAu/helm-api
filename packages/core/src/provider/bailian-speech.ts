@@ -1,4 +1,9 @@
-import { MediaSpeechRequestSchema } from "@helm/shared";
+import {
+  MediaSpeechRequestSchema,
+  type MediaSpeechTimestamp,
+  MediaSpeechTimestampSchema,
+  type MediaSpeechUsage,
+} from "@helm/shared";
 import { z } from "zod";
 import {
   type SpeechClient,
@@ -11,6 +16,30 @@ import type { OpenAIClientDeps } from "./openai.js";
 
 const Control = z.object({
   header: z.object({ event: z.string(), task_id: z.string().optional() }),
+  payload: z
+    .object({
+      output: z
+        .object({
+          type: z.string().optional(),
+          original_text: z.string().optional(),
+          sentence: z
+            .object({
+              words: z
+                .array(
+                  z.object({
+                    text: z.string(),
+                    begin_time: z.number().nonnegative(),
+                    end_time: z.number().nonnegative(),
+                  }),
+                )
+                .optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+      usage: z.object({ characters: z.number().nonnegative() }).optional(),
+    })
+    .optional(),
 });
 export interface BailianSpeechTransport {
   url: string;
@@ -39,6 +68,7 @@ export function createBailianSpeechClient(
         signal,
       });
       let started = false;
+      let billedCharacters = 0;
       const send = (action: string, payload: Record<string, unknown>) =>
         socket.send(
           JSON.stringify({ header: { action, task_id: taskId, streaming: "duplex" }, payload }),
@@ -60,6 +90,7 @@ export function createBailianSpeechClient(
               format: req.response_format,
               sample_rate: req.sample_rate,
               rate: req.speed,
+              ...(req.timestamps ? { word_timestamp_enabled: true } : {}),
             },
             input: {},
           }),
@@ -73,12 +104,38 @@ export function createBailianSpeechClient(
             emit({ type: "audio", audio: data });
             return;
           }
-          const { header } = Control.parse(JSON.parse(data));
+          const { header, payload } = Control.parse(JSON.parse(data));
           if (header.task_id !== taskId) throw new Error("speech task identity mismatch");
           if (header.event === "task-failed") throw new Error("Bailian speech task failed");
           if (header.event === "task-started") {
             started = true;
             return "started";
+          }
+          if (header.event === "result-generated" && payload?.output?.type === "sentence-end") {
+            const words = payload.output.sentence?.words?.map((word) => ({
+              text: word.text,
+              startMs: word.begin_time,
+              endMs: word.end_time,
+            }));
+            if (words?.length)
+              emit({
+                type: "timestamp",
+                timestamp: MediaSpeechTimestampSchema.parse({
+                  text: payload.output.original_text ?? words.map((word) => word.text).join(""),
+                  startMs: words[0]?.startMs,
+                  endMs: words.at(-1)?.endMs,
+                  words,
+                }),
+              });
+            if (payload.usage) {
+              if (payload.usage.characters < billedCharacters)
+                throw new Error("speech cumulative usage decreased");
+              emit({
+                type: "usage",
+                usage: { usage_characters: payload.usage.characters - billedCharacters },
+              });
+              billedCharacters = payload.usage.characters;
+            }
           }
           if (header.event === "task-finished") return "completed";
         },
@@ -99,7 +156,14 @@ export function createBailianSpeechClient(
       const req = MediaSpeechRequestSchema.parse(raw);
       const chunks: Uint8Array[] = [];
       let size = 0;
+      const timestamps: MediaSpeechTimestamp[] = [];
+      let usage: MediaSpeechUsage | undefined;
       for await (const event of client.streamSpeech(req, opts)) {
+        if (event.type === "timestamp") timestamps.push(event.timestamp);
+        if (event.type === "usage")
+          usage = {
+            usage_characters: (usage?.usage_characters ?? 0) + (event.usage.usage_characters ?? 0),
+          };
         if (event.type === "audio") {
           size += event.audio.length;
           if (size > 16 * 1024 * 1024) throw new Error("speech response exceeds limit");
@@ -110,6 +174,8 @@ export function createBailianSpeechClient(
       return {
         audio: new Uint8Array(Buffer.concat(chunks)),
         contentType: speechMime(req.response_format),
+        usage,
+        ...(timestamps.length ? { timestamps } : {}),
       };
     },
   };

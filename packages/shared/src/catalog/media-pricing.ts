@@ -66,6 +66,14 @@ export const MediaPriceRateSchema = z
 
 export const MediaPricingSchema = z.strictObject({
   currency: z.enum(["CNY", "USD"]),
+  // Deployment/account contract, never inferred from a token price or a guessed ratio.
+  billing: z
+    .strictObject({
+      roundingSeconds: z.number().positive().optional(),
+      usdPerCurrencyUnit: z.number().positive().optional(),
+      maxCharactersPerInputCodepoint: z.number().positive().optional(),
+    })
+    .optional(),
   region: z.string().min(1),
   providerModel: z.string().min(1),
   basis: z.literal("official_list_price"),

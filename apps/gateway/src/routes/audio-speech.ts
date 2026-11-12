@@ -1,8 +1,12 @@
 import {
+  accumulateSpeechUsage,
   type BudgetCaps,
   type BudgetCheckResult,
   type BudgetProbe,
   createBlockedModelMatcher,
+  MediaHttpError,
+  type SpeechAccounting,
+  SpeechAccountingError,
   type SpeechClient,
   type SpeechEvent,
   SpeechParameterError,
@@ -11,8 +15,10 @@ import {
 } from "@helm/core";
 import {
   evaluateClientPolicy,
+  type MediaPricing,
   MediaSpeechRequestSchema,
   type MediaSpeechUsage,
+  type MediaSpendRecord,
 } from "@helm/shared";
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -23,6 +29,7 @@ import type { GeminiRateLimiterPort } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
 
 export interface SpeechSelection {
+  pricing?: MediaPricing;
   client: Pick<SpeechClient, "ttsSpeech"> & Partial<SpeechClient>;
   model: string;
   alias: string;
@@ -31,6 +38,7 @@ export interface SpeechSelection {
   customModel: boolean;
 }
 export interface AudioSpeechRouteDeps {
+  accounting?: SpeechAccounting;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   resolve(
     model: string,
@@ -52,6 +60,8 @@ export interface AudioSpeechRouteDeps {
     usage?: MediaSpeechUsage;
     status: "completed" | "error" | "canceled";
     traceId: string;
+    costUsd?: number | null;
+    operationId?: string;
   }) => Promise<void>;
 }
 export class SpeechAdmissionError extends Error {
@@ -63,10 +73,19 @@ export class SpeechAdmissionError extends Error {
     super(message);
   }
 }
+export function isUnbilledSpeechFailure(error: unknown): boolean {
+  if (error instanceof MediaHttpError) return error.outcome !== "unknown";
+  return (
+    error instanceof SpeechParameterError ||
+    (error instanceof UpstreamError &&
+      [400, 401, 402, 403, 404, 413, 422, 429].includes(error.upstreamStatus ?? 0))
+  );
+}
 export async function admitSpeechIdentity(
-  deps: AudioSpeechRouteDeps,
+  deps: Pick<AudioSpeechRouteDeps, "auth" | "budgetGate" | "rateLimiter">,
   credential: string | null,
   userAgent: string | null,
+  canReserveSpend = false,
 ): Promise<MessagesIdentity> {
   const identity = await deps.auth.resolve(credential);
   if (!identity)
@@ -84,7 +103,7 @@ export async function admitSpeechIdentity(
       "media_usage_unavailable",
       "speech token usage cannot be metered for this weekly-capped key",
     );
-  if (budget?.spendUsd != null)
+  if (budget?.spendUsd != null && !canReserveSpend)
     throw new SpeechAdmissionError(
       422,
       "media_pricing_unavailable",
@@ -138,7 +157,7 @@ export async function resolveSpeechSelection(
   return selection;
 }
 export async function acquireSpeechLease(
-  deps: AudioSpeechRouteDeps,
+  deps: Pick<AudioSpeechRouteDeps, "concurrencyGate">,
   identity: MessagesIdentity,
   signal: AbortSignal,
 ) {
@@ -193,15 +212,41 @@ async function readBody(request: Request): Promise<unknown> {
   }
 }
 export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRouteDeps): void {
+  app.get("/v1/audio/operations/:id", async (c) => {
+    const identity = await deps.auth.resolve(
+      /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
+    );
+    if (!identity) return c.json({ error: { code: "invalid_api_key" } }, 401);
+    if (!evaluateClientPolicy(identity.caps?.clientPolicy, c.req.header("user-agent")).allowed)
+      return c.json({ error: { code: "client_not_allowed" } }, 403);
+    if (!deps.accounting) return c.json({ error: { code: "media_accounting_unavailable" } }, 503);
+    const record = await deps.accounting.get(c.req.param("id"), identity.keyId);
+    if (!record) return c.json({ error: { code: "operation_not_found" } }, 404);
+    return c.json(
+      {
+        operationId: record.id,
+        state: record.state,
+        providerAlias: record.alias,
+        reservedUsd: record.reservedUsd,
+        costUsd: record.costUsd,
+        costBasis: "list_price",
+        usage: record.usage,
+      },
+      200,
+      { "cache-control": "no-store" },
+    );
+  });
   app.post("/v1/audio/speech", async (c) => {
     let lease: Awaited<ReturnType<typeof acquireSpeechLease>> | undefined;
     let handedOff = false;
     const abort = new AbortController();
+    let spend: MediaSpendRecord | undefined;
     try {
       const identity = await admitSpeechIdentity(
         deps,
         /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
         c.req.header("user-agent") ?? null,
+        !!deps.accounting,
       );
       const parsed = MediaSpeechRequestSchema.safeParse(await readBody(c.req.raw));
       if (!parsed.success)
@@ -210,6 +255,15 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           "invalid_request",
           "invalid or unsupported speech parameters",
         );
+      if (
+        (parsed.data.timestamps && parsed.data.output !== "json") ||
+        (parsed.data.stream && parsed.data.output === "json")
+      )
+        throw new SpeechAdmissionError(
+          422,
+          "unsupported_parameter",
+          "timestamps require non-streaming JSON output; use WebSocket for timestamp events",
+        );
       const selection = await resolveSpeechSelection(deps, parsed.data.model, identity);
       const req = { ...parsed.data, model: selection.model };
       lease = await acquireSpeechLease(
@@ -217,26 +271,60 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         identity,
         AbortSignal.any([requestSignal(c), abort.signal, AbortSignal.timeout(120_000)]),
       );
+      if (req.stream && !selection.client.streamSpeech)
+        throw new SpeechAdmissionError(
+          422,
+          "unsupported_parameter",
+          "streaming is unavailable for this lane",
+        );
       const activeLease = lease;
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
+      if (deps.accounting)
+        spend = await deps.accounting.reserve({
+          id: crypto.randomUUID(),
+          keyId: identity.keyId,
+          alias: selection.alias,
+          model: selection.model,
+          pricing: selection.pricing,
+          caps: identity.caps?.budget,
+          request: req,
+        });
       let recorded = false;
       let onStreamAbort: (() => void) | undefined;
       const finish = async (
         status: "completed" | "error" | "canceled",
         usage?: MediaSpeechUsage,
+        notSent = false,
       ) => {
         if (recorded) return;
         recorded = true;
         if (onStreamAbort) activeLease.signal.removeEventListener("abort", onStreamAbort);
         try {
+          if (spend && deps.accounting)
+            spend =
+              (await deps.accounting.settle(
+                spend,
+                selection.pricing,
+                usage,
+                status === "completed",
+                notSent,
+              )) ?? spend;
           if (identity.caps?.budget && deps.settleBudget)
             await deps.settleBudget(
               identity.keyId,
-              identity.caps.budget,
+              spend ? { ...identity.caps.budget, spendUsd: null } : identity.caps.budget,
               { requests: 1, tokens: 0, costUsd: null },
               Date.now(),
             );
-          await deps.record?.({ identity, selection, usage, status, traceId });
+          await deps.record?.({
+            identity,
+            selection,
+            usage,
+            status,
+            traceId,
+            costUsd: spend?.costUsd,
+            operationId: spend?.id,
+          });
         } catch {
           c.get("logger")?.log("error", "media.speech_accounting_failed", { trace_id: traceId });
         } finally {
@@ -247,11 +335,36 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         try {
           const result = await selection.client.ttsSpeech(req, { signal: lease.signal });
           await finish("completed", result.usage);
+          const accounting = spend
+            ? {
+                operationId: spend.id,
+                state: spend.state,
+                reservedUsd: spend.reservedUsd,
+                costUsd: spend.costUsd,
+                costBasis: "list_price",
+              }
+            : undefined;
+          if (req.output === "json")
+            return c.json(
+              { ...result, audio: Buffer.from(result.audio).toString("base64"), accounting },
+              200,
+              {
+                "cache-control": "no-store",
+              },
+            );
           return new Response(result.audio as Uint8Array<ArrayBuffer>, {
-            headers: { "content-type": result.contentType, "cache-control": "no-store" },
+            headers: {
+              "content-type": result.contentType,
+              "cache-control": "no-store",
+              ...(spend ? { "x-helm-media-operation-id": spend.id } : {}),
+            },
           });
         } catch (error) {
-          await finish(lease.signal.aborted ? "canceled" : "error");
+          await finish(
+            lease.signal.aborted ? "canceled" : "error",
+            undefined,
+            isUnbilledSpeechFailure(error),
+          );
           throw error;
         }
       }
@@ -270,7 +383,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           const next = await iterator.next();
           if (next.done) throw new Error("speech stream ended before completion");
           const event: SpeechEvent = next.value;
-          if (event.type === "usage") usage = { ...usage, ...event.usage };
+          if (event.type === "usage") usage = accumulateSpeechUsage(usage, event.usage);
           if (event.type === "audio") return event.audio;
           if (event.type === "error") throw new Error("speech upstream failed");
           if (event.type === "completed") {
@@ -285,7 +398,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         first = await nextAudio();
       } catch (error) {
         await iterator.return?.();
-        await finish("error", usage);
+        await finish("error", usage, isUnbilledSpeechFailure(error));
         throw error;
       }
       if (!first)
@@ -330,20 +443,35 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
       if (activeLease.signal.aborted) onStreamAbort();
       handedOff = true;
       return new Response(stream, {
-        headers: { "content-type": speechMime(req.response_format), "cache-control": "no-store" },
+        headers: {
+          "content-type": speechMime(req.response_format),
+          "cache-control": "no-store",
+          ...(spend ? { "x-helm-media-operation-id": spend.id } : {}),
+        },
       });
     } catch (caught) {
       const error =
-        caught instanceof SpeechParameterError
-          ? new SpeechAdmissionError(422, "unsupported_parameter", caught.message)
-          : caught;
+        caught instanceof SpeechAccountingError
+          ? new SpeechAdmissionError(
+              caught.code === "budget_exceeded"
+                ? 429
+                : caught.code === "media_pricing_unavailable"
+                  ? 422
+                  : 503,
+              caught.code,
+              caught.message,
+            )
+          : caught instanceof SpeechParameterError
+            ? new SpeechAdmissionError(422, "unsupported_parameter", caught.message)
+            : caught;
       const known = error instanceof SpeechAdmissionError;
       return c.json(
         {
           error: {
             message: known ? error.message : "speech request failed",
+            ...(spend ? { operation_id: spend.id } : {}),
             type: known ? "invalid_request_error" : "upstream_error",
-            code: known ? error.code : "upstream_error",
+            code: known ? error.code : spend ? "outcome_unknown" : "upstream_error",
             param: null,
           },
         },

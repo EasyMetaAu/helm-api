@@ -24,7 +24,8 @@ const ResultSchema = z.strictObject({
   artifact_expires_at: z.number().int().nonnegative().optional(),
 });
 export interface NativeMediaTaskProfile {
-  profile: "bailian" | "minimax";
+  profile: "bailian" | "minimax" | "doubao";
+  clientAssignedRequestId?: boolean;
   endpointIdentity: string;
   queryTtlMs: number;
   validate(body: Record<string, unknown>, model: string): Record<string, unknown>;
@@ -148,7 +149,7 @@ export async function createNativeMediaTask(
     laneName: target.laneName ?? null,
     profile: profile.profile,
     endpointIdentity: profile.endpointIdentity,
-    upstreamId: "pending",
+    upstreamId: profile.clientAssignedRequestId ? operationId : "pending",
     state: "queued",
     queryExpiresAt: startedAt + profile.queryTtlMs,
     artifactExpiresAt: null,
@@ -165,7 +166,11 @@ export async function createNativeMediaTask(
     selectedLane: kind,
     createdAt: startedAt,
     expiresAt: startedAt + MEDIA_TASK_RETENTION_MS,
-    status: operationStatus("dispatching", null, binding),
+    status: operationStatus(
+      "dispatching",
+      profile.clientAssignedRequestId ? operationId : null,
+      binding,
+    ),
   };
   try {
     if (!(await deps.registry.putIfAbsent(reservation)))
@@ -173,13 +178,18 @@ export async function createNativeMediaTask(
   } catch {
     return error(c, 503, "registry_unavailable");
   }
-  let upstreamId: string | null = null;
+  let upstreamId: string | null = profile.clientAssignedRequestId ? operationId : null;
   try {
     const raw = await target.client.create(
       { ...body, model: target.providerModel },
       requestSignal(c),
+      undefined,
+      profile.clientAssignedRequestId ? operationId : undefined,
     );
-    upstreamId = profile.parseCreated(raw);
+    const returnedId = profile.parseCreated(raw);
+    if (profile.clientAssignedRequestId && returnedId !== operationId)
+      throw new Error("ASR request identity mismatch");
+    upstreamId = returnedId;
     if (!upstreamId || upstreamId.length > 1024) throw new Error("invalid accepted task");
     binding.upstreamId = upstreamId;
     await deps.registry.put({

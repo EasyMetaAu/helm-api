@@ -1,9 +1,10 @@
+import { type MediaSpendRecord, MediaSpendRecordSchema } from "@helm/shared";
 import { and, eq } from "drizzle-orm";
 import { weeklyPeriodStart } from "../../budget/weekly.js";
 import { type BucketState, refill } from "../../ratelimit/token-bucket.js";
 import type { BudgetDim, BudgetPeekResult, BudgetStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
-import { usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
+import { mediaSpendRecords, usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
 
 // SQLite adapter for BudgetStore (docs/06 "usage budgets"). Reuses the pure
 // token-bucket refill math with a CONFIGURABLE window. `peek` is READ-ONLY (the
@@ -16,6 +17,92 @@ import { usageBudgetBuckets, weeklyBudgetUsage } from "./schema.js";
 export class SqliteBudgetStore implements BudgetStore {
   constructor(private readonly db: SqliteDb) {}
 
+  async getMediaSpend(id: string, keyId: string): Promise<MediaSpendRecord | null> {
+    const row = this.db
+      .select()
+      .from(mediaSpendRecords)
+      .where(and(eq(mediaSpendRecords.id, id), eq(mediaSpendRecords.keyId, keyId)))
+      .get();
+    return row ? MediaSpendRecordSchema.parse(JSON.parse(row.recordJson)) : null;
+  }
+  async reserveMediaSpend(raw: MediaSpendRecord): Promise<boolean> {
+    const record = MediaSpendRecordSchema.parse(raw);
+    if (record.state !== "reserved" || record.costUsd !== null)
+      throw new Error("invalid media reservation");
+    return this.db.$sqlite.transaction(() => {
+      if (record.capacity !== null) {
+        const debit =
+          record.anchorMs === null
+            ? this.change(
+                record.keyId,
+                "usd",
+                record.capacity,
+                record.windowMs,
+                record.reservedUsd,
+                record.admittedAtMs,
+                true,
+              )
+            : this.changeWeekly(
+                record.keyId,
+                "usd",
+                record.capacity,
+                record.reservedUsd,
+                record.admittedAtMs,
+                record.anchorMs,
+                true,
+              );
+        if (!debit.accepted) return false;
+      }
+      this.db
+        .insert(mediaSpendRecords)
+        .values({ id: record.id, keyId: record.keyId, recordJson: JSON.stringify(record) })
+        .run();
+      return true;
+    })();
+  }
+  async settleMediaSpend(
+    id: string,
+    keyId: string,
+    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    nowMs: number,
+  ): Promise<MediaSpendRecord | null> {
+    return this.db.$sqlite.transaction(() => {
+      const row = this.db
+        .select()
+        .from(mediaSpendRecords)
+        .where(and(eq(mediaSpendRecords.id, id), eq(mediaSpendRecords.keyId, keyId)))
+        .get();
+      if (!row) return null;
+      const record = MediaSpendRecordSchema.parse(JSON.parse(row.recordJson));
+      if (record.state === "settled") return record;
+      const next = MediaSpendRecordSchema.parse({
+        ...record,
+        ...result,
+        state: result.costUsd === null ? "outcome_unknown" : "settled",
+      });
+      if (record.capacity !== null && next.costUsd !== null) {
+        const amount = next.costUsd - record.reservedUsd;
+        if (record.anchorMs === null)
+          this.change(keyId, "usd", record.capacity, record.windowMs, amount, nowMs, false);
+        else
+          this.changeWeekly(
+            keyId,
+            "usd",
+            record.capacity,
+            amount,
+            record.admittedAtMs,
+            record.anchorMs,
+            false,
+          );
+      }
+      this.db
+        .update(mediaSpendRecords)
+        .set({ recordJson: JSON.stringify(next) })
+        .where(eq(mediaSpendRecords.id, id))
+        .run();
+      return next;
+    })();
+  }
   async peek(
     keyId: string,
     dim: BudgetDim,
@@ -82,7 +169,7 @@ export class SqliteBudgetStore implements BudgetStore {
     return (await this.change(keyId, "req", capacity, windowMs, 1, nowMs, true)).accepted;
   }
 
-  private async change(
+  private change(
     keyId: string,
     dim: BudgetDim,
     capacity: number,
@@ -90,7 +177,7 @@ export class SqliteBudgetStore implements BudgetStore {
     amount: number,
     nowMs: number,
     requireAvailable: boolean,
-  ): Promise<{ remaining: number; accepted: boolean }> {
+  ): { remaining: number; accepted: boolean } {
     const where = and(eq(usageBudgetBuckets.keyId, keyId), eq(usageBudgetBuckets.dim, dim));
 
     const txn = this.db.$sqlite.transaction((): { remaining: number; accepted: boolean } => {
@@ -123,7 +210,7 @@ export class SqliteBudgetStore implements BudgetStore {
 
     return txn();
   }
-  private async changeWeekly(
+  private changeWeekly(
     keyId: string,
     dim: BudgetDim,
     capacity: number,
@@ -131,7 +218,7 @@ export class SqliteBudgetStore implements BudgetStore {
     nowMs: number,
     anchorMs: number,
     requireAvailable: boolean,
-  ): Promise<{ remaining: number; accepted: boolean }> {
+  ): { remaining: number; accepted: boolean } {
     const periodStartMs = weeklyPeriodStart(nowMs, anchorMs);
     const where = and(
       eq(weeklyBudgetUsage.keyId, keyId),

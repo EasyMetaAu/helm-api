@@ -35,3 +35,31 @@ for (const type of ["bailian-media", "minimax-media"] as const) {
     expect(fetch).not.toHaveBeenCalled();
   });
 }
+
+for (const type of ["openai-audio", "deepgram", "whisperx-asr", "doubao-speech"] as const) {
+  it(`${type} wires file transcription and rejects chat probes`, async () => {
+    vi.stubEnv("AUDIO_TEST_KEY", "fixture-key");
+    const config = ProviderConfigSchema.parse({
+      name: type,
+      type,
+      api_key_env: "AUDIO_TEST_KEY",
+      media_account_id: "test-account",
+      base_url:
+        type === "deepgram"
+          ? "https://api.deepgram.com/v1"
+          : type === "openai-audio"
+            ? "https://api.openai.com/v1"
+            : type === "doubao-speech"
+              ? "https://openspeech.bytedance.com"
+              : "https://gpu.example.test",
+      models: [],
+    });
+    const client = buildProviderClients([config], "https://example.test", 1000).get(type);
+    if (type === "doubao-speech") {
+      expect(client?.ttsSpeech).toBeTypeOf("function");
+      expect(client?.transcriptionCreate).toBeTypeOf("function");
+    } else expect(client?.transcribe).toBeTypeOf("function");
+    expect(client?.mediaOnly).toBe(true);
+    await expect(testStaticProviderKey(config, "fixture-key")).rejects.toThrow("chat connectivity");
+  });
+}

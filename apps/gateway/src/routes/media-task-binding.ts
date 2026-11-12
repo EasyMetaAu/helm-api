@@ -15,7 +15,7 @@ export const MediaTaskBindingSchema = z.strictObject({
   providerModel: z.string().min(1),
   providerAccount: z.string().min(1),
   laneName: z.string().min(1).nullable(),
-  profile: z.enum(["bailian", "minimax"]),
+  profile: z.enum(["bailian", "minimax", "doubao"]),
   endpointIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   upstreamId: z.string().min(1).max(1024),
   state: z.enum(["queued", "in_progress", "done", "failed", "cancelled", "expired"]),

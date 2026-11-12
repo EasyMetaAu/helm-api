@@ -23,6 +23,7 @@ import {
   createAnthropicClient,
   createApiKeyPoolClient,
   createArkMediaClient,
+  createAudioTranscriptionClient,
   createAutoVacuumRunner,
   createBailianAsrClient,
   createBailianMediaClient,
@@ -33,6 +34,8 @@ import {
   createCircuitBreaker,
   createCodexResponsesClient,
   createDistributedKeyedSemaphore,
+  createDoubaoAsrClient,
+  createDoubaoSpeechClient,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
   createJevDecisionsInvoker,
@@ -48,8 +51,11 @@ import {
   createRateLimiter,
   createSerializingClient,
   createSignalCollector,
+  createSpeechAccounting,
   createStore,
   createTokenManager,
+  createTranscriptionAccounting,
+  createWhisperXClient,
   DEFAULT_429_COOLDOWN_MS,
   DEFAULT_LANES,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
@@ -250,6 +256,7 @@ import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
 import { mountAdminLogin } from "./routes/admin-login.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { type AudioSpeechRouteDeps, registerAudioSpeechRoute } from "./routes/audio-speech.js";
+import { registerAudioTranscriptionsRoute } from "./routes/audio-transcriptions.js";
 import { handleBailianAsrChat } from "./routes/bailian-asr-chat.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
@@ -1799,6 +1806,37 @@ function createProviderClient(
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
   const providerFetch = makeProviderFetch(p, proxy);
+  if (p.type === "doubao-speech") {
+    const deps = { config: { ...base, ...cred }, fetch: providerFetch };
+    return {
+      ...createDoubaoSpeechClient(deps),
+      ...createDoubaoAsrClient(deps),
+      mediaOnly: true,
+      async chatCompletion() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+      chatCompletionStream() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+    };
+  }
+  if (p.type === "openai-audio" || p.type === "deepgram" || p.type === "whisperx-asr") {
+    return {
+      ...(p.type === "whisperx-asr"
+        ? createWhisperXClient({ config: { ...base, ...cred }, fetch: providerFetch })
+        : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
+            config: { ...base, ...cred },
+            fetch: providerFetch,
+          })),
+      mediaOnly: true,
+      async chatCompletion() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+      chatCompletionStream() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+    };
+  }
   if (p.type === "bailian-media" || p.type === "minimax-media") {
     const deps = { config: { ...base, ...cred }, fetch: providerFetch };
     const url = new URL(base.baseUrl);
@@ -2165,7 +2203,17 @@ export async function testStaticProviderKey(
   rawApiKey: string,
 ): Promise<{ warning?: string }> {
   if (provider.oauth) throw new Error("only static API-key providers can be tested here");
-  if (["ark", "bailian-media", "minimax-media"].includes(provider.type))
+  if (
+    [
+      "ark",
+      "bailian-media",
+      "minimax-media",
+      "openai-audio",
+      "deepgram",
+      "doubao-speech",
+      "whisperx-asr",
+    ].includes(provider.type)
+  )
     throw new Error("Ark media models do not support chat connectivity tests");
   const apiKey = rawApiKey.trim();
   const model = (
@@ -5349,7 +5397,10 @@ export async function buildServer(
               providerName: target.value.providerName,
               providerModel: target.value.providerModel,
               providerAccount: p?.media_account_id ?? null,
-              client: { create: (request, signal) => create(request, { signal }) },
+              client: {
+                create: (request, signal, _account, providerRequestId) =>
+                  create(request, { signal, providerRequestId }),
+              },
             };
           }
           return null;
@@ -5363,7 +5414,9 @@ export async function buildServer(
           return {
             nativeTask,
             retrieve: async (id, signal) =>
-              materializeBailianTranscription(await retrieve(id, { signal }), signal),
+              p?.type === "bailian-media"
+                ? materializeBailianTranscription(await retrieve(id, { signal }), signal)
+                : retrieve(id, { signal }),
           };
         },
       },
@@ -5372,6 +5425,7 @@ export async function buildServer(
   );
 
   const audioSpeech: AudioSpeechRouteDeps = {
+    accounting: createSpeechAccounting(store.budget, budgetConfig),
     auth: { resolve: resolveIdentity },
     concurrencyGate,
     rateLimiter,
@@ -5384,7 +5438,7 @@ export async function buildServer(
         const target = registry.resolve(alias);
         if (!target.ok || catalog.get(alias)?.capabilities.outputAudio !== true) continue;
         const p = config.providers.find((p) => p.name === target.value.providerName);
-        if (p?.type !== "bailian-media" && p?.type !== "minimax-media") continue;
+        if (!p || !["bailian-media", "minimax-media", "doubao-speech"].includes(p.type)) continue;
         const client = providerClients.get(target.value.providerName);
         if (!client?.ttsSpeech) continue;
         return {
@@ -5393,6 +5447,7 @@ export async function buildServer(
             streamSpeech: client.streamSpeech,
             openSpeechSession: client.openSpeechSession,
           },
+          pricing: catalog.get(alias)?.pricing.media,
           model: target.value.providerModel,
           alias,
           lane: isLane ? selection : "speech",
@@ -5401,7 +5456,7 @@ export async function buildServer(
       }
       return null;
     },
-    record: async ({ identity, selection, status, traceId, usage }) => {
+    record: async ({ identity, selection, status, traceId, usage, costUsd, operationId }) => {
       const success = status === "completed";
       const decision = buildImageDecision({
         requestId: crypto.randomUUID(),
@@ -5418,7 +5473,7 @@ export async function buildServer(
             status: success ? "ok" : "error",
             error_class: success ? null : status,
             latency_ms: 0,
-            cost_usd: null,
+            cost_usd: costUsd ?? null,
             error_detail: null,
           },
         ],
@@ -5436,12 +5491,90 @@ export async function buildServer(
         trace_id: traceId,
         alias: selection.alias,
         status,
-        cost_usd: null,
         ...usage,
+        cost_usd: costUsd ?? null,
+        operation_id: operationId,
       });
     },
   };
   registerAudioSpeechRoute(app, audioSpeech);
+  registerAudioTranscriptionsRoute(app, {
+    accounting: createTranscriptionAccounting(store.budget, budgetConfig),
+    auth: audioSpeech.auth,
+    concurrencyGate,
+    rateLimiter,
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    resolve: (model) => {
+      const selection = resolveMediaSelection(model);
+      const isLane = Object.hasOwn(lanes, selection);
+      for (const alias of isLane ? expandLaneChain(selection, lanes) : [selection]) {
+        const target = registry.resolve(alias);
+        if (!target.ok) continue;
+        const client = providerClients.get(target.value.providerName);
+        if (!client?.transcribe) continue;
+        return {
+          pricing: catalog.get(alias)?.pricing.media,
+          client: { transcribe: client.transcribe },
+          model: target.value.providerModel,
+          alias,
+          lane: isLane ? selection : "transcription",
+          customModel: !isLane,
+        };
+      }
+      return null;
+    },
+    record: async ({
+      identity,
+      selection,
+      status,
+      traceId,
+      result,
+      errorCode,
+      costUsd,
+      operationId,
+    }) => {
+      const success = status === "completed";
+      const decision = buildImageDecision({
+        requestId: crypto.randomUUID(),
+        traceId,
+        keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
+        requested: selection.lane,
+        selectedLane: selection.lane,
+        candidateChain: [selection.alias],
+        attempts: [
+          {
+            alias: selection.alias,
+            skipped: false,
+            skip_reason: null,
+            status: success ? "ok" : "error",
+            error_class: success ? null : (errorCode ?? "upstream_error"),
+            latency_ms: 0,
+            cost_usd: costUsd ?? null,
+            error_detail: null,
+          },
+        ],
+        served: success ? { alias: selection.alias, providerModel: selection.model } : null,
+        finalErrorClass: success ? null : (errorCode ?? "upstream_error"),
+        usage: null,
+        policyReason: "audio_transcription",
+      });
+      await writeQueue.enqueueTelemetry({
+        decision,
+        apiKeyId: identity.keyId,
+        createdAt: new Date(),
+      });
+      logger.log("info", "media.transcription_usage", {
+        trace_id: traceId,
+        provider_alias: selection.alias,
+        status,
+        usage: result?.usage,
+        cost_usd: costUsd ?? null,
+        operation_id: operationId,
+        request_id: result?.requestId,
+      });
+    },
+  });
 
   registerThreeDRoute(app, {
     auth: { resolve: resolveIdentity },
