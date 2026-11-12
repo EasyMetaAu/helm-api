@@ -186,6 +186,29 @@ export const ProviderConfigSchema = z
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
   })
   .superRefine((p, ctx) => {
+    if (["openai-audio", "deepgram", "doubao-speech"].includes(p.type)) {
+      try {
+        const url = new URL(p.base_url ?? "");
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          url.search ||
+          url.hash ||
+          !p.api_key_env ||
+          p.oauth
+        )
+          throw new Error("invalid audio provider");
+      } catch {
+        ctx.addIssue({
+          code: "custom",
+          path: ["base_url"],
+          message:
+            "audio providers require explicit HTTPS endpoint and static credential reference",
+        });
+      }
+      return;
+    }
     if (!p.type.startsWith("bailian-media") && !p.type.startsWith("minimax-media")) return;
     if (p.type !== "bailian-media" && p.type !== "minimax-media") {
       ctx.addIssue({

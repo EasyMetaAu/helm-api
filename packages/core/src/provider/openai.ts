@@ -189,6 +189,7 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  transcribe?: import("./audio-transcription.js").AudioTranscriptionClient["transcribe"];
   shortAsr?: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream">;
   streamSpeech?: import("./media-speech.js").SpeechClient["streamSpeech"];
   openSpeechSession?: import("./media-speech.js").SpeechClient["openSpeechSession"];
@@ -261,10 +262,7 @@ export interface ProviderClient {
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   threeDRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
-  ttsSpeech?(
-    req: Record<string, unknown>,
-    opts?: ProviderCallOptions,
-  ): Promise<{ audio: Uint8Array; contentType: string }>;
+  ttsSpeech?: import("./media-speech.js").SpeechClient["ttsSpeech"];
   ttsVoices?(opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(

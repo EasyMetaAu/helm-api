@@ -350,6 +350,7 @@ export {
   ArkPublicTaskResultSchema,
 } from "./request/ark-media-public-schema.js";
 export * from "./request/ark-media-schema.js";
+export * from "./request/audio-transcription.js";
 export * from "./request/bailian-media.js";
 export {
   type GrokImagineImageGenerationRequest,

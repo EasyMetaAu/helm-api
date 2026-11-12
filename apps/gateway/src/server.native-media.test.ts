@@ -35,3 +35,20 @@ for (const type of ["bailian-media", "minimax-media"] as const) {
     expect(fetch).not.toHaveBeenCalled();
   });
 }
+
+for (const type of ["openai-audio", "deepgram"] as const) {
+  it(`${type} wires file transcription and rejects chat probes`, async () => {
+    vi.stubEnv("AUDIO_TEST_KEY", "fixture-key");
+    const config = ProviderConfigSchema.parse({
+      name: type,
+      type,
+      api_key_env: "AUDIO_TEST_KEY",
+      base_url: type === "deepgram" ? "https://api.deepgram.com/v1" : "https://api.openai.com/v1",
+      models: [],
+    });
+    const client = buildProviderClients([config], "https://example.test", 1000).get(type);
+    expect(client?.transcribe).toBeTypeOf("function");
+    expect(client?.mediaOnly).toBe(true);
+    await expect(testStaticProviderKey(config, "fixture-key")).rejects.toThrow("chat connectivity");
+  });
+}

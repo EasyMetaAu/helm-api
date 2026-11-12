@@ -5,6 +5,7 @@
 
 - 请求增加可选 `timestamps: sentence | word` 与 `output: json`；原音频响应不变。HTTP 时间戳要求非流式 JSON；WS 逐条返回 `timestamp` 事件，统一毫秒单位，缺失时不生成。
 - MiniMax 非流式结构化结果在一次上游流式合成中收集音频和原生字幕，避免另取字幕文件或二次合成。百炼启用 `word_timestamp_enabled` 并解析 sentence-end，原生累计字符数转为事件增量。
+- 新增专用 openai-audio / deepgram provider 与 multipart `/v1/audio/transcriptions`；OpenAI 使用 languages[] 且拒绝时间戳，Deepgram 保留真实词时戳、说话人与时长。同步 paid-write 不自动重试，结果中断明确 outcome_unknown。25 MiB 文件限制由入站边界执行。
 - 仅确认协议和本地受控测试；音色支持、真实对齐精度、费用账本及生产部署仍须分别验收。细节与后续依赖见 `docs/g4-speech-media.md`。
 
 ## YYYY-MM-DD · 标题`，并注明所属 spec 章节。

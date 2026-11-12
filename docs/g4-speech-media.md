@@ -20,6 +20,16 @@
 
 MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执行第二次生成。音频保留现有 16 MiB 收集上限。MiniMax `audio_length` 原单位毫秒，`usage_characters` 与 `usage_voice_count` 保留原生字段。百炼累计计费字符数转为 session usage 事件增量。
 
+## 文件转写入口
+
+`POST /v1/audio/transcriptions` 接收 multipart：`file`、`model`（lane 或获授权的 alias），可选重复 `languages[]` / `keywords[]`、`prompt`、`timestamps=word|sentence`、`diarize=true|false`；只支持 JSON 结果。每个文件上限 25 MiB，长材料须由调用方按实际音频边界分块。
+
+配置 provider `type: openai-audio` / `deepgram`，分别使用 `https://api.openai.com/v1` / `https://api.deepgram.com/v1` 和静态 `api_key_env`。模型映射为 `gpt-transcribe` / `nova-3`，再配置单独转写 lane。配置生效不代表该账户已开通。
+
+统一结果包含 `text`、可选 `languages`、`words` / `segments`（startMs/endMs）、`requestId`、原生 `usage`。OpenAI 不接受词时间戳或 diarization，返回 422 `unsupported_parameter`；Deepgram 保留真实词时间戳与 speaker，将秒换算为毫秒，暂支持单通道、单语言／multi。缺词时间戳不补值。
+
+稳定错误：400 `invalid_request`；403 `model_not_allowed` / `lane_not_allowed`；413 `request_too_large`；422 `unsupported_parameter` / `media_pricing_unavailable`；503 `provider_unavailable`；上游明确拒绝 `upstream_rejected`，提交或结果连接中断／服务端故障 `outcome_unknown`，不自动重试。此同步 API 的供应商没有通用结果查询保证，unknown 不等于未扣费。
+
 ## 实现顺序与依赖
 
 1. 现有 MiniMax／百炼字幕、用量与 HTTP/WS 贯通。

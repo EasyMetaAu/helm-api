@@ -64,7 +64,7 @@ export class SpeechAdmissionError extends Error {
   }
 }
 export async function admitSpeechIdentity(
-  deps: AudioSpeechRouteDeps,
+  deps: Pick<AudioSpeechRouteDeps, "auth" | "budgetGate" | "rateLimiter">,
   credential: string | null,
   userAgent: string | null,
 ): Promise<MessagesIdentity> {
@@ -138,7 +138,7 @@ export async function resolveSpeechSelection(
   return selection;
 }
 export async function acquireSpeechLease(
-  deps: AudioSpeechRouteDeps,
+  deps: Pick<AudioSpeechRouteDeps, "concurrencyGate">,
   identity: MessagesIdentity,
   signal: AbortSignal,
 ) {

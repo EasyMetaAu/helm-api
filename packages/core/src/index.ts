@@ -520,6 +520,7 @@ export {
 } from "./provider/anthropic-identity.js";
 export { ApiKeyAccounts, createApiKeyPoolClient } from "./provider/api-key-pool.js";
 export { ArkMediaError, type ArkMediaOutcome, createArkMediaClient } from "./provider/ark.js";
+export * from "./provider/audio-transcription.js";
 export * from "./provider/bailian-asr.js";
 export * from "./provider/bailian-media.js";
 export { createBailianSpeechClient } from "./provider/bailian-speech.js";
@@ -855,6 +856,7 @@ export {
   routeRequest,
 } from "./routing/route-request.js";
 export {
+  consumeResponseBytesWithinBudget,
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
   readResponseTextWithinBudget,
