@@ -186,10 +186,12 @@ export const ProviderConfigSchema = z
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
   })
   .superRefine((p, ctx) => {
-    if (["openai-audio", "deepgram", "doubao-speech"].includes(p.type)) {
+    if (["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"].includes(p.type)) {
       try {
         const url = new URL(p.base_url ?? "");
         if (
+          (p.type === "doubao-speech" &&
+            (!p.media_account_id || url.pathname.replace(/\/+$/, "") !== "")) ||
           url.protocol !== "https:" ||
           url.username ||
           url.password ||

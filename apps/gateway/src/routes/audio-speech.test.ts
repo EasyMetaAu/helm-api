@@ -176,3 +176,56 @@ describe("structured speech response", () => {
     expect(x.speech).not.toHaveBeenCalled();
   });
 });
+
+describe("speech spend reservation", () => {
+  it("reserves before generation and returns durable accounting reference", async () => {
+    const x = setup({ budget: { spendUsd: 1 } });
+    const reserved = {
+      id: "op",
+      keyId: "k",
+      alias: "minimax/speech",
+      providerModel: "speech-2.8-hd",
+      state: "reserved",
+      reservedUsd: 0.1,
+      costUsd: null,
+      capacity: 1,
+      windowMs: 86400000,
+      admittedAtMs: 0,
+      anchorMs: null,
+      usage: null,
+    } as const;
+    const reserve = vi.fn(async () => reserved);
+    const settle = vi.fn(async () => ({ ...reserved, state: "settled" as const, costUsd: 0.01 }));
+    x.deps.accounting = { reserve, settle, get: async () => null };
+    x.deps.budgetGate = {
+      check: async () => ({
+        overBudget: false,
+        limitedBy: null,
+        behavior: "reject",
+        degradeLane: null,
+      }),
+    };
+    const response = await x.call({ ...body, output: "json" } as typeof body);
+    expect(response.status).toBe(200);
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(reserve.mock.invocationCallOrder[0]).toBeLessThan(
+      x.speech.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(await response.json()).toMatchObject({
+      accounting: { operationId: "op", state: "settled", costUsd: 0.01 },
+    });
+  });
+  it("does not send paid work when reservation fails", async () => {
+    const x = setup();
+    x.deps.accounting = {
+      reserve: async () => {
+        throw new Error("store unavailable");
+      },
+      settle: async () => null,
+      get: async () => null,
+    };
+    expect((await x.call()).status).toBeGreaterThanOrEqual(500);
+    expect(x.speech).not.toHaveBeenCalled();
+  });
+});

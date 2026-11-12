@@ -29,6 +29,7 @@ export const AudioWordSchema = z
   .refine((word) => word.endMs >= word.startMs, "timestamp end precedes start");
 export const AudioTranscriptionResultSchema = z.object({
   text: z.string(),
+  durationMs: z.number().nonnegative().optional(),
   languages: z.array(z.object({ code: z.string() })).optional(),
   requestId: z.string().optional(),
   words: z.array(AudioWordSchema).optional(),

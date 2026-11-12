@@ -32,6 +32,7 @@ describe("real speech timestamps", () => {
     }).ttsSpeech(request);
     expect(result).toMatchObject({
       audio: new Uint8Array([1, 2]),
+      durationMs: 500,
       timestamps: [
         {
           text: "Hello",
@@ -61,4 +62,30 @@ describe("real speech timestamps", () => {
     }).ttsSpeech(request);
     expect(result).not.toHaveProperty("timestamps");
   });
+});
+
+it("counts each cumulative MiniMax usage increment once", async () => {
+  const fetch = vi.fn().mockResolvedValue(
+    new Response(
+      [
+        {
+          base_resp: { status_code: 0 },
+          data: { audio: "01", status: 1 },
+          extra_info: { usage_characters: 2 },
+        },
+        {
+          base_resp: { status_code: 0 },
+          data: { audio: "02", status: 2 },
+          extra_info: { usage_characters: 5 },
+        },
+      ]
+        .map((x) => `data: ${JSON.stringify(x)}\n\n`)
+        .join(""),
+    ),
+  );
+  const result = await createMiniMaxSpeechClient({
+    config: { baseUrl: "https://api.minimax.io" },
+    fetch,
+  }).ttsSpeech(request);
+  expect(result.usage?.usage_characters).toBe(5);
 });

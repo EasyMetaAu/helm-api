@@ -14,6 +14,7 @@ export const MediaSpeechRequestSchema = z.strictObject({
 });
 export type MediaSpeechRequest = z.infer<typeof MediaSpeechRequestSchema>;
 export const MediaSpeechUsageSchema = z.object({
+  text_words: z.number().nonnegative().optional(),
   audio_length: z.number().nonnegative().optional(),
   usage_characters: z.number().nonnegative().optional(),
   usage_voice_count: z.number().nonnegative().optional(),
@@ -22,7 +23,9 @@ export type MediaSpeechUsage = z.infer<typeof MediaSpeechUsageSchema>;
 export const MediaSpeechCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("start"),
-    request: MediaSpeechRequestSchema.omit({ input: true, stream: true }),
+    request: MediaSpeechRequestSchema.omit({ input: true, stream: true }).extend({
+      max_input_characters: z.number().int().positive().max(10000).optional(),
+    }),
   }),
   z.strictObject({ type: z.literal("append"), text: z.string().min(1).max(10_000) }),
   z.strictObject({ type: z.literal("flush") }),

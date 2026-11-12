@@ -1433,6 +1433,16 @@ CREATE TABLE request_payload_response_chunks (
       );
     },
   },
+  {
+    version: 57,
+    async run(db) {
+      await db.execute(
+        sql.raw(
+          "CREATE TABLE IF NOT EXISTS media_spend_records (id TEXT PRIMARY KEY, key_id TEXT NOT NULL, record_json TEXT NOT NULL);",
+        ),
+      );
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

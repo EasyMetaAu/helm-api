@@ -136,7 +136,9 @@ export function createAudioTranscriptionClient(
         await response.body?.cancel();
         // A provider 5xx cannot prove that the paid operation did not execute.
         throw new AudioTranscriptionError(
-          response.status >= 500 ? "outcome_unknown" : "upstream_rejected",
+          response.status >= 500 || response.status === 408
+            ? "outcome_unknown"
+            : "upstream_rejected",
           response.status >= 500 ? 502 : response.status,
         );
       }

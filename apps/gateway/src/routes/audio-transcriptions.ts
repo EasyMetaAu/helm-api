@@ -4,9 +4,15 @@ import {
   consumeResponseBytesWithinBudget,
   createBlockedModelMatcher,
   ResponseBodyTooLargeError,
+  SpeechAccountingError,
   SpeechParameterError,
+  type TranscriptionAccounting,
 } from "@helm/core";
-import { AudioTranscriptionRequestSchema } from "@helm/shared";
+import {
+  AudioTranscriptionRequestSchema,
+  type MediaPricing,
+  type MediaSpendRecord,
+} from "@helm/shared";
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
@@ -19,6 +25,7 @@ import {
 } from "./audio-speech.js";
 import type { MessagesIdentity } from "./messages.js";
 export interface TranscriptionSelection {
+  pricing?: MediaPricing;
   client: AudioTranscriptionClient;
   model: string;
   alias: string;
@@ -26,7 +33,8 @@ export interface TranscriptionSelection {
   customModel: boolean;
 }
 export interface AudioTranscriptionsRouteDeps
-  extends Omit<AudioSpeechRouteDeps, "resolve" | "record"> {
+  extends Omit<AudioSpeechRouteDeps, "resolve" | "record" | "accounting"> {
+  accounting?: TranscriptionAccounting;
   resolve(
     model: string,
     identity: MessagesIdentity,
@@ -38,6 +46,8 @@ export interface AudioTranscriptionsRouteDeps
     status: "completed" | "error";
     result?: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>>;
     errorCode?: string;
+    costUsd?: number | null;
+    operationId?: string;
   }) => Promise<void>;
 }
 export function registerAudioTranscriptionsRoute(
@@ -48,11 +58,13 @@ export function registerAudioTranscriptionsRoute(
     let lease: Awaited<ReturnType<typeof acquireSpeechLease>> | undefined;
     // Admission uses only auth/budget/rate/concurrency; resolution is specific to this media kind.
     const admission = deps;
+    let spend: MediaSpendRecord | undefined;
     try {
       const identity = await admitSpeechIdentity(
         admission,
         /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
         c.req.header("user-agent") ?? null,
+        !!deps.accounting,
       );
       const contentType = c.req.header("content-type") ?? "";
       if (!contentType.startsWith("multipart/form-data;"))
@@ -125,22 +137,46 @@ export function registerAudioTranscriptionsRoute(
           "transcription lane is not allowed",
         );
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
+      if (deps.accounting)
+        spend = await deps.accounting.reserve({
+          id: crypto.randomUUID(),
+          keyId: identity.keyId,
+          alias: selection.alias,
+          model: selection.model,
+          pricing: selection.pricing,
+          caps: identity.caps?.budget,
+          file,
+          request: req,
+        });
       let result: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>> | undefined;
       let errorCode: string | undefined;
       try {
         result = await selection.client.transcribe({ ...req, model: selection.model }, file, {
           signal: lease.signal,
         });
-        return c.json(result, 200, { "cache-control": "no-store" });
+        // Finalize below before returning accounting metadata.
       } catch (error) {
-        errorCode = error instanceof AudioTranscriptionError ? error.code : "outcome_unknown";
+        errorCode =
+          error instanceof SpeechParameterError
+            ? "not_sent"
+            : error instanceof AudioTranscriptionError
+              ? error.code
+              : "outcome_unknown";
         throw error;
       } finally {
         try {
+          if (spend && deps.accounting)
+            spend =
+              (await deps.accounting.settle(
+                spend,
+                selection.pricing,
+                result,
+                errorCode === "not_sent" || errorCode === "upstream_rejected",
+              )) ?? spend;
           if (identity.caps?.budget && deps.settleBudget)
             await deps.settleBudget(
               identity.keyId,
-              identity.caps.budget,
+              spend ? { ...identity.caps.budget, spendUsd: null } : identity.caps.budget,
               {
                 requests: 1,
                 tokens: result?.usage?.type === "tokens" ? result.usage.total_tokens : 0,
@@ -155,6 +191,8 @@ export function registerAudioTranscriptionsRoute(
             status: result ? "completed" : "error",
             result,
             errorCode,
+            costUsd: spend?.costUsd,
+            operationId: spend?.id,
           });
         } catch {
           c.get("logger")?.log("error", "media.transcription_accounting_failed", {
@@ -162,7 +200,34 @@ export function registerAudioTranscriptionsRoute(
           });
         }
       }
+      return c.json(
+        {
+          ...result,
+          ...(spend
+            ? {
+                accounting: {
+                  operationId: spend.id,
+                  state: spend.state,
+                  costUsd: spend.costUsd,
+                  reservedUsd: spend.reservedUsd,
+                  costBasis: "list_price",
+                },
+              }
+            : {}),
+        },
+        200,
+        { "cache-control": "no-store" },
+      );
     } catch (error) {
+      if (error instanceof SpeechAccountingError)
+        return c.json(
+          { error: { code: error.code } },
+          error.code === "budget_exceeded"
+            ? 429
+            : error.code === "media_pricing_unavailable"
+              ? 422
+              : 503,
+        );
       const status =
         error instanceof SpeechAdmissionError
           ? error.status
@@ -184,11 +249,14 @@ export function registerAudioTranscriptionsRoute(
               ? "request_too_large"
               : error instanceof AudioTranscriptionError
                 ? error.code
-                : "upstream_error";
+                : spend
+                  ? "outcome_unknown"
+                  : "upstream_error";
       return c.json(
         {
           error: {
             code,
+            ...(spend ? { operation_id: spend.id } : {}),
             message: code,
             type: status < 500 ? "invalid_request_error" : "upstream_error",
           },

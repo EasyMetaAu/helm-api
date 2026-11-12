@@ -419,3 +419,9 @@ export const weeklyBudgetUsage = sqliteTable(
   },
   (t) => [primaryKey({ columns: [t.keyId, t.dim, t.periodStartMs] })],
 );
+
+export const mediaSpendRecords = sqliteTable("media_spend_records", {
+  id: text("id").primaryKey(),
+  keyId: text("key_id").notNull(),
+  recordJson: text("record_json").notNull(),
+});

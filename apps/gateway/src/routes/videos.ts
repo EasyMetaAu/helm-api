@@ -76,6 +76,7 @@ export interface VideoCreateTarget {
       body: Record<string, unknown>,
       signal: AbortSignal,
       onAccountSelected?: (account: string) => void | Promise<void>,
+      providerRequestId?: string,
     ): Promise<Record<string, unknown>>;
   };
 }

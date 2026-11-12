@@ -374,6 +374,7 @@ export {
   InteractionsResponseSchema,
 } from "./request/interactions-schema.js";
 export * from "./request/media-speech-schema.js";
+export * from "./request/media-spend.js";
 export * from "./request/minimax-video.js";
 export {
   type RealtimeSession,

@@ -52,6 +52,7 @@ export interface SpeechClient {
   ): Promise<{
     audio: Uint8Array;
     contentType: string;
+    durationMs?: number;
     usage?: MediaSpeechUsage;
     timestamps?: MediaSpeechTimestamp[];
   }>;
@@ -87,4 +88,21 @@ export function decodeSpeechHex(value: string): Uint8Array {
   if (!value || value.length % 2 !== 0 || !/^[\da-f]+$/i.test(value))
     throw new Error("invalid speech audio hex");
   return new Uint8Array(Buffer.from(value, "hex"));
+}
+
+/** Usage events carry deltas; provider cumulative counters are converted at their adapter. */
+export function accumulateSpeechUsage(
+  previous: MediaSpeechUsage | undefined,
+  next: MediaSpeechUsage,
+): MediaSpeechUsage {
+  const usage = { ...previous };
+  for (const key of [
+    "usage_characters",
+    "usage_voice_count",
+    "audio_length",
+    "text_words",
+  ] as const) {
+    if (next[key] !== undefined) usage[key] = (previous?.[key] ?? 0) + next[key];
+  }
+  return usage;
 }

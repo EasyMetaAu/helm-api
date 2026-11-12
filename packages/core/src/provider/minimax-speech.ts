@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 import { readSSE } from "../protocol/streaming.js";
 import {
+  accumulateSpeechUsage,
   decodeSpeechHex,
   type SpeechClient,
   type SpeechEvent,
@@ -139,12 +140,13 @@ export function createMiniMaxSpeechClient(
             chunks.push(event.audio);
           }
           if (event.type === "timestamp") timestamps.push(event.timestamp);
-          if (event.type === "usage") usage = { ...usage, ...event.usage };
+          if (event.type === "usage") usage = accumulateSpeechUsage(usage, event.usage);
         }
         return {
           audio: new Uint8Array(Buffer.concat(chunks)),
           contentType: speechMime(MediaSpeechRequestSchema.parse(raw).response_format),
           usage,
+          ...(usage?.audio_length !== undefined ? { durationMs: usage.audio_length } : {}),
           ...(timestamps.length ? { timestamps } : {}),
         };
       }
@@ -156,6 +158,9 @@ export function createMiniMaxSpeechClient(
         audio: decodeSpeechHex(result.data?.audio ?? ""),
         contentType: speechMime(req.response_format),
         usage: result.extra_info,
+        ...(result.extra_info?.audio_length !== undefined
+          ? { durationMs: result.extra_info.audio_length }
+          : {}),
       };
     },
     async *streamSpeech(raw, opts) {
@@ -170,6 +175,7 @@ export function createMiniMaxSpeechClient(
           sampleRate: req.sample_rate,
         };
         let sawAudio = false;
+        let cumulativeUsage: MediaSpeechUsage = {};
         for await (const frame of readSSE(
           response.body,
           4 * 1024 * 1024,
@@ -189,12 +195,19 @@ export function createMiniMaxSpeechClient(
               sequence: sequence++,
               timestamp: minimaxTimestamp(result.data.subtitle),
             };
-          if (result.extra_info)
-            yield {
-              type: "usage",
-              sequence: sequence++,
-              usage: result.extra_info,
-            } satisfies SpeechEvent;
+          if (result.extra_info) {
+            const usage: MediaSpeechUsage = {};
+            for (const key of ["usage_characters", "usage_voice_count", "audio_length"] as const) {
+              const value = result.extra_info[key];
+              if (value !== undefined) {
+                const previous = cumulativeUsage[key] ?? 0;
+                if (value < previous) throw new Error("speech cumulative usage decreased");
+                usage[key] = value - previous;
+              }
+            }
+            cumulativeUsage = { ...cumulativeUsage, ...result.extra_info };
+            yield { type: "usage", sequence: sequence++, usage } satisfies SpeechEvent;
+          }
           if (result.data?.status === 2) {
             if (!sawAudio)
               throw new UpstreamError("upstream_error", "speech completed without audio");

@@ -34,6 +34,8 @@ import {
   createCircuitBreaker,
   createCodexResponsesClient,
   createDistributedKeyedSemaphore,
+  createDoubaoAsrClient,
+  createDoubaoSpeechClient,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
   createJevDecisionsInvoker,
@@ -49,8 +51,11 @@ import {
   createRateLimiter,
   createSerializingClient,
   createSignalCollector,
+  createSpeechAccounting,
   createStore,
   createTokenManager,
+  createTranscriptionAccounting,
+  createWhisperXClient,
   DEFAULT_429_COOLDOWN_MS,
   DEFAULT_LANES,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
@@ -1801,12 +1806,28 @@ function createProviderClient(
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
   const providerFetch = makeProviderFetch(p, proxy);
-  if (p.type === "openai-audio" || p.type === "deepgram") {
+  if (p.type === "doubao-speech") {
+    const deps = { config: { ...base, ...cred }, fetch: providerFetch };
     return {
-      ...createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
-        config: { ...base, ...cred },
-        fetch: providerFetch,
-      }),
+      ...createDoubaoSpeechClient(deps),
+      ...createDoubaoAsrClient(deps),
+      mediaOnly: true,
+      async chatCompletion() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+      chatCompletionStream() {
+        throw new Error("Provider requires a dedicated audio endpoint");
+      },
+    };
+  }
+  if (p.type === "openai-audio" || p.type === "deepgram" || p.type === "whisperx-asr") {
+    return {
+      ...(p.type === "whisperx-asr"
+        ? createWhisperXClient({ config: { ...base, ...cred }, fetch: providerFetch })
+        : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
+            config: { ...base, ...cred },
+            fetch: providerFetch,
+          })),
       mediaOnly: true,
       async chatCompletion() {
         throw new Error("Provider requires a dedicated audio endpoint");
@@ -2183,9 +2204,15 @@ export async function testStaticProviderKey(
 ): Promise<{ warning?: string }> {
   if (provider.oauth) throw new Error("only static API-key providers can be tested here");
   if (
-    ["ark", "bailian-media", "minimax-media", "openai-audio", "deepgram", "doubao-speech"].includes(
-      provider.type,
-    )
+    [
+      "ark",
+      "bailian-media",
+      "minimax-media",
+      "openai-audio",
+      "deepgram",
+      "doubao-speech",
+      "whisperx-asr",
+    ].includes(provider.type)
   )
     throw new Error("Ark media models do not support chat connectivity tests");
   const apiKey = rawApiKey.trim();
@@ -5370,7 +5397,10 @@ export async function buildServer(
               providerName: target.value.providerName,
               providerModel: target.value.providerModel,
               providerAccount: p?.media_account_id ?? null,
-              client: { create: (request, signal) => create(request, { signal }) },
+              client: {
+                create: (request, signal, _account, providerRequestId) =>
+                  create(request, { signal, providerRequestId }),
+              },
             };
           }
           return null;
@@ -5384,7 +5414,9 @@ export async function buildServer(
           return {
             nativeTask,
             retrieve: async (id, signal) =>
-              materializeBailianTranscription(await retrieve(id, { signal }), signal),
+              p?.type === "bailian-media"
+                ? materializeBailianTranscription(await retrieve(id, { signal }), signal)
+                : retrieve(id, { signal }),
           };
         },
       },
@@ -5393,6 +5425,7 @@ export async function buildServer(
   );
 
   const audioSpeech: AudioSpeechRouteDeps = {
+    accounting: createSpeechAccounting(store.budget, budgetConfig),
     auth: { resolve: resolveIdentity },
     concurrencyGate,
     rateLimiter,
@@ -5405,7 +5438,7 @@ export async function buildServer(
         const target = registry.resolve(alias);
         if (!target.ok || catalog.get(alias)?.capabilities.outputAudio !== true) continue;
         const p = config.providers.find((p) => p.name === target.value.providerName);
-        if (p?.type !== "bailian-media" && p?.type !== "minimax-media") continue;
+        if (!p || !["bailian-media", "minimax-media", "doubao-speech"].includes(p.type)) continue;
         const client = providerClients.get(target.value.providerName);
         if (!client?.ttsSpeech) continue;
         return {
@@ -5414,6 +5447,7 @@ export async function buildServer(
             streamSpeech: client.streamSpeech,
             openSpeechSession: client.openSpeechSession,
           },
+          pricing: catalog.get(alias)?.pricing.media,
           model: target.value.providerModel,
           alias,
           lane: isLane ? selection : "speech",
@@ -5422,7 +5456,7 @@ export async function buildServer(
       }
       return null;
     },
-    record: async ({ identity, selection, status, traceId, usage }) => {
+    record: async ({ identity, selection, status, traceId, usage, costUsd, operationId }) => {
       const success = status === "completed";
       const decision = buildImageDecision({
         requestId: crypto.randomUUID(),
@@ -5439,7 +5473,7 @@ export async function buildServer(
             status: success ? "ok" : "error",
             error_class: success ? null : status,
             latency_ms: 0,
-            cost_usd: null,
+            cost_usd: costUsd ?? null,
             error_detail: null,
           },
         ],
@@ -5457,13 +5491,15 @@ export async function buildServer(
         trace_id: traceId,
         alias: selection.alias,
         status,
-        cost_usd: null,
         ...usage,
+        cost_usd: costUsd ?? null,
+        operation_id: operationId,
       });
     },
   };
   registerAudioSpeechRoute(app, audioSpeech);
   registerAudioTranscriptionsRoute(app, {
+    accounting: createTranscriptionAccounting(store.budget, budgetConfig),
     auth: audioSpeech.auth,
     concurrencyGate,
     rateLimiter,
@@ -5478,6 +5514,7 @@ export async function buildServer(
         const client = providerClients.get(target.value.providerName);
         if (!client?.transcribe) continue;
         return {
+          pricing: catalog.get(alias)?.pricing.media,
           client: { transcribe: client.transcribe },
           model: target.value.providerModel,
           alias,
@@ -5487,7 +5524,16 @@ export async function buildServer(
       }
       return null;
     },
-    record: async ({ identity, selection, status, traceId, result, errorCode }) => {
+    record: async ({
+      identity,
+      selection,
+      status,
+      traceId,
+      result,
+      errorCode,
+      costUsd,
+      operationId,
+    }) => {
       const success = status === "completed";
       const decision = buildImageDecision({
         requestId: crypto.randomUUID(),
@@ -5504,7 +5550,7 @@ export async function buildServer(
             status: success ? "ok" : "error",
             error_class: success ? null : (errorCode ?? "upstream_error"),
             latency_ms: 0,
-            cost_usd: null,
+            cost_usd: costUsd ?? null,
             error_detail: null,
           },
         ],
@@ -5523,6 +5569,8 @@ export async function buildServer(
         provider_alias: selection.alias,
         status,
         usage: result?.usage,
+        cost_usd: costUsd ?? null,
+        operation_id: operationId,
         request_id: result?.requestId,
       });
     },

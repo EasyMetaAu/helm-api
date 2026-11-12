@@ -32,6 +32,8 @@ export {
   settleBudget,
   windowMsFor,
 } from "./budget/index.js";
+export * from "./budget/speech-accounting.js";
+export * from "./budget/transcription-accounting.js";
 export {
   type CapabilityRequest,
   checkCapability,
@@ -525,6 +527,8 @@ export * from "./provider/bailian-asr.js";
 export * from "./provider/bailian-media.js";
 export { createBailianSpeechClient } from "./provider/bailian-speech.js";
 export { CodexCapacityRetryExhaustedError } from "./provider/codex-capacity.js";
+export * from "./provider/doubao-asr.js";
+export * from "./provider/doubao-speech.js";
 export type { EnvironmentTimezoneResolver } from "./provider/environment-timezone.js";
 export {
   type ChunkClass,
@@ -538,6 +542,7 @@ export {
   type GeminiClientConfig,
   type GeminiClientDeps,
 } from "./provider/gemini.js";
+export { MediaHttpError } from "./provider/media-http.js";
 export * from "./provider/media-speech.js";
 export { speechQueue } from "./provider/media-speech-session.js";
 export { createMiniMaxSpeechClient } from "./provider/minimax-speech.js";
@@ -764,6 +769,7 @@ export {
   type TokenManagerDeps,
   TokenRefreshError,
 } from "./provider/token-manager.js";
+export * from "./provider/whisperx.js";
 export {
   createDistributedKeyedSemaphore,
   type DistributedAcquireArgs,

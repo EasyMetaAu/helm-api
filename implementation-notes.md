@@ -1,18 +1,18 @@
 # 实现笔记（Implementation Notes）
 
 > 记录 spec 未覆盖、不得不自己做的决定，被迫的修改、权衡取舍，以及用户应当知道的坑与 TODO。
-> **新条目追加在最上方**，格式：`## 2026-11-12 · G4 语音真实时间戳（docs/05、15）
-
-- 请求增加可选 `timestamps: sentence | word` 与 `output: json`；原音频响应不变。HTTP 时间戳要求非流式 JSON；WS 逐条返回 `timestamp` 事件，统一毫秒单位，缺失时不生成。
-- MiniMax 非流式结构化结果在一次上游流式合成中收集音频和原生字幕，避免另取字幕文件或二次合成。百炼启用 `word_timestamp_enabled` 并解析 sentence-end，原生累计字符数转为事件增量。
-- 新增专用 openai-audio / deepgram provider 与 multipart `/v1/audio/transcriptions`；OpenAI 使用 languages[] 且拒绝时间戳，Deepgram 保留真实词时戳、说话人与时长。同步 paid-write 不自动重试，结果中断明确 outcome_unknown。25 MiB 文件限制由入站边界执行。
-- 仅确认协议和本地受控测试；音色支持、真实对齐精度、费用账本及生产部署仍须分别验收。细节与后续依赖见 `docs/g4-speech-media.md`。
-
-## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
+> **新条目追加在最上方**，格式：`## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
 >
-> **体积控制规则（必须遵守）**：本文件只保留**最近 10 条**可追踪记录。新条目入栈时，保留顶部最新完整记录与历史摘要中最新的一行要点；超过 10 条的更早历史压缩进文末「更早历史总览」的一段概括。完整原文可经 git history 回溯。
+> **体积控制规则（必须遵守）**：本文件只保留**最近 10 条**可追踪记录。完整原文可经 git history 回溯。
 
 ---
+
+## 2026-11-12 · G4 语音、时间戳与费用（docs/05、06、15）
+
+- 增加显式 JSON 音频／原生时间戳结果，旧二进制调用兼容；MiniMax、百炼与豆包事件统一毫秒，缺值不补造。MiniMax 原生时长返回 durationMs。
+- OpenAI gpt-transcribe／Deepgram 文件转写使用独立 provider；豆包 TTS 2.0 使用官方 SSE，WS 在 finish 后发送缓冲文本；豆包录音 ASR 请求 UUID 提交前持久化，未知提交只查询同一 ID。
+- SQLite v58／Postgres v57 增加 media_spend_records，原子预留及幂等结算沿用现有预算表。价格需明确币种转换和计费上界；无依据时 spend-capped key 拒绝。同步 ASR 预算首批仅支持可本地验证时长的单声道 PCM16 WAV；未知结果保留预留，费用为价卡计算值，不冒充供应商发票。
+- 供应商真实收费调用、部署与 GPU 后备未验收。WhisperX 旧同步 adapter 已完成本地协议验证，调用后自动后备及新 compute.v1 的接入阻塞与字段交接见 docs/g4-speech-media.md。
 
 ## 2026-11-11 · 上游 Providers 只读用量（docs/07、10、11）
 
