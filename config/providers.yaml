@@ -466,3 +466,17 @@ providers:
         provider_model: claude-fable-5-1
       - alias: anthropic-api/claude-haiku-4-5-20251001
         provider_model: claude-haiku-4-5-20251001
+
+# Doubao Voice is independent of Ark. Use a new-console Voice API key, not ARK_API_KEY.
+# Missing credentials leave this optional provider unavailable; no paid probe runs at startup.
+  - name: doubao
+    type: doubao-speech
+    base_url: https://openspeech.bytedance.com
+    api_key_env: DOUBAO_SPEECH_API_KEY
+    media_account_id: doubao-speech-default
+    models:
+      - alias: doubao/seed-tts-2.0
+        provider_model: seed-tts-2.0
+      # Standard asynchronous recording ASR 2.0; wire model_name=bigmodel.
+      - alias: doubao/bigmodel
+        provider_model: bigmodel

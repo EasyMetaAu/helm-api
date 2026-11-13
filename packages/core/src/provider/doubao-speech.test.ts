@@ -41,6 +41,7 @@ describe("Doubao voice protocols", () => {
       .mockResolvedValueOnce(
         Response.json(
           {
+            audio_info: { duration: 1700 },
             result: {
               text: "Hi",
               utterances: [
@@ -69,9 +70,21 @@ describe("Doubao voice protocols", () => {
     const result = await client.transcriptionRetrieve(id);
     expect(normalizeDoubaoTranscription(result, id)).toMatchObject({
       status: "done",
-      transcription: { text: "Hi", segments: [{ startMs: 120, endMs: 450 }] },
+      transcription: {
+        text: "Hi",
+        durationMs: 1700,
+        segments: [{ startMs: 120, endMs: 450 }],
+        usage: { type: "duration", seconds: 1.7 },
+      },
+      usage: { type: "duration", seconds: 1.7 },
     });
     expect(fetch.mock.calls.map((call) => call[1].headers["X-Api-Request-Id"])).toEqual([id, id]);
+    expect(fetch.mock.calls[0]?.[1].headers).toMatchObject({
+      "X-Api-Key": "test",
+      "X-Api-Resource-Id": "volc.seedasr.auc",
+    });
+    expect(fetch.mock.calls[0]?.[1].headers).not.toHaveProperty("Authorization");
+    expect(fetch.mock.calls[0]?.[1].headers).not.toHaveProperty("X-Api-App-Key");
   });
   it("requires a durable ID before submit and treats duplicate/ambiguous rejection as unknown", async () => {
     const fetch = vi
@@ -91,4 +104,43 @@ describe("Doubao voice protocols", () => {
     ).rejects.toMatchObject({ outcome: "unknown" });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+});
+
+it("does not fabricate ASR duration from its last subtitle", () => {
+  const result = normalizeDoubaoTranscription(
+    {
+      id: "id",
+      code: 20000000,
+      result: {
+        text: "Hi",
+        utterances: [{ text: "Hi", start_time: 0, end_time: 450 }],
+      },
+    },
+    "id",
+  );
+  expect(result && "transcription" in result ? result.transcription : undefined).not.toHaveProperty(
+    "durationMs",
+  );
+  expect(result && "transcription" in result ? result.transcription : undefined).not.toHaveProperty(
+    "usage",
+  );
+});
+
+it.each([
+  408, 500, 503, 529,
+])("keeps a TTS HTTP %s outcome unknown without retry", async (status) => {
+  const fetch = vi.fn().mockResolvedValue(new Response(null, { status }));
+  const client = createDoubaoSpeechClient({
+    config: { baseUrl: "https://openspeech.bytedance.com", apiKey: "test" },
+    fetch,
+  });
+  await expect(
+    client.ttsSpeech({ model: "seed-tts-2.0", voice: "voice", input: "Hi" }),
+  ).rejects.toMatchObject({ outcome: "unknown" });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("reports no-speech explicitly instead of fabricating a successful transcript", async () => {
+  const result = normalizeDoubaoTranscription({ id: "id", code: 20000003 }, "id");
+  expect(result).toMatchObject({ status: "failed", error: { code: "no_speech" } });
 });

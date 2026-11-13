@@ -1674,3 +1674,45 @@ zenmux-anthropic/claude-opus-5.5:
   cacheWritePerMTokUsd: 5
   cacheWrite1hPerMTokUsd: 8
   inferenceGeoMultipliers: { global: 1 }
+
+# Official Doubao Voice postpaid list prices. Native CNY cards do not imply USD readiness.
+doubao/seed-tts-2.0:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  media:
+    currency: CNY
+    region: cn
+    providerModel: seed-tts-2.0
+    basis: official_list_price
+    verifiedOn: "2026-11-14"
+    source: https://docs.volcengine.com/docs/zh/doubao-voice/billing-instructions.md
+    rates:
+      - direction: input
+        unit: ten_thousand_billable_characters
+        price: 3
+        conditions: {}
+    billing:
+      maxCharactersPerInputCodepoint: 1
+    notes:
+      - "Voice 2.0 postpaid: CNY 3 per 10000 characters; Han, letters, punctuation, spaces and SSML tags count."
+      - "Use native text_words. USD admission requires explicit reference FX; no FX is assumed here."
+
+doubao/bigmodel:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  media:
+    currency: CNY
+    region: cn
+    providerModel: bigmodel
+    basis: official_list_price
+    verifiedOn: "2026-11-14"
+    source: https://docs.volcengine.com/docs/zh/doubao-voice/billing-instructions.md
+    rates:
+      - direction: input_audio
+        unit: second
+        price: 0.00022222222222222223
+        conditions: {}
+    notes:
+      - "Recording ASR 2.0 resource volc.seedasr.auc: CNY 0.8/hour divided by 3600; not the older turbo resource price."
+      - "Native audio_info.duration is milliseconds. No invoice rounding or reference FX is invented."
+      - "Asynchronous URL ASR spend-capped admission remains unavailable until duration reservation is implemented."

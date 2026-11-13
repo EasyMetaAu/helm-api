@@ -8,6 +8,14 @@
 ---
 
 
+## 2026-11-14 · 豆包语音模型配置与原生时长（docs/06、G4 H02/H03）
+
+- 新增独立 `doubao-speech` provider及TTS2.0/标准录音ASR2.0各一条单候选lane，使用语音新版控制台独立API Key，不复用Ark。缺key时客户端不可用，启动不做收费探测；旧AppId/token、极速及实时ASR不在本片。
+- 按官方后付费价记录TTS CNY3/万字符、标准ASR CNY0.8/小时；没有补默认FX或推断时长取整。TTS缺FX及异步ASR缺时长预留时仍拒绝spend cap。标准query保留原生audio_info.duration/usage，不以字幕结尾造时长；TTS HTTP408保持unknown，不自动重试。
+- API key、资源开通与授权音色仍是独立运行配置；代码、模型目录和无凭据健康部署不等于供应商实测。既有Luma key、预算和其他provider不改；本轮无收费调用，真实验收须有限批次授权。
+- 发布前置：完成 Claude Code 2.1.323 官方制品有限静态审查并保持10头白名单，新增6字段剥离回归；独立只读审查无P0/P1。`pnpm release:prepare 0.30.86` 同步 Grok1.0.77、Claude2.1.323、Codex0.169.0及同tag目录，协议证据见 docs/claude-protocol-safety.md。
+- 本地验收：豆包/配置/预算/路由6文件78项与协议/身份/发布门禁4文件191项通过；core/gateway类型检查、变更范围Biome及完整build通过。此记录不代替PR/main CI、目标部署和真实供应商验收。
+
 ## 2026-11-13 · 百炼短 WAV ASR 原子费用预留（docs/06、G4 H03）
 
 - 只扩展 qwen3-asr-flash 非流式完整 mono PCM16 WAV data URL，复用转写时长核验、媒体账本和查询入口；发送前持久预留，按原生 usage.seconds 结算。缺失或无效用量及网络后未知保留预留，不自动重发；确认未发送/拒绝才归零。响应加 accounting/operation header，保留 Chat 正文和 native usage。
@@ -73,14 +81,9 @@
 - **边界**：规则覆盖 Chat 及跨协议转换后的流式／非流式发送；不修改请求错误的终止语义，不因模型名推断兼容规则，不改 Codex 熔断状态。原请求正文未保留，验收使用相同参数的合成短请求，不重放用户内容。
 - **验证与发布准备**：新增用例先复现 `temperature: 0` 未移除，再通过修复；定向 265 项通过，shared/core 构建、gateway 类型检查与定向 Biome 检查通过。`pnpm release:prepare 0.30.75` 成功，Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.0 及同 tag 模型目录保持不变。
 
-## 2026-11-10 · Helm 级联保留客户端 User-Agent（docs/04、05、06、10）
-
-- **根因与决定**：官方 Grok CLI 的 `grok-shell/1.0.77 (macos; aarch64)` 能被准入规则识别；Chat 转 Responses 时原始 Header 丢失，Node 默认 UA 导致下游 Helm 返回 `client_not_allowed`。在网关入口按请求保存原始 UA，在 `type: helm` 的最终 HTTP 发送和 Responses WebSocket 握手边界恢复；覆盖协议转换、原生、流式、媒体、重试，缺失 UA 不冒充已知客户端。
-- **协议与身份边界**：`helm` 按 `target_provider_protocol` 选择 Chat、Responses、Anthropic 或 Gemini 适配器。指向 Helm 的旧 Anthropic/Gemini 配置应将 `type` 改成 `helm` 并保留目标协议和 base URL。Realtime sideband 用当前 upgrade 请求的 UA；上游凭证、入站客户端权限和直连订阅的厂商身份规则保持原契约。UA 是客户端声明，不是认证凭据。
-- **验证**：完整 Chat HTTP 链路验证流式/非流式、上游密钥替换和 body 字段不能冒充 Header；并发请求、四类协议、图片、Responses WS 与实际 Realtime socket 验证身份隔离。定向 670 项通过，shared/core 构建和 gateway 类型检查通过；独立只读审查未发现剩余 P0/P1。
-- **发布准备**：`pnpm release:prepare 0.30.74` 和发布快照检查通过；Grok 1.0.77、Codex 0.167.0 保持不变，Claude Code 同步至已完成静态协议增量审查的 2.1.322，原字段白名单不变。
-
 ## 更早历史总览
+
+2026-11-10 Helm级联按目标协议恢复客户端User-Agent，保留权限、重试和供应商身份语义；完整记录见Git history。
 
 2026-11-09 API Key suspended 与永久吊销 disabled 分离，鉴权缓存和进行中连接语义保持；完整记录见 Git history。
 
