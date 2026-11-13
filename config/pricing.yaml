@@ -105,6 +105,8 @@ openai-codex/codex-auto-review:
   cacheWritePerMTokUsd: null
 # ChatGPT/Codex subscription requests use the official API-equivalent GPT-6
 # Astra rate card for telemetry and historical cost reconstruction.
+# Fast/Ultrafast and regional rates rechecked 2026-11-14 against:
+# https://developers.openai.com/api/docs/pricing
 openai-codex/gpt-6-astra:
   inputPerMTokUsd: 10.0
   outputPerMTokUsd: 50.0
@@ -116,6 +118,10 @@ openai-codex/gpt-6-astra:
       outputPerMTokUsd: 75.0
       cacheReadPerMTokUsd: 2.0
       cacheWritePerMTokUsd: 25.0
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
   serviceTiers:
     flex:
       inputPerMTokUsd: 5.0
@@ -139,10 +145,33 @@ openai-codex/gpt-6-astra:
           outputPerMTokUsd: 150.0
           cacheReadPerMTokUsd: 4.0
           cacheWritePerMTokUsd: 50.0
+    fast:
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 100.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 40.0
+          outputPerMTokUsd: 150.0
+          cacheReadPerMTokUsd: 4.0
+          cacheWritePerMTokUsd: 50.0
+    ultrafast:
+      inputPerMTokUsd: 60
+      outputPerMTokUsd: 300
+      cacheReadPerMTokUsd: 6
+      cacheWritePerMTokUsd: 75
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 120
+          outputPerMTokUsd: 450
+          cacheReadPerMTokUsd: 12
+          cacheWritePerMTokUsd: 150
 # GPT-6 Sol/Luna API-equivalent rates: https://developers.openai.com/api/docs/pricing
 # Verified 2026-09-28; full-request long-context rates apply above 272K input.
 # GPT-6.1 Sol (2026-09-30): cached input 5%, cache writes 1.25x;
-# >272K full-request context rates, Flex 0.5x, Fast/priority 2x. No Ultrafast.
+# >272K full-request context rates, Flex 0.5x, Fast/priority 2x, Ultrafast 6x.
+# Ultrafast verified against the official price card on 2026-11-14.
 # https://developers.openai.com/api/docs/pricing
 openai-codex/gpt-6.1-sol:
   inputPerMTokUsd: 2
@@ -193,6 +222,17 @@ openai-codex/gpt-6.1-sol:
           outputPerMTokUsd: 30
           cacheReadPerMTokUsd: 0.4
           cacheWritePerMTokUsd: 10
+    ultrafast:
+      inputPerMTokUsd: 12
+      outputPerMTokUsd: 60
+      cacheReadPerMTokUsd: 0.6
+      cacheWritePerMTokUsd: 15
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 24
+          outputPerMTokUsd: 90
+          cacheReadPerMTokUsd: 1.2
+          cacheWritePerMTokUsd: 30
 # GPT-6.1 Terra: https://developers.openai.com/api/docs/pricing (2026-10-27).
 # Standard / Flex / Fast; >272K full-request context surcharge. Codex rates are
 # API-equivalent estimates, not subscription charges. Cache writes use 30m rates;
@@ -302,6 +342,10 @@ openai-codex/gpt-6-luna:
       outputPerMTokUsd: 0.75
       cacheReadPerMTokUsd: 0.02
       cacheWritePerMTokUsd: 0.25
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
   serviceTiers:
     flex:
       inputPerMTokUsd: 0.05
@@ -569,6 +613,10 @@ openai/gpt-6-astra:
       outputPerMTokUsd: 75.0
       cacheReadPerMTokUsd: 2.0
       cacheWritePerMTokUsd: 25.0
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
   serviceTiers:
     flex:
       inputPerMTokUsd: 5.0
@@ -592,10 +640,33 @@ openai/gpt-6-astra:
           outputPerMTokUsd: 150.0
           cacheReadPerMTokUsd: 4.0
           cacheWritePerMTokUsd: 50.0
+    fast:
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 100.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 40.0
+          outputPerMTokUsd: 150.0
+          cacheReadPerMTokUsd: 4.0
+          cacheWritePerMTokUsd: 50.0
+    ultrafast:
+      inputPerMTokUsd: 60
+      outputPerMTokUsd: 300
+      cacheReadPerMTokUsd: 6
+      cacheWritePerMTokUsd: 75
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 120
+          outputPerMTokUsd: 450
+          cacheReadPerMTokUsd: 12
+          cacheWritePerMTokUsd: 150
 # GPT-6 Sol/Luna API-equivalent rates: https://developers.openai.com/api/docs/pricing
 # Verified 2026-09-28; full-request long-context rates apply above 272K input.
 # GPT-6.1 Sol (2026-09-30): cached input 5%, cache writes 1.25x;
-# >272K full-request context rates, Flex 0.5x, Fast/priority 2x. No Ultrafast.
+# >272K full-request context rates, Flex 0.5x, Fast/priority 2x, Ultrafast 6x.
+# Ultrafast verified against the official price card on 2026-11-14.
 # https://developers.openai.com/api/docs/pricing
 openai/gpt-6.1-sol:
   inputPerMTokUsd: 2
@@ -646,6 +717,17 @@ openai/gpt-6.1-sol:
           outputPerMTokUsd: 30
           cacheReadPerMTokUsd: 0.4
           cacheWritePerMTokUsd: 10
+    ultrafast:
+      inputPerMTokUsd: 12
+      outputPerMTokUsd: 60
+      cacheReadPerMTokUsd: 0.6
+      cacheWritePerMTokUsd: 15
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 24
+          outputPerMTokUsd: 90
+          cacheReadPerMTokUsd: 1.2
+          cacheWritePerMTokUsd: 30
 # GPT-6.1 Terra: https://developers.openai.com/api/docs/pricing (2026-10-27).
 # Standard / Flex / Fast; >272K full-request context surcharge. Codex rates are
 # API-equivalent estimates, not subscription charges. Cache writes use 30m rates;
@@ -755,6 +837,10 @@ openai/gpt-6-luna:
       outputPerMTokUsd: 0.75
       cacheReadPerMTokUsd: 0.02
       cacheWritePerMTokUsd: 0.25
+  inferenceGeoMultipliers:
+    global: 1
+    us: 1.1
+    eu: 1.1
   serviceTiers:
     flex:
       inputPerMTokUsd: 0.05
@@ -1147,17 +1233,53 @@ anthropic/claude-sonnet-4-6:
     global: 1.0
     us: 1.1
 # Official Claude API-equivalent estimate for Pro/Max subscription traffic.
-# Sonnet 5.5 standard pricing (checked 2026-09-29). No long-context surcharge or Fast tier.
+# Sonnet 5.5 pricing rechecked 2026-11-14: cache reads are 5% of input.
+# No long-context surcharge or Fast tier.
 # https://platform.claude.com/docs/en/about-claude/pricing
 anthropic/claude-sonnet-5-5: &anthropic_api_claude_sonnet_5_5
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 10.0
-  cacheReadPerMTokUsd: 0.2
+  cacheReadPerMTokUsd: 0.1
   cacheWritePerMTokUsd: 2.5
   cacheWrite1hPerMTokUsd: 4.0
   inferenceGeoMultipliers:
     global: 1.0
     us: 1.1
+# Official Claude rates checked 2026-11-14. Fable/Mythos 5.2 have no
+# long-context surcharge; Fast is 2x, including both cache write durations.
+# https://platform.claude.com/docs/en/about-claude/pricing
+anthropic/claude-fable-5-2: &anthropic_api_claude_fable_5_2
+  inputPerMTokUsd: 8
+  outputPerMTokUsd: 40
+  cacheReadPerMTokUsd: 0.2
+  cacheWritePerMTokUsd: 10
+  cacheWrite1hPerMTokUsd: 16
+  inferenceGeoMultipliers: { global: 1, us: 1.1 }
+  serviceTiers:
+    fast:
+      inputPerMTokUsd: 16
+      outputPerMTokUsd: 80
+      cacheReadPerMTokUsd: 0.4
+      cacheWritePerMTokUsd: 20
+      cacheWrite1hPerMTokUsd: 32
+# Mythos requires separate upstream access; a price card does not enable routing.
+anthropic/claude-mythos-5-2: *anthropic_api_claude_fable_5_2
+# Haiku's higher rates apply to the WHOLE request strictly above 100K input,
+# including cache reads/writes. These are first-party prices, not ZenMux rates.
+anthropic/claude-haiku-5-5: &anthropic_api_claude_haiku_5_5
+  inputPerMTokUsd: 0.1
+  outputPerMTokUsd: 0.5
+  cacheReadPerMTokUsd: 0.01
+  cacheWritePerMTokUsd: 0.125
+  cacheWrite1hPerMTokUsd: 0.2
+  inferenceGeoMultipliers: { global: 1, us: 1.1 }
+  contextTiers:
+    - minPromptTokens: 100001
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 2.5
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 0.625
+      cacheWrite1hPerMTokUsd: 1
 # Official Claude Fable 5.1 pricing (platform.claude.com/docs/en/about-claude/pricing,
 # checked 2026-09-05): $10/M input, $50/M output, $0.25/M cache read, $12.50/M
 # 5-minute cache write and $20/M 1-hour cache write.
@@ -1643,6 +1765,9 @@ minimax/speech-2.8-turbo:
 anthropic-api/claude-opus-5-5: *anthropic_api_claude_opus_5_5
 anthropic-api/claude-sonnet-5-5: *anthropic_api_claude_sonnet_5_5
 anthropic-api/claude-fable-5-1: *anthropic_api_claude_fable_5_1
+anthropic-api/claude-fable-5-2: *anthropic_api_claude_fable_5_2
+anthropic-api/claude-mythos-5-2: *anthropic_api_claude_fable_5_2
+anthropic-api/claude-haiku-5-5: *anthropic_api_claude_haiku_5_5
 anthropic-api/claude-haiku-4-5-20251001: *anthropic_api_claude_haiku_4_5_20251001
 
 # ZenMux Anthropic 5.5 prices, verified against its catalog on 2026-11-07.

@@ -8,6 +8,13 @@
 ---
 
 
+## 2026-11-14 · 最新 GPT／Claude 价卡（docs/07）
+
+- **来源与范围**：按 [OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[模型目录](https://developers.openai.com/api/docs/models)及 [Claude 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)核对当前通用文本模型。GPT 最新为 Astra 6、Sol 6.1、Terra 6.1、Luna 6；Claude 为 Fable 5.2、Opus／Sonnet／Haiku 5.5，另有受限的 Mythos 5.2。
+- **价卡决定**：补齐 Fable／Mythos 5.2 与 Haiku 5.5 的 `anthropic`／`anthropic-api` 定价，含缓存、Fast 与美国区域系数。Haiku 总输入严格超过 100,000 才整单升档；Sonnet 5.5 缓存读取修正为 $0.10/M。OpenAI／Codex 补 Astra Fast、Astra／Sol Ultrafast 及 Astra／Luna 区域系数。
+- **范围边界**：新增 Claude 条目仅用于价格查找，能力元数据、provider 注册及默认 lane 保持原配置；不代表已获得 Mythos 访问权限或已完成新模型接入。订阅仍按 API 等价价格估算，不代表订阅账单。第三方聚合商沿用各自价卡。
+- **已知限制**：沿用现有 OpenAI 30 分钟缓存写入计价；12 小时缓存写入尚无独立用量字段映射，不宣称可准确区分。历史费用不自动重算；部署时需将价卡增量合并到挂载配置，并从实际容器重新加载验证。
+
 ## 2026-11-14 · 豆包语音模型配置与原生时长（docs/06、G4 H02/H03）
 
 - 新增独立 `doubao-speech` provider及TTS2.0/标准录音ASR2.0各一条单候选lane，使用语音新版控制台独立API Key，不复用Ark。缺key时客户端不可用，启动不做收费探测；旧AppId/token、极速及实时ASR不在本片。
@@ -76,13 +83,9 @@
 
 - **发布准备**：`pnpm release:prepare 0.30.77` 同步 Codex 0.167.1，Grok 1.0.77、Claude Code 2.1.322 与 Codex 模型目录不变。Codex 补丁仅涉及默认关闭且限定 Bedrock 的增量工具声明；网关协议策略保持不变。已有历史迁移的关联 SQL 经性能、数据一致性、安全隔离三角色批准，仅用于独占合成 CI 回归；本次线上 SQLite v56 → v57 只新增列与计数表。
 
-## 2026-11-11 · 请求页标识上游 API Key 并解释组织限制（docs/07、11）
-
-- **展示决定**：`serving_account` 也记录 API Key 池的路由身份，原页面却统一写“订阅账号”。Admin 列表／详情按原池与账号代次解析现有记录，显示 Key 名称及末四位，并在最后失败的执行行显示账号。数据库记录保持原身份；轮换后历史请求仅显示账号名，避免把新 Key 的末四位用于旧请求。名称不可用时保留请求可读，不向页面返回凭据。
-- **错误解释**：只匹配 OpenAI 的 `codex_byok_restricted_by_api_credit_promo` 代码，在摘要说明 OpenAI 将本次请求识别为 Codex BYOK 后按组织 API Credits 福利限制拒绝；不推断所有请求均失败或具体触发头，并提供官方计费设置链接；保留原始错误详情。此项改动不修改账号权益或池的错误重试语义。
-- **验证**：174 项定向测试通过；shared/core 构建、gateway 类型检查、admin Svelte 检查及生产构建通过。桌面与 390px 窄屏浏览器预览使用该请求的只读记录，确认名称、末四位、失败执行行和中文解释均可见，无横向溢出。
-
 ## 更早历史总览
+
+2026-11-11（docs/07、11）：请求页展示实际上游 API Key 名称与末四位，解释 Codex BYOK 组织限制；身份代次校验与原错误详情保留，174 项测试及桌面／窄屏预览通过。
 
 2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）；完整记录见 Git history。
 

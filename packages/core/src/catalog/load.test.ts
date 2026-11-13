@@ -202,7 +202,7 @@ describe("loadRuntimeCatalog", () => {
     expect(sonnet?.pricing).toEqual({
       inputPerMTokUsd: 2,
       outputPerMTokUsd: 10,
-      cacheReadPerMTokUsd: 0.2,
+      cacheReadPerMTokUsd: 0.1,
       cacheWritePerMTokUsd: 2.5,
       cacheWrite1hPerMTokUsd: 4,
       inferenceGeoMultipliers: { global: 1, us: 1.1 },
@@ -238,7 +238,7 @@ describe("loadRuntimeCatalog", () => {
           output_tokens: 200,
         },
       }),
-    ).toBeCloseTo((600 * 2 + 300 * 0.2 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
+    ).toBeCloseTo((600 * 2 + 300 * 0.1 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
   });
 
   it("loads verified xAI capabilities with public-API-equivalent Grok pricing", () => {
@@ -775,13 +775,22 @@ describe("loadRuntimeCatalog", () => {
         (alias) => !(alias in pricing) && !intentionallyUnpriced.has(alias),
       ),
     ).toEqual([]);
-    // Price-only keys are dynamic Codex auto-review plus the bare Layer-2 eval
-    // model id (which bypasses the provider registry).
+    // Price-only keys include verified new Claude cards for cost lookup before
+    // an operator configures routing, dynamic Codex auto-review and bare eval.
     expect(
       Object.keys(pricing)
         .filter((alias) => !(alias in capabilities))
         .sort(),
-    ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
+    ).toEqual([
+      "anthropic-api/claude-fable-5-2",
+      "anthropic-api/claude-haiku-5-5",
+      "anthropic-api/claude-mythos-5-2",
+      "anthropic/claude-fable-5-2",
+      "anthropic/claude-haiku-5-5",
+      "anthropic/claude-mythos-5-2",
+      "deepseek-v4-flash",
+      "openai-codex/codex-auto-review",
+    ]);
     const unexpectedUnpriced = Object.keys(capabilities).filter((alias) => {
       const rates = catalog.get(alias)?.pricing;
       return (
