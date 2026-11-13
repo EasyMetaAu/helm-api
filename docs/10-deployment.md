@@ -101,6 +101,18 @@ Compose also gives graceful shutdown 30 minutes by default so active streams,
 queued Store writes, and an in-flight SQLite maintenance pass can drain before
 Docker sends SIGKILL. Large databases can raise `HELM_STOP_GRACE_PERIOD` in `.env`.
 
+The Docker image defaults to `NODE_OPTIONS=--max-old-space-size-percentage=50`.
+Node sizes its old-space heap at startup to 50% of the container memory limit
+when present, otherwise physical memory. This leaves room for request/image
+Buffers, SQLite and the OS; it does not reserve that memory upfront or resize the heap limit during the
+process lifetime. Helm still checks live memory headroom before accepting work.
+Parsed request bodies count toward measured memory, while unfinished reads keep
+their pending reservation. Operators can replace `NODE_OPTIONS` in `.env`; when
+choosing a fixed `--max-old-space-size`, omit the percentage flag because Node
+gives the percentage flag precedence. Source deployments can use the same option
+with a Node version that supports it. See the
+[Node CLI reference](https://nodejs.org/docs/latest-v22.x/api/cli.html#--max-old-space-size-percentagepercentage).
+
 ### Reverse proxy WebSocket forwarding
 
 Codex can reuse the Responses WebSocket transport only when every reverse proxy

@@ -8,6 +8,12 @@
 ---
 
 
+## 2026-11-14 · 请求内存记账与 Docker 堆自适应（docs/02、10）
+
+- HTTP/WebSocket 请求解析完成后，实际占用由实时堆与系统余量统计接管，释放共享待分配预留，避免同一请求同时扣减实际占用和预留。独立生命周期计数继续保留到流结束或断连，维护暂停仍等待活动请求排空；响应处理使用自己的预算。
+- Docker 默认使用 Node 原生 `--max-old-space-size-percentage=50`，启动时按容器内存约束（无约束时按物理内存）计算 old-space 上限，给 Buffer、SQLite 和系统留出空间。运行中不动态重设堆上限，仍执行实时准入保护；`.env` 的 `NODE_OPTIONS` 可覆盖默认值，固定上限与百分比不能同时配置以免百分比优先。
+- 100 MiB 请求通过预算模型验证，不实际分配大型正文或重放用户请求；并发待解析请求和实际堆不足仍可返回容量 503，因此不承诺所有并发下无条件接收 100 MB。定向 70 项测试通过，覆盖 HTTP/WebSocket 生命周期、断连、维护排空及堆比例启动；shared/gateway 类型检查通过。发布准备执行 `pnpm release:prepare 0.30.86`：Grok 1.0.77、Claude Code 2.1.323、Codex 0.169.0；Claude 静态制品审查与新增头隔离核对已记录于协议文档，额外 218 项协议／快照测试通过。生产验收在镜像发布后分别核对 ai-run 与 8.4。
+
 ## 2026-11-13 · 百炼短 WAV ASR 原子费用预留（docs/06、G4 H03）
 
 - 只扩展 qwen3-asr-flash 非流式完整 mono PCM16 WAV data URL，复用转写时长核验、媒体账本和查询入口；发送前持久预留，按原生 usage.seconds 结算。缺失或无效用量及网络后未知保留预留，不自动重发；确认未发送/拒绝才归零。响应加 accounting/operation header，保留 Chat 正文和 native usage。
@@ -73,149 +79,8 @@
 - **边界**：规则覆盖 Chat 及跨协议转换后的流式／非流式发送；不修改请求错误的终止语义，不因模型名推断兼容规则，不改 Codex 熔断状态。原请求正文未保留，验收使用相同参数的合成短请求，不重放用户内容。
 - **验证与发布准备**：新增用例先复现 `temperature: 0` 未移除，再通过修复；定向 265 项通过，shared/core 构建、gateway 类型检查与定向 Biome 检查通过。`pnpm release:prepare 0.30.75` 成功，Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.0 及同 tag 模型目录保持不变。
 
-## 2026-11-10 · Helm 级联保留客户端 User-Agent（docs/04、05、06、10）
-
-- **根因与决定**：官方 Grok CLI 的 `grok-shell/1.0.77 (macos; aarch64)` 能被准入规则识别；Chat 转 Responses 时原始 Header 丢失，Node 默认 UA 导致下游 Helm 返回 `client_not_allowed`。在网关入口按请求保存原始 UA，在 `type: helm` 的最终 HTTP 发送和 Responses WebSocket 握手边界恢复；覆盖协议转换、原生、流式、媒体、重试，缺失 UA 不冒充已知客户端。
-- **协议与身份边界**：`helm` 按 `target_provider_protocol` 选择 Chat、Responses、Anthropic 或 Gemini 适配器。指向 Helm 的旧 Anthropic/Gemini 配置应将 `type` 改成 `helm` 并保留目标协议和 base URL。Realtime sideband 用当前 upgrade 请求的 UA；上游凭证、入站客户端权限和直连订阅的厂商身份规则保持原契约。UA 是客户端声明，不是认证凭据。
-- **验证**：完整 Chat HTTP 链路验证流式/非流式、上游密钥替换和 body 字段不能冒充 Header；并发请求、四类协议、图片、Responses WS 与实际 Realtime socket 验证身份隔离。定向 670 项通过，shared/core 构建和 gateway 类型检查通过；独立只读审查未发现剩余 P0/P1。
-- **发布准备**：`pnpm release:prepare 0.30.74` 和发布快照检查通过；Grok 1.0.77、Codex 0.167.0 保持不变，Claude Code 同步至已完成静态协议增量审查的 2.1.322，原字段白名单不变。
-
 ## 更早历史总览
 
-2026-11-09 API Key suspended 与永久吊销 disabled 分离，鉴权缓存和进行中连接语义保持；完整记录见 Git history。
+2026-11-10 Helm 级联保留客户端 User-Agent：HTTP/WebSocket、跨协议和媒体发送恢复入站 UA，保留身份隔离；完整记录见 Git history。
 
-2026-11-08 Codex 出站 Header 一致性：默认版本由发布快照管理，保留客户端兼容规则；完整记录见 Git history。
-
-2026-11-08：官方 Claude API 清理 Agent SDK system 身份并保留 OAuth／第三方行为；完整记录见 git history。
-
-2026-11-07：官方 Claude API 清理客户端身份、ZenMux 精确别名计价与金额字段验证；完整记录见 git history。
-
-2026-11-06：Claude 账号设备、会话及版本一致性与边界验证；完整记录见 git history。
-
-2026-11-01：接入验证、客户端连通性与请求结果摘要，完整记录见 git history。
-
-2026-10-31：接入验证、账号解释、速度策略与可选出站隐私，完整记录见 git history。
-
-2026-10-29：OpenAI／Claude API 密钥池、月度恢复及逐 Key 测试，完整行为与验证见 git history。
-
-2026-10-28：Sonnet 5.5 强制工具选择按能力过滤，完整行为与验证见 Git history。
-
-2026-10-27：GPT lane 去版本化并按优先档位排序，真实模型、价格、能力与 fallback 顺序不变；完整记录见 git history。
-
-2026-10-27：恢复 Sol 为默认路由，保留显式 Terra lane；Remote 与 8.4 分别恢复对应链，账号权限与流式约束不变，完整记录见 git history。
-
-2026-10-27：新增 GPT-6.1 Terra 能力、价格与显式模型支持，初始默认路由随后恢复 Sol；订阅价格仅作 API 等价估算，完整依据与限制见 git history。
-
-2026-10-26：Codex 完整历史可在发送前恢复不可用 turn-state，保留账号、会话和工具配对边界；详见 git history。
-
-2026-10-26：Codex 容量拒绝只在首输出前同账号有界重试，冷却返回 Retry-After，断流保留结构化证据；不明结果禁止重放，完整记录见 git history。
-
-2026-10-26：Codex 入站只匹配完整产品标记，版本不参与准入，未知或冒充标记继续拒绝；完整记录见 git history。
-
-2026-10-21：DeepSeek custom 工具映射按响应隔离保存，旧状态拒绝并通过 1012 恢复完整历史；详见 git history。
-
-2026-10-20：图片串联保留客户端身份、明确拒绝不重试；Images 固定标准 Responses 工具路径，完整记录见 git history。
-
-2026-10-15：订阅时区只改已验证环境字段，保留工具／正文语义、账号代理和续接隔离；完整记录见 git history 与 docs/subscription-timezones.md。
-
-2026-10-14 模型目录超时与 Helm 串联握手的边界保持原有约定；完整记录见 git history。
-
-2026-10-14：原币媒体价卡覆盖 25 个模型、57 个分档，保留原币和地域语义，未扩展结算或汇率换算；完整记录见 Git 历史及 docs/media-pricing.md。
-
-2026-10-14：阿里与 MiniMax 媒体任务保留异步 operation ID、权限与下载边界；真实验收修正 Qwen3 OSS HTTPS 和固定 IP 连接，详见 Git 历史及 docs/media-provider-task-tracker.md。
-
-2026-10-14：Ark 多媒体按提供商契约处理图片/视频/语音输入、费用与异步任务，任务身份和数据边界不变，完整实现决定见 Git 历史。
-
-2026-10-13：API key 客户端策略在鉴权后按入口校验，模型发现按家族过滤；损坏策略拒绝且保留账号、权限与续接隔离，UA 不作为可信身份，完整范围与决定见 Git 历史。
-
-2026-10-12：Grok 价格目录按官方模型卡区分缓存与高上下文档位；媒体费用与历史重计价仍按既有边界处理，完整记录见 Git 历史。
-
-2026-10-12：Grok 固定首尾帧与声线组合只扩展明确支持的参数约束，不推断上游账号支持；完整规格与客户端快照决定见 Git 历史。
-
-2026-10-10：Claude 套餐只取官方 profile 并缓存，凭证变化失效；该展示不影响权限和调度，完整记录见 Git 历史。
-
-2026-10-09：Claude 协议与 OAuth 账户边界的完整决定保留在 Git 历史中；现有协议、凭证和权限约束继续有效。
-
-2026-10-07：发布时同步订阅客户端版本，保留官方版本检查、可追踪快照及发布前验证（完整记录见 Git 历史）。
-
-2026-10-01：Helm 级联握手协商结构化 before-send 恢复，保留冷却时间与不明结果禁止重放边界；完整记录见 Git 历史。
-
-2026-09-30：Codex 连通性测试复用账号运行配置、客户端版本和持久身份，合成端点验收通过；详见 Git 历史。
-
-2026-09-30：Codex 账号详情只展示周额度周期，完整背景见 Git 历史。
-
-2026-09-30：GPT-6.1 Sol 接入与 Sol 配置迁移；旧 GPT-6 Sol lane 指向新模型，具体协议与发布证据见 Git 历史。
-
-2026-09-29：Claude Sonnet 5.5 接入；完整变更与验证见 Git 历史。
-
-2026-09-28：原生透传取消模型准入名单，兼容规则归入 capabilities 配置，保留边界校验；完整记录见 git history。
-
-2026-09-28：GPT lane换代、线上配置保留及别名回收；完整部署边界见git history。
-
-2026-09-28 的 GPT-6 Sol / Luna 接入与目录兼容记录已归档于 Git 历史。
-
-2026-09-27：原生辅助接口兼容、重放边界和计数路由权限补修；完整记录见 git history。
-
-2026-09-26：Admin UI 走查整改、DeepSeek 零余额 key 验证兼容与请求详情路由导出修复；完整记录见 git history。
-
-2026-09-26：Portal 用量、请求详情与布局审计，复用 key 隔离数据源，缺失字段兼容及真实页面验证；完整记录见 git history。
-
-2026-09-26：DeepSeek fallback 保留 opaque reasoning 降级，request-contract mutation ledger 回写执行器；未据此宣称历史上游 400 已修复。完整记录见 git history。
-
-2026-09-26：订阅重连复用 OAuth 流程及原账号代理、标签，解密和账号匹配失败时拒绝，详见 Git 历史。
-
-2026-09-25：Claude OAuth 手动重置额度，含组织/额度校验、二次确认、结果不明禁止重试与权威读回，详见 Git 历史。
-
-2026-09-25：Replay 分块落盘、已接收请求防重放与响应内存边界，详见 Git 历史。
-
-2026-09-24 · 流式累计内存与读取生命周期：累计预算覆盖协议/管理读取、完整终止语义及取消释放，保留原生 usage 与 key 隔离。完整记录见 git history。
-
-2026-09-24 · Responses 内存准入与 Codex 恢复诊断：进程级并发上限默认关闭，保留 key 租约、公平排队、取消与预算边界，并增加无正文恢复诊断；生产启用须单独验收。完整记录见 git history。
-
-2026-09-23 · Codex 整轮暂存与同账号恢复：可选缓冲整轮，严格限定同账号重放一次，保留取消/预算/容量和结果不明保护；上游可能重复计费，需独立线上验收。完整记录见 git history。
-
-2026-09-23 · WebSocket 断线时保留已接收响应：先消费已到达的文本、工具和完成帧再报告断流；不自动重放已接收请求，保留容量和取消保护。完整记录见 git history。
-
-2026-09-23 · 远端 Helm 建连重试与 WebSocket 降级：`UND_ERR_CONNECT_TIMEOUT` 加入严格连接错误白名单并复用两次短退避；首轮发送前 WebSocket 失败改走 HTTP/SSE（401/403/429、增量续接、发送后结果不明不重放）；保留带 continuation ID 的单条 `function_call_output`；自产错误移除与 `status` 冲突的 `status_code`。完整记录见 git history。
-
-2026-09-23 · Claude Opus 5.5：新增原生 `anthropic/claude-opus-5-5`（1M 上下文/128K 输出），思考默认开启走 `output_config.effort` 五档；标准 $4/$20 每百万 token；旧 computer_20251124/强制工具/assistant prefill 不支持。完整记录见 git history。
-
-2026-09-22 · Helm 上游通道转发：静态 `type: helm` + `target_provider_protocol: openai_responses` 复用 Responses 客户端并支持 WebSocket 续接；视频 lane 需显式 Helm provider；328 项定向测试通过，0.30.7 派生镜像验收。完整记录见 git history。
-
-2026-09-22 · E2E 的 main 与 PR 使用同一隔离 runner（CI / 部署，docs/10）：完整记录见 git history。
-
-
-2026-09-22：Grok 4.7 与 Build Fast 配置沿用订阅能力边界，按官方标准和长上下文价格计费，历史型号保留。
-
-2026-09-21：WebSocket 降级到 HTTP 后禁止发送无法恢复上下文的增量 continuation；完整记录见 git history.
-
-2026-09-19—20：DeepSeek 工具图片保留结构并有界压缩，缺失 reasoning 历史时关闭思考；Admin Responses 重放保留原生 carrier。分类器 Jev 有序回退复用总超时与严格校验。完整记录见 git history。
-
-2026-09-18 Codex 短冷却在原账号等待，长冷却原样返回，禁止换账号和误触发重连；完整记录见 git history。
-
-2026-09-18 OAuth 退出与刷新共锁，撤销缓存凭证并同步禁用 live pool，避免删除后刷新写回；完整记录见 git history。
-
-2026-09-18 Grok 版本化 chat 别名进入稳定 lane，Imagine/video 按最长字面量区分；完整记录见 git history。
-
-2026-09-18 DeepSeek 回放为缺少 call_id 的 function_call_output 使用非空 id，已有值保留；完整记录见 git history。
-
-2026-09-18 Lite 将 DeepSeek 外源 reasoning 明文折入空 summary 并清空 content，已有 summary 和 OpenAI 密文不改；完整记录见 git history。
-
-2026-09-18 Codex 回放前剥掉非 `gAAAAA` 外源 encrypted_content，保留可读正文，空项丢弃；完整记录见 git history。
-
-2026-09-18 取消 Responses 默认首帧 15s 超时，保留 in-band 错误 fallback 与结果不明禁止重放；完整记录见 Git history。
-
-2026-09-17 的外源 reasoning 缺明文时关闭 DeepSeek 思考、首字节超时、Lite reasoning、候选链解释、DSML 工具兼容、DeepSeek Responses、观测字段等记录已压缩，完整原文可从本次变更之前的 Git 历史回溯。
-
-2026-09-06：Codex 模型发现使用上游 client_version 和可选 base_instructions；订阅模型自动/手动列表统一依据官方目录与数据库权威，完整记录见 Git history。
-
-2026-09-05 Fable 5.1 目录/价格、2026-09-02 HTTP 结果不明禁止重放（保留明确拒绝的有界重试）、2026-09-01 超大历史发送前保护已并入历史；完整内容见基线 `8a7df80c6684b10bfa7ff7f4f07f237a92f95d58`。2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。
-
-2026-09-21（docs/05、06、07）：Jev Decisions 独立协议面保留权限与请求数原子预留，强制无正文审计，采用 32 KB 请求、256 KB 响应与 30 秒上游边界。完整记录见 Git 历史。
-
-
-2026-09-27 原生协议、缓存与重放边界修复保留发送后结果不明禁止重放、provider 字段保真及权限检查；完整记录见 git history。
-
-2026-10-18 的订阅刷新期限与恢复规则已归入历史，完整记录见 Git history。
-
-本次归档：2026-11-04 · 管理界面与门户的窄屏布局（docs/11、Portal）。完整内容见 git history。
+更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。

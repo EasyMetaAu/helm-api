@@ -32,6 +32,9 @@ RUN pnpm deploy --filter=@helm/gateway --prod --legacy --prefer-offline /app/out
 # ---- runtime ----
 FROM node:22-slim AS runtime
 ENV NODE_ENV=production
+# Size the old-space heap at startup, leaving room for Buffers, SQLite and the OS.
+# Operators can replace NODE_OPTIONS through the container environment.
+ENV NODE_OPTIONS="--max-old-space-size-percentage=50"
 WORKDIR /app
 
 # Build info surfaced by GET /version (docs/10) and the admin header status cluster.

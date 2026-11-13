@@ -1,8 +1,94 @@
-import { createResponseWorkAdmission, createRuntimeMemoryCoordinator } from "@helm/core";
+import {
+  createResponseWorkAdmission,
+  createRuntimeMemoryCoordinator,
+  deriveSafeWorkingMemoryCapacity,
+} from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
 describe("body memory admission (unlimited body size and aggregate capacity)", () => {
+  it.each([
+    6, 1,
+  ])("hands materialized bodies to live memory accounting without ending maintenance tracking (amplification=%s)", async (jsonAmplification) => {
+    const coordinator = createRuntimeMemoryCoordinator({ capacityBytes: () => 1_000 });
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 1_000,
+      jsonAmplification,
+      minRequestChargeBytes: 1,
+      coordinator,
+    });
+    const response = createResponseWorkAdmission({
+      capacityBytes: 1_000,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+      coordinator,
+    });
+    const body = admission.acquire(100);
+    const output = response.acquire(200);
+    expect(body.ok && output.ok).toBe(true);
+    if (!body.ok || !output.ok) return;
+
+    admission.pause();
+    const idle = vi.fn();
+    const waiting = admission.waitForIdle().then(idle);
+    body.lease.materialized();
+    body.lease.materialized();
+    expect(admission.pendingBytes).toBe(0);
+    expect(coordinator.reservedBytes).toBe(200);
+    expect(admission.reservedBytes).toBe(100 * jsonAmplification);
+    expect(admission.acquire(1)).toMatchObject({ ok: false, cause: "paused" });
+    await Promise.resolve();
+    expect(idle).not.toHaveBeenCalled();
+
+    body.lease.release();
+    body.lease.release();
+    await waiting;
+    expect(idle).toHaveBeenCalledOnce();
+    expect(coordinator.reservedBytes).toBe(200);
+    output.lease.release();
+    expect(coordinator.reservedBytes).toBe(0);
+  });
+
+  it("admits a 100 MiB body after parsing another while enforcing pending and live heap limits", () => {
+    const mib = 1024 * 1024;
+    let heapUsedBytes = 512 * mib;
+    const coordinator = createRuntimeMemoryCoordinator({
+      capacityBytes: () =>
+        deriveSafeWorkingMemoryCapacity({
+          heapLimitBytes: 2_048 * mib,
+          heapUsedBytes,
+          availableMemoryBytes: 5_000 * mib,
+          hostTotalMemoryBytes: 8_000 * mib,
+        }),
+    });
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 1_000 * mib,
+      jsonAmplification: 6,
+      coordinator,
+    });
+    // Model a 100 MiB body and its parsed representation without allocating it.
+    const first = admission.acquire(100 * mib);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(admission.acquire(100 * mib)).toMatchObject({ ok: false, cause: "capacity" });
+    heapUsedBytes += 400 * mib;
+    first.lease.materialized();
+
+    const second = admission.acquire(100 * mib);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    first.lease.release();
+    expect(coordinator.reservedBytes).toBe(600 * mib);
+    expect(admission.acquire(100 * mib)).toMatchObject({ ok: false, cause: "capacity" });
+
+    heapUsedBytes += 400 * mib;
+    second.lease.materialized();
+    expect(coordinator.reservedBytes).toBe(0);
+    expect(admission.acquire(100 * mib)).toMatchObject({ ok: false, cause: "capacity" });
+    second.lease.release();
+    expect(admission.reservedBytes).toBe(0);
+  });
+
   it("shares one live capacity across HTTP, websocket ingress, and response work", () => {
     const coordinator = createRuntimeMemoryCoordinator({ capacityBytes: () => 100 });
     const http = createBodyMemoryAdmission({

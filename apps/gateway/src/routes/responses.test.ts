@@ -554,13 +554,12 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("rejects aggregate capacity while a parsed streaming request remains active", async () => {
+  it("uses live memory capacity while a parsed streaming request remains active", async () => {
     const finish = deferred<void>();
     const activeBody = JSON.stringify({ ...REQ, input: "x".repeat(800), stream: true });
     const nextBody = JSON.stringify({ ...REQ, input: "x".repeat(800) });
-    const coordinator = createRuntimeMemoryCoordinator({
-      capacityBytes: () => Buffer.byteLength(activeBody) + 1,
-    });
+    let capacityBytes = Buffer.byteLength(activeBody) + 1;
+    const coordinator = createRuntimeMemoryCoordinator({ capacityBytes: () => capacityBytes });
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       jsonAmplification: 1,
@@ -593,15 +592,26 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(active.status).toBe(200);
     expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
     expect(memoryAdmission.pendingBytes).toBe(0);
-    expect(coordinator.reservedBytes).toBeGreaterThan(0);
+    expect(coordinator.reservedBytes).toBe(0);
 
     const next = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,
       body: nextBody,
     });
-    expect(next.status).toBe(503);
-    expect(coordinator.reservedBytes).toBeGreaterThan(0);
+    expect(next.status).toBe(200);
+    await next.text();
+    expect(coordinator.reservedBytes).toBe(0);
+    expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
+
+    capacityBytes = Buffer.byteLength(nextBody) - 1;
+    const pressured = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: nextBody,
+    });
+    expect(pressured.status).toBe(503);
+    expect(coordinator.reservedBytes).toBe(0);
 
     finish.resolve(undefined);
     await active.text();
