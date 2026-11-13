@@ -3702,6 +3702,7 @@ export async function buildServer(
   // directly; the three pipeline faces get them via `pipelineBudget`.
   const budgetConfig = { defaultWindowSeconds: 2_592_000, defaultDegradeLane: "economy" };
   const budgetGate = createBudgetGate({ store: store.budget, config: budgetConfig });
+  const transcriptionAccounting = createTranscriptionAccounting(store.budget, budgetConfig);
   const settleKeyBudget = (
     keyId: string,
     caps: BudgetCaps,
@@ -4335,6 +4336,7 @@ export async function buildServer(
       handleBailianAsrChat(c, raw, {
         budgetGate,
         settleBudget: settleKeyBudget,
+        accounting: transcriptionAccounting,
         resolve: (model) => {
           const matches = config.providers
             .filter((p) => p.type === "bailian-media")
@@ -4362,11 +4364,12 @@ export async function buildServer(
               model: target.value.providerModel,
               lane: isLane ? selection : "transcription-short",
               customModel: !isLane,
+              pricing: catalog.get(alias)?.pricing.media,
             };
           }
           return null;
         },
-        record: async (target, keyId, traceId, status) => {
+        record: async (target, keyId, traceId, status, spend) => {
           const decision = buildImageDecision({
             requestId: crypto.randomUUID(),
             traceId,
@@ -4382,7 +4385,7 @@ export async function buildServer(
                 status,
                 error_class: status === "ok" ? null : "upstream_error",
                 latency_ms: 0,
-                cost_usd: null,
+                cost_usd: spend?.costUsd ?? null,
                 error_detail: null,
               },
             ],
@@ -4392,6 +4395,14 @@ export async function buildServer(
             policyReason: "audio_transcription",
           });
           await writeQueue.enqueueTelemetry({ decision, apiKeyId: keyId, createdAt: new Date() });
+          logger.log("info", "media.asr_usage", {
+            trace_id: traceId,
+            alias: target.alias,
+            status,
+            usage: spend?.usage ?? null,
+            cost_usd: spend?.costUsd ?? null,
+            operation_id: spend?.id,
+          });
         },
       }),
     memoryAdmission: requestBodyMemoryAdmission,
@@ -5513,7 +5524,7 @@ export async function buildServer(
   };
   registerAudioSpeechRoute(app, audioSpeech);
   registerAudioTranscriptionsRoute(app, {
-    accounting: createTranscriptionAccounting(store.budget, budgetConfig),
+    accounting: transcriptionAccounting,
     auth: audioSpeech.auth,
     concurrencyGate,
     rateLimiter,

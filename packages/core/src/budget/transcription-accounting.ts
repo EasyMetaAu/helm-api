@@ -80,7 +80,7 @@ export interface TranscriptionAccounting {
   settle(
     record: MediaSpendRecord,
     pricing: MediaPricing | undefined,
-    result: AudioTranscriptionResult | undefined,
+    result: Pick<AudioTranscriptionResult, "usage"> | undefined,
     notSent?: boolean,
   ): Promise<MediaSpendRecord | null>;
 }

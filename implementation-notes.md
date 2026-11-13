@@ -7,6 +7,13 @@
 
 ---
 
+
+## 2026-11-13 · 百炼短 WAV ASR 原子费用预留（docs/06、G4 H03）
+
+- 只扩展 qwen3-asr-flash 非流式完整 mono PCM16 WAV data URL，复用转写时长核验、媒体账本和查询入口；发送前持久预留，按原生 usage.seconds 结算。缺失或无效用量及网络后未知保留预留，不自动重发；确认未发送/拒绝才归零。响应加 accounting/operation header，保留 Chat 正文和 native usage。
+- 计费依据仍是部署前提：官方当前秒价不证明本账户取整单位，音频 token 的不足一秒规则不用于推断账单。缺显式 roundingSeconds，或 CNY 卡缺 FX，继续 fail-closed；没有改生产价卡或放宽 cap。带预算的 URL/流式与异步 filetrans 不在本片。
+- 业务发送前须持久化 pending attempt；operation 查询不返回 transcript，响应完全丢失不能用新 attempt 盲目重发。新增边界测试源码先行；按主控高负载要求未执行红/绿、类型检查或编译，待低负载验证。本片无供应商调用、新 key、SQL、部署或配置写入。
+
 ## 2026-11-12 · Seedance 入库素材授权（docs/06、Ark media）
 
 - `asset://` 仅扩展 Seedance 输入。管理员通过现有 Basic/session 管理入口，将素材 ID、类型绑定指定 key/租户及实际静态 Ark 客户端凭证与 endpoint；ConfigStore 单表 CAS，无新迁移。每次创建读取授权，缺失 403、存储异常 503，均不调用上游。
@@ -73,14 +80,9 @@
 - **验证**：完整 Chat HTTP 链路验证流式/非流式、上游密钥替换和 body 字段不能冒充 Header；并发请求、四类协议、图片、Responses WS 与实际 Realtime socket 验证身份隔离。定向 670 项通过，shared/core 构建和 gateway 类型检查通过；独立只读审查未发现剩余 P0/P1。
 - **发布准备**：`pnpm release:prepare 0.30.74` 和发布快照检查通过；Grok 1.0.77、Codex 0.167.0 保持不变，Claude Code 同步至已完成静态协议增量审查的 2.1.322，原字段白名单不变。
 
-## 2026-11-09 · API Key 临时禁用与启用（docs/06、11）
-
-- **状态决定**：保留既有 `disabled=true` 的不可恢复吊销语义，新增独立 `suspended` 标志。管理员通过原 PATCH 接口禁用或启用；不改变密钥、配额、身份与历史，已吊销及内部系统 Key 不允许切换。
-- **持久化与鉴权**：SQLite v56、Postgres v55 为旧记录补默认 false，保留既有吊销。HTTP、原生协议、实时连接与 MCP 的新鉴权均拒绝临时禁用 Key；管理重放选用仍有效的身份。复用 updateKey 清理本进程缓存。
-- **边界**：不终止已接收的请求或已建立的连接；共享 Postgres 的其他网关实例按已有鉴权缓存 TTL 感知状态，默认最多 30 秒。页面区分启用、已禁用、已吊销，吊销确认明确不可恢复。
-- **发布准备**：v0.30.73 已执行 `pnpm release:prepare 0.30.73`；官方稳定快照仍为 Claude Code 2.1.319、Codex 0.167.0、Grok 1.0.77，无新增客户端协议变更。
-
 ## 更早历史总览
+
+2026-11-09 API Key suspended 与永久吊销 disabled 分离，鉴权缓存和进行中连接语义保持；完整记录见 Git history。
 
 2026-11-08 Codex 出站 Header 一致性：默认版本由发布快照管理，保留客户端兼容规则；完整记录见 Git history。
 

@@ -28,6 +28,16 @@ CosyVoice 3.5 使用 v3 系统音色时上游返回 418；目标账户没有已�
 
 MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执行第二次生成。音频保留现有 16 MiB 收集上限。MiniMax `audio_length` 原单位毫秒，`usage_characters` 与 `usage_voice_count` 保留原生字段。百炼累计计费字符数转为 session usage 事件增量。
 
+## 百炼短 WAV ASR 费用路径（待验证）
+
+`POST /v1/chat/completions` 的 `transcription-short` lane 可在非流式、完整单声道 PCM16 WAV data URL 输入时复用转写账本。发送前按实际帧数核定时长并持久预留，成功后按供应商 `usage.seconds` 结算。响应保留原有 Chat 内容与 usage，并增加 `accounting` 和 `x-helm-media-operation-id`；用所属 key 查询 `/v1/audio/operations/{operationId}`，只能读账，不能恢复转写文本。
+
+放行 spend-capped key 要求该模型的单一输入音频秒价，以及显式可信的 `billing.roundingSeconds`；CNY 卡还须配置 `billing.usdPerCurrencyUnit`。官方当前秒价页没有建立本账户取整/最小收费单位，“不足一秒按一秒”的音频 token 换算不能作为账单取整证明。本次不设置默认值、不改生产价卡；缺计费依据继续 422。带 cap 的流式、URL、压缩或残缺 WAV 输入也保持关闭。现有未受限 URL/流式协议保持原行为。
+
+网络后未知、5xx、缺失/无效 usage 不写零费用、不重发，保留预留及 operation ID；只有确认未发送或明确拒绝才零结算。账本保存原生 seconds 的 duration 用量，遥测记录结算费用及 operation 日志，不把秒伪装为 token。没有新增 SQL 或幂等框架。
+
+调用方必须在发送前持久化业务 attempt 与 pending 状态，固定音频身份；返回后立即保存 operation ID、实际结果及 usage。HTTP 响应完全丢失时，Helm 当前没有按调用方自选 ID 找回结果的通用接口，先核对已有日志/账本，不能自动建新 attempt 重发。此片测试源码先行但按高负载限制未运行，亦未类型检查/编译/部署，不计为真实 ASR 费用验收通过。
+
 ## 文件转写入口
 
 `POST /v1/audio/transcriptions` 接收 multipart：`file`、`model`（lane 或获授权的 alias），可选重复 `languages[]` / `keywords[]`、`prompt`、`timestamps=word|sentence`、`diarize=true|false`；只支持 JSON 结果。每个文件上限 25 MiB，长材料须由调用方按实际音频边界分块。
