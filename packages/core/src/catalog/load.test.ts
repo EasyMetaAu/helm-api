@@ -775,22 +775,12 @@ describe("loadRuntimeCatalog", () => {
         (alias) => !(alias in pricing) && !intentionallyUnpriced.has(alias),
       ),
     ).toEqual([]);
-    // Price-only keys include verified new Claude cards for cost lookup before
-    // an operator configures routing, dynamic Codex auto-review and bare eval.
+    // Price-only keys are dynamic Codex auto-review and the bare eval model.
     expect(
       Object.keys(pricing)
         .filter((alias) => !(alias in capabilities))
         .sort(),
-    ).toEqual([
-      "anthropic-api/claude-fable-5-2",
-      "anthropic-api/claude-haiku-5-5",
-      "anthropic-api/claude-mythos-5-2",
-      "anthropic/claude-fable-5-2",
-      "anthropic/claude-haiku-5-5",
-      "anthropic/claude-mythos-5-2",
-      "deepseek-v4-flash",
-      "openai-codex/codex-auto-review",
-    ]);
+    ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
     const unexpectedUnpriced = Object.keys(capabilities).filter((alias) => {
       const rates = catalog.get(alias)?.pricing;
       return (

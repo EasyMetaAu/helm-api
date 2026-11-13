@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { checkCapability } from "../capability/filter.js";
 import { resolveCostUsd } from "./cost.js";
 import { loadRuntimeCatalog } from "./load.js";
 
@@ -8,6 +9,35 @@ import { loadRuntimeCatalog } from "./load.js";
 const catalog = loadRuntimeCatalog({ configDir: "config" });
 
 describe("current model pricing", () => {
+  it.each([
+    "anthropic",
+    "anthropic-api",
+  ])("%s keeps newly priced Claude models usable", (provider) => {
+    for (const model of ["claude-fable-5-2", "claude-mythos-5-2", "claude-haiku-5-5"]) {
+      const entry = catalog.get(`${provider}/${model}`);
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error("Missing catalog entry");
+      const request = {
+        needsTools: true,
+        needsJson: true,
+        needsResponseSchema: true,
+        needsVision: true,
+        needsStreaming: true,
+        needsDocument: true,
+        estimatedPromptTokens: 200_000,
+        maxTokens: 128_000,
+      };
+      expect(checkCapability(entry.capabilities, request)).toEqual({ ok: true, skipReason: null });
+      expect(
+        checkCapability(entry.capabilities, { ...request, needsForcedToolChoice: true }).ok,
+      ).toBe(model === "claude-haiku-5-5");
+      expect(entry.capabilities.requestCompatibility?.anthropic).toEqual({
+        unsupportedSamplingParameters: ["temperature", "top_p", "top_k"],
+        unsupportedThinkingTypes:
+          model === "claude-haiku-5-5" ? ["enabled"] : ["enabled", "disabled"],
+      });
+    }
+  });
   it.each([
     "anthropic",
     "anthropic-api",
