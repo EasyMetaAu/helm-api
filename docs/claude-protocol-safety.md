@@ -149,12 +149,11 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 附加保护头仍只在对应配置启用时生成（268332758）；请求身份、父 Agent、prompt、request class 和自定义头校验的构造结构保持。SDK SSE 发出（268121259）与累积（268124045）的文本、citation、工具 JSON、thinking、signature 和加密 compaction 分支与旧版一致，仅压缩符号变化。官方发行说明新增 Vertex fast mode 和 Fable 5.2，不据此扩大 Helm 模型或协议能力。
 - 有限静态审查未发现需要改变本次 Helm 协议实现的 P0/P1 问题；不涵盖全部客户端动态行为，发布后仍单独验收真实上游。
 
-2026-11-14 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.323`：新旧 2.1.322 平台包均已通过 npm SHA512 integrity 校验，旧二进制与审核记录一致。新二进制 SHA256 为 `5432918d904a9b6afef7bb79d20df24d76052eabc1f41bceb84091d21f8889a7`，内嵌 SDK 仍为 `0.128.0`（字节偏移 281292166）。全程静态读取公开制品，没有执行下载的 CLI 或访问账号。
+2026-11-14 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.323`：新旧 2.1.322 包均通过 npm SHA512 integrity 校验，归档内二进制与静态检查文件逐一一致。新二进制 SHA256 为 `5432918d904a9b6afef7bb79d20df24d76052eabc1f41bceb84091d21f8889a7`；内嵌 SDK 仍为 `0.128.0`（281292166）。未执行下载的 CLI 或访问账号。
 
-- 同口径扫描引号包围的 `x-*`／`anthropic-*` 小写字段，从 272 项变为 278 项，无删除。新增 `x-ccr-connector-download`（332798358）用于 worker 文件下载，`x-ccr-tool-container-call-owed`（325718701）用于 MCP 工具调用，`x-memory-reason`（282472991）读取 Memory 服务响应。三者不属于 Messages 业务头。
-- 新增 `x-claude-1p-request-class`（279860989）、`x-claude-code-auxiliary-type`（279859470）属于客户端请求分类，`x-claude-remote-chat-conversation-uuid`（279862025）属于远程会话归因。保持既有 10 个已审查头白名单，不生成或转发这六个新字段，并扩展身份边界回归验证剥离行为；相应新增归因功能未纳入兼容承诺。
-- 附加保护头仍只在配置启用时构造（281761030）。SDK SSE 发出与累积分支（旧 268121330–268125334／新 281560583–281564587）在明确替换局部压缩符号后逐字一致，保留文本、citation、工具 JSON、thinking、signature 和加密 compaction。官方发行说明中的 Code Mode、后台登录隔离和非流式错误恢复属于客户端行为；不据此扩展 Helm 权限、身份或工具能力。
-- 有限静态审查未发现需要调整本次 Helm 协议实现的 P0/P1 问题；不能代替真实账户与完整客户端功能验收。
+- 同口径引号字段扫描从 272 项变为 278 项，无删除，10 个已审查头均保留。新增 `x-ccr-connector-download` 用于文件暂存下载（332798358）、`x-ccr-tool-container-call-owed` 用于 MCP tools/call（325718701）、`x-memory-reason` 用于读取内存功能响应原因（282472991）。这些不是 Messages 业务请求的必需头。
+- `x-claude-1p-request-class`、`x-claude-code-auxiliary-type` 和 `x-claude-remote-chat-conversation-uuid` 是新增的条件请求分类／远程会话字段（构造点 281760515–281760756），尚无必需性证据。本次保持既有出站白名单，定向测试验证六个新增字段均不泄漏到 relay；附加保护头仍仅在配置启用时生成（281761031）。
+- SDK SSE 发出和累积分支（281560512、281563298）的事件类别与 2.1.322 一致，涵盖文本、citation、工具 JSON、thinking、signature 和 compaction。官方 [2.1.323 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21323) 的 Code Mode、插件和 hook 功能不扩大 Helm 的协议承诺。有限静态核对未发现本次必须修改的协议实现；动态客户端功能及真实上游验收另行验证。
 
 发布/同步流程在写版本快照前要求：
 
@@ -167,6 +166,8 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 验收以定向 mock 请求、凭证持久化、账户池、外层 fallback 和流式回归为准。不使用真实被封账号做重复探测，不把单次成功请求或测试通过视为生产账户安全证明。
 
 2026-10-09 本地验收：11 个定向测试文件、652 项测试通过；core、gateway、客户端同步脚本类型检查通过；修改范围的 Biome 检查以及 shared/core/gateway 构建通过。离线版本快照校验、官方 2.1.295 平台包元数据完整性复核通过。以上为本地验证记录，远程 CI 与部署状态需分别核验。v0.30.38 发布准备已运行 `pnpm release:prepare 0.30.38`，将 Claude Code 固定快照同步至已审查的 2.1.295，同时按发布契约同步 Grok 1.0.50、Codex 0.162.0 及同 tag 模型目录。
+
+
 ## 账号套餐显示
 
 管理后台从官方 `GET /api/oauth/profile` 的 `organization.organization_type` 读取每个账号的套餐，显示 Pro、Max、Team 或 Enterprise。没有有效返回时显示“套餐未知”，不根据使用额度、邮箱或模型列表推断。请求使用该账号的代理及凭证，不改变请求路由身份。

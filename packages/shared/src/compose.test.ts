@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,36 @@ const rootPackage = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "
 };
 
 describe("docker-compose contract", () => {
+  it("starts Node with a heap budget proportional to machine or container memory", () => {
+    const dockerfile = readFileSync(resolve(repoRoot, "Dockerfile"), "utf8");
+    const nodeOptions = dockerfile.match(/^ENV NODE_OPTIONS="([^"]*)"$/m)?.[1] ?? "";
+    const probe = `const os = require('node:os'); const v8 = require('node:v8');
+      console.log(JSON.stringify({ total: os.totalmem(),
+        constrained: process.constrainedMemory(), limit: v8.getHeapStatistics().heap_size_limit }));`;
+    const sample = JSON.parse(
+      execFileSync(process.execPath, ["-e", probe], {
+        env: { ...process.env, NODE_OPTIONS: nodeOptions },
+        encoding: "utf8",
+        timeout: 10_000,
+      }),
+    ) as { total: number; constrained: number; limit: number };
+    const total =
+      Number.isSafeInteger(sample.constrained) && sample.constrained > 0
+        ? sample.constrained
+        : sample.total;
+    // Compare with the equivalent fixed old-space limit, so differences in V8's
+    // young generation between supported Node versions do not affect the test.
+    const oldSpaceMiB = Math.floor(total / (2 * 1024 * 1024));
+    const expected = JSON.parse(
+      execFileSync(process.execPath, [`--max-old-space-size=${oldSpaceMiB}`, "-e", probe], {
+        env: { ...process.env, NODE_OPTIONS: "" },
+        encoding: "utf8",
+        timeout: 10_000,
+      }),
+    ) as { limit: number };
+    expect(sample.limit).toBe(expected.limit);
+  });
+
   it("allows a local or pinned image without editing the Compose file", () => {
     expect(compose).toContain(`image: \${HELM_IMAGE:-ghcr.io/easymetaau/helm-api:latest}`);
   });

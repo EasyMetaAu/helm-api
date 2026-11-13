@@ -129,6 +129,10 @@ export function createBodyMemoryAdmission(options: {
             if (released || isMaterialized) return;
             isMaterialized = true;
             pendingBytes -= current;
+            // Live headroom now includes the parsed body. Keep lifecycle tracking
+            // until release(), but stop reserving that memory a second time.
+            sharedLease?.release();
+            sharedLease = undefined;
           },
           release() {
             if (released) return;
