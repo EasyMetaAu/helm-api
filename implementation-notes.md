@@ -12,7 +12,7 @@
 
 - **来源与范围**：按 [OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[模型目录](https://developers.openai.com/api/docs/models)及 [Claude 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)核对当前通用文本模型。GPT 最新为 Astra 6、Sol 6.1、Terra 6.1、Luna 6；Claude 为 Fable 5.2、Opus／Sonnet／Haiku 5.5，另有受限的 Mythos 5.2。
 - **价卡决定**：补齐 Fable／Mythos 5.2 与 Haiku 5.5 的 `anthropic`／`anthropic-api` 定价，含缓存、Fast 与美国区域系数。Haiku 总输入严格超过 100,000 才整单升档；Sonnet 5.5 缓存读取修正为 $0.10/M。OpenAI／Codex 补 Astra Fast、Astra／Sol Ultrafast 及 Astra／Luna 区域系数。
-- **范围边界**：新增 Claude 条目仅用于价格查找，能力元数据、provider 注册及默认 lane 保持原配置；不代表已获得 Mythos 访问权限或已完成新模型接入。订阅仍按 API 等价价格估算，不代表订阅账单。第三方聚合商沿用各自价卡。
+- **范围边界**：新增 Claude 价卡同时配套官方能力元数据，避免价格条目生成零能力默认值并错误拦截已有自定义路由；provider 注册及默认 lane 保持原配置。Fable／Mythos 禁止强制工具选择，Haiku 支持；按官方要求移除不支持的采样及手动思考参数。Mythos 仍须上游授予访问权限。订阅仍按 API 等价价格估算，不代表订阅账单。第三方聚合商沿用各自价卡。
 - **已知限制**：沿用现有 OpenAI 30 分钟缓存写入计价；12 小时缓存写入尚无独立用量字段映射，不宣称可准确区分。历史费用不自动重算；部署时需将价卡增量合并到挂载配置，并从实际容器重新加载验证。
 
 ## 2026-11-14 · 豆包语音模型配置与原生时长（docs/06、G4 H02/H03）
