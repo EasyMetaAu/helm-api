@@ -18,6 +18,7 @@ const pricing: MediaPricing = {
   basis: "official_list_price",
   verifiedOn: "2026-11-13",
   source: "https://example.test/pricing",
+  notes: [],
   rates: [{ direction: "input_audio", unit: "second", price: 0.01, conditions: {} }],
   billing: { roundingSeconds: 1, usdPerCurrencyUnit: 0.1 },
 };
@@ -154,7 +155,7 @@ it("reserves complete WAV duration before dispatch and settles native seconds on
   const t = setup();
   const res = await t.send();
   expect(res.status).toBe(200);
-  const body = await res.json();
+  const body = (await res.json()) as { accounting: { operationId: string } };
   expect(body).toMatchObject({
     usage: { seconds: 1 },
     accounting: { state: "settled", reservedUsd: 0.002, costUsd: 0.001 },
@@ -193,7 +194,7 @@ it("retains reservation and operation identity on an unknown paid outcome withou
   t.chatCompletion.mockRejectedValue(new Error("connection lost"));
   const response = await t.send();
   expect(response.status).toBe(502);
-  const body = await response.json();
+  const body = (await response.json()) as { error: unknown };
   expect(body.error).toMatchObject({ code: "outcome_unknown", operation_id: t.saved()?.id });
   expect(t.saved()).toMatchObject({ state: "outcome_unknown", reservedUsd: 0.002, costUsd: null });
   expect(t.chatCompletion).toHaveBeenCalledTimes(1);
@@ -223,7 +224,8 @@ it.each([
   });
   const response = await t.send();
   expect(response.status).toBe(200);
-  expect((await response.json()).accounting).toMatchObject({
+  const body = (await response.json()) as { accounting: unknown };
+  expect(body.accounting).toMatchObject({
     state: "outcome_unknown",
     costUsd: null,
   });
