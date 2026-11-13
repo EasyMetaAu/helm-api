@@ -25,6 +25,7 @@ const Timed = z.object({
   start_time: z.number().nonnegative(),
   end_time: z.number().nonnegative(),
 });
+const AudioInfo = z.object({ duration: z.number().finite().nonnegative() });
 const Result = z.object({
   text: z.string(),
   utterances: z.array(Timed.extend({ words: z.array(Timed).optional() })).optional(),
@@ -39,11 +40,19 @@ export function normalizeDoubaoTranscription(raw: Record<string, unknown>, id: s
     return { status: "failed", error: { code: "no_speech", message: "no human speech detected" } };
   if (raw.code !== 20000000) return null;
   const result = Result.safeParse(raw.result);
-  if (!result.success) return null;
+  const audioInfo = AudioInfo.optional().safeParse(raw.audio_info);
+  if (!result.success || !audioInfo.success) return null;
+  const durationMs = audioInfo.data?.duration;
+  const usage =
+    durationMs === undefined
+      ? undefined
+      : { type: "duration" as const, seconds: durationMs / 1000 };
   return {
     status: "done",
+    ...(usage ? { usage } : {}),
     transcription: AudioTranscriptionResultSchema.parse({
       text: result.data.text,
+      ...(durationMs === undefined ? {} : { durationMs, usage }),
       ...(result.data.utterances
         ? {
             segments: result.data.utterances.map((segment) => ({
@@ -119,8 +128,13 @@ export function createDoubaoAsrClient(deps: OpenAIClientDeps) {
       return { id, code };
     }
     const raw = await readUpstreamJsonWithinBudget(response, deps.responseWorkAdmission);
-    const parsed = z.object({ result: Result }).parse(raw);
-    return { id, code, result: parsed.result };
+    const parsed = z.object({ result: Result, audio_info: AudioInfo.optional() }).parse(raw);
+    return {
+      id,
+      code,
+      result: parsed.result,
+      ...(parsed.audio_info ? { audio_info: parsed.audio_info } : {}),
+    };
   }
   return {
     async transcriptionCreate(

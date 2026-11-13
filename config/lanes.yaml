@@ -459,3 +459,11 @@ seedream-pro:
 wan-video:
   primary: bailian/wan3.0-video
   fallback: []
+
+# Voice-only lanes, kept outside all conversational fallback chains.
+doubao-speech:
+  primary: doubao/seed-tts-2.0
+  fallback: []
+doubao-transcription-file:
+  primary: doubao/bigmodel
+  fallback: []

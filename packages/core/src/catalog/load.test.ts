@@ -758,6 +758,8 @@ describe("loadRuntimeCatalog", () => {
       "minimax/MiniMax-H3-Max",
       "minimax/speech-2.8-hd",
       "minimax/speech-2.8-turbo",
+      "doubao/seed-tts-2.0",
+      "doubao/bigmodel",
       "openai-codex/gpt-image-2",
       "xai/grok-imagine-image",
       "xai/grok-imagine-image-quality",

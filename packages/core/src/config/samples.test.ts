@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { CapabilitiesOverrideSchema, HelmConfigSchema } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { loadRuntimeCatalog } from "../catalog/load.js";
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import { resolveModelAlias, validateModelAliasTargets } from "../routing/model-alias.js";
 import { loadConfig } from "./loader.js";
@@ -17,6 +18,43 @@ function readYaml(file: string): unknown {
 }
 
 describe("checked-in config samples", () => {
+  it("registers Doubao speech separately from Ark with dedicated lanes and native CNY prices", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const doubao = cfg.providers.find((p) => p.name === "doubao");
+    expect(doubao).toMatchObject({
+      type: "doubao-speech",
+      base_url: "https://openspeech.bytedance.com",
+      api_key_env: "DOUBAO_SPEECH_API_KEY",
+      media_account_id: "doubao-speech-default",
+    });
+    expect(doubao?.models.map((m) => m.alias)).toEqual(["doubao/seed-tts-2.0", "doubao/bigmodel"]);
+    const catalog = loadRuntimeCatalog({ configDir });
+    for (const [lane, alias] of [
+      ["doubao-speech", "doubao/seed-tts-2.0"],
+      ["doubao-transcription-file", "doubao/bigmodel"],
+    ] as const) {
+      expect(expandLaneChain(lane, cfg.lanes ?? {})).toEqual([alias]);
+      expect(expandLaneChain("balanced", cfg.lanes ?? {})).not.toContain(alias);
+    }
+    expect(catalog.get("doubao/seed-tts-2.0")?.capabilities.outputAudio).toBe(true);
+    expect(catalog.get("doubao/bigmodel")?.capabilities.modalities).toEqual(["audio"]);
+    expect(catalog.get("doubao/bigmodel")?.capabilities.supportsStreaming).toBe(false);
+    expect(catalog.get("doubao/seed-tts-2.0")?.pricing.media).toMatchObject({
+      currency: "CNY",
+      providerModel: "seed-tts-2.0",
+      rates: [{ direction: "input", unit: "ten_thousand_billable_characters", price: 3 }],
+    });
+    expect(catalog.get("doubao/bigmodel")?.pricing.media).toMatchObject({
+      currency: "CNY",
+      providerModel: "bigmodel",
+      rates: [{ direction: "input_audio", unit: "second", price: 0.8 / 3600 }],
+    });
+    expect(catalog.get("doubao/bigmodel")?.pricing.media?.billing?.roundingSeconds).toBeUndefined();
+    expect(
+      catalog.get("doubao/seed-tts-2.0")?.pricing.media?.billing?.usdPerCurrencyUnit,
+    ).toBeUndefined();
+  });
+
   it("registers four Ark models in dedicated lanes without chat fallback or invented prices", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const ark = cfg.providers.find((p) => p.type === "ark");

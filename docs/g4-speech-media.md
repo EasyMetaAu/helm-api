@@ -76,17 +76,32 @@ GPU 协议核实：旧 asr-service `/transcribe` 接收 multipart，WhisperX 时
 
 ## 豆包语音
 
-配置 `type: doubao-speech`、`base_url: https://openspeech.bytedance.com`、静态 `api_key_env` 与稳定 `media_account_id`。TTS 模型映射 `seed-tts-2.0`，录音 ASR 映射 `bigmodel`，分别配置 lane。凭据及音色必须由部署方确认授权。
+默认配置新增独立 provider `doubao`，类型 `doubao-speech`，端点 `https://openspeech.bytedance.com`，静态环境变量 `DOUBAO_SPEECH_API_KEY`，稳定 `media_account_id: doubao-speech-default`。缺凭据时跳过该可选客户端，不在启动时执行付费探测。两条 lane 均单候选、无 fallback，且不加入通用文本链：
 
-TTS 支持 mp3 / pcm / opus、8–48 kHz 的官方离散采样率；采用 2.0 `enable_subtitle`，统一映射 `sentence.words.startTime/endTime` 秒为毫秒。原生 `text_words` 保留，并映射到统一计费字符字段。HTTP 输出时长没有官方可靠总长字段，省略 durationMs；不能用字幕末尾代替音频总长。WS 为缓冲输入模式：append 累积文本，finish 才发起一次 HTTP SSE 合成，不提供 flush/cancel；关闭连接会中断本地请求，收费结果仍可能未知。
+| lane / alias | 本轮支持范围 | 官方接口与资源 |
+|---|---|---|
+| `doubao-speech` → `doubao/seed-tts-2.0` | 一次输入文本，HTTP SSE 返回音频与中/英文原生字幕；Helm HTTP binary/JSON 及缓冲 WS | `/api/v3/tts/unidirectional/sse`，`X-Api-Resource-Id: seed-tts-2.0` |
+| `doubao-transcription-file` → `doubao/bigmodel` | 供应商可取 HTTPS 录音 URL，标准版异步 submit/query，真实句/词毫秒时戳和可选原生时长 | `/api/v3/auc/bigmodel/submit`、`query`，资源 `volc.seedasr.auc`（录音文件识别2.0） |
 
-`POST /v1/audio/transcription-jobs` 示例：
+鉴权采用豆包语音**新版控制台 API Key**，发送 `X-Api-Key`，不需要 App ID。此 key 与 Ark 的 Bearer key 不是同一鉴权入口，不会回退读取 `ARK_API_KEY`。旧控制台 App ID/Access Token 双头组合本轮未增加，只有旧凭据时应在语音新版控制台准备适用 API Key；不要把 token 直接当作新 key。`media_account_id` 是部署方稳定的项目/账户标识，用于已有持久任务身份隔离，不是 secret。TTS 还需该账户已授权的2.0音色。服务/资源开通及余额未核验前不宣称真实可用。
+
+TTS 支持 mp3 / pcm / opus、8–48 kHz 的官方离散采样率；2.0 `enable_subtitle` 的词时戳单位秒，统一转换为毫秒。字幕只在供应商返回时提供，不补平均位置。HTTP 输出没有可靠音频总时长字段，省略 durationMs；不能用字幕末尾代替总时长。WS 为缓冲输入：append 累积文本、finish 才发起一次 HTTP SSE，不提供供应商原生双向TTS的实时输入/flush/cancel；关闭只中断本地请求，收费结果仍可能未知。HTTP408/5xx、流中断或缺少完成事件保持未知，无自动重发。
+
+标准录音ASR示例：
 
 ```json
-{"model":"doubao-asr","audio":{"url":"https://owned.example/audio.wav","format":"wav","language":"en-US"},"request":{"enable_punc":true}}
+{"model":"doubao-transcription-file","audio":{"url":"https://owned.example/audio.wav","format":"wav","language":"en-US"},"request":{"enable_punc":true}}
 ```
 
-响应沿用 `request_id + status`，`GET /v1/audio/transcription-jobs/{request_id}` 返回统一 `transcription.text/segments` 与毫秒时间戳。使用官方 submit/query，供应商请求 UUID 在 submit 前进入现有持久任务记录。提交断线返回 `outcome_unknown + operation_id`；查询 `/v1/audio/transcription-jobs/operations/{operation_id}` 恢复映射后只查询同一 UUID，不提交新任务。重复请求码 45000001 保持未知，不认定为可安全重发。
+请求 `POST /v1/audio/transcription-jobs`；接受后使用返回 `request_id` 查询同路径 `/{request_id}`。供应商 UUID 在提交前进入现有持久记录，query 使用同一个 UUID。提交断线返回 `outcome_unknown + operation_id`；查询 `/v1/audio/transcription-jobs/operations/{operation_id}` 恢复映射后只查询原任务，重复码45000001不能改UUID重发。可选 `audio_info.duration` 原生毫秒转为 `transcription.durationMs` 和 duration usage.seconds；缺失时省略，不从最后一个字幕推断。`words`/`segments`保留原生字段，缺失不造值。
+
+官方另有极速录音接口 `recognize/flash`（资源 `volc.bigasr.auc_turbo`、同步base64或URL、≤2h/100MB）以及实时 WebSocket ASR2.0。它们不属于本轮新增别名，不把标准版异步客户端冒充极速/实时，也不套用2.0标准版价目到旧极速资源。Luma 短录音可先形成自己的可读短WAV URL使用标准版；真正的边录边转另行适配，不借用TTS WebSocket地址。
+
+价卡记录官方**后付费标价**：TTS2.0为 CNY3/万字符，录音ASR2.0为 CNY0.8/小时（价卡按0.8/3600每秒）。官方字符规则为汉字、字母、标点、空格及SSML标签均计字符，保留原生text_words。没有假设资源包优惠、试用免费、发票汇率。TTS预留须单独明确 `billing.usdPerCurrencyUnit`；缺FX拒绝spend-capped调用。异步URL ASR仍缺本地时长预留链路，即使有native usage也不放行spend-capped key；不删cap绕过。不把原生时长称为供应商发票结算，账单单位说明与精确取整仍由账户适用契约确认。
+
+本轮部署仅使模型、lane及协议可配置。真实收费验收还需要语音项目API Key、相应资源已开通、授权音色/自有HTTPS音频，以及独立有限批次授权。旧Luma验收key保持停用。私密配置模板应置于0600文件，不能将Key写入providers.yaml、仓库或普通日志。
+
+官方资料（本轮核对2026-11-14）：[API Key使用](https://docs.volcengine.com/docs/zh/doubao-voice/api-key-usage.md)、[HTTP SSE TTS](https://docs.volcengine.com/docs/zh/doubao-voice/http-chunked-sse-unidirectional-streaming-v3.md)、[标准录音ASR](https://docs.volcengine.com/docs/zh/doubao-voice/large-model-recording-file-recognition-standard-version-api.md)、[极速录音ASR](https://docs.volcengine.com/docs/zh/doubao-voice/large-model-recording-file-lite-recognition-api.md)、[后付费价目及计量规则](https://docs.volcengine.com/docs/zh/doubao-voice/billing-instructions.md)。
 
 ## 费用与预算
 

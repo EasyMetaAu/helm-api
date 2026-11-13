@@ -86,7 +86,9 @@ export function createDoubaoSpeechClient(deps: OpenAIClientDeps): SpeechClient {
       if (!response.ok || !response.body) {
         await response.body?.cancel();
         throw new MediaHttpError(
-          response.status < 500 ? "rejected" : "unknown",
+          [400, 401, 402, 403, 404, 413, 422, 429].includes(response.status)
+            ? "rejected"
+            : "unknown",
           "upstream_error",
           "speech upstream rejected request",
           null,

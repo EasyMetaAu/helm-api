@@ -136,7 +136,7 @@ describe("GET /v1/models", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as ModelsList;
     const models = body.data.filter((item) => item.type === "model");
-    expect(models).toHaveLength(25);
+    expect(models).toHaveLength(27);
     for (const model of models) {
       expect(model.pricing).toEqual(runtimeCatalog.get(model.id)?.pricing);
       expect(model.pricing?.media?.rates.length).toBeGreaterThan(0);

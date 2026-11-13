@@ -1183,3 +1183,21 @@ zenmux-anthropic/claude-haiku-5.5:
   maxOutputTokens: 128000
 zenmux-anthropic/claude-sonnet-5.5: *anthropic_api_claude_sonnet_5_5
 zenmux-anthropic/claude-opus-5.5: *anthropic_api_claude_opus_5_5
+
+doubao/seed-tts-2.0:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+  outputAudio: true
+
+doubao/bigmodel:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]

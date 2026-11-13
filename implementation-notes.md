@@ -8,6 +8,15 @@
 ---
 
 
+## 2026-11-14 · 豆包语音模型配置与原生时长（docs/06、G4 H02/H03）
+
+- 新增独立 `doubao-speech` provider及TTS2.0/标准录音ASR2.0各一条单候选lane，使用语音新版控制台独立API Key，不复用Ark。缺key时客户端不可用，启动不做收费探测；旧AppId/token、极速及实时ASR不在本片。
+- 按官方后付费价记录TTS CNY3/万字符、标准ASR CNY0.8/小时；没有补默认FX或推断时长取整。TTS缺FX及异步ASR缺时长预留时仍拒绝spend cap。标准query保留原生audio_info.duration/usage，不以字幕结尾造时长；TTS HTTP408保持unknown，不自动重试。
+- API key、资源开通与授权音色仍是独立运行配置；代码、模型目录和无凭据健康部署不等于供应商实测。既有Luma key、预算和其他provider不改；本轮无收费调用，真实验收须有限批次授权。
+- 发布前置：完成 Claude Code 2.1.323 官方制品有限静态审查并保持10头白名单，新增6字段剥离回归；独立只读审查无P0/P1。`pnpm release:prepare 0.30.87` 同步 Grok1.0.77、Claude2.1.323、Codex0.169.0及同tag目录，协议证据见 docs/claude-protocol-safety.md。
+- 本地验收：豆包/配置/预算/路由6文件78项与协议/身份/发布门禁4文件191项通过；core/gateway类型检查、变更范围Biome及完整build通过。此记录不代替PR/main CI、目标部署和真实供应商验收。
+
+
 ## 2026-11-14 · 请求内存记账与 Docker 堆自适应（docs/02、10）
 
 - HTTP/WebSocket 请求解析完成后，实际占用由实时堆与系统余量统计接管，释放共享待分配预留，避免同一请求同时扣减实际占用和预留。独立生命周期计数继续保留到流结束或断连，维护暂停仍等待活动请求排空；响应处理使用自己的预算。
@@ -73,14 +82,8 @@
 - **错误解释**：只匹配 OpenAI 的 `codex_byok_restricted_by_api_credit_promo` 代码，在摘要说明 OpenAI 将本次请求识别为 Codex BYOK 后按组织 API Credits 福利限制拒绝；不推断所有请求均失败或具体触发头，并提供官方计费设置链接；保留原始错误详情。此项改动不修改账号权益或池的错误重试语义。
 - **验证**：174 项定向测试通过；shared/core 构建、gateway 类型检查、admin Svelte 检查及生产构建通过。桌面与 390px 窄屏浏览器预览使用该请求的只读记录，确认名称、末四位、失败执行行和中文解释均可见，无横向溢出。
 
-## 2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）
-
-- **根因与决定**：生产请求 `ed51ea9c-8a47-47ad-87f0-54b12f1e3669` 在 Codex 熔断后回退到 `openai/gpt-6-luna`，上游以 `unsupported_value` 拒绝 `temperature: 0`。在现有 `requestCompatibility.openaiChat` 中增加显式采样参数排除项，仅为该别名配置 `temperature`；发送前去除并记录 `temperature_removed_for_model`，保留原始请求和其他别名的参数。
-- **边界**：规则覆盖 Chat 及跨协议转换后的流式／非流式发送；不修改请求错误的终止语义，不因模型名推断兼容规则，不改 Codex 熔断状态。原请求正文未保留，验收使用相同参数的合成短请求，不重放用户内容。
-- **验证与发布准备**：新增用例先复现 `temperature: 0` 未移除，再通过修复；定向 265 项通过，shared/core 构建、gateway 类型检查与定向 Biome 检查通过。`pnpm release:prepare 0.30.75` 成功，Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.0 及同 tag 模型目录保持不变。
-
 ## 更早历史总览
 
-2026-11-10 Helm 级联保留客户端 User-Agent：HTTP/WebSocket、跨协议和媒体发送恢复入站 UA，保留身份隔离；完整记录见 Git history。
+2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）；完整记录见 Git history。
 
 更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。
