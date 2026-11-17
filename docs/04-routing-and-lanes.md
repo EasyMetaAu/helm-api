@@ -580,6 +580,13 @@ candidates actually attempted upstream, whether they succeeded or failed) —
 candidates pruned by the Capability Filter or skipped for an OPEN breaker do not
 increment it.
 
+A Responses `response.incomplete` caused by `max_output_tokens`, with an explicit
+empty output array and zero input, output and total usage, is a provider failure
+when no useful output has been committed. It must reach the existing fallback
+chain instead of being accepted as a successful empty answer. Any earlier text,
+reasoning or tool output still prevents replay; missing usage or other incomplete
+reasons are not evidence for this recovery.
+
 This in-chain model swap is the **execution fallback** — it never rewrites the
 lane. The **classification fallback** (→ the configured terminal lane, `balanced`
 by default) is the separate mechanism
