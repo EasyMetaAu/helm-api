@@ -296,6 +296,24 @@ describe("responses", () => {
       }).success,
     ).toBe(true);
   });
+  it("accepts the live Ark success shape, including additive fields Ark now returns", () => {
+    // Captured from a real Seedream 5.0 call on 2026-11-17: items carry `background`.
+    const live = {
+      model: flash,
+      created: 1794926406,
+      data: [{ url, size: "1024x1024", output_format: "jpeg", background: "opaque" }],
+      usage: { input_images: 0, generated_images: 1, output_tokens: 4096, total_tokens: 4096 },
+    };
+    expect(ImageResponse.safeParse(live).success).toBe(true);
+    // A paid success must not be discarded because Ark adds another harmless field later.
+    const future = {
+      ...live,
+      request_id: "r",
+      data: [{ ...live.data[0], future_item_field: 1 }],
+      usage: { ...live.usage, future_usage_field: 1 },
+    };
+    expect(ImageResponse.safeParse(future).success).toBe(true);
+  });
   it("rejects incomplete and contradictory layer success bodies", () => {
     for (const data of [
       [],
