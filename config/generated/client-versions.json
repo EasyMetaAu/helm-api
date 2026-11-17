@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "versions": {
-    "grok": "1.0.77",
-    "claude": "2.1.323",
+    "grok": "1.0.88",
+    "claude": "2.1.326",
     "codex": "0.169.0"
   },
   "sources": {

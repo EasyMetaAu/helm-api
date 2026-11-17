@@ -291,6 +291,28 @@ describe("Anthropic adapter header semantics", () => {
   });
 
   it("preserves actual relay SDK metadata and reviewed optional fields without inventing absent ones", async () => {
+    const unreviewed326Fields = [
+      "x-claude-code-upload-ahead",
+      "x-ccr-shared-tool-request",
+      "x-forwarded-server",
+      "x-host",
+      "x-http-host-override",
+      "x-original-host",
+      "x-goog-api-key",
+      "x-memory-chat-byte-budget",
+      "x-memory-filters-held",
+      "x-memory-held",
+      "x-memory-holds-laid-files",
+      "x-memory-inject-models",
+      "x-memory-inject-wait-ms",
+      "x-memory-laid-files-models",
+      "x-memory-pick-pending-for",
+      "x-memory-reads-prefetched",
+      "x-memory-takes-provisional",
+      "x-served-file-from-connector",
+      "x-served-file-original",
+      "x-served-file-uploaded-by-caller",
+    ];
     const fields = {
       "anthropic-version": "future-version",
       "anthropic-beta": "future-beta,oauth-2025-04-20",
@@ -323,6 +345,7 @@ describe("Anthropic adapter header semantics", () => {
       expect(headers.get("x-claude-code-wiggly-dove")).toBeNull();
       expect(headers.get("x-claude-code-upload-lane")).toBeNull();
       for (const name of [
+        ...unreviewed326Fields,
         "x-claude-code-route-final-answer",
         "x-claude-code-sandy-plover",
         "x-cowork-enrollment",
@@ -369,6 +392,7 @@ describe("Anthropic adapter header semantics", () => {
       body: { ...request(), system },
       headers: {
         ...fields,
+        ...Object.fromEntries(unreviewed326Fields.map((name) => [name, "private-client-value"])),
         "x-unrelated-token": "secret",
         "x-claude-code-wiggly-dove": "opaque-client-value",
         "x-claude-code-upload-lane": "private-upload-route",

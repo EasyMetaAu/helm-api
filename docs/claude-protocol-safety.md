@@ -34,7 +34,7 @@ OAuth 登录与刷新从认证响应的 `account.uuid` 保存 `anthropicAccountU
 
 出站会话由账号设备命名空间、经鉴权的租户/API key 所有者和业务会话共同决定。原始会话优先读取 `metadata.user_id.session_id`、会话 Header 和请求会话字段，再使用网关 thread ID；全部缺失时只在同一请求及其重试内稳定。不同账号或不同所有者不共用上游会话；同一业务会话 A→B→A 对应 A1→B1→A1，正文与 Header 的 session ID 同步。不会把账号全部请求合并成一个会话。已存在的 `session_id`、`session-id`、`x-session-id` 和 `x-claude-code-session-id` 同步到出站会话。已审查的 Agent/父 Agent Header 在同一业务会话内使用同一套账号映射以保留引用关系；Prompt ID 按原 prompt 映射，请求 ID 按本次网关请求映射，重试保持一致。未出现的 Agent/Prompt 字段不补造，幂等键不改写。
 
-Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.323`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
+Claude Code 版本按数字比较，取发布内置版本、账号持久版本、入站有效版本的最大值。入站来源包括 Claude UA、billing 文本及转换前保留的请求上下文；接受三段稳定版本，不接受预发布或任意字符串。较高版本通过原子更新保存，旧请求不能降低存储值；已开始发送的并发请求不会被追溯修改。内置快照目前为 `2.1.326`，运行时不联网查询发布版本；接受较高的客户端自报版本不代表已审核该版本的协议兼容性。
 
 按部署方要求，订阅出站 billing 的 `cc_entrypoint` 与 Claude UA 中的入口统一为 `cli`，同时统一 `cc_version` 和 `claude-cli/<version>`。只修改这些明确字段，保留已有构建后缀和其余归因信息。该入口是网关规范化标记：官方 CLI 的 `-p`、非 TTY 等非交互调用本来也可能报告 `sdk-cli`；`cli`/`sdk-cli` 不是订阅或 API key 的计费开关。修改标记不会把实际非交互执行变为交互执行，也不会升级实际客户端。订阅路径继续使用所选账号的 OAuth 凭证。
 
@@ -154,6 +154,12 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 - 同口径引号字段扫描从 272 项变为 278 项，无删除，10 个已审查头均保留。新增 `x-ccr-connector-download` 用于文件暂存下载（332798358）、`x-ccr-tool-container-call-owed` 用于 MCP tools/call（325718701）、`x-memory-reason` 用于读取内存功能响应原因（282472991）。这些不是 Messages 业务请求的必需头。
 - `x-claude-1p-request-class`、`x-claude-code-auxiliary-type` 和 `x-claude-remote-chat-conversation-uuid` 是新增的条件请求分类／远程会话字段（构造点 281760515–281760756），尚无必需性证据。本次保持既有出站白名单，定向测试验证六个新增字段均不泄漏到 relay；附加保护头仍仅在配置启用时生成（281761031）。
 - SDK SSE 发出和累积分支（281560512、281563298）的事件类别与 2.1.322 一致，涵盖文本、citation、工具 JSON、thinking、signature 和 compaction。官方 [2.1.323 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21323) 的 Code Mode、插件和 hook 功能不扩大 Helm 的协议承诺。有限静态核对未发现本次必须修改的协议实现；动态客户端功能及真实上游验收另行验证。
+
+2026-11-16 增量审查官方 `@anthropic-ai/claude-code-darwin-arm64@2.1.326`：新旧 2.1.323 包均通过 npm SHA512 integrity 校验；新二进制 SHA256 为 `e214ad76dcc0e846b03be28ed1c2734aacd4e27acb527cb7f8a9e2bed644e837`，内嵌 SDK 仍为 `0.128.0`（287187881）。仅静态检查官方制品，未执行下载的 CLI 或访问账号。
+
+- 引号内小写 `x-*`／`anthropic-*` 字段从 278 项增至 297 项，新增 20 项；小写 `x-mcp-features` 改为 `X-MCP-Features`（290658444），10 个已审查头均保留。新增内存字段用于带 CCR 会话认证的 `/memory_context`（291554782–291555910）；文件响应、工具主机、host 路由和凭证字段均不进入 Messages 转发白名单。定向回归验证全部 20 个新增字段被剥离。
+- `x-claude-code-upload-ahead` 标记 gzip 前缀上传（289783517），受默认关闭的 `tengu_playful_shannon` 与 first-party、会话及凭证条件约束；调用处要求目标通过仅允许 `api.anthropic.com` 的检查（295908859、326275918、282382688）。Helm 不新增该上传协议或转发标记。附加保护头仍由客户端设置控制（289883120）。
+- SDK SSE 发出及累积分支（289665003、289667820）继续保留文本、citation、工具 JSON、thinking、signature 和含 `encrypted_content` 的 compaction。官方 [2.1.325／2.1.326 发布记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21326)涉及网关上下文、后台会话网关保留及客户端 token 上限重试；未发现本次必须修改的 Helm 协议实现。此有限静态审查不覆盖全部动态行为；真实上游验收另行记录。
 
 发布/同步流程在写版本快照前要求：
 
