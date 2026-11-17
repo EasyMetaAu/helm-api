@@ -226,8 +226,11 @@ const NormalizedRectangle = z
     ([left, top, right, bottom]) => right >= left && bottom >= top,
     "Normalized bounds must be ordered",
   );
+// Responses are upstream-controlled and the paid write has already happened, so unknown
+// additive fields (Ark now returns `background`) must pass through rather than turn a
+// successful generation into outcome_unknown. Required fields stay strictly validated.
 const ImageResult = z
-  .strictObject({
+  .looseObject({
     url: ArkMediaUrlSchema.optional(),
     b64_json: z
       .string()
@@ -257,12 +260,12 @@ const ImageResult = z
     }
   });
 export const ArkImageGenerationResponseSchema = z
-  .strictObject({
+  .looseObject({
     model: ArkImageModelSchema,
     created: Count,
     data: z.array(ImageResult).min(1).max(17),
     usage: z
-      .strictObject({
+      .looseObject({
         input_images: Count.optional(),
         generated_images: Count,
         output_tokens: Count,

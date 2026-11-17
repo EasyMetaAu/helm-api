@@ -893,6 +893,19 @@ describe("Ark Seedream image generation", () => {
     expect(fixture.create).toHaveBeenCalledTimes(1);
     expect(fixture.fallback).not.toHaveBeenCalled();
   });
+  it("returns the live Ark success shape (items carry `background`) instead of outcome_unknown", async () => {
+    const result = {
+      model: flash,
+      created: 1794926406,
+      data: [{ url: source, size: "1024x1024", output_format: "jpeg", background: "opaque" }],
+      usage: { input_images: 0, generated_images: 1, output_tokens: 4096, total_tokens: 4096 },
+    };
+    const fixture = arkSetup(flash, { result });
+    const res = await post(fixture.app, { model: flash, prompt: "x" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+  });
   it("rejects the wrong delivery carrier without replay", async () => {
     const fixture = arkSetup();
     const res = await post(fixture.app, { model: flash, prompt: "x", response_format: "b64_json" });
