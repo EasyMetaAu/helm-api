@@ -179,14 +179,99 @@ const TranscriptionParametersSchema = z
     timestamp_alignment_enabled: z.boolean().optional(),
   })
   .strict();
+
+// https://help.aliyun.com/zh/model-studio/improve-asr-accuracy
+// Fun-ASR uses a text -> integer weight map, not the vocabulary-management API's array.
+const FunAsrVocabularySchema = z
+  .record(
+    z.string().refine((text) => {
+      const chars = Array.from(text);
+      return (
+        text.trim().length > 0 &&
+        (chars.some((char) => (char.codePointAt(0) ?? 0) > 127)
+          ? chars.length <= 15
+          : text.split(" ").length <= 7)
+      );
+    }, "Hotwords allow at most 15 characters with non-ASCII text, or 7 space-separated ASCII parts"),
+    z.number().int().min(1).max(5),
+  )
+  .refine((vocabulary) => Object.keys(vocabulary).length <= 2000, "At most 2000 hotwords")
+  .describe(
+    "At most 2000 text-to-weight entries; integer weights 1–5. Non-ASCII text: at most 15 characters; ASCII: at most 7 space-separated parts.",
+  );
+
+const RecordedAsrParametersSchema = z.strictObject({
+  vocabulary_id: z.string().trim().min(1).optional(),
+  channel_id: z.array(z.number().int().nonnegative()).min(1).optional(),
+  diarization_enabled: z.boolean().optional(),
+  speaker_count: z.number().int().min(2).max(100).optional(),
+});
+
 export const BailianTranscriptionRequestSchema = z.discriminatedUnion("model", [
+  // Both current REST references limit file_urls to one URL per task.
+  // https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-restful-api
+  z.strictObject({
+    model: z.literal("fun-asr"),
+    input: z.strictObject({ file_urls: z.array(MediaHttpUrlSchema).length(1) }),
+    parameters: RecordedAsrParametersSchema.extend({
+      vocabulary: FunAsrVocabularySchema.optional(),
+      language_hints: z
+        .array(
+          z.enum([
+            "zh",
+            "en",
+            "ja",
+            "ko",
+            "vi",
+            "th",
+            "id",
+            "ms",
+            "tl",
+            "hi",
+            "ar",
+            "fr",
+            "de",
+            "es",
+            "pt",
+            "ru",
+            "it",
+            "nl",
+            "sv",
+            "da",
+            "fi",
+            "no",
+            "el",
+            "pl",
+            "cs",
+            "hu",
+            "ro",
+            "bg",
+            "hr",
+            "sk",
+          ]),
+        )
+        .length(1)
+        .optional(),
+    }).default({}),
+  }),
+  // https://help.aliyun.com/zh/model-studio/paraformer-recorded-speech-recognition-restful-api
+  z.strictObject({
+    model: z.literal("paraformer-v2"),
+    input: z.strictObject({ file_urls: z.array(MediaHttpUrlSchema).length(1) }),
+    parameters: RecordedAsrParametersSchema.extend({
+      language_hints: z
+        .array(z.enum(["zh", "en", "ja", "yue", "ko", "de", "fr", "ru"]))
+        .min(1)
+        .optional(),
+      disfluency_removal_enabled: z.boolean().optional(),
+      timestamp_alignment_enabled: z.boolean().optional(),
+    }).default({}),
+  }),
   z
     .object({
       model: z.enum([
         "qwen-audio-3.1-asr-flash-filetrans",
         "qwen-audio-3.0-asr-flash-filetrans",
-        "fun-asr",
-        "paraformer-v2",
         "paraformer-8k-v2",
       ]),
       input: z.object({ file_urls: z.array(MediaHttpUrlSchema).length(1) }).strict(),
@@ -212,6 +297,43 @@ export const BailianTranscriptionRequestSchema = z.discriminatedUnion("model", [
 ]);
 export const parseBailianTranscriptionRequest = (value: unknown) =>
   BailianTranscriptionRequestSchema.parse(value);
+
+// Result-file contract in the two recorded-speech REST references above.
+// Validate known fields while retaining all native fields, including punctuation and speaker IDs.
+const TranscriptionTimedTextSchema = z
+  .object({
+    begin_time: z.number().int().nonnegative(),
+    end_time: z.number().int().nonnegative(),
+    text: z.string(),
+  })
+  .passthrough();
+export const BailianTranscriptionResultSchema = z
+  .object({
+    transcripts: z.array(
+      z
+        .object({
+          text: z.string(),
+          sentences: z
+            .array(
+              TranscriptionTimedTextSchema.extend({
+                words: z
+                  .array(
+                    TranscriptionTimedTextSchema.extend({ punctuation: z.string().optional() }),
+                  )
+                  .optional(),
+              }),
+            )
+            .optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+export const BailianTranscriptionDurationUsageSchema = z
+  .object({
+    duration: z.number().finite().nonnegative().optional(),
+  })
+  .passthrough();
 
 const TaskStatusSchema = z.enum([
   "PENDING",

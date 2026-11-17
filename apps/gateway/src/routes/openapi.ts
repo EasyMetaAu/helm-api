@@ -547,13 +547,18 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           tags: ["Inference"],
           summary: "Create an asynchronous file transcription job",
           description:
-            "Native JSON URL input. model is a configured lane or permitted model alias. qwen3-asr-flash-filetrans uses input.file_url; other file models use input.file_urls. Not Whisper multipart. Creation is never retried.",
+            "Native JSON URL input. model is a configured lane or permitted model alias. qwen3-asr-flash-filetrans uses input.file_url; fun-asr and paraformer-v2 use exactly one URL in input.file_urls. transcription-fun-asr supports parameters.vocabulary (up to 2000 text-to-weight entries, integer weights 1–5) or vocabulary_id. transcription-paraformer supports vocabulary_id. See docs/recorded-file-asr.md for model-specific options. Not Whisper multipart. Creation is never retried.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/BailianTranscriptionRequest" },
+                example: {
+                  model: "transcription-fun-asr",
+                  input: { file_urls: ["https://your-cdn.example/clip.mp4"] },
+                  parameters: { vocabulary: { 阿里巴巴: 4 }, language_hints: ["zh"] },
+                },
               },
             },
           },
@@ -575,7 +580,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           responses: {
             "200": {
               description:
-                "Status and per-file results, including materialized transcript JSON and partial_failure",
+                "Status and per-file results, including materialized transcript JSON and partial_failure. Words are at transcription.results[].transcript.transcripts[].sentences[].words[]; native begin_time/end_time are milliseconds and punctuation is preserved. Fun-ASR/Paraformer usage.duration is also exposed as usage.seconds with type=duration.",
             },
             "404": errorResponse("Unknown or unowned task"),
             "409": errorResponse("Provider identity changed"),

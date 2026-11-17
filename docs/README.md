@@ -26,6 +26,8 @@ G4 speech adapters, timestamps and spend reservations: [integration contract and
 
 Bailian / MiniMax media: [integration guide](native-media.md), [reviewed plan](media-provider-integration-plan.md), [task status](media-provider-task-tracker.md).
 
+Recorded-file ASR: [Fun-ASR / Paraformer API reference](recorded-file-asr.md), including hotwords, word timestamps, provider configuration and audio-second usage.
+
 Ark media integration: [English / 中文 API guide](ark-media.md), [contracts](ark-media-contract.md), and [task status](ark-media-development-plan.md).
 
 See [Connection checks, account evidence and optional privacy](connection-routing-privacy.md) for the client helper and opt-in gateway improvements.

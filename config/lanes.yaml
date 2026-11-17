@@ -467,3 +467,12 @@ doubao-speech:
 doubao-transcription-file:
   primary: doubao/bigmodel
   fallback: []
+
+# DashScope recorded-file ASR; authorize these lanes on the calling Helm key.
+transcription-fun-asr:
+  primary: bailian/fun-asr
+  fallback: []
+
+transcription-paraformer:
+  primary: bailian/paraformer-v2
+  fallback: []
