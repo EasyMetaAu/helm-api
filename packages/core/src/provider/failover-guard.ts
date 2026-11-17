@@ -92,6 +92,10 @@ function errorProviderRaw(data: string): Record<string, unknown> | null {
   else if (typeof obj.error === "string") out.error = obj.error;
   const responseError = asRecord(asRecord(obj.response)?.error);
   if (responseError) out.response = { error: errorFields(responseError) };
+  if (obj.type === "response.incomplete") {
+    const reason = asRecord(asRecord(obj.response)?.incomplete_details)?.reason;
+    if (typeof reason === "string") out.response = { incomplete_details: { reason } };
+  }
   return out;
 }
 
@@ -143,6 +147,19 @@ const responsesClassifier: PreOutputClassifier = {
     )
       return "preamble";
     if (t === "error" || t === "response.failed") return "error";
+    if (t === "response.incomplete") {
+      const response = asRecord(obj.response);
+      const usage = asRecord(response?.usage);
+      if (
+        asRecord(response?.incomplete_details)?.reason === "max_output_tokens" &&
+        Array.isArray(response?.output) &&
+        response.output.length === 0 &&
+        usage?.input_tokens === 0 &&
+        usage.output_tokens === 0 &&
+        usage.total_tokens === 0
+      )
+        return "error";
+    }
     if (t === "response.output_item.added" || t === "response.output_item.done") {
       const item = asRecord(obj.item);
       if (item?.type === "message" && emptyResponsesParts(item.content)) return "preamble";
@@ -173,6 +190,8 @@ const responsesClassifier: PreOutputClassifier = {
   },
   errorMessage(data) {
     const obj = tryParse(data) ?? {};
+    if (obj.type === "response.incomplete")
+      return "upstream output limit reached without any output or usage";
     const top = (obj.error ?? obj) as { message?: string };
     const nested = (((obj.response ?? {}) as Record<string, unknown>).error ?? {}) as {
       message?: string;

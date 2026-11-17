@@ -30,6 +30,53 @@ const chat = preOutputClassifierFor("openai_chat");
 if (!responses || !anthropic || !chat) throw new Error("classifier missing");
 
 describe("guardPreOutputFailure — openai_responses", () => {
+  const emptyLimit = {
+    type: "response.incomplete",
+    response: {
+      status: "incomplete",
+      output: [],
+      incomplete_details: { reason: "max_output_tokens" },
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    },
+  };
+
+  it("fails over an explicitly empty zero-usage output-limit response before forwarding any bytes", async () => {
+    const forwarded: string[] = [];
+    const chunks = [
+      { type: "response.created", response: { id: "resp_empty" } },
+      { type: "response.metadata", metadata: {} },
+      emptyLimit,
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`);
+    await expect(
+      (async () => {
+        for await (const chunk of guardPreOutputFailure(fromChunks(chunks), responses))
+          forwarded.push(chunk);
+      })(),
+    ).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      providerRaw: { response: { incomplete_details: { reason: "max_output_tokens" } } },
+    });
+    expect(forwarded).toEqual([]);
+  });
+
+  it.each([
+    { type: "response.output_text.delta", delta: "partial answer" },
+    { type: "response.output_item.added", item: { type: "function_call", name: "write_file" } },
+  ])("never replays $type when a later terminal claims zero usage", async (event) => {
+    const chunks = [event, emptyLimit].map((value) => `data: ${JSON.stringify(value)}\n\n`);
+    expect(await collect(guardPreOutputFailure(fromChunks(chunks), responses))).toEqual(chunks);
+  });
+
+  it.each([
+    { ...emptyLimit.response, usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+    { ...emptyLimit.response, usage: undefined },
+    { ...emptyLimit.response, output: [{ type: "function_call", name: "write_file" }] },
+    { ...emptyLimit.response, incomplete_details: { reason: "content_filter" } },
+  ])("does not infer safe replay without explicit empty limit evidence %#", async (response) => {
+    const chunks = [`data: ${JSON.stringify({ type: "response.incomplete", response })}\n\n`];
+    expect(await collect(guardPreOutputFailure(fromChunks(chunks), responses))).toEqual(chunks);
+  });
+
   it.each([
     { type: "response.metadata", headers: { "x-codex-turn-state": "opaque-state" } },
     { type: "response.metadata", metadata: { type: "safety_buffering", retry_model: "gpt-test" } },
