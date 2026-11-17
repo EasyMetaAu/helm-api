@@ -53,7 +53,9 @@ describe("native media model pricing configuration", () => {
       expect(pricing?.media, model.alias).toMatchObject({
         providerModel: model.provider_model,
         currency: model.alias.startsWith("minimax/") ? "USD" : "CNY",
-        verifiedOn: "2026-10-14",
+        verifiedOn: ["bailian/fun-asr", "bailian/paraformer-v2"].includes(model.alias)
+          ? "2026-11-16"
+          : "2026-10-14",
         basis: "official_list_price",
       });
       expect(

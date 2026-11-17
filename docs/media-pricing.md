@@ -33,6 +33,8 @@ Seed3D 的 Token 换算与每文件价格是同一笔费用的两种表示，不
 
 官方来源：[模型价格](https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing)。其他地域及转售 MiniMax 的价格不用于本配置。
 
+`fun-asr` 与 `paraformer-v2` 已于 2026-11-16 再次核对[阿里云官方价格页](https://help.aliyun.com/zh/model-studio/model-pricing)，北京输入音频秒价分别仍为 ¥0.00022 和 ¥0.00008。异步任务按上游 `usage.duration` 返回秒数，不从字幕推算；所选音轨分别计费。完整口径及现有结算限制见[录音文件识别接口](recorded-file-asr.md)。
+
 | 模型 | 已配置的正式价格 |
 | --- | --- |
 | qwen-image-3.0-pro | 输入 ¥0.02/张；1K 输出 ¥0.25/张，2K ¥0.50/张 |

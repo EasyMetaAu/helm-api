@@ -11,7 +11,17 @@
 - 为 `media_account_id` 设置稳定的内部账户标识；不同账户不可复用该标识。配置没有验证该账户已开通某模型。工作空间专属域名是否开放原生 `/api/v1`、WebSocket 仍需账户实测，不能由 Chat 兼容域名推断。
 - 任务绑定账户标识、endpoint 和凭证指纹。修改其中任一项后旧任务查询返回 409；在证明账户一致前不自动迁移任务。
 
-默认 lane：`qwen-image`、`wan-video`、`minimax-video`、`bailian-speech`、`minimax-speech`、`transcription-short`、`transcription-file`。给调用 Key 授权对应 lane；使用具体 alias/wire model 另需 `allow_custom_model`。不要把短 ASR 混入普通聊天 lane。
+默认 lane：`qwen-image`、`wan-video`、`minimax-video`、`bailian-speech`、`minimax-speech`、`transcription-short`、`transcription-file`、`transcription-fun-asr`、`transcription-paraformer`。给调用 Key 授权对应 lane；使用具体 alias/wire model 另需 `allow_custom_model`。不要把短 ASR 混入普通聊天 lane。
+
+文件识别模型清单：
+
+| Provider / 凭据 | Lane | 上游模型与输入 |
+| --- | --- | --- |
+| `bailian-media` / `BAILIAN_API_KEY` | `transcription-file` | `qwen3-asr-flash-filetrans`，`input.file_url` |
+| 同上 | `transcription-fun-asr` | `fun-asr`，单元素 `input.file_urls`，支持即时热词及预编译热词 |
+| 同上 | `transcription-paraformer` | `paraformer-v2`，单元素 `input.file_urls`，支持预编译热词、语气词过滤及时间戳校准 |
+
+Fun-ASR 与 Paraformer 的[接口说明、完整请求及词级时间戳示例](recorded-file-asr.md)包含当前官方限制、状态映射和计费口径。
 
 模型清单由配置显式维护。千问图片支持 3.0/3.0-pro/2.1-pro/2.1-turbo；万相支持 3.0-video/video-prime；MiniMax 视频支持 H3/H3-Max；TTS 包括配置中的千问 Audio、CosyVoice 和 speech-2.8。每个模型的地域、音色和账户权限仍由上游确认。例如 `qwen-audio-3.0-tts-plus` 可使用 `longanhuan_v3.6`，`qwen-audio-3.1-tts-flash` 应使用其音色表中的 `longanhuan_v3.1`；不能跨型号复用音色名。
 

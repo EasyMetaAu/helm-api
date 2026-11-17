@@ -5408,11 +5408,8 @@ export async function buildServer(
             const nativeTask = p ? nativeMediaProfile(p, "transcription") : undefined;
             const client = providerClients.get(target.value.providerName);
             if (!nativeTask || !client?.transcriptionCreate) continue;
-            try {
-              nativeTask.validate(body, target.value.providerModel);
-            } catch {
-              continue;
-            }
+            // The route validates after lane authorization and returns 400 for bad input.
+            // Skipping invalid input here would misreport it as provider unavailable (503).
             const create = client.transcriptionCreate;
             return {
               nativeTask,

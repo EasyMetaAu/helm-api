@@ -18,6 +18,35 @@ function readYaml(file: string): unknown {
 }
 
 describe("checked-in config samples", () => {
+  it("registers Fun-ASR and Paraformer lanes with native audio-second prices", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    expect(cfg.providers.find((p) => p.name === "bailian")).toMatchObject({
+      type: "bailian-media",
+      api_key_env: "BAILIAN_API_KEY",
+      base_url: "https://dashscope.aliyuncs.com/api/v1",
+    });
+    const catalog = loadRuntimeCatalog({ configDir });
+    for (const [lane, model, price] of [
+      ["transcription-fun-asr", "fun-asr", 0.00022],
+      ["transcription-paraformer", "paraformer-v2", 0.00008],
+    ] as const) {
+      const alias = `bailian/${model}`;
+      expect(expandLaneChain(lane, cfg.lanes ?? {})).toEqual([alias]);
+      expect(expandLaneChain("balanced", cfg.lanes ?? {})).not.toContain(alias);
+      expect(catalog.get(alias)?.capabilities).toMatchObject({
+        modalities: ["audio"],
+        supportsStreaming: false,
+      });
+      expect(catalog.get(alias)?.pricing.media).toMatchObject({
+        currency: "CNY",
+        region: "cn-beijing",
+        providerModel: model,
+        verifiedOn: "2026-11-16",
+        rates: [{ direction: "input_audio", unit: "second", price }],
+      });
+    }
+  });
+
   it("registers Doubao speech separately from Ark with dedicated lanes and native CNY prices", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const doubao = cfg.providers.find((p) => p.name === "doubao");

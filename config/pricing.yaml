@@ -1576,12 +1576,12 @@ bailian/fun-asr:
     region: "cn-beijing"
     providerModel: "fun-asr"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
-    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    verifiedOn: "2026-11-16"
+    source: "https://help.aliyun.com/zh/model-studio/model-pricing"
     rates:
       - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
     notes:
-      - "Output not billed. Use provider billable duration; no rounding rule is invented."
+      - "Output not billed. usage.duration is billable audio seconds across selected channels; no rounding or FX rate is invented."
 bailian/paraformer-v2:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
@@ -1590,12 +1590,12 @@ bailian/paraformer-v2:
     region: "cn-beijing"
     providerModel: "paraformer-v2"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
-    source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
+    verifiedOn: "2026-11-16"
+    source: "https://help.aliyun.com/zh/model-studio/model-pricing"
     rates:
       - {"direction": "input_audio", "unit": "second", "price": 8e-05, "conditions": {}}
     notes:
-      - "Output not billed. Use provider billable duration; no rounding rule is invented."
+      - "Output not billed. usage.duration is billable audio seconds across selected channels; no rounding or FX rate is invented."
 bailian/paraformer-8k-v2:
   inputPerMTokUsd: null
   outputPerMTokUsd: null

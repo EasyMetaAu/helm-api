@@ -1,6 +1,8 @@
 import {
   BailianImageResponseSchema,
   BailianTaskResponseSchema,
+  BailianTranscriptionDurationUsageSchema,
+  BailianTranscriptionResultSchema,
   parseBailianImageRequest,
   parseBailianTranscriptionRequest,
   parseBailianVideoRequest,
@@ -124,6 +126,14 @@ export function normalizeBailianTranscription(
   try {
     const task = normalizeBailianTask(value, "transcription", upstreamId, wireModel);
     if (task.status === "unknown") return null;
+    // Recorded-file usage.duration is billable audio seconds, not the last word's end time.
+    // https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-restful-api
+    let usage = task.usage;
+    if (["fun-asr", "paraformer-v2"].includes(wireModel) && usage !== undefined) {
+      const parsed = BailianTranscriptionDurationUsageSchema.parse(usage);
+      if (parsed.duration !== undefined)
+        usage = { ...parsed, type: "duration", seconds: parsed.duration };
+    }
     return {
       status:
         task.status === "succeeded" || task.status === "partial" ? ("done" as const) : task.status,
@@ -132,7 +142,7 @@ export function normalizeBailianTranscription(
         partial_failure: task.status === "partial",
         upstream_status: task.status,
       },
-      usage: task.usage,
+      usage,
       error: task.error,
     };
   } catch {
@@ -229,9 +239,7 @@ export async function materializeBailianTranscription(
       url.protocol = "https:";
     if (url.protocol !== "https:") throw new Error("transcription results require HTTPS");
     const transcript = await download(url.href, { signal });
-    if (!transcript || typeof transcript !== "object" || Array.isArray(transcript))
-      throw new Error("invalid transcription result JSON");
-    result.transcript = transcript;
+    result.transcript = BailianTranscriptionResultSchema.parse(transcript);
   }
   return raw;
 }
