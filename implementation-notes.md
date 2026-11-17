@@ -15,6 +15,8 @@
 - 下载的转写结果用 Zod 校验并保留所有原生字段，词级毫秒时间、标点、说话人字段不丢弃。上游 `usage.duration` 原样保留并映射到 `type: duration / seconds`；不从词时间推测用量。北京秒价重新核对为 ¥0.00022／¥0.00008。
 - 沿用现有异步任务记账边界：计请求次数并返回用量，不新增轮询扣费或美元结算；spend-capped Key 仍在发送前拒绝。无真实供应商调用；账户权限、识别质量及实际账单未验收。完整 API 与来源见 [recorded-file-asr.md](docs/recorded-file-asr.md)。
 
+- 发布 0.30.89：完成 Claude Code 2.1.326 静态协议审查，保留现有头白名单并增加新增字段隔离回归；`release:prepare` 同步 Grok 1.0.88、Claude Code 2.1.326，Codex 0.169.0 及目录不变。部署保留服务器自定义配置；本轮不发送真实录音，转写质量与实际计费由后续音频验收确认。
+
 ## 2026-11-14 · 最新 GPT／Claude 价卡（docs/07）
 
 - **来源与范围**：按 [OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[模型目录](https://developers.openai.com/api/docs/models)及 [Claude 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)核对当前通用文本模型。GPT 最新为 Astra 6、Sol 6.1、Terra 6.1、Luna 6；Claude 为 Fable 5.2、Opus／Sonnet／Haiku 5.5，另有受限的 Mythos 5.2。
