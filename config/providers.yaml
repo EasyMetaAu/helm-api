@@ -222,6 +222,10 @@ providers:
       strategy: round_robin
       reset_timezone: Asia/Shanghai
     models:
+      - alias: openai/gpt-6.2-astra
+        provider_model: gpt-6.2-astra
+      - alias: openai/gpt-6.2-sol
+        provider_model: gpt-6.2-sol
       - alias: openai/gpt-6.1-terra
         provider_model: gpt-6.1-terra
       - alias: openai/gpt-6.1-sol

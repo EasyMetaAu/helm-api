@@ -8,6 +8,12 @@
 ---
 
 
+## 2026-11-18 · GPT-6.2 Astra／Sol（docs/04、07）
+
+新增版本入口，优先使用账号发现的 Codex 模型；不可用时回退到原家族 lane。付费 OpenAI Responses 仍须显式选择，不进入默认链。官方 API 上下文均为 105 万，最大输入 92.2 万、输出 12.8 万；Codex 本地窗口按官方 0.169.1 目录取 Astra 27.2 万、Sol 50 万。Helm 配置支持 low 至 max，不把 ultra 映射为其他档位。
+
+两款模型超过 272,000 个输入 token 时整单升档。Ultrafast 当前为标准价的 3 倍，须于 2027-03-01 太平洋时间切换到 6 倍。Flex 未公布价格；Batch 价不套用于 Flex。缓存写入仍按 30 分钟估算，无法区分 12 小时用量。来源见 [OpenAI 价卡](https://developers.openai.com/api/docs/pricing)。
+
 ## 2026-11-18 · 零用量空截断恢复（docs/04）
 
 - 生产请求在首个有效输出前收到 max_output_tokens、output=[]、输入/输出/总用量全零的 incomplete。该终态此前被当作有效输出，直接阻止备用候选接手；现在交给现有失败与切换路径。
@@ -71,16 +77,9 @@
 - Luma 本批后端固定 lane、max_output_tokens=512、最多 3 次文本与 10 句/2000 码点语音；正文长度与串行由其后端执行。生产 concurrency_queue_enabled 仍关闭，Key concurrency_limit 不宣称生效，不修改其他项目的全局 eval 或并发设置。
 - `pnpm release:prepare 0.30.83` 已核实 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录保持不变。CI 沿用 docs/g4-speech-media-ci-sql-review.md 已审查且未改动的隔离合成数据库查询范围；本次无 schema 或 SQL 改动。
 
-## 2026-11-12 · G4 语音、时间戳与费用（docs/05、06、15）
-
-- 线上验收补正（0.30.82）：百炼未传 sample_rate 时按官方默认使用 22050 Hz；MiniMax 仍为 32000 Hz，显式合法值保留。百炼不支持的采样率在连接前拒绝，HTTP 与 WS 一致。v0.30.81 已通过 MiniMax／百炼 Qwen-Audio HTTP、WS 原生时戳及百炼 ASR；百炼美元费用仍缺 FX，CosyVoice 3.5 缺匹配音色，不据此宣布全部验收完成。
-- 增加显式 JSON 音频／原生时间戳结果，旧二进制调用兼容；MiniMax、百炼与豆包事件统一毫秒，缺值不补造。MiniMax 原生时长返回 durationMs。
-- OpenAI gpt-transcribe／Deepgram 文件转写使用独立 provider；豆包 TTS 2.0 使用官方 SSE，WS 在 finish 后发送缓冲文本；豆包录音 ASR 请求 UUID 提交前持久化，未知提交只查询同一 ID。
-- SQLite v58／Postgres v57 增加 media_spend_records，原子预留及幂等结算沿用现有预算表。价格需明确币种转换和计费上界；无依据时 spend-capped key 拒绝。同步 ASR 预算首批仅支持可本地验证时长的单声道 PCM16 WAV；未知结果保留预留，费用为价卡计算值，不冒充供应商发票。
-- 供应商真实收费调用与 GPU 后备仍需验收，部署版本从目标服务 `/version` 核对。WhisperX 旧同步 adapter 已完成本地协议验证，调用后自动后备及新 compute.v1 的接入阻塞与字段交接见 docs/g4-speech-media.md。
-- 发布准备：`pnpm release:prepare 0.30.81` 同步 Codex 0.167.2；Grok 1.0.77、Claude Code 2.1.322 与 Codex 模型目录内容不变。Codex 补丁仅将 Vertex AI 增量工具更新改为默认开启，不增加网关协议能力。完整 CI 既有跨表查询的三角色批准范围和独立测试库条件见 docs/g4-speech-media-ci-sql-review.md。
-
 ## 更早历史总览
+
+2026-11-12 · G4 语音、时间戳与费用：增加独立媒体预算与原生时戳；分供应商的实测结果、汇率与音色限制见历史记录。
 
 2026-11-11：上游 Providers 只读用量查询与模型／账号路由归属，详见 Git 历史。
 
