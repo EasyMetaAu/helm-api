@@ -292,6 +292,18 @@ gemini-pro:
     require_json: false
     require_vision: false
 
+gpt-6.2-astra:
+  purpose: GPT-6.2 Astra with the existing Astra lane as fallback
+  primary: openai-codex/gpt-6.2-astra
+  fallback: [gpt-astra]
+  constraints: { require_tools: false, require_json: false, require_vision: false }
+
+gpt-6.2-sol:
+  purpose: GPT-6.2 Sol with the existing Sol lane as fallback
+  primary: openai-codex/gpt-6.2-sol
+  fallback: [gpt-sol]
+  constraints: { require_tools: false, require_json: false, require_vision: false }
+
 # Subscription first, then DeepSeek Responses and the matching quality tier.
 gpt-astra:
   purpose: OpenAI GPT-6 Astra — flagship reasoning/coding

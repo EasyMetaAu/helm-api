@@ -103,6 +103,105 @@ openai-codex/codex-auto-review:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+# GPT-6.2: https://developers.openai.com/api/docs/pricing (2026-11-18).
+# Ultrafast is 3x through 2027-02-28 Pacific; change to 6x on March 1.
+# Cache writes use 30-minute retention. No published Flex rate for these models.
+openai/gpt-6.2-astra: &gpt62_astra_prices
+  inputPerMTokUsd: 8
+  outputPerMTokUsd: 40
+  cacheReadPerMTokUsd: 0.4
+  cacheWritePerMTokUsd: 10
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 16
+      outputPerMTokUsd: 60
+      cacheReadPerMTokUsd: 0.8
+      cacheWritePerMTokUsd: 20
+  inferenceGeoMultipliers: { global: 1, us: 1.1, eu: 1.1 }
+  serviceTiers:
+    batch:
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
+    fast: &gpt62_astra_fast
+      inputPerMTokUsd: 16
+      outputPerMTokUsd: 80
+      cacheReadPerMTokUsd: 0.8
+      cacheWritePerMTokUsd: 20
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 32
+          outputPerMTokUsd: 120
+          cacheReadPerMTokUsd: 1.6
+          cacheWritePerMTokUsd: 40
+    ultrafast:
+      inputPerMTokUsd: 24
+      outputPerMTokUsd: 120
+      cacheReadPerMTokUsd: 1.2
+      cacheWritePerMTokUsd: 30
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 48
+          outputPerMTokUsd: 180
+          cacheReadPerMTokUsd: 2.4
+          cacheWritePerMTokUsd: 60
+    priority: *gpt62_astra_fast
+openai-codex/gpt-6.2-astra: *gpt62_astra_prices
+openai/gpt-6.2-sol: &gpt62_sol_prices
+  inputPerMTokUsd: 2
+  outputPerMTokUsd: 10
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 2.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 15
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+  inferenceGeoMultipliers: { global: 1, us: 1.1, eu: 1.1 }
+  serviceTiers:
+    batch:
+      inputPerMTokUsd: 1
+      outputPerMTokUsd: 5
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 1.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2
+          outputPerMTokUsd: 7.5
+          cacheReadPerMTokUsd: 0.1
+          cacheWritePerMTokUsd: 2.5
+    fast: &gpt62_sol_fast
+      inputPerMTokUsd: 4
+      outputPerMTokUsd: 20
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 8
+          outputPerMTokUsd: 30
+          cacheReadPerMTokUsd: 0.4
+          cacheWritePerMTokUsd: 10
+    ultrafast:
+      inputPerMTokUsd: 6
+      outputPerMTokUsd: 30
+      cacheReadPerMTokUsd: 0.3
+      cacheWritePerMTokUsd: 7.5
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 12
+          outputPerMTokUsd: 45
+          cacheReadPerMTokUsd: 0.6
+          cacheWritePerMTokUsd: 15
+    priority: *gpt62_sol_fast
+openai-codex/gpt-6.2-sol: *gpt62_sol_prices
 # ChatGPT/Codex subscription requests use the official API-equivalent GPT-6
 # Astra rate card for telemetry and historical cost reconstruction.
 # Fast/Ultrafast and regional rates rechecked 2026-11-14 against:
