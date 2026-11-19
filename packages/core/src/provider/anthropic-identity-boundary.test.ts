@@ -393,7 +393,9 @@ describe("Anthropic adapter header semantics", () => {
       body: { ...request(), system },
       headers: {
         ...fields,
-        ...Object.fromEntries(unreviewedMemoryAndFileFields.map((name) => [name, "private-client-value"])),
+        ...Object.fromEntries(
+          unreviewedMemoryAndFileFields.map((name) => [name, "private-client-value"]),
+        ),
         "x-unrelated-token": "secret",
         "x-claude-code-wiggly-dove": "opaque-client-value",
         "x-claude-code-upload-lane": "private-upload-route",
