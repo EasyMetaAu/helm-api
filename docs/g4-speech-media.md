@@ -46,6 +46,12 @@ MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执�
 
 同步短录音统一使用 `transcription-short`。原有 Chat 音频请求使用百炼；multipart 文件请求选择链内支持文件转写的客户端。默认 OpenAI 候选使用现役官方 API 账号池 `openai` 和模型 `gpt-transcribe`。账号的模型许可和调用 key 的 lane 权限均生效。已获自选模型权限的 key 也可以直接指定模型别名。一次文件提交只使用一个账号。结果未知时，凭原 key 查询 `GET /v1/audio/operations/{operationId}` 核对用量与费用。默认价卡只有公开费率，实际费用未核实会保留为空，带美元硬上限的 key 在缺少可靠报价时会在发送前被拒绝。
 
+需要在丢失提交响应后查询费用时，调用方可在发送前保存 `asr_<小写 UUID v4>`，随 multipart 请求放入 `X-Helm-Transcription-Operation`。同一个 API 密钥下，持久账本只接纳此编号一次。再次提交已登记编号返回 HTTP 409 和 `operation_exists`，不会调用供应商。不同密钥的编号各自独立。
+
+用同一个 API 密钥调用 `GET /v1/audio/operations/{id}` 可读取 `reserved`、`outcome_unknown` 或 `settled` 费用状态。404 表示当下没有查到该密钥的记录，不能证明之前的请求没有到达。此查询返回费用和供应商用量。完整转写结果仍由成功的 POST 返回。
+
+独立的 Deepgram 候选使用 provider `type: deepgram`、`https://api.deepgram.com/v1`、静态 `api_key_env` 以及映射到 `nova-3` 的独立转写 lane。账号实际可用性需单独核验。
+
 统一结果包含 `text`、可选 `languages`、`words` / `segments`（startMs/endMs）、`requestId`、原生 `usage`。OpenAI 不接受词时间戳或 diarization，返回 422 `unsupported_parameter`；Deepgram 保留真实词时间戳与 speaker，将秒换算为毫秒，暂支持单通道、单语言／multi。缺词时间戳不补值。
 
 稳定错误：400 `invalid_request`；403 `model_not_allowed` / `lane_not_allowed`；413 `request_too_large`；422 `unsupported_parameter` / `media_pricing_unavailable`；503 `provider_unavailable`；上游明确拒绝 `upstream_rejected`，提交或结果连接中断／服务端故障 `outcome_unknown`，不自动重试。此同步 API 的供应商没有通用结果查询保证，unknown 不等于未扣费。

@@ -1,8 +1,15 @@
-import { AudioTranscriptionError } from "@helm/core";
+import {
+  AudioTranscriptionError,
+  createSpeechAccounting,
+  createSqliteDb,
+  createTranscriptionAccounting,
+  SqliteBudgetStore,
+} from "@helm/core";
 import type { MediaSpendRecord } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { registerAudioSpeechRoute } from "./audio-speech.js";
 import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
 
 describe("multipart transcription boundary", () => {
@@ -37,7 +44,7 @@ describe("multipart transcription boundary", () => {
         lane: "asr",
         customModel: false,
       }),
-      accounting: { reserve: async () => record, settle },
+      accounting: { get: async () => null, reserve: async () => record, settle },
     });
     const form = new FormData();
     form.set("model", "asr");
@@ -98,4 +105,74 @@ describe("multipart transcription boundary", () => {
       expect(release).toHaveBeenCalledTimes(1);
     }
   });
+});
+
+it("a caller operation survives racing submissions and stays private to the key", async () => {
+  const db = createSqliteDb(":memory:");
+  try {
+    const store = new SqliteBudgetStore(db);
+    const config = { defaultWindowSeconds: 86400, defaultDegradeLane: "economy" };
+    const ledger = createTranscriptionAccounting(store, config);
+    let readers = 0;
+    let readsComplete: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      readsComplete = resolve;
+    });
+    const get = async (id: string, key: string) => {
+      const record = await ledger.get(id, key);
+      readers++;
+      if (readers === 2) readsComplete();
+      if (readers <= 2) await bothRead;
+      return record;
+    };
+    const app = new Hono<AppEnv>();
+    const transcribe = vi.fn().mockResolvedValue({ text: "Hello" });
+    const shared = {
+      auth: {
+        resolve: async (key: string | null) => (key ? { keyId: key, accountId: "same" } : null),
+      },
+      concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
+    };
+    registerAudioSpeechRoute(app, {
+      ...shared,
+      accounting: createSpeechAccounting(store, config),
+      resolve: () => null,
+    });
+    registerAudioTranscriptionsRoute(app, {
+      ...shared,
+      accounting: { ...ledger, get },
+      resolve: () => ({
+        client: { transcribe },
+        alias: "gpu/whisperx",
+        model: "whisperx",
+        lane: "gpu",
+        customModel: false,
+      }),
+    });
+    const handle = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a";
+    const headers = { Authorization: "Bearer first", "X-Helm-Transcription-Operation": handle };
+    const submit = () => {
+      const body = new FormData();
+      body.set("model", "gpu");
+      body.set("file", new File(["test"], "clip.wav", { type: "audio/wav" }));
+      return app.request("/v1/audio/transcriptions", { method: "POST", body, headers });
+    };
+    const responses = await Promise.all([submit(), submit()]);
+    const success = responses.find((r) => r.status === 200);
+    const duplicate = responses.find((r) => r.status === 409);
+    expect(await success?.json()).toMatchObject({ accounting: { operationId: handle } });
+    expect(await duplicate?.json()).toMatchObject({
+      error: { code: "operation_exists", operation_id: handle },
+    });
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    const path = `/v1/audio/operations/${handle}`;
+    const receipt = await app.request(path, { headers: { Authorization: "Bearer first" } });
+    expect(receipt.status).toBe(200);
+    expect(await receipt.json()).toMatchObject({ operationId: handle, state: "outcome_unknown" });
+    const foreign = await app.request(path, { headers: { Authorization: "Bearer second" } });
+    expect(foreign.status).toBe(404);
+    expect(foreign.headers.get("cache-control")).toBe("no-store");
+  } finally {
+    db.$sqlite.close();
+  }
 });

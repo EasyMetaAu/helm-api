@@ -7,6 +7,8 @@ import {
   SpeechAccountingError,
   SpeechParameterError,
   type TranscriptionAccounting,
+  transcriptionOperationIdPattern,
+  transcriptionOperationStoreId,
 } from "@helm/core";
 import {
   AudioTranscriptionRequestSchema,
@@ -59,6 +61,7 @@ export function registerAudioTranscriptionsRoute(
     // Admission uses only auth/budget/rate/concurrency; resolution is specific to this media kind.
     const admission = deps;
     let spend: MediaSpendRecord | undefined;
+    let callerOperationId: string | undefined;
     try {
       const identity = await admitSpeechIdentity(
         admission,
@@ -66,6 +69,17 @@ export function registerAudioTranscriptionsRoute(
         c.req.header("user-agent") ?? null,
         !!deps.accounting,
       );
+      const accounting = deps.accounting;
+      callerOperationId = c.req.header("X-Helm-Transcription-Operation");
+      if (callerOperationId !== undefined) {
+        if (!transcriptionOperationIdPattern.test(callerOperationId))
+          throw new SpeechAdmissionError(
+            400,
+            "invalid_request",
+            "invalid transcription operation ID",
+          );
+        if (!accounting) throw new SpeechAccountingError("media_accounting_unavailable");
+      }
       const contentType = c.req.header("content-type") ?? "";
       if (!contentType.startsWith("multipart/form-data;"))
         throw new SpeechAdmissionError(400, "invalid_request", "multipart/form-data is required");
@@ -137,17 +151,41 @@ export function registerAudioTranscriptionsRoute(
           "transcription lane is not allowed",
         );
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
-      if (deps.accounting)
-        spend = await deps.accounting.reserve({
-          id: crypto.randomUUID(),
-          keyId: identity.keyId,
-          alias: selection.alias,
-          model: selection.model,
-          pricing: selection.pricing,
-          caps: identity.caps?.budget,
-          file,
-          request: req,
-        });
+      if (accounting) {
+        const id = callerOperationId
+          ? transcriptionOperationStoreId(callerOperationId, identity.keyId)
+          : crypto.randomUUID();
+        const rejectReplay = async () => {
+          if (!callerOperationId) return;
+          const existing = await accounting.get(id, identity.keyId);
+          if (existing) {
+            spend = existing;
+            throw new SpeechAdmissionError(
+              409,
+              "operation_exists",
+              "transcription operation already exists",
+            );
+          }
+        };
+        await rejectReplay();
+        try {
+          spend = await accounting.reserve({
+            id,
+            keyId: identity.keyId,
+            alias: selection.alias,
+            model: selection.model,
+            pricing: selection.pricing,
+            caps: identity.caps?.budget,
+            file,
+            request: req,
+          });
+        } catch (error) {
+          // The unique ledger ID prevents a second reservation and rolls back
+          // its debit, even if both requests passed the initial read.
+          await rejectReplay();
+          throw error;
+        }
+      }
       let result: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>> | undefined;
       let errorCode: string | undefined;
       try {
@@ -194,7 +232,7 @@ export function registerAudioTranscriptionsRoute(
             result,
             errorCode,
             costUsd: spend?.costUsd,
-            operationId: spend?.id,
+            operationId: spend ? (callerOperationId ?? spend.id) : undefined,
           });
         } catch {
           c.get("logger")?.log("error", "media.transcription_accounting_failed", {
@@ -208,7 +246,7 @@ export function registerAudioTranscriptionsRoute(
           ...(spend
             ? {
                 accounting: {
-                  operationId: spend.id,
+                  operationId: callerOperationId ?? spend.id,
                   state: spend.state,
                   costUsd: spend.costUsd,
                   reservedUsd: spend.reservedUsd,
@@ -258,7 +296,7 @@ export function registerAudioTranscriptionsRoute(
         {
           error: {
             code,
-            ...(spend ? { operation_id: spend.id } : {}),
+            ...(spend ? { operation_id: callerOperationId ?? spend.id } : {}),
             message: code,
             type: status < 500 ? "invalid_request_error" : "upstream_error",
           },

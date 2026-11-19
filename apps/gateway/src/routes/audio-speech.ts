@@ -11,6 +11,8 @@ import {
   type SpeechEvent,
   SpeechParameterError,
   speechMime,
+  transcriptionOperationIdPattern,
+  transcriptionOperationStoreId,
   UpstreamError,
 } from "@helm/core";
 import {
@@ -214,6 +216,7 @@ async function readBody(request: Request): Promise<unknown> {
 }
 export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRouteDeps): void {
   app.get("/v1/audio/operations/:id", async (c) => {
+    c.header("Cache-Control", "no-store");
     const identity = await deps.auth.resolve(
       /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
     );
@@ -221,11 +224,15 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
     if (!evaluateClientPolicy(identity.caps?.clientPolicy, c.req.header("user-agent")).allowed)
       return c.json({ error: { code: "client_not_allowed" } }, 403);
     if (!deps.accounting) return c.json({ error: { code: "media_accounting_unavailable" } }, 503);
-    const record = await deps.accounting.get(c.req.param("id"), identity.keyId);
+    const id = c.req.param("id");
+    const storageId = transcriptionOperationIdPattern.test(id)
+      ? transcriptionOperationStoreId(id, identity.keyId)
+      : id;
+    const record = await deps.accounting.get(storageId, identity.keyId);
     if (!record) return c.json({ error: { code: "operation_not_found" } }, 404);
     return c.json(
       {
-        operationId: record.id,
+        operationId: id,
         state: record.state,
         providerAlias: record.alias,
         reservedUsd: record.reservedUsd,
@@ -234,7 +241,6 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         usage: record.usage,
       },
       200,
-      { "cache-control": "no-store" },
     );
   });
   app.post("/v1/audio/speech", async (c) => {
