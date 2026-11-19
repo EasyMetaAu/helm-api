@@ -1824,7 +1824,11 @@ function createProviderClient(
   if (p.type === "openai-audio" || p.type === "deepgram" || p.type === "whisperx-asr") {
     return {
       ...(p.type === "whisperx-asr"
-        ? createWhisperXClient({ config: { ...base, ...cred }, fetch: providerFetch })
+        ? createWhisperXClient({
+            config: { ...base, ...cred },
+            fetch: providerFetch,
+            maxAudioSeconds: p.whisperx_max_audio_seconds,
+          })
         : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
             config: { ...base, ...cred },
             officialPool: p.type === "openai-audio" && !!p.api_key_pool,

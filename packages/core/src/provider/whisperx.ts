@@ -1,5 +1,6 @@
 import { AudioTranscriptionRequestSchema, AudioTranscriptionResultSchema } from "@helm/shared";
 import { z } from "zod";
+import { pcmWavDurationSeconds } from "../budget/transcription-accounting.js";
 import { type AudioTranscriptionClient, AudioTranscriptionError } from "./audio-transcription.js";
 import { SpeechParameterError } from "./media-speech.js";
 import { type OpenAIClientDeps, readUpstreamJsonWithinBudget } from "./openai.js";
@@ -20,7 +21,9 @@ const ResponseSchema = z.object({
   }),
 });
 /** Verified legacy standalone /transcribe protocol, usable behind an operator-owned authenticated HTTPS proxy. */
-export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscriptionClient {
+export function createWhisperXClient(
+  deps: OpenAIClientDeps & { maxAudioSeconds?: number },
+): AudioTranscriptionClient {
   return {
     async transcribe(raw, file, opts) {
       const req = AudioTranscriptionRequestSchema.parse(raw);
@@ -34,6 +37,14 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
         throw new SpeechParameterError("unsupported WhisperX request options");
       if (!file.size || file.size > 25 * 1024 * 1024)
         throw new SpeechParameterError("audio file must contain 1 to 25 MiB");
+      if (deps.maxAudioSeconds !== undefined) {
+        const duration = pcmWavDurationSeconds(new Uint8Array(await file.arrayBuffer()));
+        if (duration === null || duration > deps.maxAudioSeconds) {
+          throw new SpeechParameterError(
+            "WhisperX duration limit requires complete mono PCM16 WAV within the configured time limit",
+          );
+        }
+      }
       const body = new FormData();
       body.set("file", file, file.name);
       body.set("language", req.languages?.[0] ?? "auto");

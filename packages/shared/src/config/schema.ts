@@ -184,8 +184,16 @@ export const ProviderConfigSchema = z
     normalize_reasoning_delta_alias: z.boolean().default(false),
     response_model_policy: z.enum(["provider", "requested_alias", "both"]).default("provider"),
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
+    whisperx_max_audio_seconds: z.number().int().positive().optional(),
   })
   .superRefine((p, ctx) => {
+    if (p.whisperx_max_audio_seconds !== undefined && p.type !== "whisperx-asr") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["whisperx_max_audio_seconds"],
+        message: "audio duration limit applies only to WhisperX",
+      });
+    }
     if (["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"].includes(p.type)) {
       try {
         const url = new URL(p.base_url ?? "");

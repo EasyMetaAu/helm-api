@@ -63,3 +63,23 @@ for (const type of ["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"]
       expect(ProviderConfigSchema.safeParse({ ...base, type, base_url }).success).toBe(false);
   });
 }
+
+it("accepts a positive WhisperX-only audio duration limit", () => {
+  const config = { ...base, type: "whisperx-asr", base_url: "https://gpu.example.test" };
+  expect(
+    ProviderConfigSchema.parse({ ...config, whisperx_max_audio_seconds: 360 })
+      .whisperx_max_audio_seconds,
+  ).toBe(360);
+  for (const max of [0, -1, 1.5, "360", Infinity]) {
+    expect(
+      ProviderConfigSchema.safeParse({ ...config, whisperx_max_audio_seconds: max }).success,
+    ).toBe(false);
+  }
+  expect(
+    ProviderConfigSchema.safeParse({
+      ...config,
+      type: "deepgram",
+      whisperx_max_audio_seconds: 360,
+    }).success,
+  ).toBe(false);
+});

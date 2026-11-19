@@ -89,3 +89,50 @@ it("keeps pooled audio credentials on the official origin under a runtime URL ov
   ).rejects.toMatchObject({ code: "provider_unavailable" });
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("enforces the configured WhisperX duration before sending anything upstream", async () => {
+  vi.stubEnv("AUDIO_TEST_KEY", "fixture-key");
+  const fetch = vi
+    .fn()
+    .mockResolvedValue(
+      Response.json({ status: "success", result: { segments: [], audio_duration: 1 } }),
+    );
+  vi.stubGlobal("fetch", fetch);
+  const config = ProviderConfigSchema.parse({
+    name: "gpu",
+    type: "whisperx-asr",
+    api_key_env: "AUDIO_TEST_KEY",
+    base_url: "https://gpu.example.test",
+    whisperx_max_audio_seconds: 1,
+  });
+  const client = buildProviderClients([config], "https://example.test", 1000).get("gpu");
+  if (!client?.transcribe) throw new Error("WhisperX client is unavailable");
+  const wav = (frames: number) => {
+    const bytes = Buffer.alloc(44 + frames * 2);
+    bytes.write("RIFF", 0);
+    bytes.writeUInt32LE(bytes.length - 8, 4);
+    bytes.write("WAVEfmt ", 8);
+    bytes.writeUInt32LE(16, 16);
+    bytes.writeUInt16LE(1, 20);
+    bytes.writeUInt16LE(1, 22);
+    bytes.writeUInt32LE(8000, 24);
+    bytes.writeUInt32LE(16000, 28);
+    bytes.writeUInt16LE(2, 32);
+    bytes.writeUInt16LE(16, 34);
+    bytes.write("data", 36);
+    bytes.writeUInt32LE(frames * 2, 40);
+    return new File([bytes], "clip.wav", { type: "audio/wav" });
+  };
+  const unsupported = new File(["unverified audio"], "audio.wav", { type: "audio/wav" });
+  for (const file of [unsupported, wav(8001)]) {
+    await expect(client.transcribe({ model: "whisperx" }, file)).rejects.toThrow(
+      "configured time limit",
+    );
+  }
+  expect(fetch).not.toHaveBeenCalled();
+
+  await expect(client.transcribe({ model: "whisperx" }, wav(8000))).resolves.toMatchObject({
+    usage: { type: "duration", seconds: 1 },
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
