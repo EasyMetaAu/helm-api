@@ -10,6 +10,7 @@ export interface LimitsConfig {
 
 export interface RequestTimeoutState {
   signal: AbortSignal;
+  deadlineSignal: AbortSignal;
   timedOut: boolean;
 }
 
@@ -30,6 +31,7 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
     const controller = new AbortController();
     const state: RequestTimeoutState = {
       signal: AbortSignal.any([c.req.raw.signal, controller.signal]),
+      deadlineSignal: controller.signal,
       timedOut: false,
     };
     c.set("request_timeout", state);

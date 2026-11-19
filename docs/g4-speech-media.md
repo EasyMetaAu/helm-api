@@ -48,7 +48,9 @@ MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执�
 
 需要在丢失提交响应后查询费用时，调用方可在发送前保存 `asr_<小写 UUID v4>`，随 multipart 请求放入 `X-Helm-Transcription-Operation`。同一个 API 密钥下，持久账本只接纳此编号一次。再次提交已登记编号返回 HTTP 409 和 `operation_exists`，不会调用供应商。不同密钥的编号各自独立。
 
-用同一个 API 密钥调用 `GET /v1/audio/operations/{id}` 可读取 `reserved`、`outcome_unknown` 或 `settled` 费用状态。404 表示当下没有查到该密钥的记录，不能证明之前的请求没有到达。此查询返回费用和供应商用量。完整转写结果仍由成功的 POST 返回。
+用同一个 API 密钥调用 `GET /v1/audio/operations/{id}` 可读取 `reserved`、`outcome_unknown` 或 `settled` 费用状态。404 表示当下没有查到该密钥的记录，不能证明之前的请求没有到达。此查询返回费用和供应商用量。
+
+设置独立的 32 字节 `HELM_TRANSCRIPTION_RESULT_ENC_KEY` 后，带调用方操作号的请求会在返回成功前加密保存结果。连接断开后，已接纳的请求保留原并发限制和服务端截止时间。用同一账号、同一密钥调用 `GET /v1/audio/transcriptions/operations/{id}`，可读取 `operationId` 和原始 `result`，读取时重新检查客户端、模型和 lane 权限。结果上限为 512 KiB，完成后可读 6 小时，过期记录由现有注册表清理。未完成、未持久化或已过期均可能返回 404。此状态不能用于判定可重新推理。结果写入失败时返回 `outcome_unknown`，保留该操作号的费用记录和重发保护。
 
 独立的 Deepgram 候选使用 provider `type: deepgram`、`https://api.deepgram.com/v1`、静态 `api_key_env` 以及映射到 `nova-3` 的独立转写 lane。账号实际可用性需单独核验。
 

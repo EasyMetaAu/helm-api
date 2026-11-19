@@ -1,16 +1,20 @@
+import { randomBytes } from "node:crypto";
 import {
   AudioTranscriptionError,
   createSpeechAccounting,
   createSqliteDb,
   createTranscriptionAccounting,
   SqliteBudgetStore,
+  SqliteResponsesRegistryStore,
 } from "@helm/core";
 import type { MediaSpendRecord } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createResponsesRegistry } from "../responses-registry.js";
 import { registerAudioSpeechRoute } from "./audio-speech.js";
 import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
+import { createTranscriptionResultStore } from "./transcription-results.js";
 
 describe("multipart transcription boundary", () => {
   it.each([
@@ -125,11 +129,26 @@ it("a caller operation survives racing submissions and stays private to the key"
       if (readers <= 2) await bothRead;
       return record;
     };
+    let now = Date.now();
+    let laneAllowed = true;
+    const resultRegistry = createResponsesRegistry(
+      new SqliteResponsesRegistryStore(db),
+      undefined,
+      { now: () => now },
+    );
+    const results = createTranscriptionResultStore(resultRegistry, randomBytes(32), () => now);
     const app = new Hono<AppEnv>();
     const transcribe = vi.fn().mockResolvedValue({ text: "Hello" });
     const shared = {
       auth: {
-        resolve: async (key: string | null) => (key ? { keyId: key, accountId: "same" } : null),
+        resolve: async (key: string | null) =>
+          key
+            ? {
+                keyId: key === "other-account" ? "first" : key,
+                accountId: key === "other-account" ? "unrelated" : "same",
+                caps: { allowedLanes: laneAllowed ? ["gpu"] : [] },
+              }
+            : null,
       },
       concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
     };
@@ -141,6 +160,7 @@ it("a caller operation survives racing submissions and stays private to the key"
     registerAudioTranscriptionsRoute(app, {
       ...shared,
       accounting: { ...ledger, get },
+      results,
       resolve: () => ({
         client: { transcribe },
         alias: "gpu/whisperx",
@@ -172,6 +192,30 @@ it("a caller operation survives racing submissions and stays private to the key"
     const foreign = await app.request(path, { headers: { Authorization: "Bearer second" } });
     expect(foreign.status).toBe(404);
     expect(foreign.headers.get("cache-control")).toBe("no-store");
+    const resultPath = `/v1/audio/transcriptions/operations/${handle}`;
+    const readResult = (key: string) =>
+      app.request(resultPath, { headers: { Authorization: `Bearer ${key}` } });
+    const resultResponse = await readResult("first");
+    expect(resultResponse.status).toBe(200);
+    expect(await resultResponse.json()).toEqual({ operationId: handle, result: { text: "Hello" } });
+    expect(resultResponse.headers.get("cache-control")).toBe("no-store");
+    const stored = db.$sqlite.prepare("SELECT status FROM responses_registry").get() as {
+      status: string;
+    };
+    expect(stored.status).toMatch(/^v1:/);
+    expect(stored.status).not.toContain("Hello");
+    expect((await readResult("second")).status).toBe(404);
+    expect((await readResult("other-account")).status).toBe(404);
+    laneAllowed = false;
+    expect((await readResult("first")).status).toBe(403);
+    laneAllowed = true;
+    now += 6 * 60 * 60 * 1000;
+    expect((await readResult("first")).status).toBe(404);
+    expect((await submit()).status).toBe(409);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect((await app.request(path, { headers: { Authorization: "Bearer first" } })).status).toBe(
+      200,
+    );
   } finally {
     db.$sqlite.close();
   }

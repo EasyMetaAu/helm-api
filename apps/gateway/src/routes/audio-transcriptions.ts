@@ -12,6 +12,7 @@ import {
 } from "@helm/core";
 import {
   AudioTranscriptionRequestSchema,
+  evaluateClientPolicy,
   type MediaPricing,
   type MediaSpendRecord,
 } from "@helm/shared";
@@ -26,6 +27,10 @@ import {
   SpeechAdmissionError,
 } from "./audio-speech.js";
 import type { MessagesIdentity } from "./messages.js";
+import type {
+  TranscriptionResultSelection,
+  TranscriptionResultStore,
+} from "./transcription-results.js";
 export interface TranscriptionSelection {
   pricing?: MediaPricing;
   client: AudioTranscriptionClient;
@@ -36,7 +41,8 @@ export interface TranscriptionSelection {
 }
 export interface AudioTranscriptionsRouteDeps
   extends Omit<AudioSpeechRouteDeps, "resolve" | "record" | "accounting"> {
-  accounting?: Pick<TranscriptionAccounting, "reserve" | "settle">;
+  accounting?: Pick<TranscriptionAccounting, "reserve" | "settle" | "get">;
+  results?: TranscriptionResultStore;
   resolve(
     model: string,
     identity: MessagesIdentity,
@@ -52,10 +58,58 @@ export interface AudioTranscriptionsRouteDeps
     operationId?: string;
   }) => Promise<void>;
 }
+function requireTranscriptionAccess(
+  selection: TranscriptionResultSelection,
+  identity: MessagesIdentity,
+): void {
+  const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
+  if (
+    [selection.requestedModel, selection.alias, selection.model, selection.lane].some((value) =>
+      blocked?.matches(value),
+    ) ||
+    (selection.customModel && identity.caps?.allowCustomModel !== true)
+  )
+    throw new SpeechAdmissionError(403, "model_not_allowed", "transcription model is not allowed");
+  if (identity.caps?.allowedLanes && !identity.caps.allowedLanes.includes(selection.lane))
+    throw new SpeechAdmissionError(403, "lane_not_allowed", "transcription lane is not allowed");
+}
+
 export function registerAudioTranscriptionsRoute(
   app: Hono<AppEnv>,
   deps: AudioTranscriptionsRouteDeps,
 ): void {
+  app.get("/v1/audio/transcriptions/operations/:id", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const identity = await deps.auth.resolve(
+      /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
+    );
+    if (!identity) return c.json({ error: { code: "invalid_api_key" } }, 401);
+    if (!evaluateClientPolicy(identity.caps?.clientPolicy, c.req.header("user-agent")).allowed)
+      return c.json({ error: { code: "client_not_allowed" } }, 403);
+    const id = c.req.param("id");
+    if (!transcriptionOperationIdPattern.test(id))
+      return c.json({ error: { code: "invalid_request" } }, 400);
+    if (!deps.results) return c.json({ error: { code: "result_storage_unavailable" } }, 503);
+    if (deps.rateLimiter) {
+      const limit = await deps.rateLimiter.check({
+        keyId: identity.keyId,
+        estimatedTokens: 0,
+        now: Date.now(),
+        override: identity.caps?.rateLimit,
+      });
+      if (!limit.allowed) return c.json({ error: { code: "rate_limit_exceeded" } }, 429);
+    }
+    try {
+      const data = await deps.results.get(id, identity);
+      if (!data) return c.json({ error: { code: "result_not_found" } }, 404);
+      requireTranscriptionAccess(data.selection, identity);
+      return c.json({ operationId: id, result: data.result }, 200);
+    } catch (error) {
+      if (error instanceof SpeechAdmissionError)
+        return c.json({ error: { code: error.code } }, error.status);
+      return c.json({ error: { code: "result_storage_unavailable" } }, 503);
+    }
+  });
   app.post("/v1/audio/transcriptions", async (c) => {
     let lease: Awaited<ReturnType<typeof acquireSpeechLease>> | undefined;
     // Admission uses only auth/budget/rate/concurrency; resolution is specific to this media kind.
@@ -83,10 +137,17 @@ export function registerAudioTranscriptionsRoute(
       const contentType = c.req.header("content-type") ?? "";
       if (!contentType.startsWith("multipart/form-data;"))
         throw new SpeechAdmissionError(400, "invalid_request", "multipart/form-data is required");
+      // Recoverable requests keep running after transport loss. They still
+      // hold the original concurrency lease and honor both server deadlines.
+      const deadline = AbortSignal.timeout(120000);
+      const cancellation =
+        callerOperationId && deps.results
+          ? c.get("request_timeout")?.deadlineSignal
+          : requestSignal(c);
       lease = await acquireSpeechLease(
         admission,
         identity,
-        AbortSignal.any([requestSignal(c), AbortSignal.timeout(120000)]),
+        cancellation ? AbortSignal.any([cancellation, deadline]) : deadline,
       );
       const bytes = await consumeResponseBytesWithinBudget(
         new Response(c.req.raw.body, { headers: c.req.raw.headers }),
@@ -133,23 +194,14 @@ export function registerAudioTranscriptionsRoute(
           "provider_unavailable",
           "transcription lane is unavailable",
         );
-      if (
-        [selection.alias, selection.model, selection.lane].some((value) =>
-          blocked?.matches(value),
-        ) ||
-        (selection.customModel && identity.caps?.allowCustomModel !== true)
-      )
-        throw new SpeechAdmissionError(
-          403,
-          "model_not_allowed",
-          "transcription model is not allowed",
-        );
-      if (identity.caps?.allowedLanes && !identity.caps.allowedLanes.includes(selection.lane))
-        throw new SpeechAdmissionError(
-          403,
-          "lane_not_allowed",
-          "transcription lane is not allowed",
-        );
+      const resultSelection = {
+        requestedModel: req.model,
+        alias: selection.alias,
+        model: selection.model,
+        lane: selection.lane,
+        customModel: selection.customModel,
+      };
+      requireTranscriptionAccess(resultSelection, identity);
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
       if (accounting) {
         const id = callerOperationId
@@ -192,6 +244,15 @@ export function registerAudioTranscriptionsRoute(
         result = await selection.client.transcribe({ ...req, model: selection.model }, file, {
           signal: lease.signal,
         });
+        if (callerOperationId && deps.results) {
+          try {
+            await deps.results.save(callerOperationId, identity, resultSelection, result);
+          } catch {
+            // The provider already ran. Preserve its usage in the ledger, but
+            // never treat a failed durable write as a safe second submission.
+            throw new AudioTranscriptionError("outcome_unknown");
+          }
+        }
         // Finalize below before returning accounting metadata.
       } catch (error) {
         errorCode =

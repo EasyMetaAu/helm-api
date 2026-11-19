@@ -290,6 +290,7 @@ import {
   registerResponsesRoute,
 } from "./routes/responses.js";
 import { registerThreeDRoute } from "./routes/three-d.js";
+import { createTranscriptionResultStore } from "./routes/transcription-results.js";
 import { registerTtsRoute } from "./routes/tts.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
@@ -2415,6 +2416,10 @@ export async function buildServer(
   // (composition root, principle 7) — core only ever sees the decoded key buffer.
   const usesPresetOAuth = config.providers.some((p) => p.oauth && isOAuthPreset(p.oauth));
   const oauthEncKey = loadEncKeyFromEnv();
+  const transcriptionResultKey = loadEncKeyFromEnv(
+    process.env,
+    "HELM_TRANSCRIPTION_RESULT_ENC_KEY",
+  );
   if (usesPresetOAuth && !oauthEncKey) {
     throw new Error(
       "a subscription OAuth provider is configured but HELM_OAUTH_ENC_KEY is unset: set a 32-byte key (base64 or 64 hex chars) to encrypt stored tokens",
@@ -5537,6 +5542,9 @@ export async function buildServer(
   );
   registerAudioTranscriptionsRoute(app, {
     accounting: transcriptionAccounting,
+    results: transcriptionResultKey
+      ? createTranscriptionResultStore(responsesRegistry, transcriptionResultKey)
+      : undefined,
     auth: audioSpeech.auth,
     concurrencyGate,
     rateLimiter,
