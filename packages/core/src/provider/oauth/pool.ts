@@ -5,7 +5,7 @@ import { createSpeedHistory } from "./speed.js";
 // with its own token manager + egress proxy + executor type). On every call it
 // SELECTS one account, then delegates the whole request to that account's client.
 //
-// Selection: when the request carries a stable session/device fingerprint, bind it
+// Balanced selection: when the request carries a stable session/device fingerprint, bind it
 // to one account by deterministic rendezvous hashing inside the lowest-priority
 // eligible tier. That makes new sessions spread across equal-priority accounts,
 // while repeated turns stay on the same account unless it is parked, usage-limited,
@@ -252,6 +252,8 @@ export interface OAuthPoolDeps {
   onAccountRateLimit?: (account: string, untilMs: number) => void;
   accountRateLimitCooldownMs?: number;
   selectionStrategy?: OAuthSelectionStrategy;
+  /** Uniform draw in [0, 1) for weighted subscription selection. */
+  random?: () => number;
   /** Static credential pools rotate independent requests, retaining strict continuation pins. */
   rotateIndependentRequests?: boolean;
   /** A credential lifecycle may already have persisted a scoped failure. */
@@ -318,6 +320,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   );
   const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
   const selectionStrategy = deps.selectionStrategy ?? "balanced";
+  const weightedSelection =
+    selectionStrategy === "manual_priority" || selectionStrategy === "use_expiring";
+  const random = deps.random ?? Math.random;
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
   const upstreamCredentialFailureStatuses = new Set(
     deps.upstreamCredentialFailureStatuses ?? [401],
@@ -744,15 +749,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     nowMs: number,
   ): number | null {
     let total = 0;
+    let hasWindow = false;
     for (const w of applicableQuotaWindows(entry, model, nowMs)) {
       if (w.resetsAtMs === null || w.resetsAtMs <= nowMs) continue;
+      hasWindow = true;
       const remaining = Math.max(0, 100 - w.usedPercent);
       if (remaining <= 0) continue;
       const hoursUntilReset = Math.max((w.resetsAtMs - nowMs) / 3_600_000, 0.25);
       total += (remaining / hoursUntilReset) * expiringWindowWeight(w);
     }
     total += resetCreditValue(entry, nowMs);
-    return total > 0 ? total : null;
+    return hasWindow || total > 0 ? total : null;
   }
 
   function chooseByLowRisk(
@@ -783,30 +790,43 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       : best.entry;
   }
 
-  function chooseByExpiringQuota(
+  function chooseByWeight(
     candidates: PoolEntry[],
     model: string | null,
     nowMs: number,
-    sticky?: PoolEntry,
   ): PoolEntry | undefined {
-    let best: { entry: PoolEntry; value: number } | undefined;
-    for (const entry of preferredPriorityTier(candidates)) {
-      const value = expiringQuotaValue(entry, model, nowMs);
-      if (value === null) continue;
-      if (
-        best === undefined ||
-        value > best.value ||
-        (value === best.value && entry.lastUsedAt < best.entry.lastUsedAt)
-      ) {
-        best = { entry, value };
+    if (candidates.length < 2) return candidates[0];
+    const bestPriority = Math.min(...candidates.map((entry) => entry.member.priority));
+    const weights = candidates.map((entry) =>
+      selectionStrategy === "manual_priority"
+        ? 1 / (1 + (entry.member.priority - bestPriority))
+        : expiringQuotaValue(entry, model, nowMs),
+    );
+
+    // Unknown quota receives the mean positive score. A measured zero stays zero.
+    let positiveSum = 0;
+    let positiveCount = 0;
+    for (const weight of weights) {
+      if (weight !== null && weight > 0) {
+        positiveSum += weight;
+        positiveCount++;
       }
     }
-    if (best === undefined) return undefined;
-    const stickyValue =
-      sticky && sticky.member.priority === best.entry.member.priority
-        ? expiringQuotaValue(sticky, model, nowMs)
-        : null;
-    return sticky && stickyValue !== null && stickyValue >= best.value * 0.85 ? sticky : best.entry;
+    const unknownWeight = positiveCount ? positiveSum / positiveCount : 1;
+    const effective = weights.map((weight) => weight ?? unknownWeight);
+    const total = effective.reduce((sum, weight) => sum + weight, 0);
+    const draw = random();
+    if (total === 0) return candidates[Math.floor(draw * candidates.length)];
+
+    let ticket = draw * total;
+    let lastPositive: PoolEntry | undefined;
+    for (const [i, weight] of effective.entries()) {
+      if (weight === 0) continue;
+      lastPositive = candidates[i];
+      if (ticket < weight) return lastPositive;
+      ticket -= weight;
+    }
+    return lastPositive; // Floating-point rounding at the upper boundary.
   }
 
   function chooseByStrategy(
@@ -861,16 +881,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       return { entry, reason: stickyKey ? "hash_assign" : "lru" };
     }
 
-    if (selectionStrategy === "manual_priority") {
+    if (weightedSelection) {
       return sticky
         ? { entry: sticky, reason: "sticky_hit" }
-        : { entry: chooseByLru(candidates), reason: "lru" };
+        : { entry: chooseByWeight(candidates, model, nowMs), reason: "strategy" };
     }
 
-    const strategyEntry =
-      selectionStrategy === "low_risk"
-        ? chooseByLowRisk(candidates, model, nowMs, sticky)
-        : chooseByExpiringQuota(candidates, model, nowMs, sticky);
+    const strategyEntry = chooseByLowRisk(candidates, model, nowMs, sticky);
     if (strategyEntry) {
       return {
         entry: strategyEntry,
@@ -1073,8 +1090,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return entry;
   }
 
-  // Pick the next account: lowest priority, then oldest lastUsedAt (LRU round-
-  // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
+  // Filter by eligibility and capacity before applying affinity and the configured strategy.
   // Throws when no member is schedulable (fail-closed — the caller treats it as a
   // provider failure and advances the fallback chain).
   // `exclude` holds accounts already TRIED-and-transiently-failed this request (in-pool
@@ -1137,7 +1153,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
                           ? "credit_tier"
                           : !capacityTier.candidates.includes(entry)
                             ? "capacity"
-                            : member.priority !== priority && entry !== selected
+                            : (!weightedSelection || deps.rotateIndependentRequests) &&
+                                member.priority !== priority &&
+                                entry !== selected
                               ? "priority"
                               : null;
           const resets = applicableQuotaWindows(entry, model, nowMs).flatMap((w) =>

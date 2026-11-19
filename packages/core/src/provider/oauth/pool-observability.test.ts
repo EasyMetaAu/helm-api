@@ -102,7 +102,11 @@ describe("late-stream retry regression", () => {
         },
       },
     }));
-    const pool = createOAuthPoolClient({ members, selectionStrategy: "manual_priority" });
+    const pool = createOAuthPoolClient({
+      members,
+      selectionStrategy: "manual_priority",
+      random: () => 0,
+    });
     const request = { model: "m", messages: [], metadata: { session_id: "ordinary-session" } };
     const first: string[] = [];
     await expect(

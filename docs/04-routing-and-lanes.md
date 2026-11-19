@@ -383,16 +383,21 @@ cooldown. It then applies the provider's global account-usage strategy:
 
 - `balanced` — keep sticky sessions on the same account, otherwise hash a new
   session from provider-native affinity inputs and fall back to LRU spreading.
-- `manual_priority` — sticky hits still win; otherwise use account priority
-  first, rotating only within the best eligible priority tier.
+- `manual_priority` — keep an eligible sticky account. For a new assignment, draw across
+  eligible accounts with weight `1 / (1 + priority − lowest eligible priority)`.
+  Priorities 49, 50, and 52 therefore receive relative weights of 4, 2, and 1.
 - `low_risk` — in the best priority tier, prefer the account with the lowest fresh
   quota pressure; a sticky account in the same tier is kept when it is close
   enough to the best pressure. Stale or missing quota falls back to the normal
   sticky/hash/LRU behavior.
-- `use_expiring` — in the best priority tier, prefer usable quota windows that
-  will reset soon. A sticky account in the same tier is kept when its score is
-  close enough to the best score. Codex reset credits are counted only as
-  discounted virtual capacity for this score; selection never spends them.
+- `use_expiring` — keep an eligible sticky account. For a new assignment, draw across
+  eligible accounts in proportion to their expiring quota scores. Each applicable
+  window contributes its unused percentage divided by the hours until reset
+  (minimum 0.25 hours). Weekly windows count double. Codex reset credits add
+  discounted virtual capacity. Manual priority does not enter the score.
+  Accounts without a usable snapshot receive the mean positive score, or weight 1
+  when there are no positive scores. Observed empty windows contribute zero.
+  If all weights are zero, draw uniformly across the remaining eligible accounts.
 
 Sticky affinity is derived from the request shape the upstream client already
 sends: device ids, session/conversation metadata, `prompt_cache_key`,

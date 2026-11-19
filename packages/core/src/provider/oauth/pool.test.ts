@@ -14,7 +14,7 @@ import {
   createCodexResponsesClient,
 } from "../openai-responses.js";
 import { OAuthCredentialDisconnectedError, TokenRefreshError } from "../token-manager.js";
-import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
+import { createOAuthPoolClient, type OAuthPoolMember, type OAuthPoolSelection } from "./pool.js";
 
 beforeEach(() => {
   runtimeResponseWorkAdmission(
@@ -328,6 +328,7 @@ describe("createOAuthPoolClient — account selection", () => {
         },
       ],
       selectionStrategy: "use_expiring",
+      random: () => 0.5,
       now: () => 1_000,
     });
 
@@ -368,6 +369,7 @@ describe("createOAuthPoolClient — account selection", () => {
         },
       ],
       selectionStrategy: "use_expiring",
+      random: () => 0.5,
       now: () => 1_000,
     });
 
@@ -398,6 +400,7 @@ describe("createOAuthPoolClient — account selection", () => {
         },
       ],
       selectionStrategy: "use_expiring",
+      random: () => 0.5,
       now: () => 1_000,
     });
 
@@ -438,6 +441,7 @@ describe("createOAuthPoolClient — account selection", () => {
         },
       ],
       selectionStrategy: "use_expiring",
+      random: () => 0.5,
       now: () => 1_000,
     });
 
@@ -446,22 +450,92 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["plus-with-more-expiring-quota"]);
   });
 
-  it("manual_priority keeps new sessions on priority/LRU instead of hash assignment", async () => {
+  it.each([
+    "manual_priority",
+    "use_expiring",
+  ] as const)("%s draws across priorities in exact proportion to its own weights", async (selectionStrategy) => {
     const calls: string[] = [];
+    const now = 1_000;
+    let draw = 0;
+    const onSelect = vi.fn<(_account: string, selection: OAuthPoolSelection) => void>();
+    const accounts = [
+      ["a", 49, 90],
+      ["b", 50, 90],
+      ["c", 52, 20],
+    ] as const;
     const pool = createOAuthPoolClient({
-      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
-      selectionStrategy: "manual_priority",
+      members: accounts.map(([name, priority, usedPercent]) => ({
+        ...member(name, priority, true, calls),
+        quotaCapturedAtMs: now,
+        quotaWindows: [
+          {
+            key: "5h",
+            usedPercent,
+            resetsAtMs: now + 3_600_000,
+            windowMinutes: 300,
+          },
+        ],
+      })),
+      selectionStrategy,
+      now: () => now,
+      random: () => (draw++ + 0.5) / 70,
+      onSelect,
     });
-
-    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
-    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
-
-    // thread-a hashes to b in balanced mode, but manual_priority lets the first LRU
-    // account own the session, then sticky keeps later turns there.
-    expect(calls).toEqual(["a", "a"]);
+    for (let i = 0; i < 70; i++) await pool.chatCompletion(REQ);
+    expect(["a", "b", "c"].map((name) => calls.filter((c) => c === name).length)).toEqual(
+      selectionStrategy === "manual_priority" ? [40, 20, 10] : [7, 7, 56],
+    );
+    expect(
+      onSelect.mock.calls[0]?.[1].trace?.candidates.map((candidate) => candidate.exclusion),
+    ).toEqual([null, null, null]);
   });
 
-  it("quota strategies fall back to balanced selection when every quota snapshot is stale", async () => {
+  it.each([
+    "manual_priority",
+    "use_expiring",
+  ] as const)("%s samples a new session once and keeps the selected account on subsequent turns", async (selectionStrategy) => {
+    const calls: string[] = [];
+    const random = vi.fn(() => 0.99);
+    const pool = createOAuthPoolClient({
+      members: [member("a", 49, true, calls), member("b", 50, true, calls)],
+      selectionStrategy,
+      random,
+    });
+    const req = { ...USER_REQ, prompt_cache_key: "thread-a" };
+    await pool.chatCompletion(req);
+    await pool.chatCompletion(req);
+    expect(calls).toEqual(["b", "b"]);
+    expect(random).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses neutral weights for unknown expiry and zero for a known exhausted window", async () => {
+    const calls: string[] = [];
+    let draw = 0;
+    const now = 3_600_000;
+    const accounts = [
+      ["a", 20, now],
+      ["b", 80, now],
+      ["empty", 100, now],
+      ["stale", 90, 1],
+    ] as const;
+    const pool = createOAuthPoolClient({
+      members: accounts.map(([name, usedPercent, quotaCapturedAtMs]) => ({
+        ...member(name, 50, true, calls),
+        quotaCapturedAtMs,
+        quotaWindows: [{ key: "5h", usedPercent, resetsAtMs: now + 3_600_000, windowMinutes: 300 }],
+      })),
+      selectionStrategy: "use_expiring",
+      now: () => now,
+      random: () => (draw++ + 0.5) / 15,
+    });
+    for (let i = 0; i < 15; i++) await pool.chatCompletion(REQ);
+    // Positive scores 80 and 20 give the stale account a neutral weight of 50.
+    expect(
+      ["a", "b", "empty", "stale"].map((name) => calls.filter((c) => c === name).length),
+    ).toEqual([8, 2, 0, 5]);
+  });
+
+  it("low_risk falls back to balanced selection when every quota snapshot is stale", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
       members: [
@@ -1776,6 +1850,7 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     const pool = createOAuthPoolClient({
       members: [responseMember("a"), responseMember("b")],
       selectionStrategy: "manual_priority",
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValue(0.99),
       now: () => 1_000,
     });
 

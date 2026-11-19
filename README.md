@@ -399,16 +399,16 @@ Pool **several accounts per provider**. Each account (**Providers → Manage**) 
 
 - **Models** — a live allow-list, not a display filter: a removed model stops routing immediately; an uncurated model is refused (fail-closed).
 - **Proxy** — HTTP/HTTPS/SOCKS5 egress per account, used across the entire subscription flow, so co-hosted accounts exit from distinct IPs.
-- **Schedule** — `priority` (lower serves first) + a `schedulable` toggle. Park an account to keep it connected but out of rotation.
+- **Schedule** — `priority` (lower numbers indicate higher priority) + a `schedulable` toggle. Park an account to keep it connected but out of rotation.
 
 The account pool also has one **global usage strategy** that applies inside every subscription provider pool:
 
 - `balanced` — spread new sessions across accounts while preserving sticky sessions.
-- `manual_priority` — follow account priority first; rotate only within the same priority.
+- `manual_priority` — randomly assign new sessions and independent requests by priority weight. Lower numbers receive more traffic.
 - `low_risk` — prefer lower quota pressure in the best priority tier to reduce 429 risk.
-- `use_expiring` — prefer accounts with short or weekly quota that will reset soon, and count Codex reset credits as discounted recoverable capacity.
+- `use_expiring` — randomly assign new sessions and independent requests in proportion to expiring quota scores. The score includes discounted Codex reset credits.
 
-Quota signals are soft scoring inputs: stale or missing quota falls back to the balanced behavior, while hard cooldowns and manually parked accounts are still excluded. Codex reset credits are **never spent by selection**. They are consumed only by the explicit **Reset limit** action or by the guarded auto-reset flow, and only when a weekly Codex window is saturated enough.
+Hard cooldowns and manual pauses exclude accounts before scoring. With stale or missing quota, Avoid waste assigns a neutral weight. Low risk uses balanced selection when no candidate has fresh data. Codex reset credits are **never spent by selection**. They are consumed only by the explicit **Reset limit** action or by the guarded auto-reset flow, and only when a weekly Codex window is saturated enough.
 
 Everything hot-reloads — connect, disconnect, curation, proxy, scheduling — next request, no restart. Helm also mirrors each official client's identity headers and sends a **stable per-account device identity** (never rotated mid-stream) to reduce ban-correlation risk.
 

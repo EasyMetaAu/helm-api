@@ -160,7 +160,7 @@
       value: 'manual_priority',
       label: 'Manual priority',
       description:
-        'Lower numbers go first (49 before 50). Accounts with the same number take turns. Existing sessions keep their account while it is available.',
+        'New requests are assigned at random by priority. Lower numbers receive more traffic. Existing sessions keep their available account.',
     },
     {
       value: 'low_risk',
@@ -171,7 +171,7 @@
       value: 'use_expiring',
       label: 'Avoid waste',
       description:
-        'Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.',
+        'New requests are assigned at random by expiring quota. More unused quota and an earlier reset increase the odds. Codex reset credits also count.',
     },
     {
       value: 'fastest',
@@ -1358,7 +1358,7 @@
                   {/if}
                 </td>
 
-                <!-- Scheduling: priority (lower = served first), schedulable, fast mode,
+                <!-- Scheduling: priority (lower = preferred), schedulable, fast mode,
                    token expiry — the per-account knobs, grouped in one cell. -->
                 <td
                   data-label={$t('Scheduling')}
