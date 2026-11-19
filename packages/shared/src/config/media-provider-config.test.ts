@@ -83,3 +83,19 @@ it("accepts a positive WhisperX-only audio duration limit", () => {
     }).success,
   ).toBe(false);
 });
+
+it("accepts positive integer shared concurrency limits only for WhisperX", () => {
+  const config = { ...base, type: "whisperx-asr", base_url: "https://gpu.example.test" };
+  expect(
+    ProviderConfigSchema.parse({ ...config, whisperx_max_concurrent: 1 }).whisperx_max_concurrent,
+  ).toBe(1);
+  for (const limit of [0, -1, 1.5, "2", Infinity]) {
+    expect(
+      ProviderConfigSchema.safeParse({ ...config, whisperx_max_concurrent: limit }).success,
+    ).toBe(false);
+  }
+  expect(
+    ProviderConfigSchema.safeParse({ ...config, type: "deepgram", whisperx_max_concurrent: 1 })
+      .success,
+  ).toBe(false);
+});

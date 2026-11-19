@@ -127,6 +127,9 @@ WS 的 start.request 可增加 `max_input_characters`（1–10000 个 Unicode �
 
 `type: whisperx-asr` 使用旧独立服务的同步 `/transcribe` multipart 协议，通过 `/v1/audio/transcriptions` 调用，模型映射 `whisperx`。配置须指向部署方控制、带认证的 HTTPS 代理；原服务本身未确认具备鉴权。发送 `sync_mode=true` 与 `skip_cache=true`，绕过忽略语言选项的旧缓存读取；保留真实 segment/word 时间戳，秒转毫秒，无时戳的词不补值。服务原生 audio_duration 转 durationMs。原服务仍会写自己的缓存，未对其做任何修改。
 
+`whisperx_max_concurrent` 可设置同一 HTTPS 入口的并发上限。配置的多个 WhisperX 别名共用上限，数值不同时采用最小值。此限制独立于 API 密钥和可选并发队列。在 PostgreSQL 模式下多个网关进程共享租约，SQLite 模式下覆盖单进程。达到上限返回 429 `transcription_capacity_exhausted` 和 `Retry-After`，拒绝发生在预算预留和供应商调用前。租约存储不可用时返回 503 `transcription_capacity_unavailable`。该限制管理网关持有的请求；运营方仍须在 GPU 入口限制推理队列，以覆盖网关进程丢失或代理超时后上游继续运行的情形。
+
+
 lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未配置凭据／不可解析时选择 GPU。调用已发出后的失败不会自动转发 GPU，未知付费结果不会重试。API 明确拒绝后的自动切换、家庭 GPU 实际网络／推理验收，以及 Chatterbox 通用接入仍未交付；旧服务没有可依赖的未知任务查询语义，新 Chatterbox compute.v1 固定 dictogo，且尚缺独立可调用部署契约。
 
 ## Luma 交接状态

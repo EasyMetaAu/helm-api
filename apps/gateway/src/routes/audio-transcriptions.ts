@@ -19,11 +19,13 @@ import {
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import type { ConcurrencyGatePort } from "../middleware/concurrency.js";
 import { requestSignal } from "../middleware/limits.js";
 import {
   type AudioSpeechRouteDeps,
   acquireSpeechLease,
   admitSpeechIdentity,
+  checkSpeechBudget,
   SpeechAdmissionError,
 } from "./audio-speech.js";
 import type { MessagesIdentity } from "./messages.js";
@@ -38,11 +40,13 @@ export interface TranscriptionSelection {
   alias: string;
   lane: string;
   customModel: boolean;
+  capacity?: { key: string; limit: number };
 }
 export interface AudioTranscriptionsRouteDeps
   extends Omit<AudioSpeechRouteDeps, "resolve" | "record" | "accounting"> {
   accounting?: Pick<TranscriptionAccounting, "reserve" | "settle" | "get">;
   results?: TranscriptionResultStore;
+  capacityGate?: ConcurrencyGatePort;
   resolve(
     model: string,
     identity: MessagesIdentity,
@@ -112,6 +116,7 @@ export function registerAudioTranscriptionsRoute(
   });
   app.post("/v1/audio/transcriptions", async (c) => {
     let lease: Awaited<ReturnType<typeof acquireSpeechLease>> | undefined;
+    let capacity: { signal?: AbortSignal; release: () => void | Promise<void> } | undefined;
     // Admission uses only auth/budget/rate/concurrency; resolution is specific to this media kind.
     const admission = deps;
     let spend: MediaSpendRecord | undefined;
@@ -122,6 +127,7 @@ export function registerAudioTranscriptionsRoute(
         /^Bearer\s+(.+)$/.exec(c.req.header("Authorization") ?? "")?.[1] ?? null,
         c.req.header("user-agent") ?? null,
         !!deps.accounting,
+        { deferBudget: true },
       );
       const accounting = deps.accounting;
       callerOperationId = c.req.header("X-Helm-Transcription-Operation");
@@ -202,6 +208,41 @@ export function registerAudioTranscriptionsRoute(
         customModel: selection.customModel,
       };
       requireTranscriptionAccess(resultSelection, identity);
+      if (selection.capacity) {
+        const acquired = await deps.capacityGate?.acquire({
+          keyId: selection.capacity.key,
+          limit: selection.capacity.limit,
+          signal: lease.signal,
+        });
+        if (!acquired || (!acquired.ok && acquired.reason === "unavailable"))
+          throw new SpeechAdmissionError(
+            503,
+            "transcription_capacity_unavailable",
+            "transcription capacity is unavailable",
+          );
+        if (!acquired.ok) {
+          if (acquired.reason === "aborted")
+            throw new SpeechAdmissionError(
+              499 as ContentfulStatusCode,
+              "request_canceled",
+              "transcription request canceled",
+            );
+          c.header("Retry-After", String(acquired.retryAfterSeconds));
+          throw new SpeechAdmissionError(
+            429,
+            "transcription_capacity_exhausted",
+            "transcription capacity is exhausted",
+          );
+        }
+        capacity = acquired;
+      }
+      const providerSignal = capacity?.signal
+        ? AbortSignal.any([lease.signal, capacity.signal])
+        : lease.signal;
+
+      // Weekly budget checks reserve a request. Do that only after the
+      // provider-capacity check, so a full GPU does not spend the caller's quota.
+      await checkSpeechBudget(admission, identity);
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
       if (accounting) {
         const id = callerOperationId
@@ -242,7 +283,7 @@ export function registerAudioTranscriptionsRoute(
       let errorCode: string | undefined;
       try {
         result = await selection.client.transcribe({ ...req, model: selection.model }, file, {
-          signal: lease.signal,
+          signal: providerSignal,
         });
         if (callerOperationId && deps.results) {
           try {
@@ -365,7 +406,11 @@ export function registerAudioTranscriptionsRoute(
         status as ContentfulStatusCode,
       );
     } finally {
-      await lease?.release();
+      try {
+        await capacity?.release();
+      } finally {
+        await lease?.release();
+      }
     }
   });
 }

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   AudioTranscriptionError,
+  createKeyedSemaphore,
   createSpeechAccounting,
   createSqliteDb,
   createTranscriptionAccounting,
@@ -11,6 +12,7 @@ import type { MediaSpendRecord } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createConcurrencyGate } from "../middleware/concurrency.js";
 import { createResponsesRegistry } from "../responses-registry.js";
 import { registerAudioSpeechRoute } from "./audio-speech.js";
 import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
@@ -219,4 +221,79 @@ it("a caller operation survives racing submissions and stays private to the key"
   } finally {
     db.$sqlite.close();
   }
+});
+
+it("shares a provider cap across keys and aliases before spending their budgets", async () => {
+  const app = new Hono<AppEnv>();
+  const budget = {
+    spendUsd: null,
+    requests: 2,
+    tokens: null,
+    windowSeconds: null,
+    behavior: "reject" as const,
+    degradeLane: null,
+    weeklyAnchor: "2026-01-01",
+  };
+  const check = vi.fn().mockResolvedValue({ overBudget: false });
+  const gate = createConcurrencyGate({
+    semaphore: createKeyedSemaphore(),
+    getConfig: () => ({ enabled: true, minSize: 0, multiplier: 0, waitTimeoutMs: 1000 }),
+  });
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = () => {};
+  const dispatched = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const transcribe = vi.fn(async () => {
+    started();
+    await hold;
+    return { text: "OK" };
+  });
+  registerAudioTranscriptionsRoute(app, {
+    auth: {
+      resolve: async (key) => (key ? { keyId: key, accountId: "a", caps: { budget } } : null),
+    },
+    concurrencyGate: gate,
+    capacityGate: gate,
+    budgetGate: { check },
+    resolve: (alias) => ({
+      client: { transcribe },
+      model: "whisperx",
+      alias,
+      lane: "asr",
+      customModel: false,
+      capacity: { key: "provider-capacity:gpu", limit: 1 },
+    }),
+  });
+  const request = (key: string, alias: string) => {
+    const form = new FormData();
+    form.set("model", alias);
+    form.set("file", new File(["test"], "clip.wav"));
+    return app.request("/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    });
+  };
+  const first = request("first", "first-alias");
+  try {
+    await dispatched;
+    const blocked = await request("second", "other-alias");
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBe("1");
+    expect(await blocked.json()).toMatchObject({
+      error: { code: "transcription_capacity_exhausted" },
+    });
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await first;
+  }
+  expect((await request("second", "other-alias")).status).toBe(200);
+  expect(transcribe).toHaveBeenCalledTimes(2);
+  expect(check).toHaveBeenCalledTimes(2);
 });

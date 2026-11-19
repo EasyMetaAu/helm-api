@@ -89,6 +89,7 @@ export async function admitSpeechIdentity(
   credential: string | null,
   userAgent: string | null,
   canReserveSpend = false,
+  options: { deferBudget?: boolean } = {},
 ): Promise<MessagesIdentity> {
   const identity = await deps.auth.resolve(credential);
   if (!identity)
@@ -112,13 +113,7 @@ export async function admitSpeechIdentity(
       "media_pricing_unavailable",
       "speech pricing is unavailable for this spend-capped key",
     );
-  if (
-    budget &&
-    (!deps.budgetGate ||
-      (await deps.budgetGate.check({ keyId: identity.keyId, caps: budget, nowMs: Date.now() }))
-        .overBudget)
-  )
-    throw new SpeechAdmissionError(429, "budget_exceeded", "usage budget unavailable or exceeded");
+  if (!options.deferBudget) await checkSpeechBudget(deps, identity);
   if (deps.rateLimiter) {
     const result = await deps.rateLimiter.check({
       keyId: identity.keyId,
@@ -131,6 +126,20 @@ export async function admitSpeechIdentity(
   }
   return identity;
 }
+export async function checkSpeechBudget(
+  deps: Pick<AudioSpeechRouteDeps, "budgetGate">,
+  identity: MessagesIdentity,
+): Promise<void> {
+  const budget = identity.caps?.budget;
+  if (
+    budget &&
+    (!deps.budgetGate ||
+      (await deps.budgetGate.check({ keyId: identity.keyId, caps: budget, nowMs: Date.now() }))
+        .overBudget)
+  )
+    throw new SpeechAdmissionError(429, "budget_exceeded", "usage budget unavailable or exceeded");
+}
+
 export async function resolveSpeechSelection(
   deps: AudioSpeechRouteDeps,
   model: string,
