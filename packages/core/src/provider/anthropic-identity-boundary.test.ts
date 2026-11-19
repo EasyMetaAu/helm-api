@@ -291,7 +291,7 @@ describe("Anthropic adapter header semantics", () => {
   });
 
   it("preserves actual relay SDK metadata and reviewed optional fields without inventing absent ones", async () => {
-    const unreviewed326Fields = [
+    const unreviewedMemoryAndFileFields = [
       "x-claude-code-upload-ahead",
       "x-ccr-shared-tool-request",
       "x-forwarded-server",
@@ -305,6 +305,7 @@ describe("Anthropic adapter header semantics", () => {
       "x-memory-holds-laid-files",
       "x-memory-inject-models",
       "x-memory-inject-wait-ms",
+      "x-memory-cleared-at",
       "x-memory-laid-files-models",
       "x-memory-pick-pending-for",
       "x-memory-reads-prefetched",
@@ -345,7 +346,7 @@ describe("Anthropic adapter header semantics", () => {
       expect(headers.get("x-claude-code-wiggly-dove")).toBeNull();
       expect(headers.get("x-claude-code-upload-lane")).toBeNull();
       for (const name of [
-        ...unreviewed326Fields,
+        ...unreviewedMemoryAndFileFields,
         "x-claude-code-route-final-answer",
         "x-claude-code-sandy-plover",
         "x-cowork-enrollment",
@@ -392,7 +393,9 @@ describe("Anthropic adapter header semantics", () => {
       body: { ...request(), system },
       headers: {
         ...fields,
-        ...Object.fromEntries(unreviewed326Fields.map((name) => [name, "private-client-value"])),
+        ...Object.fromEntries(
+          unreviewedMemoryAndFileFields.map((name) => [name, "private-client-value"]),
+        ),
         "x-unrelated-token": "secret",
         "x-claude-code-wiggly-dove": "opaque-client-value",
         "x-claude-code-upload-lane": "private-upload-route",
