@@ -31,6 +31,23 @@ it("preserves existing provider shapes", () => {
   ).toBe(true);
 });
 
+it("accepts an official OpenAI transcription provider with an existing API key pool", () => {
+  const pooled = {
+    name: "openai-transcription",
+    type: "openai-audio",
+    base_url: "https://api.openai.com/v1",
+    api_key_pool: { id: "openai" },
+  };
+  expect(ProviderConfigSchema.safeParse(pooled).success).toBe(true);
+  expect(ProviderConfigSchema.safeParse({ ...pooled, type: "deepgram" }).success).toBe(false);
+  expect(
+    ProviderConfigSchema.safeParse({ ...pooled, base_url: "http://api.openai.com" }).success,
+  ).toBe(false);
+  expect(
+    ProviderConfigSchema.safeParse({ ...pooled, base_url: "https://proxy.example/v1" }).success,
+  ).toBe(false);
+});
+
 for (const type of ["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"]) {
   it(`${type} requires an explicit authenticated HTTPS configuration`, () => {
     expect(

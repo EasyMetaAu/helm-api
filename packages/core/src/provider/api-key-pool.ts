@@ -13,6 +13,7 @@ import {
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { ConfigStore } from "../store/ports.js";
+import { AudioTranscriptionError } from "./audio-transcription.js";
 import { guardPreOutputFailure, preOutputClassifierFor } from "./failover-guard.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./oauth/pool.js";
 import { type ProviderClient, UpstreamError } from "./openai.js";
@@ -482,7 +483,11 @@ export function createApiKeyPoolClient(deps: {
           };
         return async (...args: unknown[]) => {
           const attempt = await deps.accounts.acquire(id, modelOf(args));
-          if (!attempt || attempt.generation !== generation) throw new AccountUnavailable();
+          if (!attempt || attempt.generation !== generation) {
+            if (property === "transcribe")
+              throw new AudioTranscriptionError("provider_unavailable", 503);
+            throw new AccountUnavailable();
+          }
           try {
             const result: unknown = await Reflect.apply(method, target, args);
             await deps.accounts.settle(attempt, null);
@@ -540,6 +545,8 @@ export function createApiKeyPoolClient(deps: {
       const invoke = async (args: unknown[]) => {
         const active = await current();
         const fn: unknown = Reflect.get(active, property);
+        if (typeof fn !== "function" && property === "transcribe")
+          throw new AudioTranscriptionError("provider_unavailable", 503);
         if (typeof fn !== "function")
           throw new UpstreamError(
             "upstream_error",

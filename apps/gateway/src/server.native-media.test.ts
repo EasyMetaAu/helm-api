@@ -63,3 +63,29 @@ for (const type of ["openai-audio", "deepgram", "whisperx-asr", "doubao-speech"]
     await expect(testStaticProviderKey(config, "fixture-key")).rejects.toThrow("chat connectivity");
   });
 }
+
+it("keeps pooled audio credentials on the official origin under a runtime URL override", async () => {
+  const config = ProviderConfigSchema.parse({
+    name: "audio",
+    type: "openai-audio",
+    base_url: "https://api.openai.com/v1",
+    api_key_env: "TEST_AUDIO_KEY",
+    api_key_pool: { id: "openai" },
+    models: [],
+  });
+  vi.stubEnv("TEST_AUDIO_KEY", "fixture");
+  const fetch = vi.fn().mockResolvedValue(Response.json({ text: "test" }));
+  vi.stubGlobal("fetch", fetch);
+  const clients = buildProviderClients(
+    [{ ...config, base_url: "https://override.example/v1" }],
+    "",
+    1000,
+  );
+  await expect(
+    clients.get("audio")!.transcribe!(
+      { model: "gpt-transcribe" },
+      new File(["fixture"], "test.wav"),
+    ),
+  ).rejects.toMatchObject({ code: "provider_unavailable" });
+  expect(fetch).not.toHaveBeenCalled();
+});

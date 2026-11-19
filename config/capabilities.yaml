@@ -1291,3 +1291,12 @@ doubao/bigmodel:
   maxContextTokens: 0
   maxOutputTokens: null
   modalities: [audio]
+
+openai-transcription/gpt-transcribe:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: false
+  maxContextTokens: 0
+  maxOutputTokens: null
+  modalities: [audio]

@@ -19,6 +19,7 @@ import { createSpeedHistory } from "./speed.js";
 
 import { createHash } from "node:crypto";
 import {
+  type AudioTranscriptionRequest,
   appendMutationList,
   isNativePassthroughCarrier,
   type NativePassthroughInput,
@@ -27,6 +28,7 @@ import {
 } from "@helm/shared";
 import { isUserMessageRequest } from "../../queue/user-turn.js";
 import { AnthropicIdentityError, anthropicRequestAccountUuid } from "../anthropic-identity.js";
+import { AudioTranscriptionError } from "../audio-transcription.js";
 import {
   CodexCapacityRetryExhaustedError,
   isCodexCapacityRejection,
@@ -1883,6 +1885,24 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
                 return client.responsesCompact(req, callOptionsForEntry(opts, entry));
               },
             );
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.transcribe === "function")
+      ? {
+          async transcribe(req: AudioTranscriptionRequest, file: File, opts?: ProviderCallOptions) {
+            // One paid submission. An ambiguous result must not use another account.
+            let entry: PoolEntry;
+            try {
+              entry = select(null, undefined, { model: req.model });
+            } catch {
+              throw new AudioTranscriptionError("provider_unavailable", 503);
+            }
+            const client = entry.member.client;
+            if (!client.transcribe) throw new Error("oauth pool member cannot transcribe");
+            await opts?.onAccountSelected?.(entry.member.account);
+            return client.transcribe(req, file, callOptionsForEntry(opts, entry));
           },
         }
       : {}),

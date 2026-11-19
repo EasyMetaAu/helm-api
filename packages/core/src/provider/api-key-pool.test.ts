@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConfigStore } from "../store/ports.js";
 import { ApiKeyAccounts, createApiKeyPoolClient, nextMonthlyRetry } from "./api-key-pool.js";
+import { AudioTranscriptionError } from "./audio-transcription.js";
 import { type ProviderClient, UpstreamError } from "./openai.js";
 
 function memoryStore() {
@@ -53,6 +54,49 @@ async function setup(count = 2) {
 }
 
 describe("API key accounts and pool", () => {
+  it("reuses an eligible OpenAI account for each transcription without replaying an unknown result", async () => {
+    const { accounts } = await setup(3);
+    await accounts.update(accounts.entries()[0]!.id, { models: ["other-model"] });
+    const attempted: string[] = [];
+    const model = "gpt-transcribe";
+    const pool = createApiKeyPoolClient({
+      accounts,
+      models: [model],
+      protocol: "openai_chat",
+      createClient: (key) => ({
+        ...client(async () => ({})),
+        mediaOnly: true,
+        async transcribe(request) {
+          expect(request.model).toBe(model);
+          attempted.push(key);
+          if (attempted.length === 1) throw new AudioTranscriptionError("outcome_unknown");
+          return { text: "A public example.", usage: { type: "duration", seconds: 1 } };
+        },
+      }),
+    });
+    const file = new File(["sample"], "sample.wav", { type: "audio/wav" });
+    expect(pool.mediaOnly).toBe(true);
+    await expect(pool.transcribe!({ model }, file)).rejects.toMatchObject({
+      code: "outcome_unknown",
+    });
+    expect(attempted).toEqual(["sk-proj-test-1"]);
+    await expect(pool.transcribe!({ model }, file)).resolves.toMatchObject({
+      text: "A public example.",
+      usage: { seconds: 1 },
+    });
+    expect(attempted).toEqual(["sk-proj-test-1", "sk-proj-test-2"]);
+    for (const account of accounts.entries())
+      await accounts.update(account.id, { models: ["other-model"] });
+    await expect(pool.transcribe!({ model }, file)).rejects.toMatchObject({
+      code: "provider_unavailable",
+    });
+    for (const account of accounts.entries()) await accounts.remove(account.id);
+    await expect(pool.transcribe!({ model }, file)).rejects.toMatchObject({
+      code: "provider_unavailable",
+    });
+    expect(attempted).toHaveLength(2);
+  });
+
   it("claims a manual test recovery without waiting for quota retry and fences stale results", async () => {
     const { accounts } = await setup(1);
     const a = accounts.entries()[0]!;

@@ -44,7 +44,7 @@ MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执�
 
 `POST /v1/audio/transcriptions` 接收 multipart：`file`、`model`（lane 或获授权的 alias），可选重复 `languages[]` / `keywords[]`、`prompt`、`timestamps=word|sentence`、`diarize=true|false`；只支持 JSON 结果。每个文件上限 25 MiB，长材料须由调用方按实际音频边界分块。
 
-配置 provider `type: openai-audio` / `deepgram`，分别使用 `https://api.openai.com/v1` / `https://api.deepgram.com/v1` 和静态 `api_key_env`。模型映射为 `gpt-transcribe` / `nova-3`，再配置单独转写 lane。配置生效不代表该账户已开通。
+同步短录音统一使用 `transcription-short`。原有 Chat 音频请求使用百炼；multipart 文件请求选择链内支持文件转写的客户端。默认 OpenAI 候选使用现役官方 API 账号池 `openai` 和模型 `gpt-transcribe`。账号的模型许可和调用 key 的 lane 权限均生效。已获自选模型权限的 key 也可以直接指定模型别名。一次文件提交只使用一个账号。结果未知时，凭原 key 查询 `GET /v1/audio/operations/{operationId}` 核对用量与费用。默认价卡只有公开费率，实际费用未核实会保留为空，带美元硬上限的 key 在缺少可靠报价时会在发送前被拒绝。
 
 统一结果包含 `text`、可选 `languages`、`words` / `segments`（startMs/endMs）、`requestId`、原生 `usage`。OpenAI 不接受词时间戳或 diarization，返回 422 `unsupported_parameter`；Deepgram 保留真实词时间戳与 speaker，将秒换算为毫秒，暂支持单通道、单语言／multi。缺词时间戳不补值。
 

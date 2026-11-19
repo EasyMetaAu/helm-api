@@ -8,6 +8,10 @@
 ---
 
 
+## 2026-11-19 · 同步短录音的协议选择（docs/04、05、06）
+
+复用 `transcription-short`。Chat 音频沿用百炼，multipart 在同一条链中选择能接文件的客户端。OpenAI 使用官方 API 账号池，每次提交选一个有模型许可的账号。默认价卡缺少已核实的计费进位，费用未知时原样记账；带美元硬上限的调用在无法报价时拒绝发送。
+
 ## 2026-11-18 · GPT-6.2 Astra／Sol（docs/04、07）
 
 新增版本入口，优先使用账号发现的 Codex 模型；不可用时回退到原家族 lane。付费 OpenAI Responses 仍须显式选择，不进入默认链。官方 API 上下文均为 105 万，最大输入 92.2 万、输出 12.8 万；Codex 本地窗口按官方 0.169.1 目录取 Astra 27.2 万、Sol 50 万。Helm 配置支持 low 至 max，不把 ultra 映射为其他档位。
@@ -70,14 +74,9 @@
 - 官方真人素材要求认证、授权和素材入库；当前 HTTPS 子集不支持 `asset://`。本次仅恢复错误诊断，不宣称人像口播已接通；没有新增付费生成。
 - `pnpm release:prepare 0.30.84` 已核对 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录无变化。CI 沿用 `docs/g4-speech-media-ci-sql-review.md` 中已完成三角色审查的未改动隔离合成查询；本次无 SQL 或迁移改动。
 
-## 2026-11-12 · 受限 Key 显式选择已授权 lane（docs/04、06）
-
-- 明确列在 Key `allowed_lanes` 中的已知 lane 可直接选择，无需 `allow_custom_model`，避免该固定入口触发付费分类 eval；继续使用 lane 内模型禁用过滤及预算降级。
-- 保留其他 model、auto、空 model 以及无 lane 白名单的普通 Key 既有分类语义，不新增模型白名单或数据库字段。现有两把 lane 受限 Key 过去 30 天无遥测记录，不把该缺失当作不受影响的证明。
-- Luma 本批后端固定 lane、max_output_tokens=512、最多 3 次文本与 10 句/2000 码点语音；正文长度与串行由其后端执行。生产 concurrency_queue_enabled 仍关闭，Key concurrency_limit 不宣称生效，不修改其他项目的全局 eval 或并发设置。
-- `pnpm release:prepare 0.30.83` 已核实 Grok 1.0.77、Claude Code 2.1.322、Codex 0.167.2 及模型目录保持不变。CI 沿用 docs/g4-speech-media-ci-sql-review.md 已审查且未改动的隔离合成数据库查询范围；本次无 schema 或 SQL 改动。
-
 ## 更早历史总览
+
+受限 key 显式选择 lane 时按其已授予的 lane 权限校验。
 
 2026-11-12 · G4 语音、时间戳与费用：增加独立媒体预算与原生时戳；分供应商的实测结果、汇率与音色限制见历史记录。
 

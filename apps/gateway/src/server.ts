@@ -316,6 +316,7 @@ import {
   type ServingAccount,
   servedByAccount,
   servingAccountStore,
+  stampServingAccount,
   withServingAccountCapture,
 } from "./runtime/serving-account.js";
 import { createWriteQueue } from "./runtime/write-queue.js";
@@ -1827,6 +1828,7 @@ function createProviderClient(
         ? createWhisperXClient({ config: { ...base, ...cred }, fetch: providerFetch })
         : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
             config: { ...base, ...cred },
+            officialPool: p.type === "openai-audio" && !!p.api_key_pool,
             fetch: providerFetch,
           })),
       mediaOnly: true,
@@ -5520,6 +5522,9 @@ export async function buildServer(
     },
   };
   registerAudioSpeechRoute(app, audioSpeech);
+  app.use("/v1/audio/transcriptions", (_c, next) =>
+    servingAccountStore.run({ selected: null }, next),
+  );
   registerAudioTranscriptionsRoute(app, {
     accounting: transcriptionAccounting,
     auth: audioSpeech.auth,
@@ -5528,7 +5533,13 @@ export async function buildServer(
     budgetGate,
     settleBudget: settleKeyBudget,
     resolve: (model) => {
-      const selection = resolveMediaSelection(model);
+      let selection = resolveMediaSelection(model);
+      if (!Object.hasOwn(lanes, selection) && !registry.resolve(selection).ok) {
+        const matches = config.providers
+          .filter((p) => providerClients.get(p.name)?.transcribe)
+          .flatMap((p) => p.models.filter((m) => m.provider_model === model));
+        if (matches.length === 1) selection = matches[0]!.alias;
+      }
       const isLane = Object.hasOwn(lanes, selection);
       for (const alias of isLane ? expandLaneChain(selection, lanes) : [selection]) {
         const target = registry.resolve(alias);
@@ -5581,6 +5592,13 @@ export async function buildServer(
         usage: null,
         policyReason: "audio_transcription",
       });
+      const account = servingAccountStore.getStore()?.selected ?? null;
+      stampServingAccount(decision, account);
+      if (success)
+        recordOAuthUsage(account, selection.alias, {
+          tokens: result?.usage?.type === "tokens" ? result.usage.total_tokens : 0,
+          costUsd: costUsd ?? null,
+        });
       await writeQueue.enqueueTelemetry({
         decision,
         apiKeyId: identity.keyId,

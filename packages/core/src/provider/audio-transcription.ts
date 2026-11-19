@@ -14,7 +14,11 @@ import {
 
 export class AudioTranscriptionError extends Error {
   constructor(
-    readonly code: "outcome_unknown" | "upstream_rejected" | "upstream_invalid_response",
+    readonly code:
+      | "provider_unavailable"
+      | "outcome_unknown"
+      | "upstream_rejected"
+      | "upstream_invalid_response",
     readonly status = 502,
   ) {
     super(code);
@@ -72,7 +76,7 @@ const word = (value: z.infer<typeof Word>) => ({
 });
 export function createAudioTranscriptionClient(
   kind: "openai" | "deepgram",
-  deps: OpenAIClientDeps,
+  deps: OpenAIClientDeps & { officialPool?: boolean },
 ): AudioTranscriptionClient {
   return {
     async transcribe(raw, file, opts) {
@@ -86,6 +90,8 @@ export function createAudioTranscriptionClient(
       const base = deps.config.resolveBaseUrl
         ? await deps.config.resolveBaseUrl()
         : deps.config.baseUrl;
+      if (deps.officialPool && base.replace(/\/$/, "") !== "https://api.openai.com/v1")
+        throw new AudioTranscriptionError("provider_unavailable", 503);
       const auth = deps.config.getAuthHeader
         ? await deps.config.getAuthHeader()
         : `${kind === "deepgram" ? "Token" : "Bearer"} ${deps.config.apiKey ?? ""}`;

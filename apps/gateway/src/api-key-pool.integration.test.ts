@@ -90,6 +90,14 @@ describe("API key pools through the real gateway", () => {
       "capabilities.yaml":
         "openai/test-chat:\n  supportsStreaming: true\n  maxContextTokens: 8192\n  maxOutputTokens: 1000\nopenai/test-responses:\n  supportsStreaming: true\n  maxContextTokens: 8192\n  maxOutputTokens: 1000\n",
     };
+    files["providers.yaml"] += `  - name: openai-transcription
+    type: openai-audio
+    base_url: https://api.openai.com/v1
+    api_key_pool: { id: openai }
+    models: [{ alias: 'openai-transcription/gpt-transcribe', provider_model: gpt-transcribe }]
+`;
+    files["lanes.yaml"] =
+      "balanced: { primary: openai/test-chat }\ntranscription-short: { primary: openai/test-chat, fallback: [openai-transcription/gpt-transcribe] }";
     for (const [name, content] of Object.entries(files))
       writeFileSync(join(configDir, name), content);
     for (const [key, value] of Object.entries({
@@ -152,6 +160,44 @@ describe("API key pools through the real gateway", () => {
           })
         ).status,
       ).toBe(204);
+      const audioFetch = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (url, init) => {
+        expect(String(url)).toBe("https://api.openai.com/v1/audio/transcriptions");
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sk-proj-mock-first");
+        return Response.json({ text: "Fixture.", usage: { type: "duration", seconds: 2 } });
+      });
+      const audio = new FormData();
+      audio.set("model", "transcription-short");
+      audio.set("file", new File(["fixture"], "sample.wav"));
+      const auth = { authorization: "Bearer helm_pool_test" };
+      const transcript = await request("/v1/audio/transcriptions", {
+        method: "POST",
+        headers: auth,
+        body: audio,
+      });
+      const result = (await transcript.json()) as { accounting: { operationId: string } };
+      expect(transcript.status, JSON.stringify(result)).toBe(200);
+      expect(result).toMatchObject({
+        text: "Fixture.",
+        usage: { seconds: 2 },
+        accounting: { costUsd: null },
+      });
+      const receipt = await request(`/v1/audio/operations/${result.accounting.operationId}`, {
+        headers: auth,
+      });
+      expect(await receipt.json()).toMatchObject({
+        providerAlias: "openai-transcription/gpt-transcribe",
+        usage: { seconds: 2 },
+      });
+      expect(audioFetch).toHaveBeenCalledTimes(1);
+      audioFetch.mockResolvedValueOnce(Response.json({ text: "By model." }));
+      audio.set("model", "gpt-transcribe");
+      const byModel = await request("/v1/audio/transcriptions", {
+        method: "POST",
+        headers: auth,
+        body: audio,
+      });
+      expect(await byModel.json()).toMatchObject({ text: "By model." });
+      audioFetch.mockRestore();
       const chat = (content: string, stream = false) =>
         request("/v1/chat/completions", {
           method: "POST",
@@ -197,7 +243,7 @@ describe("API key pools through the real gateway", () => {
         const body = (await (
           await request("/admin/api/api-key-pools", { headers: admin })
         ).json()) as { pools: Array<{ usage: Array<{ requests: number }> }> };
-        expect(body.pools[0]?.usage.reduce((n, row) => n + row.requests, 0)).toBe(4);
+        expect(body.pools[0]?.usage.reduce((n, row) => n + row.requests, 0)).toBe(6);
       });
       const accountId = JSON.parse(text).pools[0].accounts[0].id;
       const testPath = `/admin/api/api-key-pools/openai/accounts/${accountId}/test`;
@@ -229,6 +275,7 @@ describe("API key pools through the real gateway", () => {
       });
       expect(calls.slice(before)).toEqual(["Bearer sk-proj-mock-first"]);
     } finally {
+      vi.restoreAllMocks();
       await handle?.dispose?.();
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
