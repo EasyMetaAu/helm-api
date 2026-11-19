@@ -251,9 +251,7 @@
   }
 
   // ── Schedule ──────────────────────────────────────────────────────────────────
-  // When a provider has several accounts the gateway pools them: a lower priority
-  // is served first, round-robin (LRU) within an equal priority; an unschedulable
-  // account is parked (kept connected, never routed).
+  // Account scheduling settings apply within the provider's selected strategy.
   let scheduleLoading = $state<boolean>(true);
   let scheduleSaving = $state<boolean>(false);
   let scheduleSaved = $state<boolean>(false); // transient "Saved" confirmation next to Save
@@ -656,7 +654,7 @@
       <div class="flex flex-col gap-3">
         <p class="field-help">
           {$t(
-            'When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.',
+            'The account strategy controls how traffic is shared. Parking an account keeps it connected and pauses routing to it.',
           )}
         </p>
         {#if scheduleError}

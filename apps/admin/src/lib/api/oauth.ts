@@ -44,8 +44,8 @@ export interface OAuthAccount {
   // True after a durable OAuth credential rejection. Reconnect clears it; the
   // schedulable toggle alone must not appear to recover the account.
   credentialFailed?: boolean;
-  // Effective pool scheduling (defaults applied by the gateway: 50 / true). LOWER
-  // priority = served first; schedulable false parks the account out of rotation.
+  // Effective pool scheduling (defaults applied by the gateway: 50 / true). Lower numbers
+  // indicate higher priority; schedulable false parks the account out of rotation.
   priority: number;
   schedulable: boolean;
   // Codex only: auto-consume a reset credit when the weekly window saturates
@@ -632,9 +632,7 @@ export async function setAccountProxy(
 
 // ── per-account pool scheduling (priority + schedulable) ─────────────────────
 
-// The account's effective scheduling. `priority` orders the pool (LOWER = served
-// first); `schedulable` false parks the account out of rotation (still connected).
-// Round-robin (LRU) breaks ties within an equal priority.
+// Lower numbers indicate higher priority. Parking keeps the account connected.
 export interface AccountSchedule {
   priority: number;
   schedulable: boolean;

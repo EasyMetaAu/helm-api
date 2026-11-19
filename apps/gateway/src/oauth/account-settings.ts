@@ -59,7 +59,7 @@ export interface AccountSettings {
   // catalog id / inference model mapping and per-model request defaults across
   // transient discovery failures. Revalidated on every read.
   xaiDiscoveredModels?: XaiOAuthModel[];
-  // Lower = preferred; round-robin within an equal priority. Scheduler default 50.
+  // Lower numbers indicate higher priority. Scheduler default 50.
   priority?: number;
   // When false the account is skipped by the scheduler (kept connected, parked).
   schedulable?: boolean;
