@@ -785,10 +785,15 @@ describe("loadRuntimeCatalog", () => {
       const rates = catalog.get(alias)?.pricing;
       return (
         !intentionallyUnpriced.has(alias) &&
+        !rates?.media?.rates.length &&
         (rates?.inputPerMTokUsd == null || rates.outputPerMTokUsd == null)
       );
     });
     expect(unexpectedUnpriced).toEqual([]);
+    expect(catalog.get("openai-transcription/gpt-transcribe")?.pricing.media).toMatchObject({
+      currency: "USD",
+      rates: [{ direction: "input_audio", unit: "second", price: 0.000075 }],
+    });
     expect(catalog.get("openai-codex/codex-auto-review")?.pricing).toMatchObject({
       inputPerMTokUsd: null,
       outputPerMTokUsd: null,
