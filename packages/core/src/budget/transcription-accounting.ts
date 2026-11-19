@@ -138,6 +138,7 @@ export interface TranscriptionAccounting {
     notSent: boolean,
     usage?: Extract<AudioTranscriptionResult["usage"], { type: "duration" }>,
   ): Promise<MediaSpendRecord | null>;
+  release?(record: MediaSpendRecord): Promise<void>;
   settle(
     record: MediaSpendRecord,
     pricing: MediaPricing | undefined,
@@ -177,6 +178,16 @@ export function createTranscriptionAccounting(
     async get(id, keyId) {
       if (!store.getMediaSpend) throw new SpeechAccountingError("media_accounting_unavailable");
       return store.getMediaSpend(id, keyId);
+    },
+    async release(record) {
+      if (!store.settleMediaSpend) throw new SpeechAccountingError("media_accounting_unavailable");
+      const released = await store.settleMediaSpend(
+        record.id,
+        record.keyId,
+        { costUsd: 0, usage: null, release: true },
+        Date.now(),
+      );
+      if (!released) throw new SpeechAccountingError("media_accounting_unavailable");
     },
     async reserve(input) {
       const cap = input.caps?.spendUsd ?? null;

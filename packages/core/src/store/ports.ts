@@ -142,7 +142,7 @@ export interface BudgetStore {
   settleMediaSpend?(
     id: string,
     keyId: string,
-    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    result: { costUsd: number | null; usage: Record<string, unknown> | null; release?: boolean },
     nowMs: number,
   ): Promise<import("@helm/shared").MediaSpendRecord | null>;
   getMediaSpend?(

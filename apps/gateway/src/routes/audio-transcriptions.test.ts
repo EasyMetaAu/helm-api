@@ -5,6 +5,7 @@ import {
   createSpeechAccounting,
   createSqliteDb,
   createTranscriptionAccounting,
+  createWhisperXClient,
   SqliteBudgetStore,
   SqliteResponsesRegistryStore,
 } from "@helm/core";
@@ -19,6 +20,85 @@ import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
 import { createTranscriptionResultStore } from "./transcription-results.js";
 
 describe("multipart transcription boundary", () => {
+  it("retries a worker-admission refusal with the same operation, but never retries a lost response", async () => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const ledger = createTranscriptionAccounting(new SqliteBudgetStore(db), {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      let loseReleaseReply = false;
+      const settle = vi.fn(ledger.settle);
+      const workerBusy = () =>
+        new Response(null, {
+          status: 429,
+          headers: { "X-ASR-Admission": "gpu-busy", "Retry-After": "5" },
+        });
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(workerBusy())
+        .mockResolvedValueOnce(Response.json({ status: "success", result: { segments: [] } }))
+        .mockRejectedValueOnce(new Error("lost response"))
+        .mockResolvedValueOnce(workerBusy());
+      const app = new Hono<AppEnv>();
+      registerAudioTranscriptionsRoute(app, {
+        auth: { resolve: async () => ({ keyId: "learner", accountId: "test" }) },
+        concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
+        accounting: {
+          ...ledger,
+          settle,
+          release: async (record) => {
+            await ledger.release?.(record);
+            if (loseReleaseReply) throw new Error("lost release reply");
+          },
+        },
+        resolve: () => ({
+          client: createWhisperXClient({
+            config: { baseUrl: "https://gpu.example.test/helm" },
+            fetch,
+          }),
+          alias: "gpu/whisperx",
+          model: "whisperx",
+          lane: "gpu",
+          customModel: false,
+        }),
+      });
+      const request = (id: string) => {
+        const body = new FormData();
+        body.set("model", "gpu");
+        body.set("file", new File(["fixture"], "sample.wav"));
+        return app.request("/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { Authorization: "Bearer fixture", "X-Helm-Transcription-Operation": id },
+          body,
+        });
+      };
+      const refused = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a";
+      const busy = await request(refused);
+      expect(busy.status).toBe(429);
+      expect(busy.headers.get("Retry-After")).toBe("5");
+      expect(await busy.json()).toMatchObject({
+        error: { code: "transcription_capacity_exhausted" },
+      });
+      expect((await request(refused)).status).toBe(200);
+      expect((await request(refused)).status).toBe(409);
+      const unknown = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795b";
+      expect((await request(unknown)).status).toBe(502);
+      expect((await request(unknown)).status).toBe(409);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      loseReleaseReply = true;
+      const uncertain = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795c";
+      const failure = await request(uncertain);
+      expect(failure.status).toBe(502);
+      expect(await failure.json()).toMatchObject({
+        error: { code: "outcome_unknown", operation_id: uncertain },
+      });
+      expect(settle).toHaveBeenCalledTimes(2);
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it.each([
     [new Error("connection lost"), 502, "outcome_unknown", false],
     [new AudioTranscriptionError("provider_unavailable", 503), 503, "provider_unavailable", true],

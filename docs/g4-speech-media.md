@@ -129,6 +129,8 @@ WS 的 start.request 可增加 `max_input_characters`（1–10000 个 Unicode �
 
 `whisperx_max_concurrent` 可设置同一 HTTPS 入口的并发上限。配置的多个 WhisperX 别名共用上限，数值不同时采用最小值。此限制独立于 API 密钥和可选并发队列。在 PostgreSQL 模式下多个网关进程共享租约，SQLite 模式下覆盖单进程。达到上限返回 429 `transcription_capacity_exhausted` 和 `Retry-After`，拒绝发生在预算预留和供应商调用前。租约存储不可用时返回 503 `transcription_capacity_unavailable`。该限制管理网关持有的请求；运营方仍须在 GPU 入口限制推理队列，以覆盖网关进程丢失或代理超时后上游继续运行的情形。
 
+EveryLevel 的受限 GPU 入口使用 HTTPS base URL `https://host/helm`。代理只转发 `POST /helm/transcribe`，保留 Bearer 认证、Content-Length 及工作器的拒绝响应头。工作器已有任务时返回 429、`X-ASR-Admission: gpu-busy` 和 `Retry-After`。只有该路径的明确忙碌回执才能撤销未使用的媒体费用预留并允许同一操作号再次提交。网关固定周期内已经扣除的请求次数仍按尝试计数。代理通用 429 不触发这条重试，超时、连接断开和预留释放结果未知继续保守对账。
+
 
 lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未配置凭据／不可解析时选择 GPU。调用已发出后的失败不会自动转发 GPU，未知付费结果不会重试。API 明确拒绝后的自动切换、家庭 GPU 实际网络／推理验收，以及 Chatterbox 通用接入仍未交付；旧服务没有可依赖的未知任务查询语义，新 Chatterbox compute.v1 固定 dictogo，且尚缺独立可调用部署契约。
 

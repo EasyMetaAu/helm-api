@@ -54,4 +54,14 @@ describe("standalone WhisperX adapter", () => {
     ).rejects.toMatchObject({ code: "outcome_unknown" });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["https://gpu.example.test/helm", {}],
+    ["https://gpu.example.test", { "X-ASR-Admission": "gpu-busy" }],
+  ])("keeps generic 429 distinct from the worker refusal at %s", async (baseUrl, headers) => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 429, headers }));
+    await expect(
+      createWhisperXClient({ config: { baseUrl }, fetch }).transcribe({ model: "whisperx" }, file),
+    ).rejects.toMatchObject({ code: "upstream_rejected", status: 429 });
+  });
 });

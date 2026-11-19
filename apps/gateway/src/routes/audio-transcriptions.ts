@@ -44,7 +44,7 @@ export interface TranscriptionSelection {
 }
 export interface AudioTranscriptionsRouteDeps
   extends Omit<AudioSpeechRouteDeps, "resolve" | "record" | "accounting"> {
-  accounting?: Pick<TranscriptionAccounting, "reserve" | "settle" | "get">;
+  accounting?: Pick<TranscriptionAccounting, "reserve" | "settle" | "get" | "release">;
   results?: TranscriptionResultStore;
   capacityGate?: ConcurrencyGatePort;
   resolve(
@@ -281,6 +281,7 @@ export function registerAudioTranscriptionsRoute(
       }
       let result: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>> | undefined;
       let errorCode: string | undefined;
+      let releaseUncertain = false;
       try {
         result = await selection.client.transcribe({ ...req, model: selection.model }, file, {
           signal: providerSignal,
@@ -296,6 +297,25 @@ export function registerAudioTranscriptionsRoute(
         }
         // Finalize below before returning accounting metadata.
       } catch (error) {
+        if (
+          error instanceof AudioTranscriptionError &&
+          error.code === "transcription_capacity_exhausted"
+        ) {
+          if (spend) {
+            try {
+              if (!accounting?.release) throw new Error("reservation release unavailable");
+              await accounting.release(spend);
+              spend = undefined;
+            } catch {
+              // A lost commit reply can mean a subsequent caller already
+              // reserved the same ID. Never settle that newer reservation.
+              releaseUncertain = true;
+              errorCode = "outcome_unknown";
+              throw new AudioTranscriptionError("outcome_unknown");
+            }
+          }
+          c.header("Retry-After", String(error.retryAfter ?? 5));
+        }
         errorCode =
           error instanceof SpeechParameterError
             ? "not_sent"
@@ -305,7 +325,7 @@ export function registerAudioTranscriptionsRoute(
         throw error;
       } finally {
         try {
-          if (spend && deps.accounting)
+          if (spend && deps.accounting && !releaseUncertain)
             spend =
               (await deps.accounting.settle(
                 spend,

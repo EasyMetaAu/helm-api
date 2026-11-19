@@ -73,6 +73,15 @@ export function createWhisperXClient(
       }
       if (!response.ok) {
         await response.body?.cancel();
+        if (
+          response.status === 429 &&
+          /\/helm\/?$/.test(new URL(deps.config.baseUrl).pathname) &&
+          response.headers.get("X-ASR-Admission") === "gpu-busy"
+        ) {
+          const retry = response.headers.get("Retry-After") ?? "";
+          const retryAfter = /^\d{1,2}$/.test(retry) && Number(retry) > 0 ? Number(retry) : 5;
+          throw new AudioTranscriptionError("transcription_capacity_exhausted", 429, retryAfter);
+        }
         throw new AudioTranscriptionError(
           response.status >= 500 || response.status === 408
             ? "outcome_unknown"
