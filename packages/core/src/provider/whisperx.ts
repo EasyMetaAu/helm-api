@@ -78,6 +78,7 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
       const parsed = ResponseSchema.safeParse(data);
       if (!parsed.success) throw new AudioTranscriptionError("outcome_unknown");
       const result = parsed.data.result;
+      const durationSeconds = result.audio_duration;
       const words = result.word_segments?.flatMap((word) =>
         word.start !== undefined && word.end !== undefined
           ? [{ text: word.word, startMs: word.start * 1000, endMs: word.end * 1000 }]
@@ -86,7 +87,11 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
       return AudioTranscriptionResultSchema.parse({
         text: result.segments.map((segment) => segment.text).join(""),
         languages: result.language ? [{ code: result.language }] : undefined,
-        durationMs: result.audio_duration === undefined ? undefined : result.audio_duration * 1000,
+        durationMs: durationSeconds === undefined ? undefined : durationSeconds * 1000,
+        // This is provider-reported input audio duration, not GPU time.
+        ...(durationSeconds !== undefined && durationSeconds > 0
+          ? { usage: { type: "duration", seconds: durationSeconds } }
+          : {}),
         segments: result.segments.map((segment) => ({
           text: segment.text,
           startMs: segment.start * 1000,
