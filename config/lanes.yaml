@@ -116,7 +116,8 @@ transcription-file:
 
 transcription-short:
   primary: bailian/qwen3-asr-flash
-  fallback: []
+  # Chat audio uses Bailian. Multipart uses the first file-transcription client.
+  fallback: [openai-transcription/gpt-transcribe]
 
 vision:
   purpose: Multimodal / image understanding

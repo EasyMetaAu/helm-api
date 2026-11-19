@@ -397,6 +397,16 @@ providers:
       - alias: ark/seed3d-2.0
         provider_model: doubao-seed3d-2-0-260328
 
+  - name: openai-transcription
+    type: openai-audio
+    base_url: https://api.openai.com/v1
+    api_key_pool:
+      id: openai
+      strategy: round_robin
+      reset_timezone: Asia/Shanghai
+    models:
+      - alias: openai-transcription/gpt-transcribe
+        provider_model: gpt-transcribe
   # Optional native media providers. No client is created until its env key is set.
   # Replace media_account_id with an operator-owned stable account label before use.
   # Workspace-specific Ali endpoints must use the same account origin with /api/v1.

@@ -171,7 +171,9 @@ export function registerAudioTranscriptionsRoute(
                 spend,
                 selection.pricing,
                 result,
-                errorCode === "not_sent" || errorCode === "upstream_rejected",
+                errorCode === "not_sent" ||
+                  errorCode === "provider_unavailable" ||
+                  errorCode === "upstream_rejected",
               )) ?? spend;
           if (identity.caps?.budget && deps.settleBudget)
             await deps.settleBudget(
@@ -237,7 +239,7 @@ export function registerAudioTranscriptionsRoute(
               ? 413
               : error instanceof AudioTranscriptionError &&
                   error.status >= 400 &&
-                  error.status < 500
+                  (error.status < 500 || error.code === "provider_unavailable")
                 ? error.status
                 : 502;
       const code =

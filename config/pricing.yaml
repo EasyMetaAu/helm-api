@@ -1940,3 +1940,18 @@ doubao/bigmodel:
       - "Recording ASR 2.0 resource volc.seedasr.auc: CNY 0.8/hour divided by 3600; not the older turbo resource price."
       - "Native audio_info.duration is milliseconds. No invoice rounding or reference FX is invented."
       - "Asynchronous URL ASR spend-capped admission remains unavailable until duration reservation is implemented."
+
+openai-transcription/gpt-transcribe:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  media:
+    currency: "USD"
+    region: "global"
+    providerModel: "gpt-transcribe"
+    basis: "official_list_price"
+    verifiedOn: "2026-11-19"
+    source: "https://developers.openai.com/api/docs/models/gpt-transcribe"
+    rates:
+      - {"direction": "input_audio", "unit": "second", "price": 0.000075, "conditions": {}}
+    notes:
+      - "Public rate USD 0.0045 per input minute. No verified rounding or reservation bound."

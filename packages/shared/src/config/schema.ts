@@ -192,12 +192,15 @@ export const ProviderConfigSchema = z
         if (
           (p.type === "doubao-speech" &&
             (!p.media_account_id || url.pathname.replace(/\/+$/, "") !== "")) ||
+          (p.type === "openai-audio" &&
+            p.api_key_pool &&
+            (url.origin !== "https://api.openai.com" || !/^\/v1\/?$/.test(url.pathname))) ||
           url.protocol !== "https:" ||
           url.username ||
           url.password ||
           url.search ||
           url.hash ||
-          !p.api_key_env ||
+          (!p.api_key_env && !(p.type === "openai-audio" && p.api_key_pool)) ||
           p.oauth
         )
           throw new Error("invalid audio provider");
@@ -205,8 +208,7 @@ export const ProviderConfigSchema = z
         ctx.addIssue({
           code: "custom",
           path: ["base_url"],
-          message:
-            "audio providers require explicit HTTPS endpoint and static credential reference",
+          message: "audio providers require an explicit HTTPS endpoint and supported credentials",
         });
       }
       return;
@@ -265,9 +267,11 @@ export const ProviderConfigSchema = z
     },
   )
   .refine(
-    (p) => !p.api_key_pool || ["openai", "openai-responses-generic", "anthropic"].includes(p.type),
+    (p) =>
+      !p.api_key_pool ||
+      ["openai", "openai-responses-generic", "openai-audio", "anthropic"].includes(p.type),
     {
-      message: "API key pools require an OpenAI Chat, Responses or Anthropic provider",
+      message: "API key pools require an OpenAI Chat, Responses, audio or Anthropic provider",
     },
   )
   .refine(
