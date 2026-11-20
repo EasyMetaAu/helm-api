@@ -116,7 +116,9 @@ export interface TranscriptionAccounting {
       request: AudioTranscriptionRequest;
     },
   ): Promise<MediaSpendRecord>;
-  reserveAsync(input: TranscriptionReservation & { accountId: string }): Promise<MediaSpendRecord>;
+  reserveAsync(
+    input: TranscriptionReservation & { accountId: string; channelCount?: number },
+  ): Promise<MediaSpendRecord>;
   asyncReceipt(id: string, keyId: string): Promise<MediaSpendRecord | null>;
   markAsyncOutcome(
     record: MediaSpendRecord,
@@ -189,12 +191,17 @@ export function createTranscriptionAccounting(
     async reserveAsync(input) {
       const pricing = input.pricing;
       const ceiling = pricing?.billing?.asyncJobCeiling;
+      const channelCount = input.channelCount ?? 0;
       if (
         !ceiling ||
         ceiling.accountId !== input.accountId ||
         pricing?.providerModel !== input.model ||
         !Number.isFinite(ceiling.costUsd) ||
-        ceiling.costUsd <= 0
+        ceiling.costUsd <= 0 ||
+        (ceiling.maxChannels !== undefined &&
+          (!Number.isSafeInteger(channelCount) ||
+            channelCount < 1 ||
+            channelCount > ceiling.maxChannels))
       )
         throw new SpeechAccountingError("media_pricing_unavailable");
       // Recovery and release are part of the required ledger contract.

@@ -77,6 +77,8 @@ export const MediaPricingSchema = z.strictObject({
         .strictObject({
           accountId: z.string().min(1),
           costUsd: z.number().positive(),
+          // Restricts this ceiling to requests with at most this many billed audio tracks.
+          maxChannels: z.number().int().positive().optional(),
         })
         .optional(),
       usdPerCurrencyUnit: z.number().positive().optional(),
