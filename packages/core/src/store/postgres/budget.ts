@@ -77,6 +77,8 @@ export class PgBudgetStore implements BudgetStore {
       const next = MediaSpendRecordSchema.parse({
         ...record,
         ...result,
+        usage:
+          result.costUsd === null ? (record.usage ?? result.usage) : (result.usage ?? record.usage),
         state: result.costUsd === null ? "outcome_unknown" : "settled",
       });
       if (record.capacity !== null && next.costUsd !== null) {
@@ -197,7 +199,7 @@ export class PgBudgetStore implements BudgetStore {
       const refilled = refill(current, capacity, nowMs, windowMs);
       if (requireAvailable && refilled.tokens < amount)
         return { remaining: refilled.tokens, accepted: false };
-      const tokens = refilled.tokens - amount;
+      const tokens = Math.min(capacity, refilled.tokens - amount);
 
       await tx
         .insert(usageBudgetBuckets)

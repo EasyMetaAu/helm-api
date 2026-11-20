@@ -70,9 +70,23 @@ export const MediaPricingSchema = z.strictObject({
   billing: z
     .strictObject({
       roundingSeconds: z.number().positive().optional(),
+      // Verified upper bound for budget admission only. It does not price provider usage.
+      reservationRoundingSeconds: z.number().positive().optional(),
+      // Maximum charge for a complete async transcription job on this account.
+      asyncJobCeiling: z
+        .strictObject({
+          accountId: z.string().min(1),
+          costUsd: z.number().positive(),
+        })
+        .optional(),
       usdPerCurrencyUnit: z.number().positive().optional(),
       maxCharactersPerInputCodepoint: z.number().positive().optional(),
     })
+    .refine(
+      (billing) =>
+        billing.roundingSeconds === undefined || billing.reservationRoundingSeconds === undefined,
+      { message: "Choose actual or reservation-only duration rounding" },
+    )
     .optional(),
   region: z.string().min(1),
   providerModel: z.string().min(1),

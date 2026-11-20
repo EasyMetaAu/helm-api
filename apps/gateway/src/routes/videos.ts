@@ -6,8 +6,10 @@ import {
   createBlockedModelMatcher,
   type DecisionRecord,
   type ResponsesRegistryRecord,
+  type TranscriptionAccounting,
 } from "@helm/core";
 import {
+  type MediaPricing,
   type ProviderAttempt,
   VideoExtensionRequestSchema,
   VideoGenerationRequestSchema,
@@ -47,11 +49,13 @@ import { PASSTHROUGH_CLASSIFIER } from "./image-telemetry.js";
 import { isNativeMediaTaskRecord } from "./media-task-binding.js";
 import type { MessagesIdentity } from "./messages.js";
 import {
+  callerTranscriptionOperationId,
   createNativeMediaTask,
   type NativeMediaTaskProfile,
   pollNativeMediaTask,
   readNativeMediaOperation,
   recoverNativeMediaOperation,
+  transcriptionJobOperationPattern,
 } from "./native-media-tasks.js";
 import {
   captureEnabled,
@@ -74,6 +78,7 @@ export interface VideoCreateTarget {
   providerName: string;
   providerModel: string;
   providerAccount: string | null;
+  pricing?: MediaPricing;
   client: {
     create(
       body: Record<string, unknown>,
@@ -87,6 +92,7 @@ export interface VideoCreateTarget {
 export type VideoCreateOperation = "generation" | "extension";
 
 export interface VideosRouteDeps {
+  transcriptionAccounting?: TranscriptionAccounting;
   authorizeArkAssets?: (
     identity: MessagesIdentity,
     target: VideoCreateTarget,
@@ -334,6 +340,10 @@ export function registerMediaTaskRoutes(
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
     const denied = clientPolicyRejection(c, identity);
     if (denied) return denied;
+    const callerOperation =
+      kind === "transcription" ? c.req.header("X-Helm-Transcription-Operation") : undefined;
+    if (callerOperation !== undefined && !transcriptionJobOperationPattern.test(callerOperation))
+      return errorJson(c, 400, "invalid transcription operation ID", "invalid_request");
     const captureRecord =
       deps.record === undefined
         ? undefined
@@ -503,14 +513,24 @@ export function registerMediaTaskRoutes(
         "task token usage cannot be metered for this weekly-capped key",
         "media_usage_unavailable",
       );
-    if ((identity.caps?.budget?.spendUsd ?? 0) > 0) {
+    if (
+      (identity.caps?.budget?.spendUsd ?? 0) > 0 &&
+      (kind !== "transcription" || !target.pricing?.billing?.asyncJobCeiling)
+    ) {
       return errorJson(
         c,
         422,
-        "video pricing is unavailable for this spend-capped key",
+        "media pricing is unavailable for this spend-capped key",
         "media_pricing_unavailable",
       );
     }
+    if (kind === "transcription" && (identity.caps?.budget?.spendUsd ?? 0) > 0 && !callerOperation)
+      return errorJson(
+        c,
+        400,
+        "a recoverable transcription operation ID is required",
+        "invalid_request",
+      );
     if (deps.budgetGate !== undefined && identity.caps?.budget !== undefined) {
       const budget = await deps.budgetGate.check({
         keyId: identity.keyId,
@@ -581,7 +601,16 @@ export function registerMediaTaskRoutes(
       }
     };
     if (isNative && kind !== "three-d") {
-      return createNativeMediaTask(c, deps, target, body, identity, kind, recordStart);
+      return createNativeMediaTask(
+        c,
+        deps,
+        target,
+        body,
+        identity,
+        kind,
+        recordStart,
+        callerOperation,
+      );
     }
     const reservation = registryRecord(
       `${kind}-create:${helmRequestId}`,
@@ -707,6 +736,7 @@ export function registerMediaTaskRoutes(
 
   app.use(`${root}/operations/:operationId`, concurrencyReleaseGuard());
   app.get(`${root}/operations/:operationId`, async (c): Promise<Response> => {
+    c.header("Cache-Control", "no-store");
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (!identity) return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
     const denied = clientPolicyRejection(c, identity);
@@ -714,9 +744,13 @@ export function registerMediaTaskRoutes(
     const admission = await admit(c, deps, identity);
     if (admission) return admission;
     const id = c.req.param("operationId");
+    const storageId =
+      kind === "transcription" && transcriptionJobOperationPattern.test(id)
+        ? callerTranscriptionOperationId(id, identity)
+        : id;
     let record: ResponsesRegistryRecord | null;
     try {
-      record = await deps.registry.get(`${kind}-create:${id}`, identity);
+      record = await deps.registry.get(`${kind}-create:${storageId}`, identity);
     } catch {
       return errorJson(c, 503, "operation registry unavailable", "registry_unavailable");
     }
@@ -732,10 +766,24 @@ export function registerMediaTaskRoutes(
     if (!operation) return errorJson(c, 404, "operation not found", "request_not_found");
     try {
       const requestId = await recoverNativeMediaOperation(record, deps);
+      const spend =
+        kind === "transcription"
+          ? await deps.transcriptionAccounting?.asyncReceipt(record.responseId, identity.keyId)
+          : null;
       return c.json({
         operation_id: id,
         ...operation,
         ...(requestId ? { request_id: requestId } : {}),
+        ...(spend
+          ? {
+              accounting: {
+                state: spend.state,
+                costUsd: spend.costUsd,
+                reservedUsd: spend.reservedUsd,
+                ...(spend.usage ? { usage: spend.usage } : {}),
+              },
+            }
+          : {}),
       });
     } catch {
       return errorJson(c, 503, "operation recovery unavailable", "registry_unavailable");

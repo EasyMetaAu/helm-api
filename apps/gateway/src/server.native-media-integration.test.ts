@@ -76,6 +76,24 @@ it("integrates native images/video/ASR/speech with ownership and restart boundar
         join(dir, "config/lanes.yaml"),
         `\n${lane}:\n  primary: ${alias}\n  fallback: []\n`,
       );
+    await appendFile(
+      join(dir, "config/pricing.yaml"),
+      "\nali/file: " +
+        JSON.stringify({
+          media: {
+            currency: "USD",
+            region: "fixture",
+            providerModel: "qwen3-asr-flash-filetrans",
+            basis: "official_list_price",
+            verifiedOn: "2026-11-19",
+            source: "https://example.test/price",
+            rates: [{ direction: "input_audio", unit: "second", price: 0.001, conditions: {} }],
+            notes: [],
+            billing: { asyncJobCeiling: { accountId: "account-a", costUsd: 0.6 } },
+          },
+        }) +
+        "\n",
+    );
     for (const [alias, flag] of [
       ["ali/image", "outputImage"],
       ["ali/video", "outputVideo"],
@@ -153,10 +171,13 @@ it("integrates native images/video/ASR/speech with ownership and restart boundar
         logger: { log: () => {} },
       });
     server = await start();
-    const post = (path: string, body: unknown, key = "owner") =>
+    const post = (path: string, body: unknown, key = "owner", operation?: string) =>
       server?.app.request(path, {
         method: "POST",
-        headers: headers(key),
+        headers: {
+          ...headers(key),
+          ...(operation ? { "X-Helm-Transcription-Operation": operation } : {}),
+        },
         body: JSON.stringify(body),
       }) as Promise<Response>;
     const video = { model: "test-video", input: { prompt: "bird" } };
@@ -209,19 +230,42 @@ it("integrates native images/video/ASR/speech with ownership and restart boundar
         },
         "/v1/videos",
       ],
-      [
-        "/v1/audio/transcription-jobs",
-        { model: "test-file", input: { file_url: "https://cdn.example/audio.mp3" } },
-        "/v1/audio/transcription-jobs",
-      ],
     ] as const) {
       const r = await post(path, body);
       const raw = await r.json();
       expect(r.status, JSON.stringify(raw)).toBe(200);
       ids.push(`${poll}/${Created.parse(raw).request_id}`);
     }
+    const asrPath = "/v1/audio/transcription-jobs";
+    const asrBody = { model: "test-file", input: { file_url: "https://cdn.example/audio.mp3" } };
+    const operation = "asr_86fad6c3-43de-44c9-925d-ce79d88c6628";
+    const discarded = await post(asrPath, asrBody, "spend", operation);
+    expect(discarded.status).toBe(200);
+    await discarded.body?.cancel();
     await server.dispose?.();
     server = await start();
+    const operationPath = `${asrPath}/operations/${operation}`;
+    const beforeRecovery = calls.length;
+    expect((await server.app.request(operationPath, { headers: headers("other") })).status).toBe(
+      404,
+    );
+    const recovered = await server.app.request(operationPath, { headers: headers("spend") });
+    expect(recovered.status).toBe(200);
+    const receipt = await recovered.json();
+    expect(receipt).toMatchObject({
+      operation_id: operation,
+      state: "accepted",
+      accounting: { state: "reserved", reservedUsd: 0.6, costUsd: null },
+    });
+    expect((await post(asrPath, asrBody, "spend", operation)).status).toBe(503);
+    const secondOperation = "asr_86fad6c3-43de-44c9-925d-ce79d88c6629";
+    expect((await post(asrPath, asrBody, "spend", secondOperation)).status).toBe(429);
+    expect(calls).toHaveLength(beforeRecovery);
+    const asrPoll = await server.app.request(`${asrPath}/${Created.parse(receipt).request_id}`, {
+      headers: headers("spend"),
+    });
+    expect(asrPoll.status).toBe(200);
+    expect(await asrPoll.json()).toMatchObject({ status: "in_progress" });
     for (const path of ids) {
       const before = calls.length;
       expect((await server.app.request(path, { headers: headers("other") })).status).toBe(404);
