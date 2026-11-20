@@ -41,7 +41,7 @@ describe("checked-in config samples", () => {
         currency: "CNY",
         region: "cn-beijing",
         providerModel: model,
-        verifiedOn: "2026-11-16",
+        verifiedOn: model === "fun-asr" ? "2026-11-20" : "2026-11-16",
         rates: [{ direction: "input_audio", unit: "second", price }],
       });
     }
