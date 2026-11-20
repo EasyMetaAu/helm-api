@@ -6,6 +6,7 @@ import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload
 import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
 import { createPayloadResponseWriter } from "../payload-response.js";
 import type {
+  ApplyAsyncMediaCostInput,
   EncodedRequestPayloadPartRecord,
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -36,7 +37,11 @@ import type {
 import { PERSISTED_SESSION_MAX_REVISIONS } from "../ports.js";
 import { selectStreamingSessionRevisions } from "../session-page.js";
 import { likeContains } from "../sql-like.js";
-import { denormalizedDecisionCost } from "../telemetry-cost.js";
+import {
+  denormalizedDecisionCost,
+  validAsyncMediaCostWindow,
+  withAsyncMediaCost,
+} from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
 import {
   payloadBlobs,
@@ -261,6 +266,36 @@ export class PgTelemetryStore implements TelemetryStore {
 
   // Batch insert (perf): ONE multi-row statement. Postgres is async/non-blocking,
   // so the win is one round-trip + one txn instead of N. Empty array is a no-op.
+  async applyAsyncMediaCost(input: ApplyAsyncMediaCostInput): Promise<boolean> {
+    if (!validAsyncMediaCostWindow(input)) return false;
+    const owned = and(
+      eq(telemetry.requestId, input.requestId),
+      eq(telemetry.apiKeyId, input.keyId),
+      gte(telemetry.createdAt, input.taskCreatedAt),
+      lte(telemetry.createdAt, input.observedAt),
+    );
+    const [row] = await this.db
+      .select({ decisionJson: telemetry.decisionJson })
+      .from(telemetry)
+      .where(owned)
+      .limit(1);
+    if (!row) return false;
+    const updated = withAsyncMediaCost(DecisionRecordSchema.parse(row.decisionJson), input);
+    if (!updated) return false;
+    const result = await this.db
+      .update(telemetry)
+      .set({
+        decisionJson: updated,
+        costUsd: denormalizedDecisionCost(updated),
+        ...(input.completionTokens === undefined
+          ? {}
+          : { completionTokens: input.completionTokens }),
+      })
+      .where(and(owned, eq(telemetry.decisionJson, row.decisionJson)))
+      .returning();
+    return result.length === 1;
+  }
+
   async insertMany(inputs: InsertTelemetryInput[]): Promise<void> {
     if (inputs.length === 0) return;
     await this.db.insert(telemetry).values(inputs.map((input) => this.toRow(input)));

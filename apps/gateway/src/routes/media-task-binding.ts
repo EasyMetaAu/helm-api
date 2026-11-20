@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { ResponsesRegistryRecord } from "@helm/core";
 import { z } from "zod";
+import { AsyncMediaBillingSchema } from "./async-media-cost.js";
 
 export const MEDIA_TASK_RETENTION_MS = 7 * 86400000;
 const PREFIX = "helm-media-task:v1:";
@@ -21,6 +22,7 @@ export const MediaTaskBindingSchema = z.strictObject({
   state: z.enum(["queued", "in_progress", "done", "failed", "cancelled", "expired"]),
   queryExpiresAt: z.number().int().nonnegative(),
   artifactExpiresAt: z.number().int().nonnegative().nullable(),
+  mediaBilling: AsyncMediaBillingSchema.optional(),
 });
 export type MediaTaskBinding = z.infer<typeof MediaTaskBindingSchema>;
 

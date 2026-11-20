@@ -1,4 +1,4 @@
-import type { CircuitBreaker, ProviderClient } from "@helm/core";
+import type { CircuitBreaker, NativeImageCost, ProviderClient } from "@helm/core";
 import { ArkMediaError } from "@helm/core";
 import { ERROR_CLASS_HTTP_STATUS, type ProviderAttempt } from "@helm/shared";
 import {
@@ -43,7 +43,8 @@ export interface ImageAttemptResult {
   // the admin detail view — so request_payloads stays lean AND the image is viewable.
   clientBody: Record<string, unknown>;
   usage: Record<string, unknown> | null; // for budget-settle tokens + decision usage
-  cost: number | null; // costOf(servedAlias, body)
+  cost: number | null;
+  mediaCost?: NativeImageCost;
   upstreamRequestJson: string | null; // exact bytes forwarded upstream (capture)
   servingAccount?: { providerId: string; account: string } | null;
 }

@@ -121,7 +121,7 @@ Verified Beijing list prices on 2026-11-16: `fun-asr` **CNY 0.00022 per input au
 
 - The current official REST references specify one URL per task for both models. Helm rejects multi-URL requests; it does not create a batch of upstream tasks behind one ID.
 - The official inline vocabulary shape requires a weight for every word. No optional-weight/default-weight form is documented for Fun-ASR. Limits and model ownership of an existing `vocabulary_id` are checked by DashScope; Helm does not fetch or manage vocabulary lists. The docs do not establish how Fun-ASR combines inline and precompiled lists, so use one form at a time.
-- This uses the existing async job accounting boundary: requests are counted, duration usage is returned, and price cards are available. It does not add durable per-second charges or USD spend settlement on polling. CNY-to-USD conversion is unconfigured; spend-capped keys remain rejected before dispatch. Repeated GETs do not create new charges in Helm.
+- For `fun-asr`, the terminal poll can price the original creation from provider-reported billable seconds. USD reporting uses the exchange rate configured on the media price card. Repeated polls refer to the same creation. Spend-capped keys still require a pre-dispatch reservation and cannot use this asynchronous route.
 - Verification uses synthetic fixtures only. Account entitlement, actual recognition quality, presigned URL reachability and provider billing have not been tested with a real call.
 
 ## Official references

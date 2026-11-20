@@ -95,7 +95,6 @@ import {
   makeGeminiError,
   makeProxyFetch,
   makeTlsImpersonationFetch,
-  materializeBailianTranscription,
   maybeEnqueueDecayJobs,
   maybeEnqueueIdleObserverJobs,
   type OAuthPoolClient,
@@ -4373,7 +4372,7 @@ export async function buildServer(
         },
         record: async (target, keyId, traceId, status, spend) => {
           const decision = buildImageDecision({
-            requestId: crypto.randomUUID(),
+            requestId: spend?.id ?? crypto.randomUUID(),
             traceId,
             keyPrefix: null,
             requested: target.lane,
@@ -5226,6 +5225,13 @@ export async function buildServer(
       if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) return null;
       return resolveCostUsd(catalog.get(alias)?.pricing, body);
     },
+    mediaPricing: (alias) => {
+      const target = registry.resolve(alias);
+      if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) {
+        return catalog.get(alias)?.pricing.media;
+      }
+      return undefined;
+    },
     isPriced: (alias) => {
       const target = registry.resolve(alias);
       if (target.ok && providerClients.get(target.value.providerName)?.mediaOnly) return false;
@@ -5358,6 +5364,7 @@ export async function buildServer(
     memoryAdmission: requestBodyMemoryAdmission,
     budgetGate,
     settleBudget: settleKeyBudget,
+    mediaPricing: (alias) => catalog.get(alias)?.pricing.media,
     record: {
       telemetry,
       writes: writeQueue,
@@ -5436,10 +5443,7 @@ export async function buildServer(
           const retrieve = client.transcriptionRetrieve;
           return {
             nativeTask,
-            retrieve: async (id, signal) =>
-              p?.type === "bailian-media"
-                ? materializeBailianTranscription(await retrieve(id, { signal }), signal)
-                : retrieve(id, { signal }),
+            retrieve: (id, signal) => retrieve(id, { signal }),
           };
         },
       },

@@ -5,6 +5,9 @@ import {
   type CircuitBreaker,
   createBlockedModelMatcher,
   type ImageEditInput,
+  type NativeImageCost,
+  priceArkImage,
+  priceQwenImage,
 } from "@helm/core";
 import {
   ArkImageGenerationRequestSchema,
@@ -15,6 +18,7 @@ import {
   GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
+  type MediaPricing,
 } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -69,6 +73,7 @@ export interface ImagesRouteDeps {
   breaker: CircuitBreaker;
   /** Price the served upstream body at the SERVED alias's catalog pricing (resolveCostUsd). */
   costOf(alias: string, body: unknown): number | null;
+  mediaPricing?(alias: string): MediaPricing | undefined;
   isPriced?(alias: string): boolean;
   captureServingAccount?<T>(call: () => Promise<T>): Promise<{
     result: T;
@@ -496,8 +501,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       );
     }
     const spendCapped = (identity.caps?.budget?.spendUsd ?? 0) > 0;
-    // Ark pricing is deliberately unavailable until media-specific accounting is
-    // proven. Never let a missing/stale resolver pricing hook admit a capped key.
+    // Ark list-price accounting happens after generation. Spend-capped requests
+    // still require a reservation before a paid create.
     if (spendCapped && permittedTargets.some((target) => isArkImageModel(target.providerModel))) {
       return errorJson(
         c,
@@ -628,7 +633,9 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         ? await deps.captureServingAccount(invoke)
         : { result: await invoke(), servingAccount: null };
       const upstream = captured.result;
-      if (isArkImageModel(target.providerModel)) {
+      let mediaCost: NativeImageCost | null = null;
+      const ark = isArkImageModel(target.providerModel);
+      if (ark) {
         const validated = ArkImageGenerationResponseSchema.safeParse(upstream);
         if (!validated.success || validated.data.model !== target.providerModel) {
           throw new Error("Ark image create returned an invalid or mismatched result");
@@ -644,6 +651,15 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         ) {
           throw new Error("Ark image result does not match the requested layer or delivery mode");
         }
+        if (generationBody !== null) {
+          mediaCost = priceArkImage(
+            deps.mediaPricing?.(target.alias),
+            generationBody,
+            validated.data,
+          );
+        }
+      } else if (generationBody !== null && target.providerModel === "qwen-image-3.0-pro") {
+        mediaCost = priceQwenImage(deps.mediaPricing?.(target.alias), generationBody, upstream);
       }
       if (!hasImageResult(upstream)) {
         throw new Error("image create returned no image result");
@@ -652,7 +668,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       return {
         clientBody: upstream,
         usage,
-        cost: isArkImageModel(target.providerModel) ? null : deps.costOf(target.alias, upstream),
+        cost: mediaCost ? mediaCost.cost_usd : ark ? null : deps.costOf(target.alias, upstream),
+        mediaCost: mediaCost ?? undefined,
         upstreamRequestJson,
         servingAccount: captured.servingAccount ?? attempted.servingAccount,
       };
@@ -747,7 +764,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         {
           requestId,
           apiKeyId: identity.keyId,
-          decision,
+          decision: { ...decision, ...(result.mediaCost && { media_cost: result.mediaCost }) },
           requestJson,
           requestBodyBytes,
           responseJson,

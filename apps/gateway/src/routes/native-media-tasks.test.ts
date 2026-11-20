@@ -1,4 +1,4 @@
-import type { ResponsesRegistryRecord } from "@helm/core";
+import { normalizeBailianTranscription, type ResponsesRegistryRecord } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -8,6 +8,7 @@ const Failed = z.object({ error: z.object({ code: z.string(), operation_id: z.st
 
 import type { AppEnv } from "../app.js";
 import type { NativeMediaTaskProfile } from "./native-media-tasks.js";
+import type { RecordServedDeps } from "./payload-capture.js";
 import { registerMediaTaskRoutes, type VideoCreateTarget, type VideosRouteDeps } from "./videos.js";
 
 const fingerprint = "a".repeat(64);
@@ -17,7 +18,12 @@ function setup(kind: "video" | "transcription" = "video") {
   let currentFingerprint = fingerprint;
   const records = new Map<string, ResponsesRegistryRecord>();
   const create = vi.fn(async () => ({ id: "upstream-1" }));
-  const retrieve = vi.fn(async () => ({ id: "upstream-1", status: "done" }));
+  const retrieve = vi.fn(
+    async (): Promise<Record<string, unknown>> => ({
+      id: "upstream-1",
+      status: "done",
+    }),
+  );
   const profile: NativeMediaTaskProfile = {
     profile: "bailian",
     endpointIdentity: fingerprint,
@@ -117,6 +123,58 @@ describe("native media task route", () => {
     expect(t.retrieve).toHaveBeenCalledWith("upstream-1", expect.any(AbortSignal));
     expect(t.create).toHaveBeenCalledTimes(1);
   });
+  it("settles Fun-ASR by supplier duration even if the transcript download fails", async () => {
+    const t = setup("transcription");
+    const applyAsyncMediaCost = vi.fn().mockResolvedValue(true);
+    const insert = vi.fn();
+    t.deps.record = {
+      telemetry: { insert, applyAsyncMediaCost },
+      capturePayloads: () => false,
+      redact: (decision: unknown) => decision,
+      now: () => 1000,
+    } as unknown as RecordServedDeps;
+    t.deps.mediaPricing = () => ({
+      currency: "CNY",
+      region: "cn-beijing",
+      providerModel: "fun-asr",
+      basis: "official_list_price",
+      verifiedOn: "2026-11-20",
+      source: "https://example.test/pricing",
+      rates: [{ direction: "input_audio", unit: "second", price: 0.00022, conditions: {} }],
+      notes: [],
+    });
+    t.target.providerModel = "fun-asr";
+    t.profile.normalize = normalizeBailianTranscription;
+    t.profile.materialize = vi.fn().mockRejectedValue(new Error("signed link expired"));
+    t.retrieve.mockResolvedValue({
+      output: {
+        task_id: "upstream-1",
+        task_status: "SUCCEEDED",
+        results: [
+          {
+            subtask_status: "SUCCEEDED",
+            transcription_url: "https://example.test/transcript?signature=private",
+          },
+        ],
+      },
+      usage: { duration: 15 },
+    });
+    const created = Created.parse(await (await t.post()).json());
+    const poll = await t.app.request(`${t.root}/${created.request_id}`);
+    expect(poll.status).toBe(502);
+    expect(applyAsyncMediaCost).toHaveBeenCalledOnce();
+    const settlement = applyAsyncMediaCost.mock.calls[0]?.[0];
+    expect(settlement).toMatchObject({
+      kind: "transcription",
+      keyId: "key-a",
+      requestId: insert.mock.calls[0]?.[0]?.decision.request_id,
+      providerModel: "fun-asr",
+      cost: { currency: "CNY", cost_usd: null },
+    });
+    expect(settlement.cost.amount).toBeCloseTo(0.0033);
+    expect(JSON.stringify(settlement)).not.toContain("signature");
+  });
+
   it("denies other keys without querying the provider", async () => {
     const t = setup();
     const r = Created.parse(await (await t.post()).json());

@@ -38,7 +38,7 @@ function wav() {
   bytes.writeUInt32LE(40000, 40);
   return bytes;
 }
-function setup(card: MediaPricing = pricing) {
+function setup(card: MediaPricing = pricing, spendUsd: number | null = 1) {
   let saved: MediaSpendRecord | undefined;
   const reserveMediaSpend = vi.fn(async (record: MediaSpendRecord) => {
     saved = record;
@@ -85,7 +85,7 @@ function setup(card: MediaPricing = pricing) {
         requestContentMode: "none",
         maxReasoningEffort: null,
         budget: {
-          spendUsd: 1,
+          spendUsd,
           requests: null,
           tokens: null,
           windowSeconds: null,
@@ -97,7 +97,14 @@ function setup(card: MediaPricing = pricing) {
     return (
       (await handleBailianAsrChat(c, await c.req.json(), {
         resolve: () => ({
-          client: { chatCompletion, chatCompletionStream: async function* () {} },
+          client: {
+            chatCompletion,
+            chatCompletionStream: async function* (request) {
+              expect(request.stream_options).toEqual({ include_usage: true });
+              yield 'data: {"choices":[], "usage":';
+              yield '{"seconds":3}}\r\n\r\ndata: [DONE]\r\n\r\n';
+            },
+          },
           alias: "bailian/qwen3-asr-flash",
           model: "qwen3-asr-flash",
           lane: "transcription-short",
@@ -243,4 +250,19 @@ it.each(["url", "truncated", "stream"])("does not expand capped ASR to %s inputs
         : `data:audio/wav;base64,${wav().subarray(0, 100).toString("base64")}`;
   expect((await t.send()).status).toBe(422);
   expect(t.chatCompletion).not.toHaveBeenCalled();
+});
+
+it.each([
+  false,
+  true,
+])("prices provider-reported seconds for uncapped URL audio (stream=%s)", async (stream) => {
+  const t = setup({ ...pricing, billing: { usdPerCurrencyUnit: 0.1 } }, null);
+  t.inputAudio.data = "https://example.test/audio.wav";
+  t.body.stream = stream;
+  t.chatCompletion.mockResolvedValue({ choices: [{}], usage: { seconds: 3 } });
+  const response = await t.send();
+  expect(response.status).toBe(200);
+  const wire = await response.text();
+  if (stream) expect(wire).toBe("data: [DONE]\r\n\r\n");
+  expect(t.saved()).toMatchObject({ state: "settled", costUsd: 0.003, usage: { seconds: 3 } });
 });

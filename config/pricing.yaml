@@ -1467,7 +1467,7 @@ ark/seedream-5.0-flash:
     region: "cn-beijing"
     providerModel: "doubao-seedream-5-0-flash-260915"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
     rates:
       - {"direction": "input", "unit": "image", "price": 0.0, "conditions": {}}
@@ -1482,7 +1482,7 @@ ark/seedream-5.0-pro:
     region: "cn-beijing"
     providerModel: "doubao-seedream-5-0-pro-260628"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
     rates:
       - {"direction": "input", "unit": "image", "price": 0.02, "conditions": {}, "freeQuantity": 1}
@@ -1501,7 +1501,7 @@ ark/seedance-2.5:
     region: "cn-beijing"
     providerModel: "doubao-seedance-2-5-260628"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing?lang=zh"
     rates:
       - {"direction": "completion", "unit": "million_tokens", "price": 70.0, "conditions": {"resolution": "480p", "hasInputVideo": false}}
@@ -1510,6 +1510,8 @@ ark/seedance-2.5:
       - {"direction": "completion", "unit": "million_tokens", "price": 42.0, "conditions": {"resolution": "480p", "hasInputVideo": true}}
       - {"direction": "completion", "unit": "million_tokens", "price": 42.0, "conditions": {"resolution": "720p", "hasInputVideo": true}}
       - {"direction": "completion", "unit": "million_tokens", "price": 46.0, "conditions": {"resolution": "1080p", "hasInputVideo": true}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 31.0, "conditions": {"resolution": "4k", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 19.0, "conditions": {"resolution": "4k", "hasInputVideo": true}}
     notes:
       - "Actual billable quantity is usage.completion_tokens, not a flat per-second price."
       - "Estimate tokens = (input_video_seconds + output_video_seconds) * width * height * fps / 1024. Input-video requests have a minimum token floor; use actual usage for settlement."
@@ -1537,7 +1539,7 @@ bailian/qwen-image-3.0-pro:
     region: "cn-beijing"
     providerModel: "qwen-image-3.0-pro"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#2e0ddf5c9edy0"
     rates:
       - {"direction": "input", "unit": "image", "price": 0.02, "conditions": {}}
@@ -1599,7 +1601,7 @@ bailian/wan3.0-video:
     region: "cn-beijing"
     providerModel: "wan3.0-video"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing#wan30video_cn_h3"
     rates:
       - {"direction": "input_and_output_video", "unit": "second", "price": 0.3, "conditions": {"outputResolution": "480P"}, "promotion": {"multiplier": 0.7, "effectivePrice": 0.21, "endDate": null, "status": "official page says limited-time; no end date stated"}}
@@ -1633,7 +1635,7 @@ bailian/qwen3-asr-flash:
     region: "cn-beijing"
     providerModel: "qwen3-asr-flash"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://docs.bailian.console.aliyun.com/zh/model-studio/model-pricing"
     rates:
       - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
@@ -1675,7 +1677,7 @@ bailian/fun-asr:
     region: "cn-beijing"
     providerModel: "fun-asr"
     basis: "official_list_price"
-    verifiedOn: "2026-11-16"
+    verifiedOn: "2026-11-20"
     source: "https://help.aliyun.com/zh/model-studio/model-pricing"
     rates:
       - {"direction": "input_audio", "unit": "second", "price": 0.00022, "conditions": {}}
@@ -1789,7 +1791,7 @@ minimax/MiniMax-H3:
     region: "MiniMax international platform"
     providerModel: "MiniMax-H3"
     basis: "official_list_price"
-    verifiedOn: "2026-10-14"
+    verifiedOn: "2026-11-20"
     source: "https://platform.minimax.io/docs/pricing/overview#models/video"
     rates:
       - {"direction": "output_video", "unit": "second", "price": 0.08, "conditions": {"outputResolution": "768P"}}
