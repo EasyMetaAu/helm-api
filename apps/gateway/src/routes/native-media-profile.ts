@@ -1,6 +1,7 @@
 import {
   BAILIAN_VIDEO_QUERY_WINDOW_MS,
   MINIMAX_VIDEO_QUERY_WINDOW_MS,
+  materializeBailianTranscription,
   normalizeBailianTranscription,
   normalizeBailianVideo,
   normalizeDoubaoTranscription,
@@ -46,6 +47,7 @@ export function nativeMediaProfile(
         validate: kind === "video" ? validateBailianVideo : validateBailianTranscription,
         parseCreated: parseBailianCreated,
         normalize: kind === "video" ? normalizeBailianVideo : normalizeBailianTranscription,
+        ...(kind === "transcription" ? { materialize: materializeBailianTranscription } : {}),
       }
     : {
         profile: "minimax",

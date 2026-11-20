@@ -80,6 +80,26 @@ function durationQuote(
   const quote = Math.ceil(seconds / rounding) * rounding * rate.price * fx;
   return Number.isFinite(quote) ? quote : null;
 }
+// Bailian reports billable audio seconds directly. Admission still requires the
+// account rounding rule when only a local file duration is available.
+export function reportedTranscriptionCost(card: MediaPricing, seconds: number): number | null {
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  if (card.billing?.roundingSeconds) return quoteTranscription(card, seconds);
+  const rate = card.rates[0];
+  const fx = card.currency === "USD" ? 1 : card.billing?.usdPerCurrencyUnit;
+  if (
+    !["qwen3-asr-flash", "fun-asr"].includes(card.providerModel) ||
+    !fx ||
+    card.rates.length !== 1 ||
+    rate?.direction !== "input_audio" ||
+    rate.unit !== "second" ||
+    Object.keys(rate.conditions).length ||
+    rate.freeQuantity ||
+    card.conditionalFees?.length
+  )
+    return null;
+  return seconds * rate.price * fx;
+}
 interface TranscriptionReservation {
   id: string;
   keyId: string;
@@ -92,7 +112,7 @@ interface TranscriptionReservation {
 export interface TranscriptionAccounting {
   reserve(
     input: TranscriptionReservation & {
-      file: File;
+      file?: File;
       request: AudioTranscriptionRequest;
     },
   ): Promise<MediaSpendRecord>;
@@ -151,7 +171,9 @@ export function createTranscriptionAccounting(
           request.languages?.includes("multi")
         )
           throw new SpeechAccountingError("media_pricing_unavailable");
-        const duration = pcmWavDurationSeconds(new Uint8Array(await input.file.arrayBuffer()));
+        const duration = input.file
+          ? pcmWavDurationSeconds(new Uint8Array(await input.file.arrayBuffer()))
+          : null;
         if (duration !== null && input.pricing?.providerModel === input.model) {
           const billing = input.pricing.billing;
           quote = durationQuote(
@@ -198,7 +220,7 @@ export function createTranscriptionAccounting(
       const usage = result?.usage;
       const cost =
         usage?.type === "duration" && pricing?.providerModel === record.providerModel
-          ? quoteTranscription(pricing, usage.seconds * (usage.channels ?? 1))
+          ? reportedTranscriptionCost(pricing, usage.seconds * (usage.channels ?? 1))
           : null;
       return store.settleMediaSpend(
         record.id,

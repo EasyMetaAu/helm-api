@@ -3,6 +3,7 @@ import {
   MediaHttpError,
   type ProviderClient,
   parseBailianShortAsrRequest,
+  parseSSEData,
   pcmWavDurationSeconds,
   SpeechAccountingError,
   type TranscriptionAccounting,
@@ -14,6 +15,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
 import type { AudioSpeechRouteDeps } from "./audio-speech.js";
+import { splitSSEFrames } from "./messages-pipeline.js";
 export interface ShortAsrTarget {
   client: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream"> | null;
   alias: string;
@@ -92,42 +94,41 @@ export async function handleBailianAsrChat(
   }
   const signal = requestSignal(c);
   signal.throwIfAborted();
-  if (!body.stream && deps.accounting) {
+  if (deps.accounting) {
     const message = body.messages.at(-1);
     const data = message?.role === "user" ? message.content[0]?.input_audio.data : undefined;
-    const bytes = data?.startsWith("data:audio/")
-      ? Buffer.from(data.slice(data.indexOf(",") + 1), "base64")
-      : undefined;
+    const bytes =
+      spendCapped && data?.startsWith("data:audio/")
+        ? Buffer.from(data.slice(data.indexOf(",") + 1), "base64")
+        : undefined;
     const file =
       bytes && pcmWavDurationSeconds(bytes) !== null
         ? new File([bytes], "short-asr.wav", { type: "audio/wav" })
         : undefined;
     if (spendCapped && !file) return fail(422, "media_pricing_unavailable");
-    if (file) {
-      try {
-        spend = await deps.accounting.reserve({
-          id: crypto.randomUUID(),
-          keyId: identity.keyId,
-          alias: target.alias,
-          model: target.model,
-          pricing: target.pricing,
-          caps: budget,
-          file,
-          request: { model: target.model },
-        });
-        c.header("x-helm-media-operation-id", spend.id);
-      } catch (error) {
-        if (error instanceof SpeechAccountingError)
-          return fail(
-            error.code === "budget_exceeded"
-              ? 429
-              : error.code === "media_accounting_unavailable"
-                ? 503
-                : 422,
-            error.code,
-          );
-        return fail(503, "media_accounting_unavailable");
-      }
+    try {
+      spend = await deps.accounting.reserve({
+        id: crypto.randomUUID(),
+        keyId: identity.keyId,
+        alias: target.alias,
+        model: target.model,
+        pricing: target.pricing,
+        caps: budget,
+        file,
+        request: { model: target.model },
+      });
+      c.header("x-helm-media-operation-id", spend.id);
+    } catch (error) {
+      if (error instanceof SpeechAccountingError)
+        return fail(
+          error.code === "budget_exceeded"
+            ? 429
+            : error.code === "media_accounting_unavailable"
+              ? 503
+              : 422,
+          error.code,
+        );
+      return fail(503, "media_accounting_unavailable");
     }
   }
   let settled = false;
@@ -185,11 +186,32 @@ export async function handleBailianAsrChat(
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
       try {
-        for await (const chunk of client.chatCompletionStream(body, {
-          signal: AbortSignal.any([signal, abort.signal]),
-        }))
-          await out.write(chunk);
-        await settle("ok");
+        const includeUsage = body.stream_options?.include_usage === true;
+        const upstream = client.chatCompletionStream(
+          spend ? { ...body, stream_options: { include_usage: true } } : body,
+          { signal: AbortSignal.any([signal, abort.signal]) },
+        );
+        let seconds: number | undefined;
+        for await (const frame of splitSSEFrames(upstream)) {
+          const payload = parseSSEData<Record<string, unknown>>(frame.data);
+          const duration = NativeDuration.safeParse(payload);
+          if (duration.success) seconds = duration.data.usage.seconds;
+          // Bailian emits billing usage in a separate empty-choices footer.
+          // A caller that did not opt in receives the same content and terminator.
+          if (
+            spend &&
+            !includeUsage &&
+            payload?.usage &&
+            Array.isArray(payload.choices) &&
+            payload.choices.length === 0
+          )
+            continue;
+          await out.write(frame.raw);
+        }
+        await settle(
+          "ok",
+          seconds === undefined ? undefined : { usage: { type: "duration", seconds } },
+        );
       } catch {
         await settle("error");
         if (!abort.signal.aborted)

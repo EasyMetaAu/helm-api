@@ -9,6 +9,7 @@ import {
   type ProviderAttempt,
 } from "@helm/shared";
 import { z } from "zod";
+import { AsyncMediaBillingSchema } from "./async-media-cost.js";
 
 export type ArkTaskKind = "video" | "three-d";
 export const ARK_TASK_TTL_MS = 7 * 86400000;
@@ -24,6 +25,7 @@ const BindingSchema = z.strictObject({
   providerName: z.string().min(1),
   providerModel: z.string().min(1),
   state: z.string(),
+  mediaBilling: AsyncMediaBillingSchema.optional(),
 });
 type Binding = z.infer<typeof BindingSchema>;
 export const ARK_VIDEO_MODELS = new Set([

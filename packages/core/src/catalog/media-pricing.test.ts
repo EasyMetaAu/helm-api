@@ -12,7 +12,7 @@ import { buildModelsList } from "./models-list.js";
 const expected = {
   "ark/seedream-5.0-flash": [0, 0.12],
   "ark/seedream-5.0-pro": [0.02, 0.3, 0.6, 0.15, 0.3],
-  "ark/seedance-2.5": [70, 70, 77, 42, 42, 46],
+  "ark/seedance-2.5": [70, 70, 77, 42, 42, 46, 31, 19],
   "ark/seed3d-2.0": [2.4],
   "bailian/qwen-image-3.0-pro": [0.02, 0.25, 0.5],
   "bailian/qwen-image-3.0": [0.02, 0.18, 0.18],
@@ -37,6 +37,17 @@ const expected = {
   "minimax/speech-2.8-turbo": [60],
 };
 
+const updatedCards = new Set([
+  "ark/seedream-5.0-flash",
+  "ark/seedream-5.0-pro",
+  "ark/seedance-2.5",
+  "bailian/qwen-image-3.0-pro",
+  "bailian/wan3.0-video",
+  "bailian/qwen3-asr-flash",
+  "bailian/fun-asr",
+  "minimax/MiniMax-H3",
+]);
+
 describe("native media model pricing configuration", () => {
   it("covers every configured Ark, Bailian and MiniMax alias, including wire-model identity", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
@@ -53,9 +64,11 @@ describe("native media model pricing configuration", () => {
       expect(pricing?.media, model.alias).toMatchObject({
         providerModel: model.provider_model,
         currency: model.alias.startsWith("minimax/") ? "USD" : "CNY",
-        verifiedOn: ["bailian/fun-asr", "bailian/paraformer-v2"].includes(model.alias)
-          ? "2026-11-16"
-          : "2026-10-14",
+        verifiedOn: updatedCards.has(model.alias)
+          ? "2026-11-20"
+          : model.alias === "bailian/paraformer-v2"
+            ? "2026-11-16"
+            : "2026-10-14",
         basis: "official_list_price",
       });
       expect(

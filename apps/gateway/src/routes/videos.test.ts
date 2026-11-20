@@ -962,6 +962,93 @@ describe("Ark video tasks", () => {
       }),
     );
   });
+  it("prices provider-reported Seedance tokens on the original create after restart", async () => {
+    const { restart, retrieve } = setupArk();
+    const applyAsyncMediaCost = vi.fn().mockResolvedValue(true);
+    const mediaPricing = () => ({
+      currency: "CNY" as const,
+      region: "cn-beijing",
+      providerModel: arkModel,
+      basis: "official_list_price" as const,
+      verifiedOn: "2026-11-20",
+      source: "https://docs.example.test/pricing",
+      rates: [
+        {
+          direction: "completion" as const,
+          unit: "million_tokens" as const,
+          price: 42,
+          conditions: { resolution: "720p" as const, hasInputVideo: true },
+        },
+      ],
+      billing: { usdPerCurrencyUnit: 0.15 },
+      notes: [],
+    });
+    const { deps, enqueueTelemetry } = setup();
+    if (!deps.record) throw new Error("Missing test recorder");
+    const insert = vi.fn();
+    const billing = {
+      mediaPricing,
+      record: {
+        ...deps.record,
+        telemetry: { ...deps.record.telemetry, insert, applyAsyncMediaCost },
+        capturePayloads: () => false,
+      },
+    };
+    const app = restart(billing);
+    const body = {
+      ...arkBody(),
+      omni_reference_task_type: "reference",
+      content: [
+        { type: "text", text: "a red kite" },
+        {
+          type: "video_url",
+          role: "reference_video",
+          video_url: { url: "https://private.example.test/input.mp4?signature=secret" },
+        },
+      ],
+    };
+    const created = await post(app, body);
+    expect(created.status).toBe(200);
+    const { request_id } = (await created.json()) as ArkPublicTestBody;
+    expect(enqueueTelemetry).not.toHaveBeenCalled();
+    const creation = insert.mock.calls[0]?.[0]?.decision;
+    expect(creation?.request_id).toEqual(expect.any(String));
+    const success = {
+      id: "shared-upstream-id",
+      model: arkModel,
+      status: "succeeded",
+      updated_at: 1000,
+      resolution: "720p",
+      usage: { completion_tokens: 500_000, total_tokens: 500_000 },
+      content: { video_url: "https://cdn.example.test/movie.mp4?signature=secret" },
+    };
+    const restarted = restart({ ...billing, mediaPricing: () => undefined });
+    retrieve.mockResolvedValueOnce({ ...success, updated_at: 1001 });
+    expect((await pollArk(restarted, request_id)).status).toBe(200);
+    retrieve.mockResolvedValueOnce({ ...success, usage: null });
+    expect((await pollArk(restarted, request_id)).status).toBe(200);
+    expect(applyAsyncMediaCost).not.toHaveBeenCalled();
+    retrieve.mockResolvedValueOnce(success);
+    const polled = await pollArk(restarted, request_id);
+    expect(polled.status).toBe(200);
+    expect(applyAsyncMediaCost).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        requestId: creation.request_id,
+        keyId: "key_1",
+        providerModel: arkModel,
+        completionTokens: 500_000,
+        cost: {
+          currency: "CNY",
+          amount: 21,
+          cost_usd: 3.15,
+          basis: "official_list_price",
+          verified_on: "2026-11-20",
+        },
+      }),
+    );
+    expect(JSON.stringify(applyAsyncMediaCost.mock.calls)).not.toContain("signature");
+  });
+
   it("rejects another owner or key before upstream polling", async () => {
     const { app, restart, retrieve } = setupArk();
     const { request_id } = (await (await post(app, arkBody())).json()) as ArkPublicTestBody;

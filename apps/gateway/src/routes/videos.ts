@@ -44,6 +44,7 @@ import {
   parseArkTaskRequest,
   updateArkTaskState,
 } from "./ark-media-task.js";
+import { applyAsyncMediaCost, captureAsyncMediaBilling } from "./async-media-cost.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import { PASSTHROUGH_CLASSIFIER } from "./image-telemetry.js";
 import { isNativeMediaTaskRecord } from "./media-task-binding.js";
@@ -126,6 +127,7 @@ export interface VideosRouteDeps {
   ) => Promise<void>;
   /** Existing telemetry/payload recorder; production wires the same instance as images. */
   record?: RecordServedDeps;
+  mediaPricing?: (alias: string) => MediaPricing | undefined;
   /** Body-free lifecycle events for asynchronous video polling. */
   log?: (event: string, fields: Record<string, unknown>) => void;
   now?: () => number;
@@ -550,6 +552,16 @@ export function registerMediaTaskRoutes(
     const upstreamRequestJson = omitContent
       ? null
       : JSON.stringify({ ...upstreamBody, model: target.providerModel });
+    const mediaBilling =
+      captureRecord?.telemetry.applyAsyncMediaCost && identity.caps?.budget?.spendUsd == null
+        ? captureAsyncMediaBilling(
+            kind,
+            target,
+            upstreamBody,
+            helmRequestId,
+            deps.mediaPricing?.(target.providerAlias),
+          )
+        : undefined;
     const recordStart = async (
       status: "ok" | "error",
       errorClass: string | null,
@@ -562,6 +574,7 @@ export function registerMediaTaskRoutes(
           captureRecord,
           {
             requestId: helmRequestId,
+            awaitTelemetry: mediaBilling !== undefined,
             accountId: identity.accountId,
             apiKeyId: identity.keyId,
             decision: buildVideoDecision({
@@ -610,6 +623,7 @@ export function registerMediaTaskRoutes(
         kind,
         recordStart,
         callerOperation,
+        mediaBilling,
       );
     }
     const reservation = registryRecord(
@@ -694,6 +708,7 @@ export function registerMediaTaskRoutes(
             providerName: target.providerName,
             providerModel: target.providerModel,
             state: "queued",
+            mediaBilling,
           })
         : String(upstream.status ?? "in_progress");
       const mapped = await deps.registry.putIfAbsent(
@@ -869,10 +884,11 @@ export function registerMediaTaskRoutes(
       });
       return errorJson(c, 502, "video poll failed", "upstream_error");
     }
+    const observedAt = (deps.now ?? Date.now)();
     const normalized =
       arkBinding === null
         ? null
-        : normalizeArkTaskResult(kind, upstream, record, requestId, (deps.now ?? Date.now)());
+        : normalizeArkTaskResult(kind, upstream, record, requestId, observedAt);
     const parsed =
       arkBinding === null
         ? VideoRetrieveResponseSchema.safeParse(upstream)
@@ -889,6 +905,19 @@ export function registerMediaTaskRoutes(
         terminal: false,
       });
       return errorJson(c, 502, "video poll returned an invalid response", "upstream_error");
+    }
+    if (
+      kind === "video" &&
+      arkBinding?.mediaBilling?.profile === "seedance" &&
+      upstream.status === "succeeded" &&
+      typeof upstream.updated_at === "number" &&
+      upstream.updated_at >= Math.floor(record.createdAt / 1000) &&
+      upstream.updated_at <= Math.floor(observedAt / 1000) &&
+      (typeof upstream.created_at !== "number" ||
+        (upstream.created_at >= Math.floor(record.createdAt / 1000) &&
+          upstream.created_at <= upstream.updated_at))
+    ) {
+      await applyAsyncMediaCost(deps, record, kind, arkBinding.mediaBilling, upstream, observedAt);
     }
     upstream = parsed.data;
     const status = upstream.status;
