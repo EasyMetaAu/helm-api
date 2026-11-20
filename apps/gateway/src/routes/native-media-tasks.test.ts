@@ -1,4 +1,12 @@
-import { normalizeBailianTranscription, type ResponsesRegistryRecord } from "@helm/core";
+import {
+  type BudgetCaps,
+  createSqliteDb,
+  createTranscriptionAccounting,
+  normalizeBailianTranscription,
+  type ResponsesRegistryRecord,
+  SqliteBudgetStore,
+} from "@helm/core";
+import { MediaPricingSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -12,9 +20,10 @@ import type { RecordServedDeps } from "./payload-capture.js";
 import { registerMediaTaskRoutes, type VideoCreateTarget, type VideosRouteDeps } from "./videos.js";
 
 const fingerprint = "a".repeat(64);
-function setup(kind: "video" | "transcription" = "video") {
+function setup(kind: "video" | "transcription" = "video", record?: RecordServedDeps) {
   let now = 1000;
   let key = "key-a";
+  let budget: BudgetCaps | undefined;
   let currentFingerprint = fingerprint;
   const records = new Map<string, ResponsesRegistryRecord>();
   const create = vi.fn(async () => ({ id: "upstream-1" }));
@@ -56,7 +65,8 @@ function setup(kind: "video" | "transcription" = "video") {
     records.set(r.responseId, r);
   });
   const deps: VideosRouteDeps = {
-    auth: { resolve: async () => ({ accountId: "owner", keyId: key }) },
+    record,
+    auth: { resolve: async () => ({ accountId: "owner", keyId: key, caps: { budget } }) },
     resolver: {
       create: async () => target,
       poll: async () => ({
@@ -78,10 +88,14 @@ function setup(kind: "video" | "transcription" = "video") {
   const app = new Hono<AppEnv>();
   registerMediaTaskRoutes(app, deps, kind);
   const root = kind === "video" ? "/v1/videos" : "/v1/audio/transcription-jobs";
-  const post = () =>
+  const post = (operation?: string) =>
     app.request(root + (kind === "video" ? "/generations" : ""), {
       method: "POST",
-      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer test",
+        "content-type": "application/json",
+        ...(operation ? { "X-Helm-Transcription-Operation": operation } : {}),
+      },
       body: JSON.stringify({ model: "video-standard", prompt: "hello" }),
     });
   return {
@@ -97,6 +111,9 @@ function setup(kind: "video" | "transcription" = "video") {
     setKey: (v: string) => {
       key = v;
     },
+    setBudget: (caps: BudgetCaps) => {
+      budget = caps;
+    },
     setTime: (v: number) => {
       now = v;
     },
@@ -107,6 +124,251 @@ function setup(kind: "video" | "transcription" = "video") {
   };
 }
 describe("native media task route", () => {
+  it("reserves a proven per-job ceiling before any paid POST and retains unknown cost", async () => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const t = setup("transcription");
+      const store = new SqliteBudgetStore(db);
+      t.deps.transcriptionAccounting = createTranscriptionAccounting(store, {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      t.setBudget({
+        requests: null,
+        tokens: null,
+        spendUsd: 0.5,
+        windowSeconds: 86400,
+        behavior: "reject",
+        degradeLane: null,
+        admittedAtMs: 1000,
+      });
+      const first = "asr_86fad6c3-43de-44c9-925d-ce79d88c6628";
+      const second = "asr_86fad6c3-43de-44c9-925d-ce79d88c6629";
+      const third = "asr_86fad6c3-43de-44c9-925d-ce79d88c6630";
+      expect((await t.post(first)).status).toBe(422);
+      t.target.pricing = MediaPricingSchema.parse({
+        currency: "USD",
+        region: "fixture",
+        providerModel: t.target.providerModel,
+        basis: "official_list_price",
+        source: "https://example.test/price",
+        verifiedOn: "2026-11-19",
+        rates: [{ direction: "input_audio", unit: "second", price: 0.001, conditions: {} }],
+        notes: [],
+        billing: { asyncJobCeiling: { accountId: "account-a", costUsd: 0.3 } },
+      });
+      expect((await t.post()).status).toBe(400);
+      t.create.mockRejectedValueOnce({ outcome: "not_sent" });
+      const refused = await t.post(first);
+      expect(refused.status).toBe(503);
+      expect(await refused.json()).toMatchObject({ error: { code: "upstream_not_sent" } });
+      const read = async (id: string) => (await t.app.request(`${t.root}/operations/${id}`)).json();
+      expect(await read(first)).toMatchObject({
+        state: "not_sent",
+        accounting: { state: "settled", costUsd: 0 },
+      });
+
+      let remainingAtDispatch: number | undefined;
+      t.create.mockImplementationOnce(async () => {
+        remainingAtDispatch = (await store.peek("key-a", "usd", 0.5, 86400000, 1000)).remaining;
+        throw new Error("reply lost");
+      });
+      expect((await t.post(second)).status).toBe(503);
+      expect(remainingAtDispatch).toBeCloseTo(0.2);
+      expect(await read(second)).toMatchObject({
+        state: "outcome_unknown",
+        accounting: { state: "outcome_unknown", reservedUsd: 0.3, costUsd: null },
+      });
+      const exhausted = await t.post(third);
+      expect(exhausted.status).toBe(429);
+      expect(await exhausted.json()).toMatchObject({
+        error: { code: "budget_exceeded", message: "usage budget exceeded" },
+      });
+      expect(t.create).toHaveBeenCalledTimes(2);
+
+      t.setKey("key-b");
+      const accepted = await t.post(third);
+      expect(accepted.status).toBe(200);
+      const task = Created.parse(await accepted.json());
+      expect(await read(third)).toMatchObject({
+        state: "accepted",
+        accounting: { state: "reserved" },
+      });
+      const poll = () => t.app.request(`${t.root}/${task.request_id}`);
+      expect((await poll()).status).toBe(200);
+      expect(await read(third)).toMatchObject({
+        state: "accepted",
+        accounting: { state: "outcome_unknown", reservedUsd: 0.3, costUsd: null },
+      });
+      const usage = { type: "duration", seconds: 3.56 };
+      const normalize = t.profile.normalize;
+      t.profile.normalize = (body, id, model) => ({
+        ...normalize(body, id, model),
+        usage: { ...usage, privateField: "must not be retained" },
+      });
+      expect((await poll()).status).toBe(200);
+      expect(await read(third)).toMatchObject({
+        state: "accepted",
+        accounting: { state: "outcome_unknown", reservedUsd: 0.3, costUsd: null, usage },
+      });
+      expect(await read(third)).toMatchObject({ accounting: { usage } });
+      t.profile.normalize = normalize;
+      expect((await poll()).status).toBe(200);
+      expect(await read(third)).toMatchObject({ accounting: { usage } });
+      expect(JSON.stringify(await read(third))).not.toContain("privateField");
+      expect(t.create).toHaveBeenCalledTimes(3);
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
+  it.each([
+    false,
+    true,
+  ])("omits signed ASR content from capture on success and error (error: %s)", async (failed) => {
+    const enqueueTelemetry = vi.fn();
+    const enqueuePayload = vi.fn();
+    const enqueueSession = vi.fn();
+    const t = setup("transcription", {
+      now: () => 1000,
+      redact: (value: unknown) => value,
+      capturePayloads: () => true,
+      captureSessions: () => true,
+      telemetry: { insert: vi.fn() },
+      writes: { enqueueTelemetry, enqueuePayload, enqueueSession },
+    } as unknown as RecordServedDeps);
+    const fileUrl = "https://files.example.test/sound.wav?signature=private-capability";
+    if (failed) t.create.mockRejectedValueOnce(new Error("connection lost"));
+    else t.create.mockImplementationOnce(async () => ({ id: "upstream-1", echoedUrl: fileUrl }));
+    const body = JSON.stringify({
+      model: "video-standard",
+      prompt: "fixture",
+      input: { file_url: fileUrl },
+    });
+    const res = await t.app.request(t.root, {
+      method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(failed ? 503 : 200);
+    expect(t.create).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { file_url: fileUrl } }),
+      expect.any(AbortSignal),
+      undefined,
+      undefined,
+    );
+    expect(enqueueTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          request_content_mode: "none",
+          request_body_bytes: Buffer.byteLength(body),
+        }),
+      }),
+    );
+    expect(enqueuePayload).not.toHaveBeenCalled();
+    expect(enqueueSession).not.toHaveBeenCalled();
+    expect(JSON.stringify([...t.records.values(), ...enqueueTelemetry.mock.calls])).not.toContain(
+      "private-capability",
+    );
+  });
+
+  it("recovers a caller-known operation after the entire create response is lost", async () => {
+    const t = setup("transcription");
+    const operation = "asr_86fad6c3-43de-44c9-925d-ce79d88c6628";
+    const path = `${t.root}/operations/${operation}`;
+    await t.post(operation); // The caller discards the entire response.
+    const lookup = await t.app.request(path);
+    expect(lookup.status).toBe(200);
+    expect(lookup.headers.get("cache-control")).toBe("no-store");
+    expect(await lookup.json()).toMatchObject({
+      operation_id: operation,
+      state: "accepted",
+      request_id: expect.any(String),
+    });
+    const replay = await t.post(operation);
+    expect(replay.status).toBe(503);
+    expect(await replay.json()).toMatchObject({
+      error: { code: "outcome_unknown", operation_id: operation },
+    });
+    expect(t.create).toHaveBeenCalledTimes(1);
+    t.setKey("other");
+    expect((await t.app.request(path)).status).toBe(404);
+    expect((await t.post(operation)).status).toBe(200);
+    expect(t.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects malformed operation headers before calling the transcription provider", async () => {
+    const t = setup("transcription");
+    expect((await t.post("wrong")).status).toBe(400);
+    expect(t.create).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake a reserved provider ID for a submitted request after a definite refusal", async () => {
+    const t = setup("transcription");
+    t.profile.clientAssignedRequestId = true;
+    t.create.mockRejectedValueOnce({ outcome: "not_sent" });
+    const operation = "asr_86fad6c3-43de-44c9-925d-ce79d88c6628";
+    expect((await t.post(operation)).status).toBe(503);
+    const lookup = await t.app.request(`${t.root}/operations/${operation}`);
+    expect(await lookup.json()).toEqual({
+      operation_id: operation,
+      state: "not_sent",
+      upstream_task_known: false,
+    });
+    expect(t.retrieve).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, true],
+    [true, true],
+    [true, false],
+  ])("omits signed ASR content (error: %s, capture enabled: %s)", async (failed, capture) => {
+    const enqueueTelemetry = vi.fn();
+    const enqueuePayload = vi.fn();
+    const enqueueSession = vi.fn();
+    const t = setup("transcription", {
+      now: () => 1000,
+      redact: (value: unknown) => value,
+      capturePayloads: () => capture,
+      captureSessions: () => capture,
+      telemetry: { insert: vi.fn() },
+      writes: { enqueueTelemetry, enqueuePayload, enqueueSession },
+    } as unknown as RecordServedDeps);
+    const fileUrl = "https://files.example.test/sound.wav?signature=private-capability";
+    if (failed) t.create.mockRejectedValueOnce(new Error("connection lost"));
+    else t.create.mockImplementationOnce(async () => ({ id: "upstream-1", echoedUrl: fileUrl }));
+    const body = JSON.stringify({
+      model: "video-standard",
+      prompt: "fixture",
+      input: { file_url: fileUrl },
+    });
+    const res = await t.app.request(t.root, {
+      method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(failed ? 503 : 200);
+    expect(t.create).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { file_url: fileUrl } }),
+      expect.any(AbortSignal),
+      undefined,
+      undefined,
+    );
+    expect(enqueueTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          request_content_mode: "none",
+          request_body_bytes: Buffer.byteLength(body),
+        }),
+      }),
+    );
+    expect(enqueuePayload).not.toHaveBeenCalled();
+    expect(enqueueSession).not.toHaveBeenCalled();
+    expect(JSON.stringify([...t.records.values(), ...enqueueTelemetry.mock.calls])).not.toContain(
+      "private-capability",
+    );
+  });
+
   it.each([
     "video",
     "transcription",

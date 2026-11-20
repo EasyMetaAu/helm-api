@@ -740,6 +740,8 @@ export async function recordServed(
     decision: DecisionRecord;
     requestJson: string;
     requestBodyBytes?: number;
+    // Requests that carry bearer URLs must never force body capture on error.
+    omitContent?: boolean;
     responseJson: string | null;
     timedOut?: boolean;
     // The accepted task can be polled immediately after the create response.
@@ -762,18 +764,20 @@ export async function recordServed(
   const finalDecision =
     args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;
   const failed = finalDecision.final.status === "error";
-  const captureDeps: RecordServedDeps = failed
-    ? {
-        ...deps,
-        capturePayloads: () => true,
-        captureSessions: () => true,
-        captureGeneration: undefined,
-      }
-    : deps;
+  const captureDeps: RecordServedDeps = args.omitContent
+    ? { ...deps, capturePayloads: () => false, captureSessions: () => false }
+    : failed
+      ? {
+          ...deps,
+          capturePayloads: () => true,
+          captureSessions: () => true,
+          captureGeneration: undefined,
+        }
+      : deps;
   const decision: DecisionRecord = {
     ...finalDecision,
     request_id: args.requestId,
-    request_content_mode: failed ? "payload" : effectiveRequestContentMode(deps),
+    request_content_mode: effectiveRequestContentMode(captureDeps),
   };
   const responseJson = args.timedOut === true ? null : args.responseJson;
   const sessionResponse =

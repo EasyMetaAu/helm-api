@@ -34,7 +34,7 @@ export interface TranscriptionSelection {
 }
 export interface AudioTranscriptionsRouteDeps
   extends Omit<AudioSpeechRouteDeps, "resolve" | "record" | "accounting"> {
-  accounting?: TranscriptionAccounting;
+  accounting?: Pick<TranscriptionAccounting, "reserve" | "settle">;
   resolve(
     model: string,
     identity: MessagesIdentity,

@@ -57,6 +57,18 @@ for (const kind of ["sqlite", "postgres"] as const)
           0.3,
         );
         expect(await store.getMediaSpend(record.id, "another-key")).toBeNull();
+        const lateRefund = { ...record, id: "late-refund", keyId: "refund-key" };
+        expect(await store.reserveMediaSpend(lateRefund)).toBe(true);
+        const afterRefill = record.admittedAtMs + record.windowMs;
+        await store.settleMediaSpend(
+          lateRefund.id,
+          lateRefund.keyId,
+          { costUsd: 0, usage: null },
+          afterRefill,
+        );
+        expect(
+          (await store.peek(lateRefund.keyId, "usd", 1, record.windowMs, afterRefill)).remaining,
+        ).toBe(1);
         await store.settleMediaSpend(
           record.id,
           record.keyId,
@@ -64,6 +76,10 @@ for (const kind of ["sqlite", "postgres"] as const)
           1000,
         );
         expect((await store.getMediaSpend(record.id, record.keyId))?.state).toBe("outcome_unknown");
+        await store.settleMediaSpend(record.id, record.keyId, { costUsd: null, usage: null }, 1000);
+        expect((await store.getMediaSpend(record.id, record.keyId))?.usage).toEqual({
+          usage_characters: 5,
+        });
         expect((await store.peek(record.keyId, "usd", 1, 86400000, 1000)).remaining).toBeCloseTo(
           0.3,
         );

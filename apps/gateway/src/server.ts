@@ -5405,6 +5405,7 @@ export async function buildServer(
     app,
     {
       ...mediaRoutes,
+      transcriptionAccounting,
       resolver: {
         create: async (body) => {
           if (typeof body.model !== "string") return null;
@@ -5427,6 +5428,7 @@ export async function buildServer(
               providerName: target.value.providerName,
               providerModel: target.value.providerModel,
               providerAccount: p?.media_account_id ?? null,
+              pricing: catalog.get(alias)?.pricing.media,
               client: {
                 create: (request, signal, _account, providerRequestId) =>
                   create(request, { signal, providerRequestId }),

@@ -113,6 +113,8 @@ An invalid or unavailable result file returns HTTP 502; it is not reported as a 
 
 If creation returns HTTP 503 with `error.code: "outcome_unknown"`, retain `error.operation_id` and query `GET /v1/audio/transcription-jobs/operations/<operation ID>`. Do not submit the file again automatically. The operation returns `state` and `upstream_task_known`; if a known upstream ID can be recovered, it also returns the stable `request_id`. If the upstream ID was never received, recovery requires account-side reconciliation (核对上游任务). Provider 4xx rejection returns HTTP 400 with `upstream_rejected`; provider 5xx or lost responses remain uncertain and are never retried.
 
+The create route records status, timing, and request size. Complete request and response bodies are excluded from payload and session capture, including on errors, because the download URL can grant access to private media.
+
 ## Usage and pricing
 
 Verified Beijing list prices on 2026-11-16: `fun-asr` **CNY 0.00022 per input audio second**; `paraformer-v2` **CNY 0.00008 per input audio second**. Output is not billed. Use the provider's `usage.duration`, exposed unchanged and also as `usage.type: "duration"` / `usage.seconds`. Selected channels are billed separately; never substitute file duration or the final word timestamp. Missing usage stays unknown, and zero is retained.
@@ -121,7 +123,8 @@ Verified Beijing list prices on 2026-11-16: `fun-asr` **CNY 0.00022 per input au
 
 - The current official REST references specify one URL per task for both models. Helm rejects multi-URL requests; it does not create a batch of upstream tasks behind one ID.
 - The official inline vocabulary shape requires a weight for every word. No optional-weight/default-weight form is documented for Fun-ASR. Limits and model ownership of an existing `vocabulary_id` are checked by DashScope; Helm does not fetch or manage vocabulary lists. The docs do not establish how Fun-ASR combines inline and precompiled lists, so use one form at a time.
-- For `fun-asr`, the terminal poll can price the original creation from provider-reported billable seconds. USD reporting uses the exchange rate configured on the media price card. Repeated polls refer to the same creation. Spend-capped keys still require a pre-dispatch reservation and cannot use this asynchronous route.
+- Spend-capped file ASR requires a verified per-job ceiling for the selected provider account and an `X-Helm-Transcription-Operation` ID. Helm reserves the ceiling before dispatch. A confirmed unsent request releases it. A terminal result with provider-reported duration records normalized usage on the same receipt and retains the reservation with unknown cost. Later polls can fill missing usage. Polling does not derive a charge from a public list price or submit a second provider request. Without verified account-level pricing, keep the ceiling unset and admission remains disabled for spend-capped keys.
+- For uncapped `fun-asr` keys, the terminal poll can price the original creation from provider-reported billable seconds. USD reporting uses the exchange rate configured on the media price card. Repeated polls refer to the same creation.
 - Verification uses synthetic fixtures only. Account entitlement, actual recognition quality, presigned URL reachability and provider billing have not been tested with a real call.
 
 ## Official references

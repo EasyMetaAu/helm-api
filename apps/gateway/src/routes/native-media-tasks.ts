@@ -1,5 +1,10 @@
-import { randomUUID } from "node:crypto";
-import { createBlockedModelMatcher, type ResponsesRegistryRecord } from "@helm/core";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  createBlockedModelMatcher,
+  type ResponsesRegistryRecord,
+  SpeechAccountingError,
+} from "@helm/core";
+import { AudioTranscriptionResultSchema, type MediaSpendRecord } from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
@@ -52,7 +57,7 @@ function error(
       error: {
         type: "upstream_error",
         code,
-        message: code.replaceAll("_", " "),
+        message: code === "budget_exceeded" ? "usage budget exceeded" : code.replaceAll("_", " "),
         ...(operationId ? { operation_id: operationId } : {}),
       },
     },
@@ -116,6 +121,21 @@ export async function recoverNativeMediaOperation(
     ? binding.publicId
     : null;
 }
+
+// Keep internal task IDs in the existing UUID format, including for providers
+// that use the operation ID as their own task identity. Caller handles have a
+// distinct namespace and are scoped to the same account and key as the row.
+export const transcriptionJobOperationPattern =
+  /^asr_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function callerTranscriptionOperationId(id: string, identity: MessagesIdentity): string {
+  const hex = createHash("sha256")
+    .update(JSON.stringify(["transcription-job", identity.accountId, identity.keyId, id]))
+    .digest("hex");
+  const variant = ((Number.parseInt(hex.charAt(16), 16) & 3) | 8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export async function createNativeMediaTask(
   c: Context<AppEnv>,
   deps: VideosRouteDeps,
@@ -128,6 +148,7 @@ export async function createNativeMediaTask(
     errorClass: string | null,
     upstream: Record<string, unknown> | null,
   ) => Promise<void>,
+  callerOperation?: string,
   mediaBilling?: AsyncMediaBilling,
 ): Promise<Response> {
   const profile = target.nativeTask;
@@ -141,7 +162,12 @@ export async function createNativeMediaTask(
     return error(c, 503, "media_profile_unavailable");
   const now = deps.now ?? Date.now;
   const startedAt = now();
-  const operationId = randomUUID();
+  const operationId = callerOperation
+    ? callerTranscriptionOperationId(callerOperation, identity)
+    : randomUUID();
+  const receipt = callerOperation ?? operationId;
+  const accounting = deps.transcriptionAccounting;
+  const caps = identity.caps?.budget;
   const publicId = randomUUID();
   const binding: MediaTaskBinding = {
     version: 1,
@@ -181,9 +207,43 @@ export async function createNativeMediaTask(
   };
   try {
     if (!(await deps.registry.putIfAbsent(reservation)))
-      return error(c, 503, "registry_unavailable");
+      return callerOperation
+        ? error(c, 503, "outcome_unknown", receipt)
+        : error(c, 503, "registry_unavailable");
   } catch {
     return error(c, 503, "registry_unavailable");
+  }
+  let spend: MediaSpendRecord | undefined;
+  if (kind === "transcription" && (caps?.spendUsd ?? 0) > 0) {
+    try {
+      if (!accounting) throw new SpeechAccountingError("media_accounting_unavailable");
+      spend = await accounting.reserveAsync({
+        id: reservation.responseId,
+        keyId: identity.keyId,
+        alias: target.providerAlias,
+        model: target.providerModel,
+        accountId: target.providerAccount,
+        pricing: target.pricing,
+        caps,
+      });
+    } catch (cause) {
+      const code =
+        cause instanceof SpeechAccountingError ? cause.code : "media_accounting_unavailable";
+      try {
+        await deps.registry.put({
+          ...reservation,
+          status: operationStatus("not_sent", null, binding),
+        });
+      } catch {
+        return error(c, 503, "registry_unavailable", receipt);
+      }
+      return error(
+        c,
+        code === "budget_exceeded" ? 429 : code === "media_pricing_unavailable" ? 422 : 503,
+        code,
+        receipt,
+      );
+    }
   }
   let upstreamId: string | null = profile.clientAssignedRequestId ? operationId : null;
   try {
@@ -214,7 +274,7 @@ export async function createNativeMediaTask(
       try {
         await deps.settleBudget(
           identity.keyId,
-          identity.caps.budget,
+          spend ? { ...identity.caps.budget, spendUsd: null } : identity.caps.budget,
           { requests: 1, tokens: 0, costUsd: null },
           now(),
         );
@@ -249,12 +309,19 @@ export async function createNativeMediaTask(
       typeof cause === "object" &&
       "outcome" in cause &&
       cause.outcome === "not_sent";
+    if (spend) {
+      try {
+        await accounting?.markAsyncOutcome(spend, notSent);
+      } catch {
+        deps.log?.("media.transcription_accounting_failed", { operation_id: operationId });
+      }
+    }
     try {
       await deps.registry.put({
         ...reservation,
         status: operationStatus(
           rejected ? "rejected" : notSent ? "not_sent" : "outcome_unknown",
-          upstreamId,
+          rejected || notSent ? null : upstreamId,
           binding,
         ),
       });
@@ -270,7 +337,7 @@ export async function createNativeMediaTask(
       c,
       rejected ? 400 : 503,
       rejected ? "upstream_rejected" : notSent ? "upstream_not_sent" : "outcome_unknown",
-      operationId,
+      receipt,
     );
   }
 }
@@ -321,6 +388,26 @@ export async function pollNativeMediaTask(
       return error(c, 502, "missing_task_artifact");
     if (result.video && new URL(result.video.url).protocol !== "https:")
       return error(c, 502, "invalid_artifact_url");
+    if (kind === "transcription" && !["queued", "in_progress"].includes(result.status)) {
+      try {
+        const accounting = deps.transcriptionAccounting;
+        const spend = await accounting?.asyncReceipt(
+          `${kind}-create:${binding.operationId}`,
+          identity.keyId,
+        );
+        const usage = AudioTranscriptionResultSchema.shape.usage.safeParse(result.usage).data;
+        const duration = usage?.type === "duration" ? usage : undefined;
+        if (
+          spend &&
+          (spend.state === "reserved" ||
+            (spend.state === "outcome_unknown" && spend.usage === null && duration))
+        ) {
+          await accounting?.markAsyncOutcome(spend, false, duration);
+        }
+      } catch {
+        deps.log?.("media.transcription_accounting_failed", { operation_id: binding.operationId });
+      }
+    }
     if (
       result.status === "done" &&
       binding.mediaBilling &&
