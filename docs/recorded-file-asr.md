@@ -113,6 +113,8 @@ An invalid or unavailable result file returns HTTP 502; it is not reported as a 
 
 If creation returns HTTP 503 with `error.code: "outcome_unknown"`, retain `error.operation_id` and query `GET /v1/audio/transcription-jobs/operations/<operation ID>`. Do not submit the file again automatically. The operation returns `state` and `upstream_task_known`; if a known upstream ID can be recovered, it also returns the stable `request_id`. If the upstream ID was never received, recovery requires account-side reconciliation (核对上游任务). Provider 4xx rejection returns HTTP 400 with `upstream_rejected`; provider 5xx or lost responses remain uncertain and are never retried.
 
+The create route records status, timing, and request size. Complete request and response bodies are excluded from payload and session capture, including on errors, because the download URL can grant access to private media.
+
 ## Usage and pricing
 
 Verified Beijing list prices on 2026-11-16: `fun-asr` **CNY 0.00022 per input audio second**; `paraformer-v2` **CNY 0.00008 per input audio second**. Output is not billed. Use the provider's `usage.duration`, exposed unchanged and also as `usage.type: "duration"` / `usage.seconds`. Selected channels are billed separately; never substitute file duration or the final word timestamp. Missing usage stays unknown, and zero is retained.

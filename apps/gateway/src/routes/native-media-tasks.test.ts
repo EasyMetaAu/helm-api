@@ -8,10 +8,11 @@ const Failed = z.object({ error: z.object({ code: z.string(), operation_id: z.st
 
 import type { AppEnv } from "../app.js";
 import type { NativeMediaTaskProfile } from "./native-media-tasks.js";
+import type { RecordServedDeps } from "./payload-capture.js";
 import { registerMediaTaskRoutes, type VideoCreateTarget, type VideosRouteDeps } from "./videos.js";
 
 const fingerprint = "a".repeat(64);
-function setup(kind: "video" | "transcription" = "video") {
+function setup(kind: "video" | "transcription" = "video", record?: RecordServedDeps) {
   let now = 1000;
   let key = "key-a";
   let currentFingerprint = fingerprint;
@@ -50,6 +51,7 @@ function setup(kind: "video" | "transcription" = "video") {
     records.set(r.responseId, r);
   });
   const deps: VideosRouteDeps = {
+    record,
     auth: { resolve: async () => ({ accountId: "owner", keyId: key }) },
     resolver: {
       create: async () => target,
@@ -101,6 +103,56 @@ function setup(kind: "video" | "transcription" = "video") {
   };
 }
 describe("native media task route", () => {
+  it.each([
+    [false, true],
+    [true, true],
+    [true, false],
+  ])("omits signed ASR content (error: %s, capture enabled: %s)", async (failed, capture) => {
+    const enqueueTelemetry = vi.fn();
+    const enqueuePayload = vi.fn();
+    const enqueueSession = vi.fn();
+    const t = setup("transcription", {
+      now: () => 1000,
+      redact: (value: unknown) => value,
+      capturePayloads: () => capture,
+      captureSessions: () => capture,
+      writes: { enqueueTelemetry, enqueuePayload, enqueueSession },
+    } as unknown as RecordServedDeps);
+    const fileUrl = "https://files.example.test/sound.wav?signature=private-capability";
+    if (failed) t.create.mockRejectedValueOnce(new Error("connection lost"));
+    else t.create.mockImplementationOnce(async () => ({ id: "upstream-1", echoedUrl: fileUrl }));
+    const body = JSON.stringify({
+      model: "video-standard",
+      prompt: "fixture",
+      input: { file_url: fileUrl },
+    });
+    const res = await t.app.request(t.root, {
+      method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(failed ? 503 : 200);
+    expect(t.create).toHaveBeenCalledWith(
+      expect.objectContaining({ input: { file_url: fileUrl } }),
+      expect.any(AbortSignal),
+      undefined,
+      undefined,
+    );
+    expect(enqueueTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          request_content_mode: "none",
+          request_body_bytes: Buffer.byteLength(body),
+        }),
+      }),
+    );
+    expect(enqueuePayload).not.toHaveBeenCalled();
+    expect(enqueueSession).not.toHaveBeenCalled();
+    expect(JSON.stringify([...t.records.values(), ...enqueueTelemetry.mock.calls])).not.toContain(
+      "private-capability",
+    );
+  });
+
   it.each([
     "video",
     "transcription",

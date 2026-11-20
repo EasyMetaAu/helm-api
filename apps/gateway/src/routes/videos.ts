@@ -526,7 +526,10 @@ export function registerMediaTaskRoutes(
     const now = deps.now ?? Date.now;
     const startedAt = now();
     const upstreamBody = isArk || isNative ? body : normalizeVideoCreateBody(body, operation);
-    const upstreamRequestJson = JSON.stringify({ ...upstreamBody, model: target.providerModel });
+    const omitContent = kind === "transcription";
+    const upstreamRequestJson = omitContent
+      ? null
+      : JSON.stringify({ ...upstreamBody, model: target.providerModel });
     const recordStart = async (
       status: "ok" | "error",
       errorClass: string | null,
@@ -560,9 +563,13 @@ export function registerMediaTaskRoutes(
                   ? ((response as Record<string, unknown>)[isArk ? "id" : "request_id"] as string)
                   : undefined,
             }),
-            requestJson,
+            requestJson: omitContent ? "" : requestJson,
+            requestBodyBytes: omitContent ? Buffer.byteLength(requestJson, "utf8") : undefined,
+            omitContent,
             responseJson:
-              status === "ok" && captureEnabled(captureRecord) ? JSON.stringify(response) : null,
+              !omitContent && status === "ok" && captureEnabled(captureRecord)
+                ? JSON.stringify(response)
+                : null,
             timedOut: requestTimedOut(c),
             upstreamRequestJson,
           },
