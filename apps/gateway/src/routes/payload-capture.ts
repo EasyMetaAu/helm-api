@@ -742,6 +742,8 @@ export async function recordServed(
     requestBodyBytes?: number;
     responseJson: string | null;
     timedOut?: boolean;
+    // The accepted task can be polled immediately after the create response.
+    awaitTelemetry?: boolean;
     // The exact body forwarded upstream (post inject + translation); null when no
     // provider served or capture context lacks it.
     upstreamRequestJson?: string | null;
@@ -793,11 +795,20 @@ export async function recordServed(
   // independent of anything that touches the decision later.
   const w = deps.writes;
   if (w !== undefined) {
-    await w.enqueueTelemetry({
+    const input = {
       decision: redactDecisionForTelemetry(deps.redact, decision),
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
-    });
+    };
+    if (args.awaitTelemetry) {
+      try {
+        await deps.telemetry.insert(input);
+      } catch {
+        log("telemetry.insert_failed");
+      }
+    } else {
+      await w.enqueueTelemetry(input);
+    }
     await queueOrPersistSessionRequest(captureDeps, sessionArgs, log);
     if (captureEnabled(captureDeps)) {
       const generation = captureDeps.captureGeneration?.();

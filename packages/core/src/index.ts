@@ -18,6 +18,7 @@ export {
   hashKey,
   KEY_PREFIX,
 } from "./auth/keygen.js";
+export { type NativeImageCost, priceArkImage, priceQwenImage } from "./budget/image-accounting.js";
 export {
   activeDims,
   type BudgetCaps,

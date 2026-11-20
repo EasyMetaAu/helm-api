@@ -5,6 +5,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
+import { type AsyncMediaBilling, applyAsyncMediaCost } from "./async-media-cost.js";
 import {
   decodeMediaTaskBinding,
   encodeMediaTaskBinding,
@@ -35,6 +36,10 @@ export interface NativeMediaTaskProfile {
     upstreamId: string,
     model: string,
   ): Record<string, unknown> | null;
+  materialize?(
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>>;
 }
 function error(
   c: Context<AppEnv>,
@@ -123,6 +128,7 @@ export async function createNativeMediaTask(
     errorClass: string | null,
     upstream: Record<string, unknown> | null,
   ) => Promise<void>,
+  mediaBilling?: AsyncMediaBilling,
 ): Promise<Response> {
   const profile = target.nativeTask;
   if (
@@ -153,6 +159,7 @@ export async function createNativeMediaTask(
     state: "queued",
     queryExpiresAt: startedAt + profile.queryTtlMs,
     artifactExpiresAt: null,
+    mediaBilling,
   };
   const reservation: ResponsesRegistryRecord = {
     responseId: `${kind}-create:${operationId}`,
@@ -304,15 +311,41 @@ export async function pollNativeMediaTask(
   )
     return error(c, 409, "task_provider_changed");
   try {
-    const raw = await client.retrieve(binding.upstreamId, requestSignal(c));
+    const signal = requestSignal(c);
+    const raw = await client.retrieve(binding.upstreamId, signal);
     const normalized = client.nativeTask.normalize(raw, binding.upstreamId, binding.providerModel);
     const parsed = ResultSchema.safeParse(normalized);
     if (!parsed.success) return error(c, 502, "invalid_task_result");
-    const result = parsed.data;
+    let result = parsed.data;
     if (result.status === "done" && (kind === "video" ? !result.video : !result.transcription))
       return error(c, 502, "missing_task_artifact");
     if (result.video && new URL(result.video.url).protocol !== "https:")
       return error(c, 502, "invalid_artifact_url");
+    if (
+      result.status === "done" &&
+      binding.mediaBilling &&
+      ((kind === "video" &&
+        ((binding.profile === "bailian" && binding.mediaBilling.profile === "wan") ||
+          (binding.profile === "minimax" && binding.mediaBilling.profile === "minimax"))) ||
+        (kind === "transcription" &&
+          binding.profile === "bailian" &&
+          binding.mediaBilling.profile === "fun-asr"))
+    ) {
+      await applyAsyncMediaCost(
+        deps,
+        record,
+        kind,
+        binding.mediaBilling,
+        raw,
+        (deps.now ?? Date.now)(),
+      );
+    }
+    if (client.nativeTask.materialize && result.status === "done") {
+      const enriched = await client.nativeTask.materialize(raw, signal);
+      result = ResultSchema.parse(
+        client.nativeTask.normalize(enriched, binding.upstreamId, binding.providerModel),
+      );
+    }
     try {
       await deps.registry.put({
         ...record,

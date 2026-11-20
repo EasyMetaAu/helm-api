@@ -8,7 +8,7 @@ const ConditionsSchema = z
     mode: z.enum(["single_image", "layer_decomposition"]).optional(),
     pixelsLte: z.number().int().positive().optional(),
     pixelsGt: z.number().int().nonnegative().optional(),
-    resolution: z.enum(["480p", "720p", "1080p"]).optional(),
+    resolution: z.enum(["480p", "720p", "1080p", "4k"]).optional(),
     hasInputVideo: z.boolean().optional(),
     resolutionClass: z.enum(["1k", "2k"]).optional(),
     outputResolution: z.enum(["480P", "720P", "768P", "1080P", "2K"]).optional(),

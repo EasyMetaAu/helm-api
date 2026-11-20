@@ -335,6 +335,20 @@ export interface InsertTelemetryInput {
   createdAt: Date;
 }
 
+export interface ApplyAsyncMediaCostInput {
+  requestId: string;
+  keyId: string;
+  kind: "video" | "transcription";
+  providerAlias: string;
+  providerName: string;
+  providerModel: string;
+  providerAccount: string | null;
+  taskCreatedAt: number;
+  observedAt: number;
+  cost: NonNullable<DecisionRecord["media_cost"]>;
+  completionTokens?: number;
+}
+
 // Full request/response body capture (admin "System Settings" → capture_payloads).
 // Stored in a SEPARATE table from the decision record so it prunes independently
 // (payload_retention_days) and never bloats the decision JSON. Unlike telemetry,
@@ -670,6 +684,8 @@ export interface TelemetryKeyUsage {
 
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
+  /** Apply the final charge to the owned create decision once. */
+  applyAsyncMediaCost?(input: ApplyAsyncMediaCostInput): Promise<boolean>;
   // Optional batch variants (perf): collapse N rows into ONE commit on the
   // synchronous SQLite writer, mirroring MemoryStore.appendMessages. The deferred
   // write queue prefers these; adapters lacking them fall back to per-row insert.

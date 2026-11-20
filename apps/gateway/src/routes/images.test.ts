@@ -1,5 +1,6 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { createArkMediaClient, UpstreamError } from "@helm/core";
+import type { MediaPricing } from "@helm/shared";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
@@ -719,6 +720,7 @@ describe("Ark Seedream image generation", () => {
       error?: Error;
       result?: Record<string, unknown>;
       priced?: boolean;
+      mediaPricing?: MediaPricing;
     } = {},
   ) {
     const result = options.result ?? {
@@ -765,6 +767,7 @@ describe("Ark Seedream image generation", () => {
         ],
       }),
       isPriced: options.priced === undefined ? undefined : () => options.priced === true,
+      mediaPricing: () => options.mediaPricing,
       costOf,
     });
     return { ...fixture, create, fallback, imageEdit, result, costOf };
@@ -884,6 +887,38 @@ describe("Ark Seedream image generation", () => {
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({ error: { code: "media_pricing_unavailable" } });
     expect(fixture.create).not.toHaveBeenCalled();
+  });
+  it("records the list price and USD cost against the served Ark image", async () => {
+    const fixture = arkSetup(flash, {
+      mediaPricing: {
+        providerModel: flash,
+        currency: "CNY",
+        billing: { usdPerCurrencyUnit: 0.125 },
+        region: "cn-beijing",
+        source: "https://example.com/pricing",
+        basis: "official_list_price",
+        verifiedOn: "2026-11-20",
+        notes: [],
+        rates: [
+          { direction: "input", unit: "image", price: 0, conditions: {} },
+          { direction: "output", unit: "image", price: 0.12, conditions: {} },
+        ],
+      },
+    });
+    const res = await post(fixture.app, { model: "seedream-flash", prompt: "x" });
+    expect(res.status).toBe(200);
+    expect(fixture.enqueueTelemetry.mock.calls[0]?.[0].decision).toMatchObject({
+      final: { model_alias: "ark-primary" },
+      cost_breakdown: { total_usd: 0.015 },
+      media_cost: {
+        currency: "CNY",
+        amount: 0.12,
+        cost_usd: 0.015,
+        basis: "official_list_price",
+        verified_on: "2026-11-20",
+      },
+    });
+    expect(fixture.costOf).not.toHaveBeenCalled();
   });
   it("rejects a plain image returned for layer decomposition without replay", async () => {
     const fixture = arkSetup();

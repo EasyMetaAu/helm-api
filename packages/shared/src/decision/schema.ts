@@ -341,6 +341,15 @@ export const DecisionRecordSchema = z.object({
     completion_usd: null,
     total_usd: null,
   }),
+  media_cost: z
+    .strictObject({
+      currency: z.enum(["CNY", "USD"]),
+      amount: z.number().nonnegative(),
+      cost_usd: z.number().nonnegative().nullable(),
+      basis: z.literal("official_list_price"),
+      verified_on: z.iso.date(),
+    })
+    .optional(),
   // Memory inject observability (docs/08) — stamped by the gateway AFTER routing
   // (see MemoryDecisionSchema). `.default(null)` keeps the routing core's
   // builders and all pre-existing records valid without knowing about memory.
