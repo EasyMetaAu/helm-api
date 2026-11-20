@@ -4,7 +4,11 @@ import {
   type ResponsesRegistryRecord,
   SpeechAccountingError,
 } from "@helm/core";
-import { AudioTranscriptionResultSchema, type MediaSpendRecord } from "@helm/shared";
+import {
+  AudioTranscriptionResultSchema,
+  BailianTranscriptionRequestSchema,
+  type MediaSpendRecord,
+} from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
@@ -217,12 +221,24 @@ export async function createNativeMediaTask(
   if (kind === "transcription" && (caps?.spendUsd ?? 0) > 0) {
     try {
       if (!accounting) throw new SpeechAccountingError("media_accounting_unavailable");
+      let channelCount: number | undefined;
+      if (target.pricing?.billing?.asyncJobCeiling?.maxChannels !== undefined) {
+        if (profile.profile !== "bailian")
+          throw new SpeechAccountingError("media_pricing_unavailable");
+        const parsed = BailianTranscriptionRequestSchema.safeParse({
+          ...body,
+          model: target.providerModel,
+        });
+        if (!parsed.success) throw new SpeechAccountingError("media_pricing_unavailable");
+        channelCount = parsed.data.parameters?.channel_id?.length ?? 1;
+      }
       spend = await accounting.reserveAsync({
         id: reservation.responseId,
         keyId: identity.keyId,
         alias: target.providerAlias,
         model: target.providerModel,
         accountId: target.providerAccount,
+        channelCount,
         pricing: target.pricing,
         caps,
       });

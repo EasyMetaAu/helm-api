@@ -6,7 +6,7 @@ import {
   type ResponsesRegistryRecord,
   SqliteBudgetStore,
 } from "@helm/core";
-import { MediaPricingSchema } from "@helm/shared";
+import { BailianTranscriptionRequestSchema, MediaPricingSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -124,6 +124,80 @@ function setup(kind: "video" | "transcription" = "video", record?: RecordServedD
   };
 }
 describe("native media task route", () => {
+  it.each([
+    "fun-asr",
+    "qwen3-asr-flash-filetrans",
+  ])("enforces the priced channel limit for %s before dispatching", async (model) => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const t = setup("transcription");
+      t.target.providerModel = model;
+      t.profile.validate = (body, model) =>
+        BailianTranscriptionRequestSchema.parse({ ...body, model });
+      const accounting = createTranscriptionAccounting(new SqliteBudgetStore(db), {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      t.deps.transcriptionAccounting = accounting;
+      t.setBudget({
+        requests: null,
+        tokens: null,
+        spendUsd: 1,
+        windowSeconds: 86400,
+        behavior: "reject",
+        degradeLane: null,
+        admittedAtMs: Date.now(),
+      });
+      t.target.pricing = MediaPricingSchema.parse({
+        currency: "USD",
+        region: "fixture",
+        providerModel: t.target.providerModel,
+        basis: "official_list_price",
+        source: "https://example.test/price",
+        verifiedOn: "2026-11-20",
+        rates: [{ direction: "input_audio", unit: "second", price: 0.001, conditions: {} }],
+        notes: [],
+        billing: { asyncJobCeiling: { accountId: "account-a", costUsd: 0.3, maxChannels: 1 } },
+      });
+      const post = (id: string, channels?: number[]) =>
+        t.app.request(t.root, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test",
+            "content-type": "application/json",
+            "X-Helm-Transcription-Operation": id,
+          },
+          body: JSON.stringify({
+            model: "video-standard",
+            input:
+              model === "fun-asr"
+                ? { file_urls: ["https://example.test/sample.wav"] }
+                : { file_url: "https://example.test/sample.wav" },
+            ...(channels ? { parameters: { channel_id: channels } } : {}),
+          }),
+        });
+      const rejected = "asr_86fad6c3-43de-44c9-925d-ce79d88c6651";
+      const response = await post(rejected, [0, 1]);
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({ error: { code: "media_pricing_unavailable" } });
+      expect(t.create).not.toHaveBeenCalled();
+      const lookup = await t.app.request(t.root + "/operations/" + rejected);
+      expect(await lookup.json()).toMatchObject({ state: "not_sent" });
+      const reserve = vi.spyOn(accounting, "reserveAsync");
+      expect((await post("asr_86fad6c3-43de-44c9-925d-ce79d88c6652")).status).toBe(200);
+      expect(reserve).toHaveBeenLastCalledWith(expect.objectContaining({ channelCount: 1 }));
+      expect((await post("asr_86fad6c3-43de-44c9-925d-ce79d88c6653", [1])).status).toBe(200);
+      expect(t.create).toHaveBeenCalledTimes(2);
+      const originalProfile = t.profile.profile;
+      t.profile.profile = "doubao";
+      expect((await post("asr_86fad6c3-43de-44c9-925d-ce79d88c6654", [0])).status).toBe(422);
+      expect(t.create).toHaveBeenCalledTimes(2);
+      t.profile.profile = originalProfile;
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it("reserves a proven per-job ceiling before any paid POST and retains unknown cost", async () => {
     const db = createSqliteDb(":memory:");
     try {
