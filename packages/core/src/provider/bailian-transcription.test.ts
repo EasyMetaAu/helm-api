@@ -182,6 +182,35 @@ describe("Bailian recorded-file transcription", () => {
     expect(download).toHaveBeenCalledWith("https://cdn.example/result.json", { signal: undefined });
   });
 
+  it.each([0, 3, 3.56])("normalizes Qwen Filetrans native seconds %s", (seconds) => {
+    const result = normalizeBailianTranscription(
+      { ...completed, usage: { seconds } },
+      "task-1",
+      "qwen3-asr-flash-filetrans",
+    );
+    expect(result?.usage).toEqual({ type: "duration", seconds });
+  });
+
+  it.each([
+    -1,
+    "3",
+    null,
+    Number.POSITIVE_INFINITY,
+  ])("rejects malformed Qwen seconds %s", (seconds) => {
+    expect(
+      normalizeBailianTranscription(
+        { ...completed, usage: { seconds } },
+        "task-1",
+        "qwen3-asr-flash-filetrans",
+      ),
+    ).toBeNull();
+  });
+
+  it("does not infer Qwen usage from duration or transcript timestamps", () => {
+    const result = normalizeBailianTranscription(completed, "task-1", "qwen3-asr-flash-filetrans");
+    expect(result?.usage).toEqual({ duration: 2 });
+  });
+
   it("preserves partial failures and fetches only successful files", async () => {
     const download = vi.fn(async () => transcript);
     const raw = await materializeBailianTranscription(

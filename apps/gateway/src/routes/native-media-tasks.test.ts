@@ -198,7 +198,10 @@ describe("native media task route", () => {
     }
   });
 
-  it("reserves a proven per-job ceiling before any paid POST and retains unknown cost", async () => {
+  it.each([
+    "normalized",
+    "qwen-native",
+  ])("reserves a proven per-job ceiling and retains %s usage with unknown cost", async (usageFormat) => {
     const db = createSqliteDb(":memory:");
     try {
       const t = setup("transcription");
@@ -276,10 +279,28 @@ describe("native media task route", () => {
       });
       const usage = { type: "duration", seconds: 3.56 };
       const normalize = t.profile.normalize;
-      t.profile.normalize = (body, id, model) => ({
-        ...normalize(body, id, model),
-        usage: { ...usage, privateField: "must not be retained" },
-      });
+      t.profile.normalize =
+        usageFormat === "qwen-native"
+          ? (_body, id) =>
+              normalizeBailianTranscription(
+                {
+                  output: {
+                    task_id: id,
+                    task_status: "SUCCEEDED",
+                    result: {
+                      transcription_url: "https://cdn.example/transcript.json",
+                      transcript: { text: "hello" },
+                    },
+                  },
+                  usage: { seconds: 3.56, privateField: "must not be retained" },
+                },
+                id,
+                "qwen3-asr-flash-filetrans",
+              )
+          : (body, id, model) => ({
+              ...normalize(body, id, model),
+              usage: { ...usage, privateField: "must not be retained" },
+            });
       expect((await poll()).status).toBe(200);
       expect(await read(third)).toMatchObject({
         state: "accepted",
