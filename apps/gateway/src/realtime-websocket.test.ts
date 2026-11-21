@@ -5,6 +5,7 @@ import { makeHelmError } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { HelmHttpError } from "./middleware/error-handler.js";
+import { OAuthEgressError } from "./oauth/account-settings.js";
 import { createRealtimeCallRegistry } from "./realtime-call-registry.js";
 import {
   installRealtimeWebSocketBridge,
@@ -448,4 +449,55 @@ it("passes the original User-Agent to admission and rejects policy violations be
   expect(response.statusCode).toBe(403);
   expect(resolveKey).toHaveBeenCalledWith("helm-key", "curl/8");
   expect(registry.take("restricted", "key-1").ok).toBe(true);
+});
+
+it("discards a sideband ticket if egress changes while headers are pending", async () => {
+  const upstream = await listeningServer();
+  let connections = 0;
+  upstream.server.on("upgrade", (_req, socket) => {
+    connections += 1;
+    socket.destroy();
+  });
+  const gateway = await listeningServer();
+  const registry = createRealtimeCallRegistry();
+  let current = true;
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((r) => {
+    release = r;
+  });
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  registry.put("rtc_stale", "key-1", {
+    url: `ws://127.0.0.1:${upstream.port}/v1/realtime`,
+    assertCurrent: () => {
+      if (!current) throw new OAuthEgressError("egress changed");
+    },
+    headers: async () => {
+      entered();
+      await pending;
+      return {};
+    },
+  });
+  const bridge = installRealtimeWebSocketBridge({
+    server: gateway.server,
+    registry,
+    resolveKey: async () => "key-1",
+  });
+  closers.push(() => bridge.close());
+  const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_stale`, {
+    headers: { Authorization: "Bearer test" },
+  });
+  client.on("error", () => {});
+  const rejected = once(client, "unexpected-response");
+  await started;
+  current = false;
+  release();
+  const [, response] = (await rejected) as [unknown, { statusCode: number; resume(): void }];
+  expect(response.statusCode).toBe(503);
+  response.resume();
+  client.terminate();
+  expect(connections).toBe(0);
+  expect(registry.take("rtc_stale", "key-1").ok).toBe(false);
 });

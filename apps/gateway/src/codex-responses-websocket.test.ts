@@ -618,3 +618,10 @@ describe("createCodexResponsesWebSocketConnector", () => {
     );
   });
 });
+
+it("delegates SOCKS5 target DNS to the proxy for WebSocket connections", () => {
+  const agent = codexWebSocketAgent({ type: "socks5", host: "127.0.0.1", port: 1080 });
+  expect(agent).toBeInstanceOf(SocksProxyAgent);
+  expect(Reflect.get(agent!, "shouldLookup")).toBe(false);
+  agent?.destroy();
+});

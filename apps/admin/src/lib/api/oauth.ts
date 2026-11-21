@@ -311,11 +311,17 @@ export async function startManualPaste(
   proxy?: AccountProxyInput,
   account?: string,
   timezone?: string | null,
+  createOnly?: boolean,
 ): Promise<{ sessionId: string; authorizeUrl: string }> {
   const res = await fetch(`${BASE}/${provider}/manual/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ proxy, timezone, ...(account ? { account } : {}) }),
+    body: JSON.stringify({
+      proxy,
+      timezone,
+      ...(createOnly ? { createOnly: true } : {}),
+      ...(account ? { account } : {}),
+    }),
   });
   return asJson(res);
 }
@@ -341,6 +347,7 @@ export async function startDeviceCode(
   proxy?: AccountProxyInput,
   account?: string,
   timezone?: string | null,
+  createOnly?: boolean,
 ): Promise<{
   sessionId: string;
   userCode: string;
@@ -352,7 +359,13 @@ export async function startDeviceCode(
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enterprise, proxy, timezone, ...(account ? { account } : {}) }),
+    body: JSON.stringify({
+      enterprise,
+      proxy,
+      timezone,
+      ...(createOnly ? { createOnly: true } : {}),
+      ...(account ? { account } : {}),
+    }),
   });
   return asJson(res);
 }

@@ -766,6 +766,7 @@ export {
   oauthRefreshQueueDepth,
   type PresetOAuth,
   type ResolvedOAuth,
+  replaceOAuthCredential,
   type TokenManager,
   type TokenManagerDeps,
   TokenRefreshError,

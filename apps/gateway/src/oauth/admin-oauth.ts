@@ -38,6 +38,7 @@ import {
   pollCopilotDeviceOnce,
   pollXaiDeviceOnce,
   refreshGitHubCopilotToken,
+  replaceOAuthCredential,
   resolveXaiGrokClientVersion,
   validateProxyConfig,
   XAI_GROK_OAUTH_BASE_URL,
@@ -66,12 +67,14 @@ import type {
 } from "../routes/admin/deps.js";
 import {
   type AccountSettings,
+  captureAccountEgress,
   clearAccountCredentialFailure,
   clearAccountDiscoveredModels,
   clearAccountSettings,
   getAccountSettings,
+  guardAccountFetch,
+  invalidateAccountEgress,
   loadAccountSettings,
-  loadAccountSettingsForMutation,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
@@ -80,6 +83,7 @@ import {
   selectAccountModels,
   setAccountSettings,
   setGlobalOAuthSettings,
+  withAccountMutation,
 } from "./account-settings.js";
 import { getAccountTimezone } from "./account-timezone.js";
 import { createAnthropicPlanAccess } from "./anthropic-plan.js";
@@ -280,30 +284,47 @@ const MANUAL_FLOWS: Record<
 // Each login session pins its egress proxy (when the operator entered one in the
 // connect dialog's first step) so EVERY network call of the flow — and the persisted
 // account settings — use it (issue #38). `proxy` undefined ⇒ direct connection.
-type Session =
-  | {
-      kind: "manual";
-      providerId: string;
-      account?: string;
-      verifier: string;
-      state: string;
-      proxy?: ProxyConfig;
-      timezone?: string | null;
-      createdAt: number;
-    }
-  | {
-      kind: "device";
-      providerId: string;
-      account?: string;
-      deviceCode: string;
-      domain?: string;
-      tokenEndpoint?: string;
-      enterpriseDomain?: string;
-      proxy?: ProxyConfig;
-      timezone?: string | null;
-      createdAt: number;
-      expiresAt: number;
-    };
+export class OAuthSessionConflict extends Error {
+  readonly status = 409;
+  constructor(
+    message = "OAuth account proxy changed; restart authorization with the current settings",
+    readonly code = "oauth_proxy_changed",
+  ) {
+    super(message);
+  }
+}
+type SessionBinding = {
+  account: string;
+  assertCurrent: () => void;
+  persistProxy: boolean;
+  createOnly: boolean;
+};
+type Session = SessionBinding &
+  (
+    | {
+        kind: "manual";
+        providerId: string;
+        account?: string;
+        verifier: string;
+        state: string;
+        proxy?: ProxyConfig;
+        timezone?: string | null;
+        createdAt: number;
+      }
+    | {
+        kind: "device";
+        providerId: string;
+        account?: string;
+        deviceCode: string;
+        domain?: string;
+        tokenEndpoint?: string;
+        enterpriseDomain?: string;
+        proxy?: ProxyConfig;
+        timezone?: string | null;
+        createdAt: number;
+        expiresAt: number;
+      }
+  );
 
 export interface OAuthAdminDeps {
   store: OAuthTokenStore;
@@ -458,18 +479,44 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     return next;
   }
 
-  async function reconnectProxy(
+  async function bindAccount(
     providerId: string,
     account: string,
-  ): Promise<ProxyConfig | undefined> {
-    const stored = getAccountSettings(
-      await loadAccountSettingsForMutation(deps.config, deps.encKey),
-      providerId,
-      account,
-    ).proxy;
-    if (stored) validateProxyConfig(stored);
-    return stored;
+    input?: AccountProxyInput,
+    createOnly = false,
+  ): Promise<SessionBinding & { proxy?: ProxyConfig }> {
+    return withAccountMutation(deps.config, providerId, account, async () => {
+      const settings = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      );
+      if (createOnly && (await deps.store.get(providerId, account)))
+        throw new OAuthSessionConflict("Account already exists; use Reconnect", "account_exists");
+      const guard = captureAccountEgress(deps.config, providerId, account, settings.proxy);
+      return {
+        account,
+        proxy: input ? toProxy(input) : settings.proxy,
+        persistProxy: input !== undefined,
+        createOnly,
+        assertCurrent: () => {
+          try {
+            guard();
+          } catch {
+            throw new OAuthSessionConflict();
+          }
+        },
+      };
+    });
   }
+  const sessionFetch = (s: SessionBinding & { proxy?: ProxyConfig }) =>
+    guardAccountFetch(makeFetch(s.proxy), s.assertCurrent);
+  const accountFetch = (providerId: string, account: string, proxy?: ProxyConfig) =>
+    guardAccountFetch(
+      makeFetch(proxy),
+      captureAccountEgress(deps.config, providerId, account, proxy),
+    );
+
   // Persist the bind-time proxy to the account settings so refresh + execution +
   // quota reuse it (the SAME blob resolveProviderProxy reads) — true 全程 coverage.
   async function persistProxy(
@@ -575,18 +622,18 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         .filter(isRoutableXaiOAuthModel)
         .map((model) => model.id);
       try {
-        const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+        const doAccountFetch = accountFetch(providerId, account, settings.proxy);
         const tm = createTokenManager({
           oauth: { kind: "preset", providerId, account },
           tokenStore: deps.store,
           encKey: deps.encKey,
           oauthProvider: provider,
-          fetch: accountFetch,
+          fetch: doAccountFetch,
           now,
         });
         const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
         const metadata = tm.currentMetadata();
-        const live = await listXaiOAuthModels(accessToken, accountFetch, {
+        const live = await listXaiOAuthModels(accessToken, doAccountFetch, {
           identity: {
             userId: identityString(metadata.accountId),
             email: identityString(metadata.email),
@@ -606,17 +653,17 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       const available = await modelDiscoveryCache.load(
         discoveryKey,
         async () => {
-          const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+          const doAccountFetch = accountFetch(providerId, account, settings.proxy);
           const tm = createTokenManager({
             oauth: { kind: "preset", providerId, account },
             tokenStore: deps.store,
             encKey: deps.encKey,
             oauthProvider: provider,
-            fetch: accountFetch,
+            fetch: doAccountFetch,
             now,
           });
           const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-          return discoverOAuthModels(providerId, accessToken, accountFetch, {
+          return discoverOAuthModels(providerId, accessToken, doAccountFetch, {
             fallbackToCurated: false,
           });
         },
@@ -639,13 +686,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       return { available, entitled: available };
     }
     try {
-      const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+      const doAccountFetch = accountFetch(providerId, account, settings.proxy);
       const tm = createTokenManager({
         oauth: { kind: "preset", providerId, account },
         tokenStore: deps.store,
         encKey: deps.encKey,
         oauthProvider: provider,
-        fetch: accountFetch,
+        fetch: doAccountFetch,
         now,
       });
       const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
@@ -669,7 +716,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
               isFedramp: currentIdentity.isFedramp,
               clientVersion,
               userAgent,
-              fetchImpl: accountFetch,
+              fetchImpl: doAccountFetch,
               signal,
             });
           },
@@ -679,7 +726,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         const modelSets = codexModelSets(snapshot.models);
         return { available: modelSets.visible, entitled: modelSets.entitled };
       }
-      const available = await discoverOAuthModels(providerId, accessToken, accountFetch, {
+      const available = await discoverOAuthModels(providerId, accessToken, doAccountFetch, {
         fallbackToCurated: false,
       });
       const expanded = expandOpenAICodexModelAliases(available);
@@ -741,7 +788,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         throw new Error("failed to clear the previous account model snapshot");
       }
     }
-    await deps.store.upsert({
+    await replaceOAuthCredential(deps.store, {
       providerId,
       account,
       accessEnc: encryptSecret(creds.access, deps.encKey),
@@ -754,6 +801,23 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     // upstream identity. Never let that new credential inherit the old identity's
     // positive OR negative quota cache entry.
     invalidateQuotaCache(providerId, account);
+  }
+
+  async function completeBinding(
+    sessionId: string,
+    s: Session,
+    creds: OAuthCredentials,
+  ): Promise<void> {
+    await withAccountMutation(deps.config, s.providerId, s.account, async () => {
+      s.assertCurrent();
+      if (s.createOnly && (await deps.store.get(s.providerId, s.account)))
+        throw new OAuthSessionConflict("Account already exists; use Reconnect", "account_exists");
+      await persistProxy(s.providerId, s.account, s.persistProxy ? s.proxy : undefined, s.timezone);
+      await persist(s.providerId, s.account, creds);
+      invalidateAccountEgress(deps.config, s.providerId, s.account);
+      await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, s.account);
+      sessions.delete(sessionId);
+    });
   }
 
   // Ensure a stored account's access token is fresh — the SAME lazy refresh the
@@ -783,7 +847,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       tokenStore: deps.store,
       encKey: deps.encKey,
       oauthProvider: provider,
-      fetch: makeFetch(proxy),
+      fetch: accountFetch(providerId, account, proxy),
       now,
     });
     let healthy = true;
@@ -944,7 +1008,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       ANTHROPIC,
       account,
     ).proxy as ProxyConfig | undefined;
-    const doFetch = makeFetch(proxy);
+    const doFetch = accountFetch(ANTHROPIC, account, proxy);
     const tm = createTokenManager({
       oauth: { kind: "preset", providerId: ANTHROPIC, account },
       tokenStore: deps.store,
@@ -1020,7 +1084,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       });
     },
 
-    async startManualPaste({ providerId, account, proxy, timezone }) {
+    async startManualPaste({ providerId, account = "default", proxy, timezone, createOnly }) {
       if (timezone != null) IanaTimezoneSchema.parse(timezone);
       const flow = MANUAL_FLOWS[providerId];
       if (!flow) {
@@ -1030,27 +1094,26 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // Validate the proxy up-front (fail-closed) and pin it to the session. begin()
       // is a pure URL build (no network), so the only flow call that egresses — the
       // token exchange in complete — already has the proxy.
-      const pinned = account && !proxy ? await reconnectProxy(providerId, account) : toProxy(proxy);
+      const binding = await bindAccount(providerId, account, proxy, createOnly);
       ensureSessionCapacity();
       const { authorizeUrl, verifier, state } = flow.begin();
       const sessionId = genId();
       sessions.set(sessionId, {
         kind: "manual",
         providerId,
-        account,
+        ...binding,
         verifier,
         state,
-        proxy: pinned,
         timezone,
         createdAt: now(),
       });
       return { sessionId, authorizeUrl };
     },
 
-    async completeManualPaste({ sessionId, redirectInput, account }) {
+    async completeManualPaste({ sessionId, redirectInput, account, providerId }) {
       const s = take(sessionId);
       if (s.kind !== "manual") throw new Error("wrong flow for this session");
-      if (s.account !== undefined && s.account !== account)
+      if (s.account !== account || (providerId !== undefined && s.providerId !== providerId))
         throw new Error("reconnect account mismatch");
       const flow = MANUAL_FLOWS[s.providerId];
       if (!flow)
@@ -1058,20 +1121,19 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // Token exchange tunnels through the session's proxy — never the real IP.
       const creds = await flow.complete(
         { redirectInput, verifier: s.verifier, state: s.state },
-        makeFetch(s.proxy),
+        sessionFetch(s),
       );
-      // Persist the proxy BEFORE the token (fail-closed ordering): if the settings
-      // write fails, the token is NOT bound, so the operator retries rather than
-      // ending up with an account routed directly despite picking a proxy. A token
-      // write that fails afterward leaves only an orphan proxy setting (no token =
-      // not routable) — harmless, and overwritten by the next successful bind.
-      await persistProxy(s.providerId, account, s.proxy, s.timezone);
-      await persist(s.providerId, account, creds);
-      await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
-      sessions.delete(sessionId);
+      await completeBinding(sessionId, s, creds);
     },
 
-    async startDeviceCode({ providerId, account, enterprise, proxy, timezone }) {
+    async startDeviceCode({
+      providerId,
+      account = "default",
+      enterprise,
+      proxy,
+      timezone,
+      createOnly,
+    }) {
       if (timezone != null) IanaTimezoneSchema.parse(timezone);
       if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
@@ -1081,8 +1143,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       try {
         // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
         // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
-        const pinned =
-          account && !proxy ? await reconnectProxy(providerId, account) : toProxy(proxy);
+        const binding = await bindAccount(providerId, account, proxy, createOnly);
         if (account && providerId === COPILOT && !enterprise) {
           const row = await deps.store.get(providerId, account);
           if (row?.meta) {
@@ -1097,16 +1158,17 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             enterprise = domain;
           }
         }
-        const doFetch = makeFetch(pinned);
+        const doFetch = sessionFetch(binding);
         const start =
           providerId === XAI
             ? await beginXaiDeviceLogin(doFetch, now)
             : await beginCopilotDeviceLogin(enterprise, doFetch);
+        binding.assertCurrent();
         const sessionId = genId();
         sessions.set(sessionId, {
           kind: "device",
           providerId,
-          account,
+          ...binding,
           deviceCode: start.deviceCode,
           ...(providerId === XAI
             ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
@@ -1114,7 +1176,6 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
                 domain: (start as CopilotDeviceStart).domain,
                 enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
               }),
-          proxy: pinned,
           timezone,
           createdAt: now(),
           expiresAt: start.expiresAt,
@@ -1134,12 +1195,12 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
     },
 
-    async pollDeviceCode({ sessionId, account }) {
+    async pollDeviceCode({ sessionId, account, providerId }) {
       const s = take(sessionId);
       if (s.kind !== "device") throw new Error("wrong flow for this session");
-      if (s.account !== undefined && s.account !== account)
+      if (s.account !== account || (providerId !== undefined && s.providerId !== providerId))
         throw new Error("reconnect account mismatch");
-      const doFetch = makeFetch(s.proxy);
+      const doFetch = sessionFetch(s);
       if (s.providerId === XAI) {
         if (!s.tokenEndpoint) throw new Error("xAI OAuth session is missing its token endpoint");
         const xai = await pollXaiDeviceOnce(
@@ -1148,10 +1209,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           now,
         );
         if (xai.status !== "done") return { status: xai.status };
-        await persistProxy(s.providerId, account, s.proxy, s.timezone);
-        await persist(s.providerId, account, xai.credentials);
-        await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
-        sessions.delete(sessionId);
+        await completeBinding(sessionId, s, xai.credentials);
         return { status: "done" };
       }
       if (!s.domain) throw new Error("Copilot device session is missing its domain");
@@ -1166,24 +1224,22 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         s.enterpriseDomain,
         doFetch,
       );
-      // Proxy BEFORE token (fail-closed ordering — see completeManualPaste): the
-      // account is never bound without its proxy, so it can't later route directly.
-      await persistProxy(s.providerId, account, s.proxy, s.timezone);
-      await persist(s.providerId, account, creds);
-      await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
-      sessions.delete(sessionId);
+      await completeBinding(sessionId, s, creds);
       return { status: "done" };
     },
 
     async logout({ providerId, account }) {
-      await disconnectOAuthCredential(deps.store, providerId, account);
-      deps.onDisconnected?.(providerId, account);
-      // Invalidate immediately after the credential delete succeeds. A later
-      // settings cleanup failure must not leave quota attached to a logged-out
-      // identity or a future same-name reconnect.
-      invalidateQuotaCache(providerId, account);
-      await clearAccountSettings(deps.config, deps.encKey, providerId, account);
-      modelDiscoveryCache.invalidate({ providerId, account });
+      await withAccountMutation(deps.config, providerId, account, async () => {
+        await disconnectOAuthCredential(deps.store, providerId, account);
+        invalidateAccountEgress(deps.config, providerId, account);
+        deps.onDisconnected?.(providerId, account);
+        // Invalidate immediately after the credential delete succeeds. A later
+        // settings cleanup failure must not leave quota attached to a logged-out
+        // identity or a future same-name reconnect.
+        invalidateQuotaCache(providerId, account);
+        await clearAccountSettings(deps.config, deps.encKey, providerId, account);
+        modelDiscoveryCache.invalidate({ providerId, account });
+      });
     },
 
     async listModels({ providerId, account }) {
@@ -1243,36 +1299,38 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     },
 
     async setAccountProxy({ providerId, account, proxy }): Promise<void> {
-      if (proxy === null) {
-        // Clear: revert to a direct connection. setAccountSettings does a top-level
-        // merge, so patching `proxy: undefined` overwrites just that field (JSON
-        // drops the undefined key) while curation/pool state survive.
-        await setAccountSettings(deps.config, deps.encKey, providerId, account, {
-          proxy: undefined,
-        });
+      await withAccountMutation(deps.config, providerId, account, async () => {
+        if (proxy === null) {
+          // Clear: revert to a direct connection. setAccountSettings does a top-level
+          // merge, so patching `proxy: undefined` overwrites just that field (JSON
+          // drops the undefined key) while curation/pool state survive.
+          await setAccountSettings(deps.config, deps.encKey, providerId, account, {
+            proxy: undefined,
+          });
+          modelDiscoveryCache.invalidate({ providerId, account });
+          return;
+        }
+        // An OMITTED password on an update preserves the stored one (so the operator
+        // can edit host/port without re-entering the secret); an explicit empty string
+        // clears it. Resolve the effective password BEFORE validating + persisting.
+        const prior = getAccountSettings(
+          await loadAccountSettings(deps.config, deps.encKey),
+          providerId,
+          account,
+        ).proxy;
+        const password = proxy.password !== undefined ? proxy.password : prior?.password;
+        const next: ProxyConfig = {
+          type: proxy.type,
+          host: proxy.host,
+          port: proxy.port,
+          ...(proxy.username !== undefined ? { username: proxy.username } : {}),
+          ...(password !== undefined && password !== "" ? { password } : {}),
+        };
+        // Fail-closed (principle 2): reject a malformed proxy here, never persist it.
+        validateProxyConfig(next);
+        await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy: next });
         modelDiscoveryCache.invalidate({ providerId, account });
-        return;
-      }
-      // An OMITTED password on an update preserves the stored one (so the operator
-      // can edit host/port without re-entering the secret); an explicit empty string
-      // clears it. Resolve the effective password BEFORE validating + persisting.
-      const prior = getAccountSettings(
-        await loadAccountSettings(deps.config, deps.encKey),
-        providerId,
-        account,
-      ).proxy;
-      const password = proxy.password !== undefined ? proxy.password : prior?.password;
-      const next: ProxyConfig = {
-        type: proxy.type,
-        host: proxy.host,
-        port: proxy.port,
-        ...(proxy.username !== undefined ? { username: proxy.username } : {}),
-        ...(password !== undefined && password !== "" ? { password } : {}),
-      };
-      // Fail-closed (principle 2): reject a malformed proxy here, never persist it.
-      validateProxyConfig(next);
-      await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy: next });
-      modelDiscoveryCache.invalidate({ providerId, account });
+      });
     },
 
     async getAccountSchedule({ providerId, account }): Promise<AccountScheduleView> {
@@ -1361,7 +1419,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           ANTHROPIC,
           account,
         ).proxy as ProxyConfig | undefined;
-        const doFetch = makeFetch(proxy);
+        const doFetch = accountFetch(ANTHROPIC, account, proxy);
         // Same lazy-refresh token manager the execution path uses, so the bearer is
         // fresh; its refresh tunnels through the same proxy.
         const tm = createTokenManager({
@@ -1428,7 +1486,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           XAI,
           account,
         ).proxy as ProxyConfig | undefined;
-        const doFetch = makeFetch(proxy);
+        const doFetch = accountFetch(XAI, account, proxy);
         const tm = createTokenManager({
           oauth: { kind: "preset", providerId: XAI, account },
           tokenStore: deps.store,
@@ -1509,7 +1567,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           CODEX,
           account,
         ).proxy as ProxyConfig | undefined;
-        const doFetch = makeFetch(proxy);
+        const doFetch = accountFetch(CODEX, account, proxy);
         const tm = createTokenManager({
           oauth: { kind: "preset", providerId: CODEX, account },
           tokenStore: deps.store,
@@ -1638,7 +1696,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         CODEX,
         account,
       ).proxy as ProxyConfig | undefined;
-      const doFetch = makeFetch(proxy);
+      const doFetch = accountFetch(CODEX, account, proxy);
       const tm = createTokenManager({
         oauth: { kind: "preset", providerId: CODEX, account },
         tokenStore: deps.store,

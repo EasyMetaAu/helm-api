@@ -13,6 +13,7 @@ import {
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
+import { OAuthSessionConflict } from "../../oauth/admin-oauth.js";
 import { createOAuthAdminRefreshCoordinator } from "../../oauth/admin-refresh-coordinator.js";
 import { AnthropicResetError } from "../../oauth/anthropic-reset.js";
 import {
@@ -128,6 +129,13 @@ function testUsageTokens(ev: {
 // A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
 // a 400. Distinct type so a genuine seam error isn't masked as a parse error.
 class ProxyParseError extends Error {}
+function oauthErrorStatus(error: unknown): 400 | 409 | 503 {
+  return error instanceof OAuthSessionConflict
+    ? 409
+    : error instanceof UpstreamError && error.httpStatus === 503
+      ? 503
+      : 400;
+}
 
 const SELECTION_STRATEGIES: ReadonlySet<string> = new Set([
   "balanced",
@@ -154,7 +162,9 @@ function parseProxyInput(raw: unknown): AccountProxyInput | null {
   if (
     (p.type !== "http" && p.type !== "https" && p.type !== "socks5") ||
     typeof p.host !== "string" ||
-    typeof p.port !== "number"
+    typeof p.port !== "number" ||
+    (p.username !== undefined && typeof p.username !== "string") ||
+    (p.password !== undefined && typeof p.password !== "string")
   ) {
     throw new ProxyParseError("proxy requires type (http|https|socks5), host, port");
   }
@@ -789,11 +799,23 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.post("/admin/api/oauth/:provider/manual/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as {
+    const text = await c.req.text();
+    let raw: unknown;
+    try {
+      raw = text.trim() ? JSON.parse(text) : {};
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      return c.json({ error: "JSON object required" }, 400);
+    const body = raw as {
       account?: unknown;
+      createOnly?: unknown;
       proxy?: unknown;
       timezone?: unknown;
     };
+    if (body.createOnly !== undefined && typeof body.createOnly !== "boolean")
+      return c.json({ error: "createOnly must be boolean" }, 400);
     if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
       return c.json({ error: "account must be a non-empty string" }, 400);
     }
@@ -801,7 +823,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       proxy = parseProxyInput(body.proxy);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
     try {
       return c.json(
@@ -810,6 +835,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           ...(typeof body.account === "string" && body.account.trim()
             ? { account: body.account }
             : {}),
+          ...(body.createOnly === true ? { createOnly: true } : {}),
           proxy: proxy ?? undefined,
           ...(body.timezone !== undefined
             ? AccountTimezoneInputSchema.parse({ timezone: body.timezone })
@@ -817,7 +843,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         }),
       );
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -838,6 +867,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const account =
         typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
       await s.completeManualPaste({
+        providerId,
         sessionId: body.sessionId,
         redirectInput: body.redirectInput,
         account,
@@ -848,7 +878,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (providerId === "xai") refreshCoordinator.enqueue();
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -859,12 +892,24 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.post("/admin/api/oauth/:provider/device/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as {
+    const text = await c.req.text();
+    let raw: unknown;
+    try {
+      raw = text.trim() ? JSON.parse(text) : {};
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      return c.json({ error: "JSON object required" }, 400);
+    const body = raw as {
       account?: unknown;
+      createOnly?: unknown;
       enterprise?: unknown;
       proxy?: unknown;
       timezone?: unknown;
     };
+    if (body.createOnly !== undefined && typeof body.createOnly !== "boolean")
+      return c.json({ error: "createOnly must be boolean" }, 400);
     if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
       return c.json({ error: "account must be a non-empty string" }, 400);
     }
@@ -872,7 +917,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       proxy = parseProxyInput(body.proxy);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
     try {
       return c.json(
@@ -882,6 +930,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             ? { account: body.account }
             : {}),
           enterprise: typeof body.enterprise === "string" ? body.enterprise : undefined,
+          ...(body.createOnly === true ? { createOnly: true } : {}),
           proxy: proxy ?? undefined,
           ...(body.timezone !== undefined
             ? AccountTimezoneInputSchema.parse({ timezone: body.timezone })
@@ -889,7 +938,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         }),
       );
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -909,6 +961,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const account =
         typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
       const result = await s.pollDeviceCode({
+        providerId,
         sessionId: body.sessionId,
         account,
       });
@@ -920,7 +973,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       }
       return c.json(result);
     } catch (e) {
-      return c.json({ error: errMessage(e), code: devicePollErrorCode(e) }, 400);
+      return c.json(
+        {
+          error: errMessage(e),
+          code: e instanceof OAuthSessionConflict ? e.code : devicePollErrorCode(e),
+        },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -933,7 +992,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       return c.json(await s.listModels({ providerId: c.req.param("provider"), account }));
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -963,7 +1025,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -978,7 +1043,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         }),
       );
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
   app.put("/admin/api/oauth/:provider/timezone", async (c) => {
@@ -999,7 +1067,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       // The runtime getter is live; rebuilding would discard stateful sessions.
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1015,7 +1086,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         proxy: await s.getAccountProxy({ providerId: c.req.param("provider"), account }),
       });
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1026,10 +1100,14 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.put("/admin/api/oauth/:provider/proxy", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as {
-      account?: unknown;
-      proxy?: unknown;
-    };
+    const raw: unknown = await c.req.json().catch(() => undefined);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || !Object.hasOwn(raw, "proxy")) {
+      return c.json({ error: "a JSON object with an explicit proxy field is required" }, 400);
+    }
+    const body = raw as { account?: unknown; proxy: unknown };
+    if (body.account !== undefined && (typeof body.account !== "string" || !body.account.trim())) {
+      return c.json({ error: "account must be a non-empty string" }, 400);
+    }
     const account =
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
     // null = clear the proxy (direct connection); an object = set it. Same parse the
@@ -1038,7 +1116,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       proxy = parseProxyInput(body.proxy);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
     try {
       await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });
@@ -1046,7 +1127,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1059,7 +1143,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       return c.json(await s.getAccountSchedule({ providerId: c.req.param("provider"), account }));
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1135,7 +1222,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1148,7 +1238,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       return c.json(await s.getSelectionStrategy());
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1173,7 +1266,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 
@@ -1288,7 +1384,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       await deps.applyUsageLimit(providerId, account, null);
       return c.body(null, 204);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json(
+        { error: errMessage(e), ...(e instanceof OAuthSessionConflict ? { code: e.code } : {}) },
+        oauthErrorStatus(e),
+      );
     }
   });
 }

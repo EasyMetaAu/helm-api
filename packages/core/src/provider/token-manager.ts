@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import type { ResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
-import type { OAuthTokenStore } from "../store/ports.js";
+import type { OAuthTokenRecord, OAuthTokenStore } from "../store/ports.js";
 import { AnthropicOAuthIdentityChangedError } from "./anthropic-identity.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { buildOAuthRequestSignal, OAuthHttpError } from "./oauth/runtime.js";
@@ -59,6 +59,22 @@ function credentialLease(store: OAuthTokenStore, key: string): { revoked: boolea
     leases.set(key, lease);
   }
   return lease;
+}
+
+// Reconnect shares the rotating-refresh gate, so an older refresh cannot overwrite
+// the replacement identity. Existing managers must acquire a fresh credential lease.
+export async function replaceOAuthCredential(
+  store: OAuthTokenStore,
+  record: OAuthTokenRecord,
+): Promise<void> {
+  const key = `${record.providerId} ${record.account}`;
+  await runExclusive(store, key, async () => {
+    await store.upsert(record);
+    const leases = presetCredentialLeases.get(store);
+    const lease = leases?.get(key);
+    if (lease) lease.revoked = true;
+    leases?.delete(key);
+  });
 }
 
 export async function disconnectOAuthCredential(

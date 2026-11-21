@@ -599,3 +599,17 @@ describe('admin oauth api client', () => {
     expect(requestInit(call).method).toBe('DELETE');
   });
 });
+
+it('sends createOnly and the final label before device authorization starts', async () => {
+  const fetchFn = vi.fn(async () => resp({ sessionId: 's' }));
+  vi.stubGlobal('fetch', fetchFn);
+  try {
+    await startDeviceCode('xai', undefined, undefined, 'work', undefined, true);
+    expect(fetchFn).toHaveBeenCalledWith(
+      '/admin/api/oauth/xai/device/start',
+      expect.objectContaining({ body: JSON.stringify({ createOnly: true, account: 'work' }) }),
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

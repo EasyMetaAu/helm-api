@@ -71,7 +71,7 @@ describe("account timezone", () => {
       source: "ipapi.is" as const,
       checkedAt: 1,
     }));
-    await setAccountSettings(config, key, "anthropic", "a", { timezone: "Asia/Tokyo" });
+    await setAccountSettings(config, key, "anthropic", "a", { timezone: "Asia/Tokyo", proxy });
     expect(await getAccountTimezone(config, key, "anthropic", "a", proxy, detect)).toMatchObject({
       override: "Asia/Tokyo",
       effective: "Asia/Tokyo",
@@ -79,6 +79,7 @@ describe("account timezone", () => {
     });
     expect(detect).not.toHaveBeenCalled();
     expect(await config.get("oauth.account_settings")).not.toContain("Tokyo");
+    await setAccountSettings(config, key, "xai", "a", { proxy });
     expect(await getAccountTimezone(config, key, "xai", "a", proxy, detect)).toMatchObject({
       override: null,
       effective: "America/New_York",

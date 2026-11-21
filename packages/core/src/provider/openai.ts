@@ -73,6 +73,8 @@ export interface ProviderConfig {
   connectRetryBackoffMs?: readonly number[];
   // Realtime sideband WebSockets must use the same egress hop as the HTTP call.
   realtimeProxy?: ProxyConfig;
+  /** Revalidate an account-bound transport before a deferred sideband connection. */
+  assertCurrent?: () => void;
 }
 
 export interface OpenAIClientDeps {
@@ -105,6 +107,7 @@ export interface RealtimeCallRequest {
 }
 
 export interface RealtimeSidebandTarget {
+  assertCurrent?: () => void;
   /** Helm relays preserve the authenticated upgrade request's client identity. */
   forwardClientUserAgent?: boolean;
   url: string;
@@ -1151,6 +1154,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         location,
         callId,
         sideband: {
+          ...(cfg.assertCurrent ? { assertCurrent: cfg.assertCurrent } : {}),
           ...(cfg.forwardClientUserAgent ? { forwardClientUserAgent: true } : {}),
           url: sideband.toString(),
           headers: forwardedHeaders,

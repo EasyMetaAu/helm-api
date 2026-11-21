@@ -1,6 +1,6 @@
 import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
-import { type RealtimeSidebandTarget, runtimeMemoryBudget } from "@helm/core";
+import { type RealtimeSidebandTarget, runtimeMemoryBudget, UpstreamError } from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { codexWebSocketAgent } from "./codex-responses-websocket.js";
 import { HelmHttpError } from "./middleware/error-handler.js";
@@ -102,7 +102,9 @@ async function openUpstream(
 ): Promise<PendingUpstream> {
   for (let attempt = 0; ; attempt += 1) {
     try {
+      target.assertCurrent?.();
       const headers = new Headers(await target.headers());
+      target.assertCurrent?.();
       if (target.forwardClientUserAgent) headers.set("user-agent", userAgent ?? "");
       return await new Promise<PendingUpstream>((resolve, reject) => {
         const pending: PendingUpstream["pending"] = [];
@@ -291,12 +293,24 @@ export function installRealtimeWebSocketBridge(
           request.headers["user-agent"],
         );
       } catch (cause) {
-        options.registry.put(callId, keyId, call.target);
+        // Stale tickets must not be restored for a later attempt through the old proxy.
+        try {
+          call.target.assertCurrent?.();
+          options.registry.put(callId, keyId, call.target);
+        } catch {
+          /* retired account transport */
+        }
         throw cause;
       }
       if (closed || socket.destroyed) {
         upstream.socket.terminate();
-        options.registry.put(callId, keyId, call.target);
+        // Stale tickets must not be restored for a later attempt through the old proxy.
+        try {
+          call.target.assertCurrent?.();
+          options.registry.put(callId, keyId, call.target);
+        } catch {
+          /* retired account transport */
+        }
         return;
       }
       websocketServer.handleUpgrade(request, socket, head, (client) => {
@@ -309,7 +323,11 @@ export function installRealtimeWebSocketBridge(
         const message = cause instanceof Error ? cause.message : "realtime websocket failed";
         await rejectUpgrade(
           socket,
-          cause instanceof HelmHttpError ? cause.helm.http_status : 502,
+          cause instanceof HelmHttpError
+            ? cause.helm.http_status
+            : cause instanceof UpstreamError
+              ? cause.httpStatus
+              : 502,
           message,
         ).catch(() => socket.destroy());
       })

@@ -187,10 +187,10 @@ describe("account-settings", () => {
     expect(getAccountSettings(await loadAccountSettings(config, KEY), "xai", "heavy")).toEqual({});
   });
 
-  it("fails open to {} on a corrupt/undecryptable blob", async () => {
+  it("fails closed on a corrupt/undecryptable blob", async () => {
     const config = makeConfig();
     await config.set("oauth.account_settings", "not-a-valid-cipher-blob");
-    expect(await loadAccountSettings(config, KEY)).toEqual({});
+    await expect(loadAccountSettings(config, KEY)).rejects.toThrow(/cannot be read safely/);
   });
 
   it("setAccountSettings MERGES a partial patch and preserves other accounts", async () => {

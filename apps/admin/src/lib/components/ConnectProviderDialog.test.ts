@@ -38,8 +38,9 @@ describe('ConnectProviderDialog device-code polling', () => {
     expect(oauth.startManualPaste).toHaveBeenCalledWith(
       'anthropic',
       undefined,
-      undefined,
+      'default',
       'America/Los_Angeles',
+      true,
     );
   });
 

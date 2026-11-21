@@ -3030,3 +3030,38 @@ describe("account timezone routes", () => {
     }
   });
 });
+
+describe("proxy update intent", () => {
+  it.each([
+    "{",
+    "null",
+    "[]",
+    "{}",
+    '{"account":"work"}',
+    '{"account":42,"proxy":null}',
+    '{"proxy":{"type":"http","host":"p","port":80,"password":42}}',
+  ])("rejects invalid updates without clearing any proxy: %s", async (body) => {
+    const seam = fullSeam();
+    const res = await app({ oauth: seam }).request("/admin/api/oauth/anthropic/proxy", {
+      method: "PUT",
+      headers: JSONH,
+      body,
+    });
+    expect(res.status).toBe(400);
+    expect(seam.setAccountProxy).not.toHaveBeenCalled();
+  });
+});
+
+it("returns 503 when real encrypted account settings cannot be read", async () => {
+  const { createOAuthAdmin } = await import("../../oauth/admin-oauth.js");
+  const config = { get: async () => "corrupt-ciphertext", set: async () => {} };
+  const store = {
+    get: async () => null,
+    list: async () => [],
+    upsert: async () => {},
+    delete: async () => {},
+  };
+  const oauth = createOAuthAdmin({ config, store, encKey: Buffer.alloc(32, 1) });
+  const response = await app({ oauth }).request("/admin/api/oauth/anthropic/proxy?account=default");
+  expect(response.status).toBe(503);
+});
