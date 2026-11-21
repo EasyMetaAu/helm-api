@@ -1,5 +1,6 @@
 import { AudioTranscriptionRequestSchema, AudioTranscriptionResultSchema } from "@helm/shared";
 import { z } from "zod";
+import { pcmWavDurationSeconds } from "../budget/transcription-accounting.js";
 import { type AudioTranscriptionClient, AudioTranscriptionError } from "./audio-transcription.js";
 import { SpeechParameterError } from "./media-speech.js";
 import { type OpenAIClientDeps, readUpstreamJsonWithinBudget } from "./openai.js";
@@ -20,7 +21,9 @@ const ResponseSchema = z.object({
   }),
 });
 /** Verified legacy standalone /transcribe protocol, usable behind an operator-owned authenticated HTTPS proxy. */
-export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscriptionClient {
+export function createWhisperXClient(
+  deps: OpenAIClientDeps & { maxAudioSeconds?: number },
+): AudioTranscriptionClient {
   return {
     async transcribe(raw, file, opts) {
       const req = AudioTranscriptionRequestSchema.parse(raw);
@@ -34,6 +37,14 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
         throw new SpeechParameterError("unsupported WhisperX request options");
       if (!file.size || file.size > 25 * 1024 * 1024)
         throw new SpeechParameterError("audio file must contain 1 to 25 MiB");
+      if (deps.maxAudioSeconds !== undefined) {
+        const duration = pcmWavDurationSeconds(new Uint8Array(await file.arrayBuffer()));
+        if (duration === null || duration > deps.maxAudioSeconds) {
+          throw new SpeechParameterError(
+            "WhisperX duration limit requires complete mono PCM16 WAV within the configured time limit",
+          );
+        }
+      }
       const body = new FormData();
       body.set("file", file, file.name);
       body.set("language", req.languages?.[0] ?? "auto");
@@ -52,7 +63,7 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
           {
             method: "POST",
             redirect: "error",
-            headers: { Authorization: `Bearer ${deps.config.apiKey ?? ""}` },
+            headers: deps.config.apiKey ? { Authorization: `Bearer ${deps.config.apiKey}` } : {},
             body,
             signal,
           },
@@ -62,6 +73,15 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
       }
       if (!response.ok) {
         await response.body?.cancel();
+        if (
+          response.status === 429 &&
+          /\/helm\/?$/.test(new URL(deps.config.baseUrl).pathname) &&
+          response.headers.get("X-ASR-Admission") === "gpu-busy"
+        ) {
+          const retry = response.headers.get("Retry-After") ?? "";
+          const retryAfter = /^\d{1,2}$/.test(retry) && Number(retry) > 0 ? Number(retry) : 5;
+          throw new AudioTranscriptionError("transcription_capacity_exhausted", 429, retryAfter);
+        }
         throw new AudioTranscriptionError(
           response.status >= 500 || response.status === 408
             ? "outcome_unknown"
@@ -78,6 +98,7 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
       const parsed = ResponseSchema.safeParse(data);
       if (!parsed.success) throw new AudioTranscriptionError("outcome_unknown");
       const result = parsed.data.result;
+      const durationSeconds = result.audio_duration;
       const words = result.word_segments?.flatMap((word) =>
         word.start !== undefined && word.end !== undefined
           ? [{ text: word.word, startMs: word.start * 1000, endMs: word.end * 1000 }]
@@ -86,7 +107,11 @@ export function createWhisperXClient(deps: OpenAIClientDeps): AudioTranscription
       return AudioTranscriptionResultSchema.parse({
         text: result.segments.map((segment) => segment.text).join(""),
         languages: result.language ? [{ code: result.language }] : undefined,
-        durationMs: result.audio_duration === undefined ? undefined : result.audio_duration * 1000,
+        durationMs: durationSeconds === undefined ? undefined : durationSeconds * 1000,
+        // This is provider-reported input audio duration, not GPU time.
+        ...(durationSeconds !== undefined && durationSeconds > 0
+          ? { usage: { type: "duration", seconds: durationSeconds } }
+          : {}),
         segments: result.segments.map((segment) => ({
           text: segment.text,
           startMs: segment.start * 1000,

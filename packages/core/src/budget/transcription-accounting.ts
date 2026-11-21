@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AudioTranscriptionRequest,
   AudioTranscriptionResult,
@@ -80,6 +81,17 @@ function durationQuote(
   const quote = Math.ceil(seconds / rounding) * rounding * rate.price * fx;
   return Number.isFinite(quote) ? quote : null;
 }
+// Client handles and storage IDs use separate namespaces. A key can use a
+// handle already chosen by another key without sharing its storage row.
+export const transcriptionOperationIdPattern =
+  /^asr_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function transcriptionOperationStoreId(id: string, keyId: string): string {
+  return `transcription:${createHash("sha256")
+    .update(JSON.stringify([keyId, id]))
+    .digest("hex")}`;
+}
+
 // Bailian reports billable audio seconds directly. Admission still requires the
 // account rounding rule when only a local file duration is available.
 export function reportedTranscriptionCost(card: MediaPricing, seconds: number): number | null {
@@ -110,6 +122,7 @@ interface TranscriptionReservation {
 }
 
 export interface TranscriptionAccounting {
+  get(id: string, keyId: string): Promise<MediaSpendRecord | null>;
   reserve(
     input: TranscriptionReservation & {
       file?: File;
@@ -125,6 +138,7 @@ export interface TranscriptionAccounting {
     notSent: boolean,
     usage?: Extract<AudioTranscriptionResult["usage"], { type: "duration" }>,
   ): Promise<MediaSpendRecord | null>;
+  release?(record: MediaSpendRecord): Promise<void>;
   settle(
     record: MediaSpendRecord,
     pricing: MediaPricing | undefined,
@@ -161,6 +175,20 @@ export function createTranscriptionAccounting(
   }
 
   return {
+    async get(id, keyId) {
+      if (!store.getMediaSpend) throw new SpeechAccountingError("media_accounting_unavailable");
+      return store.getMediaSpend(id, keyId);
+    },
+    async release(record) {
+      if (!store.settleMediaSpend) throw new SpeechAccountingError("media_accounting_unavailable");
+      const released = await store.settleMediaSpend(
+        record.id,
+        record.keyId,
+        { costUsd: 0, usage: null, release: true },
+        Date.now(),
+      );
+      if (!released) throw new SpeechAccountingError("media_accounting_unavailable");
+    },
     async reserve(input) {
       const cap = input.caps?.spendUsd ?? null;
       let quote: number | null = null;

@@ -46,6 +46,14 @@ MiniMax HTTP JSON 通过一次流式上游合成收集字幕和音频，不执�
 
 同步短录音统一使用 `transcription-short`。原有 Chat 音频请求使用百炼；multipart 文件请求选择链内支持文件转写的客户端。默认 OpenAI 候选使用现役官方 API 账号池 `openai` 和模型 `gpt-transcribe`。账号的模型许可和调用 key 的 lane 权限均生效。已获自选模型权限的 key 也可以直接指定模型别名。一次文件提交只使用一个账号。结果未知时，凭原 key 查询 `GET /v1/audio/operations/{operationId}` 核对用量与费用。默认价卡只有公开费率，实际费用未核实会保留为空，带美元硬上限的 key 在缺少可靠报价时会在发送前被拒绝。
 
+需要在丢失提交响应后查询费用时，调用方可在发送前保存 `asr_<小写 UUID v4>`，随 multipart 请求放入 `X-Helm-Transcription-Operation`。同一个 API 密钥下，持久账本只接纳此编号一次。再次提交已登记编号返回 HTTP 409 和 `operation_exists`，不会调用供应商。不同密钥的编号各自独立。
+
+用同一个 API 密钥调用 `GET /v1/audio/operations/{id}` 可读取 `reserved`、`outcome_unknown` 或 `settled` 费用状态。404 表示当下没有查到该密钥的记录，不能证明之前的请求没有到达。此查询返回费用和供应商用量。
+
+设置独立的 32 字节 `HELM_TRANSCRIPTION_RESULT_ENC_KEY` 后，带调用方操作号的请求会在返回成功前加密保存结果。连接断开后，已接纳的请求保留原并发限制和服务端截止时间。用同一账号、同一密钥调用 `GET /v1/audio/transcriptions/operations/{id}`，可读取 `operationId` 和原始 `result`，读取时重新检查客户端、模型和 lane 权限。结果上限为 512 KiB，完成后可读 6 小时，过期记录由现有注册表清理。未完成、未持久化或已过期均可能返回 404。此状态不能用于判定可重新推理。结果写入失败时返回 `outcome_unknown`，保留该操作号的费用记录和重发保护。
+
+独立的 Deepgram 候选使用 provider `type: deepgram`、`https://api.deepgram.com/v1`、静态 `api_key_env` 以及映射到 `nova-3` 的独立转写 lane。账号实际可用性需单独核验。
+
 统一结果包含 `text`、可选 `languages`、`words` / `segments`（startMs/endMs）、`requestId`、原生 `usage`。OpenAI 不接受词时间戳或 diarization，返回 422 `unsupported_parameter`；Deepgram 保留真实词时间戳与 speaker，将秒换算为毫秒，暂支持单通道、单语言／multi。缺词时间戳不补值。
 
 稳定错误：400 `invalid_request`；403 `model_not_allowed` / `lane_not_allowed`；413 `request_too_large`；422 `unsupported_parameter` / `media_pricing_unavailable`；503 `provider_unavailable`；上游明确拒绝 `upstream_rejected`，提交或结果连接中断／服务端故障 `outcome_unknown`，不自动重试。此同步 API 的供应商没有通用结果查询保证，unknown 不等于未扣费。
@@ -119,6 +127,11 @@ WS 的 start.request 可增加 `max_input_characters`（1–10000 个 Unicode �
 
 `type: whisperx-asr` 使用旧独立服务的同步 `/transcribe` multipart 协议，通过 `/v1/audio/transcriptions` 调用，模型映射 `whisperx`。配置须指向部署方控制、带认证的 HTTPS 代理；原服务本身未确认具备鉴权。发送 `sync_mode=true` 与 `skip_cache=true`，绕过忽略语言选项的旧缓存读取；保留真实 segment/word 时间戳，秒转毫秒，无时戳的词不补值。服务原生 audio_duration 转 durationMs。原服务仍会写自己的缓存，未对其做任何修改。
 
+`whisperx_max_concurrent` 可设置同一 HTTPS 入口的并发上限。配置的多个 WhisperX 别名共用上限，数值不同时采用最小值。此限制独立于 API 密钥和可选并发队列。在 PostgreSQL 模式下多个网关进程共享租约，SQLite 模式下覆盖单进程。达到上限返回 429 `transcription_capacity_exhausted` 和 `Retry-After`，拒绝发生在预算预留和供应商调用前。租约存储不可用时返回 503 `transcription_capacity_unavailable`。该限制管理网关持有的请求；运营方仍须在 GPU 入口限制推理队列，以覆盖网关进程丢失或代理超时后上游继续运行的情形。
+
+EveryLevel 的受限 GPU 入口使用 HTTPS base URL `https://host/helm`。代理只转发 `POST /helm/transcribe`，保留 Bearer 认证、Content-Length 及工作器的拒绝响应头。工作器已有任务时返回 429、`X-ASR-Admission: gpu-busy` 和 `Retry-After`。只有该路径的明确忙碌回执才能撤销未使用的媒体费用预留并允许同一操作号再次提交。网关固定周期内已经扣除的请求次数仍按尝试计数。代理通用 429 不触发这条重试，超时、连接断开和预留释放结果未知继续保守对账。
+
+
 lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未配置凭据／不可解析时选择 GPU。调用已发出后的失败不会自动转发 GPU，未知付费结果不会重试。API 明确拒绝后的自动切换、家庭 GPU 实际网络／推理验收，以及 Chatterbox 通用接入仍未交付；旧服务没有可依赖的未知任务查询语义，新 Chatterbox compute.v1 固定 dictogo，且尚缺独立可调用部署契约。
 
 ## Luma 交接状态
@@ -135,3 +148,8 @@ lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未�
 ## 本地验证
 
 2026-11-12：17 个定向测试文件、106 项测试通过，覆盖字幕与协议映射、HTTP/WS、权限、豆包提交恢复、费用预留／结算、双数据库与新增迁移。未知转写异常返回 outcome_unknown 和持久 operation_id，且不重复调用上游。shared/core/gateway 类型检查与构建、变更 TypeScript 的 Biome 检查通过。以上不替代远程完整 CI、真实供应商调用或 GPU 验收。
+
+
+### 内网模型入口（2026-11-21）
+
+明确配置为私有 IPv4 的 `openai` 和 `whisperx-asr` 可省略上游凭据，适用于自有内网模型；显式配置的 key 环境变量缺失仍拒绝加载，不回退为免认证。Helm 对外 API 的 key、lane 和预算校验保持。WhisperX 的专用 `/helm/transcribe` 工作器仍负责容量、时长与断线后的任务存续；内网免认证不等于允许重复派发。

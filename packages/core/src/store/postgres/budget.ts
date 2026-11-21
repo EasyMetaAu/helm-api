@@ -61,7 +61,7 @@ export class PgBudgetStore implements BudgetStore {
   async settleMediaSpend(
     id: string,
     keyId: string,
-    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    result: { costUsd: number | null; usage: Record<string, unknown> | null; release?: boolean },
     nowMs: number,
   ): Promise<MediaSpendRecord | null> {
     return this.db.transaction(async (tx) => {
@@ -73,6 +73,11 @@ export class PgBudgetStore implements BudgetStore {
         .for("update");
       if (!row) return null;
       const record = MediaSpendRecordSchema.parse(JSON.parse(row.recordJson));
+      if (
+        result.release &&
+        (record.state !== "reserved" || result.costUsd !== 0 || result.usage !== null)
+      )
+        throw new Error("only an unused media reservation can be released");
       if (record.state === "settled") return record;
       const next = MediaSpendRecordSchema.parse({
         ...record,
@@ -97,10 +102,14 @@ export class PgBudgetStore implements BudgetStore {
             false,
           );
       }
-      await tx
-        .update(mediaSpendRecords)
-        .set({ recordJson: JSON.stringify(next) })
-        .where(eq(mediaSpendRecords.id, id));
+      if (result.release) {
+        await tx.delete(mediaSpendRecords).where(eq(mediaSpendRecords.id, id));
+      } else {
+        await tx
+          .update(mediaSpendRecords)
+          .set({ recordJson: JSON.stringify(next) })
+          .where(eq(mediaSpendRecords.id, id));
+      }
       return next;
     });
   }

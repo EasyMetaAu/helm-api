@@ -48,20 +48,23 @@ export function decryptSecret(blob: string, key: Buffer): string {
 }
 
 // Resolve the at-rest encryption key from the environment (composition root only).
-// Returns null when HELM_OAUTH_ENC_KEY is UNSET — the caller decides whether the
+// Returns null when the named environment variable is unset — the caller decides whether the
 // key is required (fail-closed only when a subscription OAuth provider is
 // configured). Accepts the key as 64 hex chars OR base64; a value that is PRESENT
 // but does not decode to exactly 32 bytes is an operator error and THROWS (never
 // silently runs with a weak/short key).
-export function loadEncKeyFromEnv(env: NodeJS.ProcessEnv = process.env): Buffer | null {
-  const raw = env.HELM_OAUTH_ENC_KEY;
+export function loadEncKeyFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  name = "HELM_OAUTH_ENC_KEY",
+): Buffer | null {
+  const raw = env[name];
   if (raw === undefined || raw === "") return null;
   const decoded = /^[0-9a-fA-F]{64}$/.test(raw)
     ? Buffer.from(raw, "hex")
     : Buffer.from(raw, "base64");
   if (decoded.length !== KEY_LEN) {
     throw new Error(
-      `HELM_OAUTH_ENC_KEY must decode to ${KEY_LEN} bytes (got ${decoded.length}); supply 32 bytes as base64 or 64 hex chars`,
+      `${name} must decode to ${KEY_LEN} bytes (got ${decoded.length}); supply 32 bytes as base64 or 64 hex chars`,
     );
   }
   return decoded;

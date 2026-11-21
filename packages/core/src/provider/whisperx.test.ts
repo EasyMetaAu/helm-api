@@ -23,12 +23,26 @@ describe("standalone WhisperX adapter", () => {
     expect(result).toMatchObject({
       text: "Hi!",
       durationMs: 1500,
+      usage: { type: "duration", seconds: 1.5 },
       words: [{ text: "Hi", startMs: 100, endMs: 900 }],
       segments: [{ text: "Hi!", startMs: 0, endMs: 1100 }],
     });
     const form = fetch.mock.calls[0]?.[1].body as FormData;
     expect(form.get("sync_mode")).toBe("true");
     expect(form.get("skip_cache")).toBe("true");
+  });
+  it.each([undefined, 0])("leaves usage unknown for duration %s", async (duration) => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        status: "success",
+        result: { audio_duration: duration, segments: [] },
+      }),
+    );
+    const result = await createWhisperXClient({
+      config: { baseUrl: "https://gpu.example.test", apiKey: "test" },
+      fetch,
+    }).transcribe({ model: "whisperx" }, file);
+    expect(result.usage).toBeUndefined();
   });
   it("does not infer success or retry from processing and missing results", async () => {
     const fetch = vi.fn().mockResolvedValue(Response.json({ status: "processing", file_id: "x" }));
@@ -39,5 +53,15 @@ describe("standalone WhisperX adapter", () => {
       ),
     ).rejects.toMatchObject({ code: "outcome_unknown" });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["https://gpu.example.test/helm", {}],
+    ["https://gpu.example.test", { "X-ASR-Admission": "gpu-busy" }],
+  ])("keeps generic 429 distinct from the worker refusal at %s", async (baseUrl, headers) => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 429, headers }));
+    await expect(
+      createWhisperXClient({ config: { baseUrl }, fetch }).transcribe({ model: "whisperx" }, file),
+    ).rejects.toMatchObject({ code: "upstream_rejected", status: 429 });
   });
 });

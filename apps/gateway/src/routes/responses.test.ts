@@ -2443,10 +2443,13 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(retrieve).not.toHaveBeenCalled();
   });
 
-  it("returns 404 for expired registry response ids without provider dispatch", async () => {
+  it.each([
+    ["resp_expired", 1],
+    ["audio-transcription-result:private", Date.now() + 60_000],
+  ])("returns 404 for unavailable or private registry id %s", async (responseId, expiresAt) => {
     const retrieve = vi.fn();
     const registryRecord = {
-      responseId: "resp_expired",
+      responseId,
       accountId: "acct",
       keyId: "k1",
       providerAlias: "responses/gpt-5.5",
@@ -2454,7 +2457,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       providerModel: "gpt-5.5",
       providerProtocol: "openai_responses" as const,
       createdAt: 1,
-      expiresAt: 1,
+      expiresAt,
       status: "completed",
     };
     const { deps } = makeDeps({
@@ -2463,7 +2466,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
     const app = buildApp(deps);
 
-    const res = await app.request("/v1/responses/resp_expired", {
+    const res = await app.request(`/v1/responses/${responseId}`, {
       headers: { Authorization: AUTH.Authorization },
     });
 

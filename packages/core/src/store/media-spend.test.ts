@@ -120,6 +120,42 @@ for (const kind of ["sqlite", "postgres"] as const)
         expect(
           (await store.peek(weekly.keyId, "usd", 1, 7 * 86400000, 8 * 86400000, 0)).remaining,
         ).toBe(1);
+        const refused = { ...weekly, id: "capacity-refused" };
+        expect(await store.reserveMediaSpend(refused)).toBe(true);
+        expect(
+          await store.settleMediaSpend(
+            refused.id,
+            "another-key",
+            { costUsd: 0, usage: null, release: true },
+            1000,
+          ),
+        ).toBeNull();
+        expect(
+          (await store.peek(weekly.keyId, "usd", 1, 7 * 86400000, 1000, 0)).remaining,
+        ).toBeCloseTo(0.3);
+        await store.settleMediaSpend(
+          refused.id,
+          refused.keyId,
+          { costUsd: 0, usage: null, release: true },
+          8 * 86400000,
+        );
+        expect(await store.getMediaSpend(refused.id, refused.keyId)).toBeNull();
+        expect((await store.peek(weekly.keyId, "usd", 1, 7 * 86400000, 1000, 0)).remaining).toBe(1);
+        expect(await store.reserveMediaSpend(refused)).toBe(true);
+        await store.settleMediaSpend(
+          refused.id,
+          refused.keyId,
+          { costUsd: null, usage: null },
+          1000,
+        );
+        await expect(
+          store.settleMediaSpend(
+            refused.id,
+            refused.keyId,
+            { costUsd: 0, usage: null, release: true },
+            1000,
+          ),
+        ).rejects.toThrow("only an unused media reservation can be released");
       } finally {
         if ("$sqlite" in db) db.$sqlite.close();
         else await db.$close();

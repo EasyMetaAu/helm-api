@@ -63,7 +63,7 @@ export class SqliteBudgetStore implements BudgetStore {
   async settleMediaSpend(
     id: string,
     keyId: string,
-    result: { costUsd: number | null; usage: Record<string, unknown> | null },
+    result: { costUsd: number | null; usage: Record<string, unknown> | null; release?: boolean },
     nowMs: number,
   ): Promise<MediaSpendRecord | null> {
     return this.db.$sqlite.transaction(() => {
@@ -74,6 +74,11 @@ export class SqliteBudgetStore implements BudgetStore {
         .get();
       if (!row) return null;
       const record = MediaSpendRecordSchema.parse(JSON.parse(row.recordJson));
+      if (
+        result.release &&
+        (record.state !== "reserved" || result.costUsd !== 0 || result.usage !== null)
+      )
+        throw new Error("only an unused media reservation can be released");
       if (record.state === "settled") return record;
       const next = MediaSpendRecordSchema.parse({
         ...record,
@@ -97,11 +102,15 @@ export class SqliteBudgetStore implements BudgetStore {
             false,
           );
       }
-      this.db
-        .update(mediaSpendRecords)
-        .set({ recordJson: JSON.stringify(next) })
-        .where(eq(mediaSpendRecords.id, id))
-        .run();
+      if (result.release) {
+        this.db.delete(mediaSpendRecords).where(eq(mediaSpendRecords.id, id)).run();
+      } else {
+        this.db
+          .update(mediaSpendRecords)
+          .set({ recordJson: JSON.stringify(next) })
+          .where(eq(mediaSpendRecords.id, id))
+          .run();
+      }
       return next;
     })();
   }

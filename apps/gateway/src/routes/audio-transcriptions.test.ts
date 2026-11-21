@@ -1,11 +1,145 @@
-import { AudioTranscriptionError } from "@helm/core";
+import { randomBytes } from "node:crypto";
+import {
+  AudioTranscriptionError,
+  createKeyedSemaphore,
+  createSpeechAccounting,
+  createSqliteDb,
+  createTranscriptionAccounting,
+  createWhisperXClient,
+  SqliteBudgetStore,
+  SqliteResponsesRegistryStore,
+} from "@helm/core";
 import type { MediaSpendRecord } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createConcurrencyGate } from "../middleware/concurrency.js";
+import { createResponsesRegistry } from "../responses-registry.js";
+import { registerAudioSpeechRoute } from "./audio-speech.js";
 import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
+import { createTranscriptionResultStore } from "./transcription-results.js";
 
 describe("multipart transcription boundary", () => {
+  it.each([
+    true,
+    false,
+  ])("rejects replay or missing durable storage before admission (storage=%s)", async (storage) => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const ledger = createTranscriptionAccounting(new SqliteBudgetStore(db), {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      const get = vi.fn().mockResolvedValue({ id: "existing" });
+      const acquire = vi.fn();
+      const resolve = vi.fn();
+      const app = new Hono<AppEnv>();
+      registerAudioTranscriptionsRoute(app, {
+        auth: { resolve: async () => ({ keyId: "learner", accountId: "test" }) },
+        concurrencyGate: { acquire },
+        accounting: { ...ledger, get },
+        resolve,
+        ...(storage ? { results: { save: vi.fn(), get: vi.fn() } } : {}),
+      });
+      const response = await app.request("/v1/audio/transcriptions", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer fixture",
+          "X-Helm-Transcription-Operation": "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a",
+        },
+        body: "not even multipart",
+      });
+      expect(response.status).toBe(storage ? 409 : 503);
+      expect(await response.json()).toMatchObject({
+        error: { code: storage ? "operation_exists" : "result_storage_unavailable" },
+      });
+      expect(acquire).not.toHaveBeenCalled();
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
+  it("retries a worker-admission refusal with the same operation, but never retries a lost response", async () => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const ledger = createTranscriptionAccounting(new SqliteBudgetStore(db), {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      let loseReleaseReply = false;
+      const settle = vi.fn(ledger.settle);
+      const workerBusy = () =>
+        new Response(null, {
+          status: 429,
+          headers: { "X-ASR-Admission": "gpu-busy", "Retry-After": "5" },
+        });
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(workerBusy())
+        .mockResolvedValueOnce(Response.json({ status: "success", result: { segments: [] } }))
+        .mockRejectedValueOnce(new Error("lost response"))
+        .mockResolvedValueOnce(workerBusy());
+      const app = new Hono<AppEnv>();
+      registerAudioTranscriptionsRoute(app, {
+        auth: { resolve: async () => ({ keyId: "learner", accountId: "test" }) },
+        concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
+        results: { save: vi.fn(), get: vi.fn() },
+        accounting: {
+          ...ledger,
+          settle,
+          release: async (record) => {
+            await ledger.release?.(record);
+            if (loseReleaseReply) throw new Error("lost release reply");
+          },
+        },
+        resolve: () => ({
+          client: createWhisperXClient({
+            config: { baseUrl: "https://gpu.example.test/helm" },
+            fetch,
+          }),
+          alias: "gpu/whisperx",
+          model: "whisperx",
+          lane: "gpu",
+          customModel: false,
+        }),
+      });
+      const request = (id: string) => {
+        const body = new FormData();
+        body.set("model", "gpu");
+        body.set("file", new File(["fixture"], "sample.wav"));
+        return app.request("/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { Authorization: "Bearer fixture", "X-Helm-Transcription-Operation": id },
+          body,
+        });
+      };
+      const refused = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a";
+      const busy = await request(refused);
+      expect(busy.status).toBe(429);
+      expect(busy.headers.get("Retry-After")).toBe("5");
+      expect(await busy.json()).toMatchObject({
+        error: { code: "transcription_capacity_exhausted" },
+      });
+      expect((await request(refused)).status).toBe(200);
+      expect((await request(refused)).status).toBe(409);
+      const unknown = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795b";
+      expect((await request(unknown)).status).toBe(502);
+      expect((await request(unknown)).status).toBe(409);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      loseReleaseReply = true;
+      const uncertain = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795c";
+      const failure = await request(uncertain);
+      expect(failure.status).toBe(502);
+      expect(await failure.json()).toMatchObject({
+        error: { code: "outcome_unknown", operation_id: uncertain },
+      });
+      expect(settle).toHaveBeenCalledTimes(2);
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it.each([
     [new Error("connection lost"), 502, "outcome_unknown", false],
     [new AudioTranscriptionError("provider_unavailable", 503), 503, "provider_unavailable", true],
@@ -37,7 +171,7 @@ describe("multipart transcription boundary", () => {
         lane: "asr",
         customModel: false,
       }),
-      accounting: { reserve: async () => record, settle },
+      accounting: { get: async () => null, reserve: async () => record, settle },
     });
     const form = new FormData();
     form.set("model", "asr");
@@ -98,4 +232,189 @@ describe("multipart transcription boundary", () => {
       expect(release).toHaveBeenCalledTimes(1);
     }
   });
+});
+
+it("a caller operation survives racing submissions and stays private to the key", async () => {
+  const db = createSqliteDb(":memory:");
+  try {
+    const store = new SqliteBudgetStore(db);
+    const config = { defaultWindowSeconds: 86400, defaultDegradeLane: "economy" };
+    const ledger = createTranscriptionAccounting(store, config);
+    let readers = 0;
+    let readsComplete: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      readsComplete = resolve;
+    });
+    const get = async (id: string, key: string) => {
+      const record = await ledger.get(id, key);
+      readers++;
+      if (readers === 2) readsComplete();
+      if (readers <= 2) await bothRead;
+      return record;
+    };
+    let now = Date.now();
+    let laneAllowed = true;
+    const resultRegistry = createResponsesRegistry(
+      new SqliteResponsesRegistryStore(db),
+      undefined,
+      { now: () => now },
+    );
+    const results = createTranscriptionResultStore(resultRegistry, randomBytes(32), () => now);
+    const app = new Hono<AppEnv>();
+    const transcribe = vi.fn().mockResolvedValue({ text: "Hello" });
+    const shared = {
+      auth: {
+        resolve: async (key: string | null) =>
+          key
+            ? {
+                keyId: key === "other-account" ? "first" : key,
+                accountId: key === "other-account" ? "unrelated" : "same",
+                caps: { allowedLanes: laneAllowed ? ["gpu"] : [] },
+              }
+            : null,
+      },
+      concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
+    };
+    registerAudioSpeechRoute(app, {
+      ...shared,
+      accounting: createSpeechAccounting(store, config),
+      resolve: () => null,
+    });
+    registerAudioTranscriptionsRoute(app, {
+      ...shared,
+      accounting: { ...ledger, get },
+      results,
+      resolve: () => ({
+        client: { transcribe },
+        alias: "gpu/whisperx",
+        model: "whisperx",
+        lane: "gpu",
+        customModel: false,
+      }),
+    });
+    const handle = "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a";
+    const headers = { Authorization: "Bearer first", "X-Helm-Transcription-Operation": handle };
+    const submit = () => {
+      const body = new FormData();
+      body.set("model", "gpu");
+      body.set("file", new File(["test"], "clip.wav", { type: "audio/wav" }));
+      return app.request("/v1/audio/transcriptions", { method: "POST", body, headers });
+    };
+    const responses = await Promise.all([submit(), submit()]);
+    const success = responses.find((r) => r.status === 200);
+    const duplicate = responses.find((r) => r.status === 409);
+    expect(await success?.json()).toMatchObject({ accounting: { operationId: handle } });
+    expect(await duplicate?.json()).toMatchObject({
+      error: { code: "operation_exists", operation_id: handle },
+    });
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    const path = `/v1/audio/operations/${handle}`;
+    const receipt = await app.request(path, { headers: { Authorization: "Bearer first" } });
+    expect(receipt.status).toBe(200);
+    expect(await receipt.json()).toMatchObject({ operationId: handle, state: "outcome_unknown" });
+    const foreign = await app.request(path, { headers: { Authorization: "Bearer second" } });
+    expect(foreign.status).toBe(404);
+    expect(foreign.headers.get("cache-control")).toBe("no-store");
+    const resultPath = `/v1/audio/transcriptions/operations/${handle}`;
+    const readResult = (key: string) =>
+      app.request(resultPath, { headers: { Authorization: `Bearer ${key}` } });
+    const resultResponse = await readResult("first");
+    expect(resultResponse.status).toBe(200);
+    expect(await resultResponse.json()).toEqual({ operationId: handle, result: { text: "Hello" } });
+    expect(resultResponse.headers.get("cache-control")).toBe("no-store");
+    const stored = db.$sqlite.prepare("SELECT status FROM responses_registry").get() as {
+      status: string;
+    };
+    expect(stored.status).toMatch(/^v1:/);
+    expect(stored.status).not.toContain("Hello");
+    expect((await readResult("second")).status).toBe(404);
+    expect((await readResult("other-account")).status).toBe(404);
+    laneAllowed = false;
+    expect((await readResult("first")).status).toBe(403);
+    laneAllowed = true;
+    now += 6 * 60 * 60 * 1000;
+    expect((await readResult("first")).status).toBe(404);
+    expect((await submit()).status).toBe(409);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect((await app.request(path, { headers: { Authorization: "Bearer first" } })).status).toBe(
+      200,
+    );
+  } finally {
+    db.$sqlite.close();
+  }
+});
+
+it("shares a provider cap across keys and aliases before spending their budgets", async () => {
+  const app = new Hono<AppEnv>();
+  const budget = {
+    spendUsd: null,
+    requests: 2,
+    tokens: null,
+    windowSeconds: null,
+    behavior: "reject" as const,
+    degradeLane: null,
+    weeklyAnchor: "2026-01-01",
+  };
+  const check = vi.fn().mockResolvedValue({ overBudget: false });
+  const gate = createConcurrencyGate({
+    semaphore: createKeyedSemaphore(),
+    getConfig: () => ({ enabled: true, minSize: 0, multiplier: 0, waitTimeoutMs: 1000 }),
+  });
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = () => {};
+  const dispatched = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const transcribe = vi.fn(async () => {
+    started();
+    await hold;
+    return { text: "OK" };
+  });
+  registerAudioTranscriptionsRoute(app, {
+    auth: {
+      resolve: async (key) => (key ? { keyId: key, accountId: "a", caps: { budget } } : null),
+    },
+    concurrencyGate: gate,
+    capacityGate: gate,
+    budgetGate: { check },
+    resolve: (alias) => ({
+      client: { transcribe },
+      model: "whisperx",
+      alias,
+      lane: "asr",
+      customModel: false,
+      capacity: { key: "provider-capacity:gpu", limit: 1 },
+    }),
+  });
+  const request = (key: string, alias: string) => {
+    const form = new FormData();
+    form.set("model", alias);
+    form.set("file", new File(["test"], "clip.wav"));
+    return app.request("/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    });
+  };
+  const first = request("first", "first-alias");
+  try {
+    await dispatched;
+    const blocked = await request("second", "other-alias");
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBe("1");
+    expect(await blocked.json()).toMatchObject({
+      error: { code: "transcription_capacity_exhausted" },
+    });
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await first;
+  }
+  expect((await request("second", "other-alias")).status).toBe(200);
+  expect(transcribe).toHaveBeenCalledTimes(2);
+  expect(check).toHaveBeenCalledTimes(2);
 });

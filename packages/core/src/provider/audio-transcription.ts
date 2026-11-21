@@ -18,8 +18,10 @@ export class AudioTranscriptionError extends Error {
       | "provider_unavailable"
       | "outcome_unknown"
       | "upstream_rejected"
-      | "upstream_invalid_response",
+      | "upstream_invalid_response"
+      | "transcription_capacity_exhausted",
     readonly status = 502,
+    readonly retryAfter?: number,
   ) {
     super(code);
   }

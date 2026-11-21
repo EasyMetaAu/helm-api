@@ -178,6 +178,7 @@ export interface ResponsesBudgetPort {
 export type { ResponsesRegistryRecord } from "@helm/core";
 
 import type { ResponsesRegistryRecord } from "@helm/core";
+import { TRANSCRIPTION_RESULT_ID_PREFIX } from "./transcription-results.js";
 
 export interface ResponsesRegistryPort {
   put(record: ResponsesRegistryRecord): void | Promise<void>;
@@ -591,6 +592,7 @@ function responseSnapshotFromStreamFrame(
 }
 
 function isUsableRegistryRecord(record: ResponsesRegistryRecord): boolean {
+  if (record.responseId.startsWith(TRANSCRIPTION_RESULT_ID_PREFIX)) return false;
   if (record.expiresAt <= Date.now()) return false;
   return record.status !== "deleted";
 }

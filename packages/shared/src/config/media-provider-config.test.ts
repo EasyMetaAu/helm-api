@@ -63,3 +63,58 @@ for (const type of ["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"]
       expect(ProviderConfigSchema.safeParse({ ...base, type, base_url }).success).toBe(false);
   });
 }
+
+it("accepts a positive WhisperX-only audio duration limit", () => {
+  const config = { ...base, type: "whisperx-asr", base_url: "https://gpu.example.test" };
+  expect(
+    ProviderConfigSchema.parse({ ...config, whisperx_max_audio_seconds: 360 })
+      .whisperx_max_audio_seconds,
+  ).toBe(360);
+  for (const max of [0, -1, 1.5, "360", Infinity]) {
+    expect(
+      ProviderConfigSchema.safeParse({ ...config, whisperx_max_audio_seconds: max }).success,
+    ).toBe(false);
+  }
+  expect(
+    ProviderConfigSchema.safeParse({
+      ...config,
+      type: "deepgram",
+      whisperx_max_audio_seconds: 360,
+    }).success,
+  ).toBe(false);
+});
+
+it("accepts positive integer shared concurrency limits only for WhisperX", () => {
+  const config = { ...base, type: "whisperx-asr", base_url: "https://gpu.example.test" };
+  expect(
+    ProviderConfigSchema.parse({ ...config, whisperx_max_concurrent: 1 }).whisperx_max_concurrent,
+  ).toBe(1);
+  for (const limit of [0, -1, 1.5, "2", Infinity]) {
+    expect(
+      ProviderConfigSchema.safeParse({ ...config, whisperx_max_concurrent: limit }).success,
+    ).toBe(false);
+  }
+  expect(
+    ProviderConfigSchema.safeParse({ ...config, type: "deepgram", whisperx_max_concurrent: 1 })
+      .success,
+  ).toBe(false);
+});
+
+it("allows credential-free WhisperX only at a private IPv4 endpoint", () => {
+  const config = { name: "gpu", type: "whisperx-asr", base_url: "https://192.168.199.4/helm" };
+  expect(ProviderConfigSchema.safeParse(config).success).toBe(true);
+  expect(
+    ProviderConfigSchema.safeParse({
+      ...config,
+      type: "openai",
+      base_url: "http://192.168.199.5:8088/v1",
+    }).success,
+  ).toBe(true);
+  for (const base_url of [
+    "https://voice.example.test",
+    "https://8.8.8.8",
+    "https://192.168.199.4.example.test",
+  ])
+    expect(ProviderConfigSchema.safeParse({ ...config, base_url }).success).toBe(false);
+  expect(ProviderConfigSchema.safeParse({ ...config, type: "deepgram" }).success).toBe(false);
+});

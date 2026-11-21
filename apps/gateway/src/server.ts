@@ -174,6 +174,7 @@ import {
   cloneCarrierWithBody,
   ErrorClassSchema,
   evaluateClientPolicy,
+  isInternalProvider,
   isNativePassthroughCarrier,
   isOAuthPreset,
   makeHelmError,
@@ -290,6 +291,7 @@ import {
   registerResponsesRoute,
 } from "./routes/responses.js";
 import { registerThreeDRoute } from "./routes/three-d.js";
+import { createTranscriptionResultStore } from "./routes/transcription-results.js";
 import { registerTtsRoute } from "./routes/tts.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
@@ -1689,6 +1691,9 @@ export function buildCredential(
   }
   // Static key path: env var NAME → plaintext key (or null when unset).
   const apiKey = p.api_key_env ? process.env[p.api_key_env] : undefined;
+  // Schema permits credential-free access only for explicit private-IP local providers.
+  if (p.api_key_env === undefined && p.api_key_pool === undefined && isInternalProvider(p))
+    return { apiKey: "" };
   if (!apiKey) return null;
   return { apiKey };
 }
@@ -1824,7 +1829,11 @@ function createProviderClient(
   if (p.type === "openai-audio" || p.type === "deepgram" || p.type === "whisperx-asr") {
     return {
       ...(p.type === "whisperx-asr"
-        ? createWhisperXClient({ config: { ...base, ...cred }, fetch: providerFetch })
+        ? createWhisperXClient({
+            config: { ...base, ...cred },
+            fetch: providerFetch,
+            maxAudioSeconds: p.whisperx_max_audio_seconds,
+          })
         : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
             config: { ...base, ...cred },
             officialPool: p.type === "openai-audio" && !!p.api_key_pool,
@@ -2411,6 +2420,10 @@ export async function buildServer(
   // (composition root, principle 7) — core only ever sees the decoded key buffer.
   const usesPresetOAuth = config.providers.some((p) => p.oauth && isOAuthPreset(p.oauth));
   const oauthEncKey = loadEncKeyFromEnv();
+  const transcriptionResultKey = loadEncKeyFromEnv(
+    process.env,
+    "HELM_TRANSCRIPTION_RESULT_ENC_KEY",
+  );
   if (usesPresetOAuth && !oauthEncKey) {
     throw new Error(
       "a subscription OAuth provider is configured but HELM_OAUTH_ENC_KEY is unset: set a 32-byte key (base64 or 64 hex chars) to encrypt stored tokens",
@@ -3925,12 +3938,11 @@ export async function buildServer(
         log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
       })
     : null;
+  const gatewaySemaphore =
+    distributedSemaphore ??
+    createKeyedSemaphore({ log: (lvl, msg, fields) => logger.log(lvl, msg, fields) });
   const concurrencyGate = createConcurrencyGate({
-    semaphore:
-      distributedSemaphore ??
-      createKeyedSemaphore({
-        log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
-      }),
+    semaphore: gatewaySemaphore,
     getConfig: () => ({
       enabled: settings.concurrency_queue_enabled,
       globalLimit: settings.global_concurrency_limit,
@@ -5531,8 +5543,30 @@ export async function buildServer(
   app.use("/v1/audio/transcriptions", (_c, next) =>
     servingAccountStore.run({ selected: null }, next),
   );
+  const whisperxEndpoint = (provider: (typeof config.providers)[number]) =>
+    provider.type === "whisperx-asr" && provider.base_url
+      ? new URL(provider.base_url).href.replace(/\/+$/, "")
+      : undefined;
+  const endpointLimits = new Map<string, number>();
+  for (const provider of config.providers) {
+    const endpoint = whisperxEndpoint(provider);
+    if (endpoint && provider.whisperx_max_concurrent !== undefined) {
+      endpointLimits.set(
+        endpoint,
+        Math.min(endpointLimits.get(endpoint) ?? Infinity, provider.whisperx_max_concurrent),
+      );
+    }
+  }
+  const transcriptionCapacityGate = createConcurrencyGate({
+    semaphore: gatewaySemaphore,
+    getConfig: () => ({ enabled: true, minSize: 0, multiplier: 0, waitTimeoutMs: 1000 }),
+  });
   registerAudioTranscriptionsRoute(app, {
     accounting: transcriptionAccounting,
+    capacityGate: transcriptionCapacityGate,
+    results: transcriptionResultKey
+      ? createTranscriptionResultStore(responsesRegistry, transcriptionResultKey)
+      : undefined,
     auth: audioSpeech.auth,
     concurrencyGate,
     rateLimiter,
@@ -5552,7 +5586,20 @@ export async function buildServer(
         if (!target.ok) continue;
         const client = providerClients.get(target.value.providerName);
         if (!client?.transcribe) continue;
+        const provider = config.providers.find((p) => p.name === target.value.providerName);
+        const endpoint = provider && whisperxEndpoint(provider);
+        const limit = endpoint ? endpointLimits.get(endpoint) : undefined;
         return {
+          ...(endpoint && limit !== undefined
+            ? {
+                capacity: {
+                  key:
+                    "provider-capacity:whisperx:" +
+                    createHash("sha256").update(endpoint).digest("hex"),
+                  limit,
+                },
+              }
+            : {}),
           pricing: catalog.get(alias)?.pricing.media,
           client: { transcribe: client.transcribe },
           model: target.value.providerModel,

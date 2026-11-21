@@ -16,6 +16,28 @@ import { PoliciesConfigSchema } from "./policy-schema.js";
 // the router consumes (re-exported by @helm/core) — schema-first, no duplicate
 // shapes.
 
+export function isInternalProvider(p: { type: string; base_url?: string }): boolean {
+  if (!["whisperx-asr", "openai"].includes(p.type) || !p.base_url) return false;
+  try {
+    const url = new URL(p.base_url);
+    const octets = url.hostname.split(".").map(Number);
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      octets.length === 4 &&
+      octets.every((n) => Number.isInteger(n) && n >= 0 && n <= 255) &&
+      (octets[0] === 10 ||
+        (octets[0] === 172 && (octets[1] ?? -1) >= 16 && (octets[1] ?? -1) <= 31) ||
+        (octets[0] === 192 && octets[1] === 168))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const ServerConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
   port: z.number().int().min(1).max(65535).default(8080),
@@ -184,8 +206,24 @@ export const ProviderConfigSchema = z
     normalize_reasoning_delta_alias: z.boolean().default(false),
     response_model_policy: z.enum(["provider", "requested_alias", "both"]).default("provider"),
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
+    whisperx_max_audio_seconds: z.number().int().positive().optional(),
+    whisperx_max_concurrent: z.number().int().positive().optional(),
   })
   .superRefine((p, ctx) => {
+    if (p.whisperx_max_audio_seconds !== undefined && p.type !== "whisperx-asr") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["whisperx_max_audio_seconds"],
+        message: "audio duration limit applies only to WhisperX",
+      });
+    }
+    if (p.whisperx_max_concurrent !== undefined && p.type !== "whisperx-asr") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["whisperx_max_concurrent"],
+        message: "provider concurrency limit applies only to WhisperX",
+      });
+    }
     if (["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"].includes(p.type)) {
       try {
         const url = new URL(p.base_url ?? "");
@@ -200,7 +238,9 @@ export const ProviderConfigSchema = z
           url.password ||
           url.search ||
           url.hash ||
-          (!p.api_key_env && !(p.type === "openai-audio" && p.api_key_pool)) ||
+          (!p.api_key_env &&
+            !(p.type === "openai-audio" && p.api_key_pool) &&
+            !isInternalProvider(p)) ||
           p.oauth
         )
           throw new Error("invalid audio provider");
@@ -260,7 +300,8 @@ export const ProviderConfigSchema = z
   // the original shape). A provider with both OR neither fails closed (principle 2).
   .refine(
     (p) =>
-      (p.api_key_env !== undefined || p.api_key_pool !== undefined) !== (p.oauth !== undefined),
+      (p.api_key_env !== undefined || p.api_key_pool !== undefined) !== (p.oauth !== undefined) ||
+      (isInternalProvider(p) && !p.api_key_env && !p.api_key_pool && !p.oauth),
     {
       message: "provider requires exactly one of `api_key_env` or `oauth`",
       path: ["api_key_env"],
