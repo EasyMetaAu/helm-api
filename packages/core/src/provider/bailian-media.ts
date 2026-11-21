@@ -1,5 +1,6 @@
 import {
   BailianImageResponseSchema,
+  BailianQwenTranscriptionUsageSchema,
   BailianTaskResponseSchema,
   BailianTranscriptionDurationUsageSchema,
   BailianTranscriptionResultSchema,
@@ -133,6 +134,10 @@ export function normalizeBailianTranscription(
       const parsed = BailianTranscriptionDurationUsageSchema.parse(usage);
       if (parsed.duration !== undefined)
         usage = { ...parsed, type: "duration", seconds: parsed.duration };
+    }
+    if (wireModel === "qwen3-asr-flash-filetrans" && usage !== undefined) {
+      const parsed = BailianQwenTranscriptionUsageSchema.parse(usage);
+      if (parsed.seconds !== undefined) usage = { ...parsed, type: "duration" };
     }
     return {
       status:

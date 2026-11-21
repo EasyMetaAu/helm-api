@@ -335,6 +335,11 @@ export const BailianTranscriptionDurationUsageSchema = z
   })
   .passthrough();
 
+// Qwen Filetrans returns native seconds, unlike Fun-ASR's duration field.
+export const BailianQwenTranscriptionUsageSchema = z
+  .object({ seconds: z.number().finite().nonnegative().optional() })
+  .passthrough();
+
 const TaskStatusSchema = z.enum([
   "PENDING",
   "RUNNING",
