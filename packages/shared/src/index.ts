@@ -118,6 +118,7 @@ export {
   ForgettingSchema,
   type HelmConfig,
   HelmConfigSchema,
+  isInternalProvider,
   isOAuthPreset,
   type MemoryConfig,
   MemoryConfigSchema,

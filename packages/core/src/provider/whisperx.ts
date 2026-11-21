@@ -63,7 +63,7 @@ export function createWhisperXClient(
           {
             method: "POST",
             redirect: "error",
-            headers: { Authorization: `Bearer ${deps.config.apiKey ?? ""}` },
+            headers: deps.config.apiKey ? { Authorization: `Bearer ${deps.config.apiKey}` } : {},
             body,
             signal,
           },

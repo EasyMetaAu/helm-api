@@ -610,7 +610,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
 
   async function headers(): Promise<Record<string, string>> {
     return {
-      Authorization: await authHeader(),
+      ...(cfg.apiKey === "" ? {} : { Authorization: await authHeader() }),
       "Content-Type": "application/json",
       ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
     };

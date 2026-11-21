@@ -99,3 +99,22 @@ it("accepts positive integer shared concurrency limits only for WhisperX", () =>
       .success,
   ).toBe(false);
 });
+
+it("allows credential-free WhisperX only at a private IPv4 endpoint", () => {
+  const config = { name: "gpu", type: "whisperx-asr", base_url: "https://192.168.199.4/helm" };
+  expect(ProviderConfigSchema.safeParse(config).success).toBe(true);
+  expect(
+    ProviderConfigSchema.safeParse({
+      ...config,
+      type: "openai",
+      base_url: "http://192.168.199.5:8088/v1",
+    }).success,
+  ).toBe(true);
+  for (const base_url of [
+    "https://voice.example.test",
+    "https://8.8.8.8",
+    "https://192.168.199.4.example.test",
+  ])
+    expect(ProviderConfigSchema.safeParse({ ...config, base_url }).success).toBe(false);
+  expect(ProviderConfigSchema.safeParse({ ...config, type: "deepgram" }).success).toBe(false);
+});

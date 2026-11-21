@@ -174,6 +174,7 @@ import {
   cloneCarrierWithBody,
   ErrorClassSchema,
   evaluateClientPolicy,
+  isInternalProvider,
   isNativePassthroughCarrier,
   isOAuthPreset,
   makeHelmError,
@@ -1690,6 +1691,9 @@ export function buildCredential(
   }
   // Static key path: env var NAME → plaintext key (or null when unset).
   const apiKey = p.api_key_env ? process.env[p.api_key_env] : undefined;
+  // Schema permits credential-free access only for explicit private-IP local providers.
+  if (p.api_key_env === undefined && p.api_key_pool === undefined && isInternalProvider(p))
+    return { apiKey: "" };
   if (!apiKey) return null;
   return { apiKey };
 }

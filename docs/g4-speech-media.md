@@ -148,3 +148,8 @@ lane 中 API 排在首位、WhisperX 位于 fallback，可在 API provider 未�
 ## 本地验证
 
 2026-11-12：17 个定向测试文件、106 项测试通过，覆盖字幕与协议映射、HTTP/WS、权限、豆包提交恢复、费用预留／结算、双数据库与新增迁移。未知转写异常返回 outcome_unknown 和持久 operation_id，且不重复调用上游。shared/core/gateway 类型检查与构建、变更 TypeScript 的 Biome 检查通过。以上不替代远程完整 CI、真实供应商调用或 GPU 验收。
+
+
+### 内网模型入口（2026-11-21）
+
+明确配置为私有 IPv4 的 `openai` 和 `whisperx-asr` 可省略上游凭据，适用于自有内网模型；显式配置的 key 环境变量缺失仍拒绝加载，不回退为免认证。Helm 对外 API 的 key、lane 和预算校验保持。WhisperX 的专用 `/helm/transcribe` 工作器仍负责容量、时长与断线后的任务存续；内网免认证不等于允许重复派发。

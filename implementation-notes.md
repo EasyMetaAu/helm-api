@@ -8,6 +8,10 @@
 ---
 
 
+## 2026-11-21 · 自有内网模型免上游凭据（docs/02、04）
+
+Lukin 明确要求家庭 GPU 无认证，并增加 `.5` 的本地 Qwen 接入。仅明确私有 IPv4 的 OpenAI 兼容与 WhisperX provider 可省略上游凭据；已配置的凭据缺失不静默降级。公网 Helm API 的访问控制保持。自有模型按零供应商现金价格记账，仍保留实际 token/音频秒数及容量限制。
+
 ## 2026-11-21 · GPU 转写的容量与结果恢复（docs/04、06、native-media）
 
 WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一规范化入口共用跨 key 容量。调用方可预存 `asr_` 操作号；结果用独立 `HELM_TRANSCRIPTION_RESULT_ENC_KEY` 加密保留六小时，断连后按原号恢复。原号不能重复派发，读取仍核验当前 key、账户与 lane 权限。GPU 的原生秒数和零现金价格进入现有用量账本。
@@ -54,11 +58,6 @@ WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一
 
 两款模型超过 272,000 个输入 token 时整单升档。Ultrafast 当前为标准价的 3 倍，须于 2027-03-01 太平洋时间切换到 6 倍。Flex 未公布价格；Batch 价不套用于 Flex。缓存写入仍按 30 分钟估算，无法区分 12 小时用量。来源见 [OpenAI 价卡](https://developers.openai.com/api/docs/pricing)。
 
-## 2026-11-18 · 零用量空截断恢复（docs/04）
-
-- 生产请求在首个有效输出前收到 max_output_tokens、output=[]、输入/输出/总用量全零的 incomplete。该终态此前被当作有效输出，直接阻止备用候选接手；现在交给现有失败与切换路径。
-- 仅匹配这组明确证据；已经产生文字、推理或工具输出的流不重放，未知用量及正常内容截断继续保留原行为。
-
 ## 更早历史总览
 
 2026-11-14：GPT／Claude 官方价卡与能力元数据同步，费用适用边界见 Git 历史。
@@ -84,3 +83,5 @@ WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一
 更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。
 
 历史摘要补记：2026-11-16 · Fun-ASR／Paraformer 录音文件识别（docs/05、06、native-media）；原文见 Git history。
+
+历史摘要补记：2026-11-18 · 零用量空截断恢复（docs/04）；原文见 Git history。

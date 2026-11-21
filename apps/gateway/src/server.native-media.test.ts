@@ -1,6 +1,6 @@
 import { ProviderConfigSchema } from "@helm/shared";
 import { afterEach, expect, it, vi } from "vitest";
-import { buildProviderClients, testStaticProviderKey } from "./server.js";
+import { buildCredential, buildProviderClients, testStaticProviderKey } from "./server.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -135,4 +135,34 @@ it("enforces the configured WhisperX duration before sending anything upstream",
     usage: { type: "duration", seconds: 1 },
   });
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("uses the internal WhisperX endpoint without an upstream credential", async () => {
+  const config = ProviderConfigSchema.parse({
+    name: "gpu",
+    type: "whisperx-asr",
+    base_url: "https://192.168.199.4/helm",
+    models: [],
+  });
+  const fetch = vi
+    .fn()
+    .mockResolvedValue(Response.json({ status: "success", result: { segments: [] } }));
+  vi.stubGlobal("fetch", fetch);
+  const client = buildProviderClients([config], "https://example.test", 1000).get("gpu");
+  expect(client?.transcribe).toBeTypeOf("function");
+  await client?.transcribe?.({ model: "whisperx" }, new File(["fixture"], "clip.wav"));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("Authorization")).toBe(false);
+});
+
+it("never drops an explicitly configured missing local credential", () => {
+  const config = ProviderConfigSchema.parse({
+    name: "gpu",
+    type: "openai",
+    base_url: "http://192.168.199.5:8088/v1",
+    api_key_env: "MISSING_INTERNAL_KEY",
+    models: [],
+  });
+  vi.stubEnv("MISSING_INTERNAL_KEY", "");
+  expect(buildCredential(config)).toBeNull();
 });

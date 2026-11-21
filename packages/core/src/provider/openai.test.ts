@@ -30,6 +30,16 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     expect(out).toEqual(upstream);
   });
 
+  it("omits authorization for an explicitly empty internal credential", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    const client = createOpenAIClient({
+      config: { baseUrl: "http://192.168.199.5:8088/v1", apiKey: "" },
+      fetch,
+    });
+    await client.chatCompletion({ model: "qwen3.8-27b", messages: [] });
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("Authorization")).toBe(false);
+  });
+
   it("forwards the request body and auth header verbatim", async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     const client = createOpenAIClient({ config: CONFIG, fetch });
