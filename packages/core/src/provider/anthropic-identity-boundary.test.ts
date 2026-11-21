@@ -292,6 +292,8 @@ describe("Anthropic adapter header semantics", () => {
 
   it("preserves actual relay SDK metadata and reviewed optional fields without inventing absent ones", async () => {
     const unreviewedMemoryAndFileFields = [
+      "x-ccr-file-save",
+      "x-asks-for-saves",
       "x-claude-code-upload-ahead",
       "x-ccr-shared-tool-request",
       "x-forwarded-server",

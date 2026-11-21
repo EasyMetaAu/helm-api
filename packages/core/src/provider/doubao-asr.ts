@@ -25,10 +25,29 @@ const Timed = z.object({
   start_time: z.number().nonnegative(),
   end_time: z.number().nonnegative(),
 });
+// Doubao inserts untimed whitespace between English words. Keep text intact,
+// but omit these separators from the timed words; all other timing stays strict.
+const Words = z.preprocess(
+  (value) =>
+    Array.isArray(value)
+      ? value.filter((word: unknown) => {
+          if (typeof word !== "object" || word === null) return true;
+          const item = word as Record<string, unknown>;
+          return !(
+            typeof item.text === "string" &&
+            item.text.length > 0 &&
+            item.text.trim() === "" &&
+            item.start_time === -1 &&
+            item.end_time === -1
+          );
+        })
+      : value,
+  z.array(Timed),
+);
 const AudioInfo = z.object({ duration: z.number().finite().nonnegative() });
 const Result = z.object({
   text: z.string(),
-  utterances: z.array(Timed.extend({ words: z.array(Timed).optional() })).optional(),
+  utterances: z.array(Timed.extend({ words: Words.optional() })).optional(),
 });
 export const validateDoubaoTranscription = (body: Record<string, unknown>, model: string) =>
   DoubaoAsrRequestSchema.parse({ ...body, model });
