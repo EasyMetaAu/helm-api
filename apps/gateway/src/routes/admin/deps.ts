@@ -182,11 +182,13 @@ export interface OAuthAdminAccess {
   // it from the start, never the operator's real IP (issue #38).
   startManualPaste(input: {
     providerId: string;
+    createOnly?: boolean;
     account?: string;
     timezone?: string | null;
     proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; authorizeUrl: string }>;
   completeManualPaste(input: {
+    providerId?: string;
     sessionId: string;
     redirectInput: string;
     account: string;
@@ -197,6 +199,7 @@ export interface OAuthAdminAccess {
   // the first device-code call so step 1 already egresses through it (issue #38).
   startDeviceCode(input: {
     providerId: string;
+    createOnly?: boolean;
     account?: string;
     timezone?: string | null;
     enterprise?: string;
@@ -210,6 +213,7 @@ export interface OAuthAdminAccess {
     serverNowMs: number;
   }>;
   pollDeviceCode(input: {
+    providerId?: string;
     sessionId: string;
     account: string;
   }): Promise<{ status: "pending" | "slow_down" | "done" }>;

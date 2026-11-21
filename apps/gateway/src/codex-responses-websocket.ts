@@ -42,7 +42,7 @@ export function codexWebSocketAgent(proxy: ProxyConfig | undefined): HttpAgent |
   if (!proxy) return undefined;
   const proxyUrl = proxyConfigToUrl(proxy);
   return proxy.type === "socks5"
-    ? (new SocksProxyAgent(proxyUrl) as HttpAgent)
+    ? (new SocksProxyAgent(proxyUrl.replace(/^socks5:/, "socks5h:")) as HttpAgent)
     : (new HttpsProxyAgent(proxyUrl) as HttpAgent);
 }
 

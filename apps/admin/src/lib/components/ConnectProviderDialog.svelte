@@ -156,14 +156,14 @@
       if (pendingWindow) pendingWindow.opener = null;
     }
     const acct = reconnect?.account ?? (account.trim() || suggestion);
+    const bindOptions: [timezone?: string, createOnly?: boolean] = reconnect
+      ? timezone.trim()
+        ? [timezone.trim()]
+        : []
+      : [timezone.trim() || undefined, true];
     try {
       if (selected?.flow === 'manual_paste') {
-        const s = await startManualPaste(
-          providerId,
-          proxy ?? undefined,
-          reconnect?.account,
-          ...(timezone.trim() ? ([timezone.trim()] as const) : []),
-        );
+        const s = await startManualPaste(providerId, proxy ?? undefined, acct, ...bindOptions);
         if (closed) return;
         sessionId = s.sessionId;
         authorizeUrl = s.authorizeUrl;
@@ -175,8 +175,8 @@
           providerId,
           enterprise.trim() || undefined,
           proxy ?? undefined,
-          reconnect?.account,
-          ...(timezone.trim() ? ([timezone.trim()] as const) : []),
+          acct,
+          ...bindOptions,
         );
         if (closed) return;
         sessionId = s.sessionId;

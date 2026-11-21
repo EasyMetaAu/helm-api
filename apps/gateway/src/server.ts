@@ -204,7 +204,10 @@ import {
 } from "./middleware/relay-client-identity.js";
 import {
   type AccountSettingsMap,
+  accountEgressGeneration,
+  captureAccountEgress,
   getAccountSettings,
+  guardAccountFetch,
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
@@ -453,6 +456,7 @@ export function buildInternalLlmKeyInput(k: GeneratedKey): CreateKeyInput {
 type ProviderCredential =
   | { apiKey: string }
   | {
+      assertCurrent?: () => void;
       getAuthHeader: () => Promise<string>;
       onUnauthorized: () => void;
       currentSecrets: () => string[];
@@ -647,8 +651,15 @@ export async function loadCodexCatalogForClientVersion(input: {
       oauth: { provider: binding.providerId, account: binding.account },
     } as unknown as ProviderConfigShared;
     const proxy = resolveProviderProxy(accountConfig, accountSettings);
-    const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
-    const tokenManagerKey = JSON.stringify([binding.providerId, binding.account]);
+    const proxyFetch = guardAccountFetch(
+      proxy ? makeProxyFetch(proxy) : globalThis.fetch,
+      captureAccountEgress(input.config, binding.providerId, binding.account, proxy),
+    );
+    const tokenManagerKey = JSON.stringify([
+      binding.providerId,
+      binding.account,
+      accountEgressGeneration(input.config, binding.providerId, binding.account),
+    ]);
     let tokenManager = input.tokenManagers?.get(tokenManagerKey);
     if (!tokenManager) {
       tokenManager = createTokenManager({
@@ -982,7 +993,14 @@ async function buildOAuthAccountClient(
                 currentMetadata: cred.currentMetadata,
                 invalidate: cred.onUnauthorized,
               },
-              proxyFetch: proxy ? makeProxyFetch(proxy) : undefined,
+              proxyFetch: cred.assertCurrent
+                ? guardAccountFetch(
+                    proxy ? makeProxyFetch(proxy) : globalThis.fetch,
+                    cred.assertCurrent,
+                  )
+                : proxy
+                  ? makeProxyFetch(proxy)
+                  : undefined,
               clientVersion: codexRuntime.clientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
               catalog: codexRuntime.catalog,
               runInBackground: codexRuntime.runInBackground,
@@ -1101,6 +1119,7 @@ export async function synthesizeOAuthProviders(
   const selectionStrategy: OAuthSelectionStrategy = globalSettings.selectionStrategy ?? "balanced";
   const providers: ProviderConfigShared[] = [];
   const poolClients = new Map<string, OAuthPoolClient>();
+  const synthesisGuards: Array<() => void> = [];
   const codexKeys: CodexModelCacheKey[] = [];
   const xaiModels = new Map<string, XaiOAuthModel>();
   const xaiModelAccounts = new Map<string, string[]>();
@@ -1139,7 +1158,13 @@ export async function synthesizeOAuthProviders(
         { oauth: { provider: providerId, account } } as unknown as ProviderConfigShared,
         accountSettings,
       );
-      const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
+      const assertCurrent = captureAccountEgress(config, providerId, account, proxy);
+      synthesisGuards.push(assertCurrent);
+      const egressGeneration = accountEgressGeneration(config, providerId, account);
+      const proxyFetch = guardAccountFetch(
+        proxy ? makeProxyFetch(proxy) : globalThis.fetch,
+        assertCurrent,
+      );
       const tm = createTokenManager({
         oauth: { kind: "preset", providerId, account },
         tokenStore: oauthCtx.store,
@@ -1354,6 +1379,7 @@ export async function synthesizeOAuthProviders(
           allowSpendRemainingCredits: s.allowSpendRemainingCredits === true,
           models: [...memberModels].sort(),
           proxy: proxy ?? null,
+          egressGeneration,
           accountIdentity: accountCodexRuntime?.accountIdentity ?? null,
           clientVersion: accountCodexRuntime?.clientVersion ?? null,
           userAgent: accountCodexRuntime?.userAgent ?? null,
@@ -1529,6 +1555,7 @@ export async function synthesizeOAuthProviders(
     });
   }
   if (!poolClients.has("openai-codex")) poolReuseCache?.delete("openai-codex");
+  for (const guard of synthesisGuards) guard();
   return { providers, poolClients, codexKeys, xaiModels, xaiModelAccounts };
 }
 
@@ -1646,17 +1673,34 @@ export function buildCredential(
       if (!oauthCtx) return null;
       const provider = getOAuthProvider(o.provider);
       if (!provider) return null;
+      let assertCurrent: (() => void) | undefined;
+      if (oauthCtx.config) {
+        try {
+          assertCurrent = captureAccountEgress(oauthCtx.config, o.provider, o.account, proxy);
+        } catch (error) {
+          assertCurrent = () => {
+            throw error;
+          };
+        }
+      }
+      const refreshFetch = proxy ? makeProxyFetch(proxy) : globalThis.fetch;
       const tm = createTokenManager({
         oauth: { kind: "preset", providerId: o.provider, account: o.account },
         tokenStore: oauthCtx.store,
         encKey: oauthCtx.encKey,
         oauthProvider: provider,
-        fetch: proxy ? makeProxyFetch(proxy) : undefined,
+        fetch: assertCurrent ? guardAccountFetch(refreshFetch, assertCurrent) : refreshFetch,
         now: () => Date.now(),
         ...executionSkew,
       });
       return {
-        getAuthHeader: () => tm.getAuthHeader(),
+        assertCurrent,
+        getAuthHeader: async () => {
+          assertCurrent?.();
+          const header = await tm.getAuthHeader();
+          assertCurrent?.();
+          return header;
+        },
         onUnauthorized: () => tm.invalidate(),
         currentSecrets: () => tm.currentSecrets(),
         currentMetadata: () => tm.currentMetadata(),
@@ -1777,8 +1821,48 @@ function accountEnvironmentResolver(
   // Read override live: a timezone edit must not replace a Codex pool or lose its
   // WS/previous_response_id state. Automatic detection follows this client's
   // pinned egress, including an older connection still draining after proxy edits.
-  return async () =>
-    (await getAccountTimezone(config, ctx.encKey, providerId, account, proxy)).effective;
+  let guard: () => void;
+  try {
+    guard = captureAccountEgress(config, providerId, account, proxy);
+  } catch (error) {
+    guard = () => {
+      throw error;
+    };
+  }
+  return async () => {
+    guard();
+    return (
+      await getAccountTimezone(config, ctx.encKey, providerId, account, proxy, undefined, guard)
+    ).effective;
+  };
+}
+
+export function guardResponsesConnector(
+  connect: CodexResponsesWebSocketConnector,
+  assertCurrent?: () => void,
+): CodexResponsesWebSocketConnector {
+  if (!assertCurrent) return connect;
+  return async (input) => {
+    assertCurrent();
+    const connection = await connect(input);
+    try {
+      assertCurrent();
+    } catch (error) {
+      await connection.close();
+      throw error;
+    }
+    const send = connection.send.bind(connection);
+    connection.send = async (text) => {
+      try {
+        assertCurrent();
+      } catch (error) {
+        await connection.close();
+        throw error;
+      }
+      return send(text);
+    };
+    return connection;
+  };
 }
 
 function createProviderClient(
@@ -1811,7 +1895,11 @@ function createProviderClient(
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
-  const providerFetch = makeProviderFetch(p, proxy);
+  const assertCurrent = "getAuthHeader" in cred ? cred.assertCurrent : undefined;
+  const transport = makeProviderFetch(p, proxy);
+  const providerFetch = assertCurrent
+    ? guardAccountFetch(transport ?? globalThis.fetch, assertCurrent)
+    : transport;
   if (p.type === "doubao-speech") {
     const deps = { config: { ...base, ...cred }, fetch: providerFetch };
     return {
@@ -1933,12 +2021,11 @@ function createProviderClient(
               );
             }
           : undefined,
-        responsesWebSocketConnector:
+        responsesWebSocketConnector: guardResponsesConnector(
           codexRuntime?.responsesWebSocketConnector ??
-          createCodexResponsesWebSocketConnector({
-            proxy,
-            timeoutMs: base.timeoutMs,
-          }),
+            createCodexResponsesWebSocketConnector({ proxy, timeoutMs: base.timeoutMs }),
+          assertCurrent,
+        ),
       },
       fetch: providerFetch,
     });
@@ -2506,8 +2593,13 @@ export async function buildServer(
   // loaded ONCE here (fail-open to {}) and threaded into client building so each
   // preset OAuth account egresses through its pinned proxy (if any). Empty when no
   // enc key is wired — then every account connects directly.
+  let accountSettingsAvailable = true;
   const accountSettings: AccountSettingsMap = oauthCtx
-    ? await loadAccountSettings(store.config, oauthCtx.encKey)
+    ? await loadAccountSettings(store.config, oauthCtx.encKey).catch(() => {
+        accountSettingsAvailable = false;
+        logger.log("error", "oauth.settings.unavailable", {});
+        return {};
+      })
     : {};
 
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
@@ -3298,7 +3390,18 @@ export async function buildServer(
     codexRuntime,
     oauthModelDiscoveryCache,
     oauthPoolReuseCache,
-  );
+  ).catch((error): SynthesizedOAuth => {
+    logger.log("error", "oauth.pool.startup_unavailable", {
+      message: error instanceof Error ? error.message : "unavailable",
+    });
+    return {
+      providers: [],
+      poolClients: new Map(),
+      codexKeys: [],
+      xaiModels: new Map(),
+      xaiModelAccounts: new Map(),
+    };
+  });
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
     ...synthesizedOAuth.providers,
@@ -3366,8 +3469,9 @@ export async function buildServer(
   // HELM_PROVIDER_BASE_URL is set (test/e2e), force the override so cross-provider
   // candidates still hit the mock; in production each provider keeps its own base_url.
   // CONFIGURED providers (config/providers.yaml) + the primary client. These come
-  // from immutable config — NOT editable via the admin UI — so they are built ONCE.
-  const configuredClients = buildProviderClients(
+  // from immutable config. Preset credentials are rebuilt only when their account
+  // generation changes; unchanged transports retain their stateful WS sessions.
+  let configuredClients = buildProviderClients(
     baseUrlOverride
       ? config.providers.map((p) => ({ ...p, base_url: baseUrlOverride }))
       : config.providers,
@@ -3380,6 +3484,20 @@ export async function buildServer(
   // its configured aliases explicitly unavailable, so lane fallback can continue
   // to another static or connected OAuth provider.
   if (primaryCred) configuredClients.set(first.name, provider);
+  let configuredGenerations = new Map(
+    config.providers.flatMap((p) =>
+      oauthCtx && p.oauth && isOAuthPreset(p.oauth)
+        ? [
+            [
+              p.name,
+              accountSettingsAvailable
+                ? accountEgressGeneration(store.config, p.oauth.provider, p.oauth.account)
+                : -1,
+            ] as const,
+          ]
+        : [],
+    ),
+  );
   // Static API transports share a durable credential pool per provider type. An untouched pool
   // retains the env-key path; an explicitly emptied pool never falls back to it.
   const apiKeyPools = new Map<
@@ -3566,6 +3684,39 @@ export async function buildServer(
         return;
       }
       try {
+        const nextConfigured = new Map(configuredClients);
+        const nextGenerations = new Map(configuredGenerations);
+        const configuredGuards: Array<() => void> = [];
+        if (oauthCtx) {
+          const currentSettings = await loadAccountSettings(store.config, oauthCtx.encKey);
+          const presets = config.providers.filter((p) => {
+            if (!p.oauth || !isOAuthPreset(p.oauth)) return false;
+            configuredGuards.push(
+              captureAccountEgress(
+                store.config,
+                p.oauth.provider,
+                p.oauth.account,
+                resolveProviderProxy(p, currentSettings),
+              ),
+            );
+            const generation = accountEgressGeneration(
+              store.config,
+              p.oauth.provider,
+              p.oauth.account,
+            );
+            nextGenerations.set(p.name, generation);
+            return configuredGenerations.get(p.name) !== generation;
+          });
+          for (const p of presets) nextConfigured.delete(p.name);
+          const rebuilt = buildProviderClients(
+            baseUrlOverride ? presets.map((p) => ({ ...p, base_url: baseUrlOverride })) : presets,
+            fallbackBaseUrl,
+            timeoutMs,
+            oauthCtx,
+            currentSettings,
+          );
+          for (const [name, client] of rebuilt) nextConfigured.set(name, client);
+        }
         const next = await synthesizeOAuthProviders(
           config.providers,
           oauthCtx,
@@ -3594,6 +3745,12 @@ export async function buildServer(
             nextXaiModelAccounts,
           );
         }
+        for (const guard of configuredGuards) guard();
+        configuredClients = nextConfigured;
+        configuredGenerations = nextGenerations;
+        if (first.oauth && isOAuthPreset(first.oauth))
+          provider =
+            configuredClients.get(first.name) ?? createUnavailableProviderClient(first.name);
         oauthPoolClients = next.poolClients;
         oauthAliasSet = nextAliasSet;
         oauthWireModelMap = nextWireModelMap;
@@ -3766,7 +3923,7 @@ export async function buildServer(
     defaultLane: () => settings.default_lane,
     // When routing internal LLM calls through the gateway, the eval model goes via the
     // self-HTTP client (visible in /admin/requests); else straight to the primary provider.
-    provider: selfHttpClient ?? provider,
+    provider: selfHttpClient ?? { chatCompletion: (...args) => provider.chatCompletion(...args) },
     invokeDecisions: createJevInvoker({
       apiKey: () =>
         decisionsProvider?.api_key_env ? process.env[decisionsProvider.api_key_env] : undefined,

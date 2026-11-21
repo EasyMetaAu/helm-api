@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { type ConfigStore, makeProxyFetch, type ProxyConfig } from "@helm/core";
 import { type AccountTimezoneView, IanaTimezoneSchema } from "@helm/shared";
 import { z } from "zod";
-import { getAccountSettings, loadAccountSettings } from "./account-settings.js";
+import {
+  captureAccountEgress,
+  getAccountSettings,
+  guardAccountFetch,
+  loadAccountSettings,
+} from "./account-settings.js";
 
 type Detection = Omit<AccountTimezoneView, "override">;
 const services = [
@@ -30,7 +35,8 @@ export function createEgressTimezoneResolver(
 ) {
   const now = deps.now ?? Date.now;
   const cache = new Map<string, { expiresAt: number; result: Promise<Detection> }>();
-  return (proxy?: ProxyConfig): Promise<Detection> => {
+  return (proxy?: ProxyConfig, assertCurrent?: () => void): Promise<Detection> => {
+    assertCurrent?.();
     const key = createHash("sha256")
       .update(JSON.stringify(proxy ?? null))
       .digest("hex");
@@ -41,9 +47,10 @@ export function createEgressTimezoneResolver(
       result: Promise.resolve<Detection>({ effective: null, source: "unknown", checkedAt: null }),
     };
     entry.result = (async (): Promise<Detection> => {
-      const doFetch = (deps.makeFetch ?? ((p) => (p ? makeProxyFetch(p) : globalThis.fetch)))(
+      const transport = (deps.makeFetch ?? ((p) => (p ? makeProxyFetch(p) : globalThis.fetch)))(
         proxy,
       );
+      const doFetch = assertCurrent ? guardAccountFetch(transport, assertCurrent) : transport;
       for (const service of services) {
         try {
           const response = await doFetch(service.url, {
@@ -103,6 +110,7 @@ export async function getAccountTimezone(
   account: string,
   pinnedProxy?: ProxyConfig,
   detect = detectEgressTimezone,
+  assertCurrent?: () => void,
 ): Promise<AccountTimezoneView> {
   const settings = getAccountSettings(
     await loadAccountSettings(config, encKey),
@@ -112,5 +120,10 @@ export async function getAccountTimezone(
   const override = IanaTimezoneSchema.safeParse(settings.timezone);
   if (override.success)
     return { override: override.data, effective: override.data, source: "manual", checkedAt: null };
-  return { override: null, ...(await detect(pinnedProxy)) };
+  const current = captureAccountEgress(config, providerId, account, pinnedProxy);
+  const guard = () => {
+    assertCurrent?.();
+    current();
+  };
+  return { override: null, ...(await detect(pinnedProxy, guard)) };
 }

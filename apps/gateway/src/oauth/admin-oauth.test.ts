@@ -211,7 +211,7 @@ describe("createOAuthAdmin", () => {
       genSessionId: () => "xai-session",
     });
 
-    const start = await admin.startDeviceCode({ providerId: "xai" });
+    const start = await admin.startDeviceCode({ providerId: "xai", account: "heavy" });
     expect(start).toEqual({
       sessionId: "xai-session",
       userCode: "ABCD-EFGH",
@@ -322,7 +322,10 @@ describe("createOAuthAdmin", () => {
       ]),
     );
     for (const account of ["work", "personal"]) {
-      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+        account,
+      });
       const state = new URL(authorizeUrl).searchParams.get("state");
       await admin.completeManualPaste({
         sessionId,
@@ -642,7 +645,7 @@ describe("createOAuthAdmin", () => {
 
     const pending = await Promise.all(
       Array.from({ length: MAX_PENDING_OAUTH_SESSIONS }, () =>
-        admin.startManualPaste({ providerId: "anthropic" }),
+        admin.startManualPaste({ providerId: "anthropic", account: "retained" }),
       ),
     );
     await expect(admin.startManualPaste({ providerId: "anthropic" })).rejects.toThrow(
@@ -660,7 +663,7 @@ describe("createOAuthAdmin", () => {
     ).resolves.toBeUndefined();
 
     now = 15 * 60 * 1000 - 1;
-    const live = await admin.startManualPaste({ providerId: "anthropic" });
+    const live = await admin.startManualPaste({ providerId: "anthropic", account: "live" });
     now = 15 * 60 * 1000 + 1;
     await expect(admin.startManualPaste({ providerId: "anthropic" })).resolves.toBeDefined();
     await expect(
@@ -692,7 +695,7 @@ describe("createOAuthAdmin", () => {
       admin.startDeviceCode({ providerId: "github-copilot" }),
     );
     const settled = Promise.allSettled(starts);
-    expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS));
 
     release();
     const results = await settled;
@@ -1703,7 +1706,10 @@ describe("createOAuthAdmin", () => {
       ]),
     );
     for (const account of ["tuned", "untuned"]) {
-      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+        account,
+      });
       const state = new URL(authorizeUrl).searchParams.get("state");
       await admin.completeManualPaste({
         sessionId,
@@ -1754,7 +1760,10 @@ describe("createOAuthAdmin", () => {
       ]),
     );
     for (const account of ["proxied", "bare"]) {
-      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+        account,
+      });
       const state = new URL(authorizeUrl).searchParams.get("state");
       await admin.completeManualPaste({
         sessionId,
@@ -2684,6 +2693,7 @@ describe("createOAuthAdmin > quota cache credential lifecycle", () => {
     const connect = async () => {
       const { sessionId, authorizeUrl } = await admin.startManualPaste({
         providerId: "anthropic",
+        account: "same-name",
       });
       const state = new URL(authorizeUrl).searchParams.get("state");
       await admin.completeManualPaste({
@@ -2789,6 +2799,7 @@ describe("createOAuthAdmin > quota cache credential lifecycle", () => {
     if (lifecycle === "reconnect") {
       const { sessionId, authorizeUrl } = await admin.startManualPaste({
         providerId: "anthropic",
+        account: "same-name",
       });
       const state = new URL(authorizeUrl).searchParams.get("state");
       await admin.completeManualPaste({
@@ -3192,6 +3203,7 @@ describe("createOAuthAdmin > codex reset credit", () => {
     // Bind a second codex account on the same admin (same upstream ChatGPT login).
     const { sessionId, authorizeUrl } = await admin.startManualPaste({
       providerId: "openai-codex",
+      account: "sibling",
     });
     const state = new URL(authorizeUrl).searchParams.get("state");
     await admin.completeManualPaste({

@@ -4,7 +4,10 @@ import {
   encryptSecret,
   isRetiredOpenAICodexModel,
   type OAuthSelectionStrategy,
+  type ProxyConfig,
   parseXaiOAuthModels,
+  UpstreamError,
+  validateProxyConfig,
   type XaiOAuthModel,
 } from "@helm/core";
 import { IanaTimezoneSchema } from "@helm/shared";
@@ -17,10 +20,16 @@ import { IanaTimezoneSchema } from "@helm/shared";
 // internally by `${providerId}\u0000${account}`.
 //
 // SECURITY (principle 7): the blob can hold a proxy password, so it is AES-256-GCM
-// ciphertext (token-cipher), never plaintext — same enc key as the tokens. The
-// read path is FAIL-OPEN: any decrypt/parse error yields {} (settings are
-// convenience state layered on top of the credential, not a security boundary —
-// a corrupt blob must never block routing or the admin page).
+// ciphertext (token-cipher), never plaintext — same enc key as the tokens.
+// Egress settings are a security boundary: unreadable settings never authorize direct traffic.
+
+export class OAuthEgressError extends UpstreamError {
+  override readonly httpStatus = 503;
+  constructor(message: string) {
+    super("upstream_error", message);
+    this.name = "OAuthEgressError";
+  }
+}
 
 const SETTINGS_KEY = "oauth.account_settings";
 const GLOBAL_SETTINGS_KEY = "oauth.global_settings";
@@ -131,6 +140,114 @@ function composite(providerId: string, account: string): string {
   return `${providerId}${SEP}${account}`;
 }
 
+// Account operations serialize credential commits with proxy edits. Never hold this
+// lock across an upstream request, or acquire it from the settings-write queue.
+const accountOperations = new WeakMap<ConfigStore, Map<string, Promise<void>>>();
+export function withAccountMutation<T>(
+  config: ConfigStore,
+  providerId: string,
+  account: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  let queues = accountOperations.get(config);
+  if (!queues) {
+    queues = new Map();
+    accountOperations.set(config, queues);
+  }
+  const key = composite(providerId, account);
+  const run = (queues.get(key) ?? Promise.resolve()).then(work, work);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  queues.set(key, settled);
+  void settled.then(() => {
+    if (queues.get(key) === settled) queues.delete(key);
+  });
+  return run;
+}
+
+type EgressState = {
+  unavailable: boolean;
+  proxies: Map<string, string>;
+  generations: Map<string, number>;
+};
+const egressStates = new WeakMap<ConfigStore, EgressState>();
+function egressState(config: ConfigStore): EgressState {
+  let state = egressStates.get(config);
+  if (!state) {
+    state = { unavailable: false, proxies: new Map(), generations: new Map() };
+    egressStates.set(config, state);
+  }
+  return state;
+}
+function proxyIdentity(proxy?: ProxyConfig): string {
+  return JSON.stringify(
+    proxy
+      ? [proxy.type, proxy.host, proxy.port, proxy.username ?? null, proxy.password ?? null]
+      : null,
+  );
+}
+function observeEgress(config: ConfigStore, map: AccountSettingsMap): void {
+  const state = egressState(config);
+  const keys = new Set([...state.proxies.keys(), ...Object.keys(map)]);
+  for (const key of keys) {
+    const next = proxyIdentity(map[key]?.proxy);
+    const previous = state.proxies.get(key) ?? proxyIdentity();
+    if (next !== previous) state.generations.set(key, (state.generations.get(key) ?? 0) + 1);
+    state.proxies.set(key, next);
+  }
+  state.unavailable = false;
+}
+export function invalidateAccountEgress(
+  config: ConfigStore,
+  providerId: string,
+  account: string,
+): void {
+  const state = egressState(config);
+  const key = composite(providerId, account);
+  state.generations.set(key, (state.generations.get(key) ?? 0) + 1);
+}
+export function accountEgressGeneration(
+  config: ConfigStore,
+  providerId: string,
+  account: string,
+): number {
+  return egressState(config).generations.get(composite(providerId, account)) ?? 0;
+}
+export function captureAccountEgress(
+  config: ConfigStore,
+  providerId: string,
+  account: string,
+  proxy?: ProxyConfig,
+): () => void {
+  const state = egressState(config);
+  const key = composite(providerId, account);
+  const generation = state.generations.get(key) ?? 0;
+  const expected = proxyIdentity(proxy);
+  const guard = () => {
+    if (
+      state.unavailable ||
+      (state.generations.get(key) ?? 0) !== generation ||
+      (state.proxies.get(key) ?? proxyIdentity()) !== expected
+    ) {
+      throw new OAuthEgressError(
+        "OAuth account egress settings are unavailable or changed; retry after applying the current settings",
+      );
+    }
+  };
+  guard();
+  return guard;
+}
+export function guardAccountFetch(fetchImpl: typeof fetch, guard: () => void): typeof fetch {
+  return async (input, init) => {
+    guard();
+    // Once dispatched, consume the result: refresh grants can rotate a single-use
+    // token upstream. The next request and authorization commit check again.
+    return fetchImpl(input, init);
+  };
+}
+
 function serializeSettingsMutation<T>(config: ConfigStore, work: () => Promise<T>): Promise<T> {
   const previous = mutationQueues.get(config) ?? Promise.resolve();
   const run = previous.then(work, work);
@@ -152,8 +269,19 @@ function parseAccountSettings(blob: string, encKey: Buffer): AccountSettingsMap 
   const settings = parsed as Record<string, unknown>;
   const normalized: AccountSettingsMap = {};
   for (const [key, raw] of Object.entries(settings)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw new Error("invalid OAuth account settings entry");
     const account = { ...(raw as AccountSettings) };
+    if (account.proxy !== undefined) {
+      if (!account.proxy || typeof account.proxy !== "object")
+        throw new Error("invalid OAuth proxy settings");
+      validateProxyConfig(account.proxy);
+      if (
+        (account.proxy.username !== undefined && typeof account.proxy.username !== "string") ||
+        (account.proxy.password !== undefined && typeof account.proxy.password !== "string")
+      )
+        throw new Error("invalid OAuth proxy credentials");
+    }
     if ("xaiDiscoveredModels" in account) {
       const models = parseXaiOAuthModels(account.xaiDiscoveredModels);
       if (models === null) delete account.xaiDiscoveredModels;
@@ -168,25 +296,23 @@ export async function loadAccountSettingsForMutation(
   config: ConfigStore,
   encKey: Buffer,
 ): Promise<AccountSettingsMap> {
-  const blob = await config.get(SETTINGS_KEY);
-  if (blob === null) return {};
-  return parseAccountSettings(blob, encKey);
+  try {
+    const blob = await config.get(SETTINGS_KEY);
+    const map = blob === null ? {} : parseAccountSettings(blob, encKey);
+    observeEgress(config, map);
+    return map;
+  } catch {
+    egressState(config).unavailable = true;
+    throw new OAuthEgressError("OAuth account settings cannot be read safely");
+  }
 }
 
-// Read paths FAIL-OPEN to {} on a missing/corrupt blob so a bad write can never
-// wedge routing or the providers page. Mutation paths use the strict loader above:
-// corrupt/unreadable settings must never be replaced with a partial empty map.
-export async function loadAccountSettings(
+// Serialize reads with writes so a delayed read cannot restore an older egress snapshot.
+export function loadAccountSettings(
   config: ConfigStore,
   encKey: Buffer,
 ): Promise<AccountSettingsMap> {
-  try {
-    const blob = await config.get(SETTINGS_KEY);
-    if (blob === null) return {};
-    return parseAccountSettings(blob, encKey);
-  } catch {
-    return {};
-  }
+  return serializeSettingsMutation(config, () => loadAccountSettingsForMutation(config, encKey));
 }
 
 // Encrypt + persist the whole map.
@@ -196,6 +322,7 @@ export async function saveAccountSettings(
   map: AccountSettingsMap,
 ): Promise<void> {
   await config.set(SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
+  observeEgress(config, map);
 }
 
 function normalizeSelectionStrategy(
