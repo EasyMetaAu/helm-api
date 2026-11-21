@@ -144,3 +144,266 @@ it("reports no-speech explicitly instead of fabricating a successful transcript"
   const result = normalizeDoubaoTranscription({ id: "id", code: 20000003 }, "id");
   expect(result).toMatchObject({ status: "failed", error: { code: "no_speech" } });
 });
+
+it("keeps real word timestamps when Doubao inserts untimed spaces", async () => {
+  const id = "5250b68e-18a1-4923-93d1-938c92af83b3";
+  const payload = {
+    audio_info: {
+      duration: 3560,
+    },
+    result: {
+      additions: {
+        duration: "3560",
+      },
+      text: "A good follow up starts with something you actually remember.",
+      utterances: [
+        {
+          end_time: 3160,
+          start_time: 0,
+          text: "A good follow up starts with something you actually remember.",
+          words: [
+            {
+              confidence: 0,
+              end_time: 200,
+              start_time: 0,
+              text: "A",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 400,
+              start_time: 200,
+              text: "good",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 680,
+              start_time: 480,
+              text: "follow",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 880,
+              start_time: 720,
+              text: "up",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 1320,
+              start_time: 1080,
+              text: "starts",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 1640,
+              start_time: 1400,
+              text: "with",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 2000,
+              start_time: 1680,
+              text: "something",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 2280,
+              start_time: 2040,
+              text: "you",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 2680,
+              start_time: 2360,
+              text: "actually",
+            },
+            {
+              confidence: 0,
+              end_time: -1,
+              start_time: -1,
+              text: " ",
+            },
+            {
+              confidence: 0,
+              end_time: 3160,
+              start_time: 2840,
+              text: "remember",
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const fetch = vi.fn().mockResolvedValue(
+    Response.json(payload, {
+      headers: { "X-Api-Status-Code": "20000000" },
+    }),
+  );
+  const client = createDoubaoAsrClient({
+    config: { baseUrl: "https://openspeech.bytedance.com", apiKey: "test" },
+    fetch,
+  });
+  const expected = {
+    status: "done",
+    usage: {
+      type: "duration",
+      seconds: 3.56,
+    },
+    transcription: {
+      text: "A good follow up starts with something you actually remember.",
+      durationMs: 3560,
+      segments: [
+        {
+          text: "A good follow up starts with something you actually remember.",
+          startMs: 0,
+          endMs: 3160,
+          words: [
+            {
+              text: "A",
+              startMs: 0,
+              endMs: 200,
+            },
+            {
+              text: "good",
+              startMs: 200,
+              endMs: 400,
+            },
+            {
+              text: "follow",
+              startMs: 480,
+              endMs: 680,
+            },
+            {
+              text: "up",
+              startMs: 720,
+              endMs: 880,
+            },
+            {
+              text: "starts",
+              startMs: 1080,
+              endMs: 1320,
+            },
+            {
+              text: "with",
+              startMs: 1400,
+              endMs: 1640,
+            },
+            {
+              text: "something",
+              startMs: 1680,
+              endMs: 2000,
+            },
+            {
+              text: "you",
+              startMs: 2040,
+              endMs: 2280,
+            },
+            {
+              text: "actually",
+              startMs: 2360,
+              endMs: 2680,
+            },
+            {
+              text: "remember",
+              startMs: 2840,
+              endMs: 3160,
+            },
+          ],
+        },
+      ],
+    },
+  };
+  expect(normalizeDoubaoTranscription({ id, code: 20000000, ...payload }, id)).toMatchObject(
+    expected,
+  );
+  expect(normalizeDoubaoTranscription(await client.transcriptionRetrieve(id), id)).toMatchObject(
+    expected,
+  );
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0]?.[0]).toMatch(/\/query$/);
+});
+
+it.each([
+  { text: "word", start_time: -1, end_time: -1 },
+  { text: "", start_time: -1, end_time: -1 },
+  { text: " ", start_time: -1, end_time: 0 },
+  { text: " ", start_time: "-1", end_time: "-1" },
+  null,
+])("rejects invalid word timing instead of silently dropping it: %j", (word) => {
+  expect(
+    normalizeDoubaoTranscription(
+      {
+        id: "id",
+        code: 20000000,
+        result: {
+          text: "word",
+          utterances: [{ text: "word", start_time: 0, end_time: 400, words: [word] }],
+        },
+      },
+      "id",
+    ),
+  ).toBeNull();
+});
+
+it("does not drop untimed utterances", () => {
+  expect(
+    normalizeDoubaoTranscription(
+      {
+        id: "id",
+        code: 20000000,
+        result: {
+          text: " ",
+          utterances: [{ text: " ", start_time: -1, end_time: -1 }],
+        },
+      },
+      "id",
+    ),
+  ).toBeNull();
+});

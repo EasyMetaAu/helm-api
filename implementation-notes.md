@@ -8,6 +8,12 @@
 ---
 
 
+## 2026-11-21 · 豆包录音的空白时间戳（native-media）
+
+真实录音结果在英文词间插入 `text: " "`、两端时间均为 `-1` 的占位。只从 words 数组过滤非空纯空白且双端严格为 -1 的条目，保留全文、真实词时间和供应商时长。其他负值、空字符串、非数字及 utterance 时间仍拒绝。查询和标准化共用 schema，现有任务只需查询，无需重发付费提交。
+
+发布 0.30.95 按发布流程同步 Grok 1.0.92、Claude Code 2.1.330，Codex 0.171.0 不变；Claude 新增的 MCP 保存字段已静态审查并加入剥离回归，Messages 信任白名单不变。
+
 ## 2026-11-21 · Qwen Filetrans 原生秒数（docs/06、native-media）
 
 真实文件任务返回 `usage.seconds`，此前仅 Fun-ASR 的 `duration` 被标准化，导致异步预算回执漏记 Qwen 用量。Qwen Filetrans 现在验证有限、非负秒数并添加 `type: duration`，保留供应商原数值，不用上传时长或字幕末尾推算。金额仍为 unknown，原预留不变；现有任务经只读查询即可补齐回执，无需再次付费提交。
@@ -54,14 +60,9 @@
 
 - 发布 0.30.89：完成 Claude Code 2.1.326 静态协议审查，保留现有头白名单并增加新增字段隔离回归；`release:prepare` 同步 Grok 1.0.88、Claude Code 2.1.326，Codex 0.169.0 及目录不变。部署保留服务器自定义配置；本轮不发送真实录音，转写质量与实际计费由后续音频验收确认。
 
-## 2026-11-14 · 最新 GPT／Claude 价卡（docs/07）
-
-- **来源与范围**：按 [OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[模型目录](https://developers.openai.com/api/docs/models)及 [Claude 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)核对当前通用文本模型。GPT 最新为 Astra 6、Sol 6.1、Terra 6.1、Luna 6；Claude 为 Fable 5.2、Opus／Sonnet／Haiku 5.5，另有受限的 Mythos 5.2。
-- **价卡决定**：补齐 Fable／Mythos 5.2 与 Haiku 5.5 的 `anthropic`／`anthropic-api` 定价，含缓存、Fast 与美国区域系数。Haiku 总输入严格超过 100,000 才整单升档；Sonnet 5.5 缓存读取修正为 $0.10/M。OpenAI／Codex 补 Astra Fast、Astra／Sol Ultrafast 及 Astra／Luna 区域系数。
-- **范围边界**：新增 Claude 价卡同时配套官方能力元数据，避免价格条目生成零能力默认值并错误拦截已有自定义路由；provider 注册及默认 lane 保持原配置。Fable／Mythos 禁止强制工具选择，Haiku 支持；按官方要求移除不支持的采样及手动思考参数。Mythos 仍须上游授予访问权限。订阅仍按 API 等价价格估算，不代表订阅账单。第三方聚合商沿用各自价卡。
-- **已知限制**：沿用现有 OpenAI 30 分钟缓存写入计价；12 小时缓存写入尚无独立用量字段映射，不宣称可准确区分。历史费用不自动重算；部署时需将价卡增量合并到挂载配置，并从实际容器重新加载验证。
-
 ## 更早历史总览
+
+2026-11-14：GPT／Claude 官方价卡与能力元数据同步，费用适用边界见 Git 历史。
 
 2026-11-14/13：豆包语音目录、请求内存与 Docker 堆、百炼短 WAV 原子预留已交；完整记录见对应 Git 历史。
 
