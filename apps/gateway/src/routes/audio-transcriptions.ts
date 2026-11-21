@@ -139,6 +139,24 @@ export function registerAudioTranscriptionsRoute(
             "invalid transcription operation ID",
           );
         if (!accounting) throw new SpeechAccountingError("media_accounting_unavailable");
+        if (!deps.results)
+          throw new SpeechAdmissionError(
+            503,
+            "result_storage_unavailable",
+            "durable transcription storage is unavailable",
+          );
+        const existing = await accounting.get(
+          transcriptionOperationStoreId(callerOperationId, identity.keyId),
+          identity.keyId,
+        );
+        if (existing) {
+          spend = existing;
+          throw new SpeechAdmissionError(
+            409,
+            "operation_exists",
+            "transcription operation already exists",
+          );
+        }
       }
       const contentType = c.req.header("content-type") ?? "";
       if (!contentType.startsWith("multipart/form-data;"))
@@ -241,7 +259,8 @@ export function registerAudioTranscriptionsRoute(
         : lease.signal;
 
       // Weekly budget checks reserve a request. Do that only after the
-      // provider-capacity check, so a full GPU does not spend the caller's quota.
+      // gateway capacity check. Requests admitted here still count if the shared
+      // worker later refuses them, matching weekly failed-attempt accounting.
       await checkSpeechBudget(admission, identity);
       const traceId = c.get("trace_id") ?? crypto.randomUUID();
       if (accounting) {

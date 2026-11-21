@@ -20,6 +20,46 @@ import { registerAudioTranscriptionsRoute } from "./audio-transcriptions.js";
 import { createTranscriptionResultStore } from "./transcription-results.js";
 
 describe("multipart transcription boundary", () => {
+  it.each([
+    true,
+    false,
+  ])("rejects replay or missing durable storage before admission (storage=%s)", async (storage) => {
+    const db = createSqliteDb(":memory:");
+    try {
+      const ledger = createTranscriptionAccounting(new SqliteBudgetStore(db), {
+        defaultWindowSeconds: 86400,
+        defaultDegradeLane: "economy",
+      });
+      const get = vi.fn().mockResolvedValue({ id: "existing" });
+      const acquire = vi.fn();
+      const resolve = vi.fn();
+      const app = new Hono<AppEnv>();
+      registerAudioTranscriptionsRoute(app, {
+        auth: { resolve: async () => ({ keyId: "learner", accountId: "test" }) },
+        concurrencyGate: { acquire },
+        accounting: { ...ledger, get },
+        resolve,
+        ...(storage ? { results: { save: vi.fn(), get: vi.fn() } } : {}),
+      });
+      const response = await app.request("/v1/audio/transcriptions", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer fixture",
+          "X-Helm-Transcription-Operation": "asr_0ad3295c-3f46-4a74-8e76-1f22b5d9795a",
+        },
+        body: "not even multipart",
+      });
+      expect(response.status).toBe(storage ? 409 : 503);
+      expect(await response.json()).toMatchObject({
+        error: { code: storage ? "operation_exists" : "result_storage_unavailable" },
+      });
+      expect(acquire).not.toHaveBeenCalled();
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
   it("retries a worker-admission refusal with the same operation, but never retries a lost response", async () => {
     const db = createSqliteDb(":memory:");
     try {
@@ -44,6 +84,7 @@ describe("multipart transcription boundary", () => {
       registerAudioTranscriptionsRoute(app, {
         auth: { resolve: async () => ({ keyId: "learner", accountId: "test" }) },
         concurrencyGate: { acquire: async () => ({ ok: true as const, release: vi.fn() }) },
+        results: { save: vi.fn(), get: vi.fn() },
         accounting: {
           ...ledger,
           settle,
