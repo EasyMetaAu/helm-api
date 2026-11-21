@@ -8,6 +8,12 @@
 ---
 
 
+## 2026-11-21 · GPU 转写的容量与结果恢复（docs/04、06、native-media）
+
+WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一规范化入口共用跨 key 容量。调用方可预存 `asr_` 操作号；结果用独立 `HELM_TRANSCRIPTION_RESULT_ENC_KEY` 加密保留六小时，断连后按原号恢复。原号不能重复派发，读取仍核验当前 key、账户与 lane 权限。GPU 的原生秒数和零现金价格进入现有用量账本。
+
+只有专用 `/helm` 工作器返回带 `X-ASR-Admission: gpu-busy` 的 429，才释放尚未使用的预留并允许原号退避重试；其他未知结果保留原操作核对。现役异步转写的账户上界、单音轨及未知费用语义保持。0.30.96 发布准备确认 CLI 快照没有变化。
+
 ## 2026-11-21 · 豆包录音的空白时间戳（native-media）
 
 真实录音结果在英文词间插入 `text: " "`、两端时间均为 `-1` 的占位。只从 words 数组过滤非空纯空白且双端严格为 -1 的条目，保留全文、真实词时间和供应商时长。其他负值、空字符串、非数字及 utterance 时间仍拒绝。查询和标准化共用 schema，现有任务只需查询，无需重发付费提交。
@@ -51,15 +57,6 @@
 - 生产请求在首个有效输出前收到 max_output_tokens、output=[]、输入/输出/总用量全零的 incomplete。该终态此前被当作有效输出，直接阻止备用候选接手；现在交给现有失败与切换路径。
 - 仅匹配这组明确证据；已经产生文字、推理或工具输出的流不重放，未知用量及正常内容截断继续保留原行为。
 
-## 2026-11-16 · Fun-ASR／Paraformer 录音文件识别（docs/05、06、native-media）
-
-- 按官方 REST 与热词文档拆分 `fun-asr`、`paraformer-v2` 请求 schema，复用现有 DashScope 异步任务、operations 恢复和公网结果下载；新增专用 lane。供应商选择不再吞掉无效请求，未通过 schema 的请求在发送前返回 400。
-- 当前两份官方 REST 文档均限制每任务一个 URL，保留 `file_urls` 单元素数组；多文件由客户端逐个建任务。Fun-ASR 即时热词为最多 2000 项的文本到整数权重（1–5）映射，非 ASCII 文本最多 15 字符；官方未定义省略权重的形式。Paraformer 仅开放文档支持的 `vocabulary_id`，不套用 Fun-ASR 即时热词或未公开的标点开关。
-- 下载的转写结果用 Zod 校验并保留所有原生字段，词级毫秒时间、标点、说话人字段不丢弃。上游 `usage.duration` 原样保留并映射到 `type: duration / seconds`；不从词时间推测用量。北京秒价重新核对为 ¥0.00022／¥0.00008。
-- 沿用现有异步任务记账边界：计请求次数并返回用量，不新增轮询扣费或美元结算；spend-capped Key 仍在发送前拒绝。无真实供应商调用；账户权限、识别质量及实际账单未验收。完整 API 与来源见 [recorded-file-asr.md](docs/recorded-file-asr.md)。
-
-- 发布 0.30.89：完成 Claude Code 2.1.326 静态协议审查，保留现有头白名单并增加新增字段隔离回归；`release:prepare` 同步 Grok 1.0.88、Claude Code 2.1.326，Codex 0.169.0 及目录不变。部署保留服务器自定义配置；本轮不发送真实录音，转写质量与实际计费由后续音频验收确认。
-
 ## 更早历史总览
 
 2026-11-14：GPT／Claude 官方价卡与能力元数据同步，费用适用边界见 Git 历史。
@@ -83,3 +80,5 @@
 2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）；完整记录见 Git history。
 
 更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。
+
+历史摘要补记：2026-11-16 · Fun-ASR／Paraformer 录音文件识别（docs/05、06、native-media）；原文见 Git history。
