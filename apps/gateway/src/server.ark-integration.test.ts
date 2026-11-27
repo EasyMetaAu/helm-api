@@ -5,7 +5,7 @@ import { type CreateKeyInput, createSqliteDb, hashKey, SqliteKeyStore } from "@h
 import { expect, it, vi } from "vitest";
 import { buildServer, type ServerHandle } from "./server.js";
 
-it("routes four Ark models through SDK, enforces key boundaries and restores owned tasks after restart", async () => {
+it("routes configured Ark models through SDK, enforces key boundaries and restores owned tasks after restart", async () => {
   const dir = await mkdtemp(join(tmpdir(), "helm-ark-integration-"));
   const db = createSqliteDb(join(dir, "helm.db"));
   let server: ServerHandle | undefined;
@@ -103,6 +103,7 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
     for (const [path, body] of [
       ["/v1/images/generations", { model: "seedream-flash", prompt: "An apple" }],
       ["/v1/videos/generations", video],
+      ["/v1/videos/generations", { ...video, model: "seedance-video-flash" }],
       ["/v1/3d/generations", threeD],
     ] as const) {
       for (const key of ["spend", "blocked", "blocked-wire", "restricted"]) {
@@ -120,6 +121,7 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
       expect.arrayContaining([
         expect.objectContaining({ alias: "ark/seedream-5.0-flash", outputKind: "image" }),
         expect.objectContaining({ alias: "ark/seedance-2.5", outputKind: "video" }),
+        expect.objectContaining({ alias: "ark/seedance-2.5-flash", outputKind: "video" }),
         expect.objectContaining({ alias: "ark/seed3d-2.0", outputKind: "3d" }),
       ]),
     );
@@ -138,9 +140,21 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
       "doubao-seedream-5-0-flash-260915",
       "doubao-seedream-5-0-pro-260628",
     ]);
+    const beforeFlashValidation = calls.length;
+    for (const resolution of ["480p", "720p", "1080p"]) {
+      const result = await post("/v1/videos/validate", {
+        ...video,
+        model: "seedance-video-flash",
+        resolution,
+      });
+      expect(result.status).toBe(resolution === "1080p" ? 400 : 200);
+    }
+    expect(calls).toHaveLength(beforeFlashValidation);
     const created = [];
     for (const [kind, body] of [
       ["videos", video],
+      ["videos", { ...video, model: "seedance-video-flash" }],
+      ["videos", { ...video, model: "doubao-seedance-2-5-flash-261115" }],
       ["3d", threeD],
     ] as const) {
       const result = await post(`/v1/${kind}/generations`, body);
@@ -163,7 +177,7 @@ it("routes four Ark models through SDK, enforces key boundaries and restores own
       expect(result.status, JSON.stringify(body)).toBe(200);
       expect(body.status).toBe("done");
     }
-    expect(calls.filter((call) => call.method === "POST")).toHaveLength(4);
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(6);
     const assetBody = {
       ...video,
       watermark: false,

@@ -88,12 +88,13 @@ describe("checked-in config samples", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const ark = cfg.providers.find((p) => p.type === "ark");
     expect(ark?.api_key_env).toBe("ARK_API_KEY");
-    expect(ark?.models).toHaveLength(4);
+    expect(ark?.models).toHaveLength(5);
     const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
     for (const [lane, alias, capability] of [
       ["seedream-flash", "ark/seedream-5.0-flash", "outputImage"],
       ["seedream-pro", "ark/seedream-5.0-pro", "outputImage"],
       ["seedance-video", "ark/seedance-2.5", "outputVideo"],
+      ["seedance-video-flash", "ark/seedance-2.5-flash", "outputVideo"],
       ["seed3d", "ark/seed3d-2.0", "outputThreeD"],
     ] as const) {
       expect(expandLaneChain(lane, cfg.lanes ?? {})).toEqual([alias]);

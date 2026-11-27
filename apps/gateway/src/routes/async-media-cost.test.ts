@@ -1,6 +1,7 @@
+import { loadRuntimeCatalog } from "@helm/core";
 import type { MediaPricing } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { priceAsyncMediaResult } from "./async-media-cost.js";
+import { captureAsyncMediaBilling, priceAsyncMediaResult } from "./async-media-cost.js";
 
 const card = (
   providerModel: string,
@@ -103,4 +104,40 @@ describe("asynchronous media prices", () => {
       )?.cost.amount,
     ).toBe(0);
   });
+});
+
+it.each([false, true])("captures and settles Flash usage with input video=%s", (hasInputVideo) => {
+  const pricing = loadRuntimeCatalog({ configDir: "config" }).get("ark/seedance-2.5-flash")?.pricing
+    .media;
+  const target = {
+    providerType: "ark" as const,
+    providerAlias: "ark/seedance-2.5-flash",
+    providerName: "ark",
+    providerModel: "doubao-seedance-2-5-flash-261115",
+    providerAccount: null,
+    client: { create: async () => ({}) },
+  };
+  const billing = captureAsyncMediaBilling(
+    "video",
+    target,
+    {
+      content: [{ type: hasInputVideo ? "video_url" : "text" }],
+    },
+    "flash-request",
+    pricing,
+  );
+  expect(billing).toMatchObject({ profile: "seedance", hasInputVideo });
+  if (!billing) throw new Error("missing Flash billing");
+  for (const resolution of ["480p", "720p"]) {
+    const result = priceAsyncMediaResult(billing, {
+      resolution,
+      usage: { completion_tokens: 100000 },
+    });
+    expect(result?.cost.amount).toBeCloseTo(hasInputVideo ? 2.8 : 4.6);
+    expect(result?.cost.currency).toBe("CNY");
+    expect(result?.cost.cost_usd).toBeNull();
+  }
+  expect(
+    priceAsyncMediaResult(billing, { resolution: "1080p", usage: { completion_tokens: 100000 } }),
+  ).toBeNull();
 });

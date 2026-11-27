@@ -39,7 +39,12 @@ export function captureAsyncMediaBilling(
   const base = { requestId, pricing };
   let binding: unknown;
   if (kind === "video") {
-    if (target.providerType === "ark" && target.providerModel === "doubao-seedance-2-5-260628") {
+    if (
+      target.providerType === "ark" &&
+      ["doubao-seedance-2-5-260628", "doubao-seedance-2-5-flash-261115"].includes(
+        target.providerModel,
+      )
+    ) {
       const content = z.array(z.object({ type: z.string() })).safeParse(body.content);
       if (content.success)
         binding = {

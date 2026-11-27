@@ -1493,6 +1493,26 @@ ark/seedream-5.0-pro:
     notes:
       - "First input image free per request; bill remaining images."
       - "Each output layer is priced by its own actual pixel count; failed outputs not billed."
+# Seedance 2.5 Flash: https://www.volcengine.com/docs/82379/1544106
+ark/seedance-2.5-flash:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  media:
+    currency: "CNY"
+    region: "cn-beijing"
+    providerModel: "doubao-seedance-2-5-flash-261115"
+    basis: "official_list_price"
+    verifiedOn: "2026-11-27"
+    source: "https://www.volcengine.com/docs/82379/1544106"
+    rates:
+      - {"direction": "completion", "unit": "million_tokens", "price": 46, "conditions": {"resolution": "480p", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 46, "conditions": {"resolution": "720p", "hasInputVideo": false}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 28, "conditions": {"resolution": "480p", "hasInputVideo": true}}
+      - {"direction": "completion", "unit": "million_tokens", "price": 28, "conditions": {"resolution": "720p", "hasInputVideo": true}}
+    notes:
+      - "Only successful generation is billed, using actual usage.completion_tokens."
+      - "Token estimates use (input + output video seconds) * width * height * fps / 1024; input-video requests have a minimum token floor."
+      - "Supports 480p and 720p at 24 fps, 4–30 seconds. CNY prices are not USD prices."
 ark/seedance-2.5:
   inputPerMTokUsd: null
   outputPerMTokUsd: null

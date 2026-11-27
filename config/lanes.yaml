@@ -442,6 +442,15 @@ seed3d:
     require_json: false
     require_vision: false
 
+seedance-video-flash:
+  purpose: Seedance 2.5 Flash video generation
+  primary: ark/seedance-2.5-flash
+  fallback: []
+  constraints:
+    require_tools: false
+    require_json: false
+    require_vision: false
+
 seedance-video:
   purpose: Ark dedicated media generation
   primary: ark/seedance-2.5

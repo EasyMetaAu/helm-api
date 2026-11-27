@@ -143,6 +143,50 @@ it("rejects all non-approved model IDs", () => {
   }
 });
 
+describe("Seedance 2.5 Flash", () => {
+  const model = "doubao-seedance-2-5-flash-261115";
+  const request = { ...simpleVideo, model };
+  it.each(["480p", "720p"])("accepts %s text and pinned-frame generation", (resolution) => {
+    for (const duration of [4, 30, -1]) {
+      expect(VideoRequest.parse({ ...request, resolution, duration })).toMatchObject({ model });
+    }
+    expect(
+      VideoRequest.parse({
+        ...request,
+        resolution,
+        ratio: "adaptive",
+        content: [image("first_frame"), image("last_frame")],
+      }),
+    ).toMatchObject({ model });
+  });
+  it("enforces Flash reference limits independently of the full model", () => {
+    const content = [
+      ...Array(10).fill(image("reference_image")),
+      ...Array(5).fill(video),
+      ...Array(5).fill(audio),
+    ];
+    const body = { ...request, content: [text, ...content], omni_reference_task_type: "reference" };
+    expect(VideoRequest.parse(body)).toEqual(body);
+    for (const extra of [image("reference_image"), video, audio]) {
+      const overflow = { ...body, content: [...body.content, extra] };
+      expect(VideoRequest.safeParse(overflow).success).toBe(false);
+      expect(VideoRequest.safeParse({ ...overflow, model: videoModel }).success).toBe(true);
+    }
+  });
+  it("rejects unsupported resolution before generation and accepts Flash task results", () => {
+    expect(VideoRequest.safeParse({ ...request, resolution: "1080p" }).success).toBe(false);
+    expect(VideoRequest.safeParse({ ...simpleVideo, resolution: "1080p" }).success).toBe(true);
+    expect(
+      VideoResponse.safeParse({
+        id: "flash-task",
+        model,
+        status: "succeeded",
+        content: { video_url: "https://media.example.com/flash.mp4" },
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe("Seedance 2.5", () => {
   it("accepts text, first frame, first/last frames and ordered multimodal references", () => {
     for (const body of [
