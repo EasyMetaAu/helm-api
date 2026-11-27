@@ -285,16 +285,20 @@ it("routes configured Ark models through SDK, enforces key boundaries and restor
     const row = db.$sqlite
       .prepare("SELECT decision_json FROM telemetry WHERE request_id = ?")
       .get(rejectedId) as { decision_json: string };
-    expect(JSON.parse(row.decision_json).provider_attempts[0].error_detail).toEqual({
+    expect(JSON.parse(row.decision_json).provider_attempts[0].error_detail).toMatchObject({
       upstream_status: 400,
-      message: "Ark media request failed",
+      message: "Ark upstream returned HTTP 400",
       provider_raw: {
-        error: { code: "InvalidParameter.InputImage", param: "content[1].image_url.url" },
-        request_id: "ark-integration-request",
+        error: {
+          code: "InvalidParameter.InputImage",
+          param: "content[1].image_url.url",
+          message: "https://private.example.test/portrait",
+        },
       },
+      provider_headers: { "x-request-id": "ark-integration-request" },
     });
     expect(row.decision_json).not.toContain("private-signature");
-    expect(row.decision_json).not.toContain("private.example.test");
+    expect(row.decision_json).toContain("https://private.example.test/portrait");
   } finally {
     await server?.dispose?.();
     db.$sqlite.close();

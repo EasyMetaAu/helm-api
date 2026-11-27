@@ -6,7 +6,14 @@ import {
   mediaBaseUrl,
   parseMediaInput,
 } from "./media-http.js";
-import { createOpenAIClient, type OpenAIClientDeps, type ProviderCallOptions } from "./openai.js";
+import {
+  createOpenAIClient,
+  type OpenAIClientDeps,
+  type ProviderCallOptions,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
+  safeUpstreamHeaders,
+} from "./openai.js";
 
 export const BAILIAN_SHORT_ASR_PROFILE = "qwen3-asr-flash-chat";
 export const parseBailianShortAsrRequest = (value: unknown) =>
@@ -26,13 +33,24 @@ export function createBailianAsrClient(deps: OpenAIClientDeps) {
       // The generic Chat transport retries overloads independently of connectRetries.
       // A paid ASR call has no idempotency guarantee; stop that policy at its fetch seam.
       if (response.status === 503 || response.status === 529) {
-        await response.body?.cancel().catch(() => {});
+        const rawError = await readUpstreamErrorBody(
+          response,
+          providerErrorScrubber(
+            deps.config,
+            new Headers(init?.headers).get("Authorization") ?? undefined,
+          ),
+          deps.responseWorkAdmission,
+        );
         throw new MediaHttpError(
           "unknown",
           "upstream_error",
           "ASR upstream overloaded",
-          { error: { code: "upstream_overloaded" } },
+          rawError,
           response.status,
+          providerErrorScrubber(deps.config)(safeUpstreamHeaders(response.headers)) as Record<
+            string,
+            string
+          >,
         );
       }
       return response;

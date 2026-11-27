@@ -226,9 +226,16 @@ export function createArkMediaClient(deps: OpenAIClientDeps) {
         admission.capacityBytes,
         (text) => {
           try {
-            return RecordSchema.parse(JSON.parse(text));
+            return RecordSchema.parse(scrub(JSON.parse(text)));
           } catch {
-            throw error("invalid_response", "Ark upstream returned an invalid JSON object");
+            throw new ArkMediaError(
+              outcome(),
+              "upstream_error",
+              "Ark upstream returned an invalid JSON object",
+              { error: { code: "invalid_response" }, raw: scrub(text.slice(0, 65536)) },
+              responseStatus,
+              responseHeaders,
+            );
           }
         },
         admission,

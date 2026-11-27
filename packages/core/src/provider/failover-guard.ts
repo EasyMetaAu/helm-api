@@ -72,26 +72,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
-function errorFields(value: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of ["type", "code", "message", "param"] as const) {
-    const field = value[key];
-    if (typeof field === "string" || typeof field === "number" || field === null) {
-      out[key] = field;
-    }
-  }
-  return out;
-}
-
 function errorProviderRaw(data: string): Record<string, unknown> | null {
   const obj = tryParse(data);
   if (!obj) return null;
-  const out = errorFields(obj);
+  const out = { ...obj };
+  delete out.response;
   const error = asRecord(obj.error);
-  if (error) out.error = errorFields(error);
+  if (error) out.error = error;
   else if (typeof obj.error === "string") out.error = obj.error;
   const responseError = asRecord(asRecord(obj.response)?.error);
-  if (responseError) out.response = { error: errorFields(responseError) };
+  if (responseError) out.response = { error: responseError };
   if (obj.type === "response.incomplete") {
     const reason = asRecord(asRecord(obj.response)?.incomplete_details)?.reason;
     if (typeof reason === "string") out.response = { incomplete_details: { reason } };

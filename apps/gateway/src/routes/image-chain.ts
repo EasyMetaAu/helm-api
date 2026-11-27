@@ -158,7 +158,7 @@ export async function runImageChain(
           error_class: "outcome_unknown",
           latency_ms: Date.now() - started,
           cost_usd: null,
-          error_detail: null,
+          error_detail: errorDetailOf(err),
         });
         return {
           ok: false,
@@ -182,7 +182,7 @@ export async function runImageChain(
           error_class: "outcome_unknown",
           latency_ms: Date.now() - started,
           cost_usd: null,
-          error_detail: null,
+          error_detail: errorDetailOf(err),
         });
         return {
           ok: false,
@@ -233,7 +233,7 @@ export async function runImageChain(
           error_class: errorClass,
           latency_ms: Date.now() - started,
           cost_usd: null,
-          error_detail: null,
+          error_detail: errorDetailOf(err),
         });
         return {
           ok: false,

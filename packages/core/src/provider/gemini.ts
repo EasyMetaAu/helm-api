@@ -442,8 +442,14 @@ export async function fetchPublicResultJson(
         continue;
       }
       if (!response.ok) {
-        await response.body?.cancel();
-        throw new UpstreamError("upstream_error", "media result fetch failed");
+        const raw = await readUpstreamErrorBody(response, (value) => value);
+        throw new UpstreamError(
+          "upstream_error",
+          "media result fetch failed",
+          raw,
+          response.status,
+          safeUpstreamHeaders(response.headers),
+        );
       }
       const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
       if (Number(response.headers.get("content-length")) > maxBytes) {
@@ -770,6 +776,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     },
 
     async *chatCompletionStream(req, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const { model, body } = openAIChatToGeminiBody(req);
       const res = await requestWithAuthRetry(
         "streamGenerateContent",
@@ -800,6 +807,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     },
 
     async *nativePassthroughStream(input, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const res = await requestWithAuthRetry(
         "streamGenerateContent",
         input,

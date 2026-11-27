@@ -1,11 +1,17 @@
 import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
-import { type RealtimeSidebandTarget, runtimeMemoryBudget, UpstreamError } from "@helm/core";
+import {
+  providerErrorScrubber,
+  type RealtimeSidebandTarget,
+  runtimeMemoryBudget,
+  UpstreamError,
+} from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { codexWebSocketAgent } from "./codex-responses-websocket.js";
 import { HelmHttpError } from "./middleware/error-handler.js";
 import type { RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
+import { websocketUpstreamError } from "./websocket-upstream-error.js";
 
 const DEFAULT_MAX_REALTIME_CONNECTIONS = 128;
 const DEFAULT_REALTIME_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -38,11 +44,15 @@ interface PendingUpstream {
   socket: WebSocket;
   pending: Array<{ data: WebSocket.RawData; isBinary: boolean }>;
   stopQueue(): void;
+  recordError(error: unknown): void;
 }
 
-class UpstreamUpgradeError extends Error {
-  constructor(readonly status: number) {
-    super(`realtime upstream websocket rejected the upgrade (${status})`);
+class UpstreamUpgradeError extends UpstreamError {
+  constructor(
+    readonly status: number,
+    error: UpstreamError,
+  ) {
+    super(error.errorClass, error.message, error.providerRaw, status, error.upstreamHeaders);
   }
 }
 
@@ -105,6 +115,13 @@ async function openUpstream(
       target.assertCurrent?.();
       const headers = new Headers(await target.headers());
       target.assertCurrent?.();
+      const scrub = providerErrorScrubber(
+        { baseUrl: target.url },
+        headers.get("Authorization") ?? undefined,
+      );
+      const recordError = (error: unknown) => {
+        void target.recordError?.(error).catch(() => {});
+      };
       if (target.forwardClientUserAgent) headers.set("user-agent", userAgent ?? "");
       return await new Promise<PendingUpstream>((resolve, reject) => {
         const pending: PendingUpstream["pending"] = [];
@@ -130,12 +147,27 @@ async function openUpstream(
             socket,
             pending,
             stopQueue: () => socket.off("message", queue),
+            recordError: (error) =>
+              recordError(
+                error instanceof UpstreamError
+                  ? new UpstreamError(
+                      error.errorClass,
+                      error.message,
+                      scrub(error.providerRaw),
+                      error.upstreamStatus,
+                      error.upstreamHeaders,
+                    )
+                  : error,
+              ),
           }),
         );
         socket.once("unexpected-response", (request, response) => {
-          response.resume();
-          request.socket?.destroy();
-          reject(new UpstreamUpgradeError(response.statusCode ?? 502));
+          void websocketUpstreamError(response, headers.get("Authorization") ?? undefined).then(
+            (error) => {
+              reject(new UpstreamUpgradeError(response.statusCode ?? 502, error));
+              request.socket?.destroy();
+            },
+          );
         });
         socket.once("error", reject);
       });
@@ -152,6 +184,7 @@ async function openUpstream(
       if (cause instanceof UpstreamUpgradeError && cause.status === 401) {
         target.onCredentialFailure?.(401);
       }
+      await target.recordError?.(cause).catch(() => {});
       throw cause;
     }
   }
@@ -218,6 +251,18 @@ export function installRealtimeWebSocketBridge(
       idleTimer.unref?.();
     };
     const relay = (destination: WebSocket, data: WebSocket.RawData, isBinary: boolean) => {
+      if (destination === client && !isBinary) {
+        try {
+          const raw: unknown = JSON.parse(data.toString());
+          if (raw && typeof raw === "object" && "type" in raw && raw.type === "error") {
+            pending.recordError(
+              new UpstreamError("upstream_error", "realtime upstream error", raw),
+            );
+          }
+        } catch {
+          /* Non-JSON events are forwarded unchanged. */
+        }
+      }
       // Size/capacity checks are disabled; maintenance pause remains.
       const acquired = admission.acquire(rawBytes(data));
       if (!acquired.ok) {

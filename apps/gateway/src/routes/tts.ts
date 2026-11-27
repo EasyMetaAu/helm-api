@@ -19,6 +19,7 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
+import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import { buildImageDecision } from "./image-telemetry.js";
 import type { MessagesIdentity } from "./messages.js";
@@ -28,6 +29,7 @@ import {
   recordServed,
   withRequestContentMode,
 } from "./payload-capture.js";
+import { recordUpstreamFailure } from "./upstream-failure.js";
 
 export interface TtsRouteDeps {
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
@@ -90,6 +92,7 @@ function ttsDecision(input: {
   keyPrefix: string | null;
   status: "ok" | "error";
   errorClass: string | null;
+  errorDetail?: ProviderAttempt["error_detail"];
   latencyMs: number;
   servingAccount: { providerId: string; account: string } | null;
 }) {
@@ -101,7 +104,7 @@ function ttsDecision(input: {
     error_class: input.errorClass,
     latency_ms: input.latencyMs,
     cost_usd: null,
-    error_detail: null,
+    error_detail: input.errorDetail ?? null,
     provider_name: "xai",
     provider_model: "tts",
   };
@@ -194,6 +197,15 @@ export function registerTtsRoute(app: Hono<AppEnv>, deps: TtsRouteDeps): void {
     try {
       return c.json(await client.ttsVoices({ signal: requestSignal(c) }));
     } catch (error) {
+      await recordUpstreamFailure(deps.record, {
+        keyId: admission.keyId,
+        alias: "xai/tts",
+        model: "tts",
+        operation: "tts_voices",
+        error,
+        requestId: c.get("request_id"),
+        traceId: c.get("trace_id"),
+      });
       if (isAbortError(error)) return c.body(null, 499 as ContentfulStatusCode);
       return error instanceof UpstreamError
         ? upstreamError(c, error)
@@ -350,6 +362,7 @@ export function registerTtsRoute(app: Hono<AppEnv>, deps: TtsRouteDeps): void {
               keyPrefix,
               status: "error",
               errorClass,
+              errorDetail: errorDetailOf(error),
               latencyMs: Date.now() - providerStartedAt,
               servingAccount,
             }),

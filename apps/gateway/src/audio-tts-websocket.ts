@@ -1,7 +1,12 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { SpeechSession, SpeechSocketConnector } from "@helm/core";
-import { accumulateSpeechUsage, SpeechAccountingError, speechQueue } from "@helm/core";
+import {
+  accumulateSpeechUsage,
+  SpeechAccountingError,
+  speechQueue,
+  UpstreamError,
+} from "@helm/core";
 import {
   MediaSpeechCommandSchema,
   type MediaSpeechUsage,
@@ -19,6 +24,8 @@ import {
   SpeechAdmissionError,
   type SpeechSelection,
 } from "./routes/audio-speech.js";
+import { errorDetailOf } from "./routes/execute.js";
+import { websocketUpstreamError } from "./websocket-upstream-error.js";
 
 const MAX_BYTES = 1024 * 1024;
 async function send(socket: WebSocket, text: string): Promise<void> {
@@ -77,9 +84,13 @@ export function createSpeechSocketConnector(
         ws.once("error", () => reject(new Error("speech upstream connection failed")));
         ws.once("close", () => reject(new Error("speech upstream closed during handshake")));
         ws.once("unexpected-response", (request, response) => {
-          response.resume();
-          request.destroy();
-          reject(new Error(`speech upstream rejected handshake (${response.statusCode ?? 502})`));
+          void websocketUpstreamError(
+            response,
+            new Headers(headers).get("Authorization") ?? undefined,
+          ).then((error) => {
+            reject(error);
+            request.destroy();
+          });
         });
       });
     } catch (error) {
@@ -147,6 +158,7 @@ export function mountAudioTtsWebSocket({
       let done = false,
         started = false;
       let unbilledFailure = false;
+      let upstreamFailure: unknown;
       const traceId = crypto.randomUUID();
       let identity: Awaited<ReturnType<typeof admitSpeechIdentity>> | undefined;
       const timer = setTimeout(() => abort.abort(), sessionTimeoutMs);
@@ -200,6 +212,8 @@ export function mountAudioTtsWebSocket({
               traceId,
               costUsd: spend?.costUsd,
               operationId: spend?.id,
+              errorDetail:
+                upstreamFailure === undefined ? undefined : errorDetailOf(upstreamFailure),
             });
           }
         } catch {
@@ -342,6 +356,11 @@ export function mountAudioTtsWebSocket({
                     ),
                   );
                   if (event.type === "error") {
+                    upstreamFailure = new UpstreamError(
+                      "upstream_error",
+                      "speech session failed",
+                      event,
+                    );
                     await end("error");
                     return;
                   }
@@ -352,6 +371,7 @@ export function mountAudioTtsWebSocket({
                 }
                 if (!done) await end("error");
               } catch (error) {
+                upstreamFailure = error;
                 unbilledFailure = isUnbilledSpeechFailure(error);
                 if (!done) {
                   await send(
@@ -401,6 +421,7 @@ export function mountAudioTtsWebSocket({
           }
         }
       } catch (error) {
+        upstreamFailure = error;
         // Command validation after a session opened cannot undo earlier dispatches.
         unbilledFailure = !session && isUnbilledSpeechFailure(error);
         if (!ws && !socket.destroyed)

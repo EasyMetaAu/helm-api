@@ -14,7 +14,12 @@ import {
   speechMime,
 } from "./media-speech.js";
 import { speechQueue } from "./media-speech-session.js";
-import type { OpenAIClientDeps } from "./openai.js";
+import {
+  type OpenAIClientDeps,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
+  safeUpstreamHeaders,
+} from "./openai.js";
 
 const Packet = z.object({
   code: z.number(),
@@ -80,19 +85,35 @@ export function createDoubaoSpeechClient(deps: OpenAIClientDeps): SpeechClient {
             signal,
           },
         );
-      } catch {
-        throw new MediaHttpError("unknown", "upstream_error", "speech outcome unknown");
+      } catch (cause) {
+        throw new MediaHttpError(
+          "unknown",
+          "upstream_error",
+          "speech outcome unknown",
+          null,
+          null,
+          null,
+          providerErrorScrubber(deps.config)(cause),
+        );
       }
       if (!response.ok || !response.body) {
-        await response.body?.cancel();
+        const rawError = await readUpstreamErrorBody(
+          response,
+          providerErrorScrubber(deps.config),
+          deps.responseWorkAdmission,
+        );
         throw new MediaHttpError(
           [400, 401, 402, 403, 404, 413, 422, 429].includes(response.status)
             ? "rejected"
             : "unknown",
           "upstream_error",
           "speech upstream rejected request",
-          null,
+          rawError,
           response.status,
+          providerErrorScrubber(deps.config)(safeUpstreamHeaders(response.headers)) as Record<
+            string,
+            string
+          >,
         );
       }
       let sequence = 0,
@@ -110,9 +131,20 @@ export function createDoubaoSpeechClient(deps: OpenAIClientDeps): SpeechClient {
           deps.responseWorkAdmission,
         )) {
           if (!frame.data) continue;
-          const packet = Packet.parse(JSON.parse(frame.data));
+          const rawPacket: unknown = JSON.parse(frame.data);
+          const packet = Packet.parse(rawPacket);
           if (packet.code !== 0 && packet.code !== 20000000)
-            throw new MediaHttpError("unknown", "upstream_error", "Doubao speech business error");
+            throw new MediaHttpError(
+              "unknown",
+              "upstream_error",
+              "Doubao speech business error",
+              providerErrorScrubber(deps.config)(rawPacket),
+              response.status,
+              providerErrorScrubber(deps.config)(safeUpstreamHeaders(response.headers)) as Record<
+                string,
+                string
+              >,
+            );
           if (packet.data) {
             if (
               !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(packet.data)

@@ -474,7 +474,7 @@ describe("registerVideosRoute", () => {
     );
   });
 
-  it("logs a failed poll lifecycle without recording a second media decision", async () => {
+  it("records failed polling diagnostics as a separate request", async () => {
     const log = vi.fn();
     const { app, retrieve, enqueueTelemetry } = setup({ log });
     await post(app);
@@ -483,7 +483,10 @@ describe("registerVideosRoute", () => {
     const poll = await app.request("/v1/videos/vid_1", { headers: { Authorization: "Bearer k" } });
 
     expect(poll.status).toBe(502);
-    expect(enqueueTelemetry).toHaveBeenCalledOnce();
+    expect(enqueueTelemetry).toHaveBeenCalledTimes(2);
+    expect(enqueueTelemetry.mock.calls[1]?.[0]?.decision.final.error_detail.message).toBe(
+      "temporary upstream failure",
+    );
     expect(log).toHaveBeenCalledWith(
       "video.poll.lifecycle",
       expect.objectContaining({
@@ -821,7 +824,7 @@ const pollArk = (app: Hono<AppEnv>, id: string) =>
 describe("Ark video tasks", () => {
   it.each([
     400, 503,
-  ])("persists only safe Ark diagnostics for HTTP %i without retry", async (status) => {
+  ])("persists actual scrubbed Ark diagnostics for HTTP %i without retry", async (status) => {
     const credential = "private-ark-credential";
     const signedUrl = "https://private.example.test/portrait.png?signature=private-signature";
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
@@ -853,12 +856,16 @@ describe("Ark video tasks", () => {
       error: { code: status === 400 ? "upstream_rejected" : "outcome_unknown" },
     });
     const detail = enqueueTelemetry.mock.calls[0]?.[0]?.decision.provider_attempts[0]?.error_detail;
-    expect(detail).toEqual({
+    expect(detail).toMatchObject({
       upstream_status: status,
-      message: "Ark media request failed",
+      message: `Ark upstream returned HTTP ${status}`,
       provider_raw: {
-        error: { code: "InvalidParameter.InputImage", param: "content[1].image_url.url" },
-        request_id: "ark-request-123",
+        error: {
+          code: "InvalidParameter.InputImage",
+          param: "content[1].image_url.url",
+          message: expect.stringContaining("private transcript"),
+        },
+        request_id: "body-request-id",
       },
     });
     expect(log).toHaveBeenCalledWith(
@@ -870,13 +877,7 @@ describe("Ark video tasks", () => {
       enqueuePayload.mock.calls,
       log.mock.calls,
     ]);
-    for (const secret of [
-      credential,
-      signedUrl,
-      "private-signature",
-      "private transcript",
-      "location",
-    ])
+    for (const secret of [credential, signedUrl, "private-signature"])
       expect(recorded).not.toContain(secret);
     expect(enqueuePayload.mock.calls[0]?.[0]?.responseJson).toBeNull();
     expect(fetch).toHaveBeenCalledOnce();
@@ -893,7 +894,7 @@ describe("Ark video tasks", () => {
       param: "private-ark-credential",
       requestId: "private-ark-credential",
     },
-  ])("omits unsafe diagnostic values and all raw error text", async ({
+  ])("retains actual diagnostic values while removing credential values and URL signatures", async ({
     code,
     param,
     requestId,
@@ -917,11 +918,13 @@ describe("Ark video tasks", () => {
     expect(response.status).toBe(400);
     expect(
       enqueueTelemetry.mock.calls[0]?.[0]?.decision.provider_attempts[0]?.error_detail,
-    ).toEqual({
+    ).toMatchObject({
       upstream_status: 400,
-      message: "Ark media request failed",
-      provider_raw: {},
+      provider_raw: { error: { message: "private transcript" } },
     });
+    const diagnostic = JSON.stringify(enqueueTelemetry.mock.calls);
+    expect(diagnostic).not.toContain("private-ark-credential");
+    expect(diagnostic).not.toContain("sig=secret");
     expect(fetch).toHaveBeenCalledOnce();
   });
 

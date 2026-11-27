@@ -9,10 +9,8 @@ import {
   isCodexResponsesBeforeSendError,
   isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
-  preOutputClassifierFor,
   type RateLimitProbe,
   type RateLimitResult,
-  streamErrorFromData,
   UpstreamError,
 } from "@helm/core";
 import {
@@ -468,11 +466,16 @@ function isResponsesTerminalEvent(eventName: string): boolean {
 
 type ResponsesStreamOutcome = NonNullable<DecisionRecord["stream_outcome"]>;
 
-function responsesFrameErrorDetail(eventName: string, data: string): AttemptErrorDetail | null {
+function responsesFrameErrorDetail(eventName: string): AttemptErrorDetail | null {
   if (eventName !== "error" && eventName !== "response.failed") return null;
-  const classifier = preOutputClassifierFor("openai_responses");
-  if (classifier === null) return null;
-  return { ...errorDetailOf(streamErrorFromData(classifier, data)), upstream_event: eventName };
+  // A missing executor diagnostic can mean an oversized frame. Never rebuild
+  // diagnostics from unsanitized wire text without the selected credential.
+  return {
+    upstream_status: null,
+    message: "Upstream stream failed; bounded diagnostic unavailable",
+    provider_raw: null,
+    upstream_event: eventName,
+  };
 }
 
 export function settleResponsesStreamOutcome(args: {
@@ -1668,7 +1671,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             if (snapshot.status !== null) streamStatus = snapshot.status;
             if (snapshot.safetyIdentifier !== null)
               streamSafetyIdentifier = snapshot.safetyIdentifier;
-            finalErrorDetail ??= responsesFrameErrorDetail(frame.event, frame.data);
+            finalErrorDetail ??=
+              result.decision.provider_attempts?.findLast((attempt) => !attempt.skipped)
+                ?.error_detail ?? responsesFrameErrorDetail(frame.event);
             if (captureSessionResponse && terminalEvent && !captureBodies) {
               if (sessionTerminalCapture?.limited()) {
                 c.get("logger").log("warn", "session.response_limited", { trace_id: traceId });

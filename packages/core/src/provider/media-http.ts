@@ -27,8 +27,9 @@ export class MediaHttpError extends UpstreamError {
     raw: unknown = null,
     status: number | null = null,
     headers: Record<string, string> | null = null,
+    cause?: unknown,
   ) {
-    super(errorClass, message, raw, status, headers);
+    super(errorClass, message, raw, status, headers, cause);
     this.name = "MediaHttpError";
   }
 }
@@ -276,7 +277,14 @@ export function createMediaHttpTransport(deps: OpenAIClientDeps, profile: "baili
           try {
             raw = z.record(z.string(), z.unknown()).parse(JSON.parse(text));
           } catch {
-            throw failure("invalid_response", "Media upstream returned invalid JSON");
+            throw new MediaHttpError(
+              outcome(),
+              "upstream_error",
+              "Media upstream returned invalid JSON",
+              { error: { code: "invalid_response" }, raw: scrub(text.slice(0, 65536)) },
+              status,
+              responseHeaders,
+            );
           }
           if (args.isRejection?.(raw))
             throw new MediaHttpError(
@@ -288,7 +296,7 @@ export function createMediaHttpTransport(deps: OpenAIClientDeps, profile: "baili
               responseHeaders,
             );
           try {
-            return args.parse(raw);
+            return args.parse(scrub(raw));
           } catch {
             // Preserve bounded, scrubbed evidence (especially a known upstream task ID)
             // for recovery when the acceptance envelope is malformed. Never resend it.

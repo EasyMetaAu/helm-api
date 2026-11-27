@@ -52,6 +52,13 @@ export interface RealtimeRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
   concurrencyGate?: ConcurrencyGatePort;
   memoryAdmission?: BodyMemoryAdmission;
+  recordError?: (input: {
+    keyId: string;
+    traceId: string;
+    alias: string;
+    model: string;
+    error: unknown;
+  }) => Promise<void>;
 }
 
 function bearer(value: string | undefined): string | null {
@@ -231,6 +238,19 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
       if (value) headers[name] = value;
     }
 
+    const recordError = async (cause: unknown) => {
+      try {
+        await deps.recordError?.({
+          keyId: identity.keyId,
+          traceId: c.get("trace_id") ?? crypto.randomUUID(),
+          alias: target.alias,
+          model: target.providerModel,
+          error: cause,
+        });
+      } catch {
+        c.get("logger")?.log("error", "realtime.error_record_failed");
+      }
+    };
     try {
       const result = await target.client.realtimeCall(
         {
@@ -242,6 +262,7 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         },
         { signal: requestSignal(c) },
       );
+      result.sideband.recordError = recordError;
       deps.registry.put(result.callId, identity.keyId, result.sideband);
       return new Response(result.sdp, {
         status: result.status,
@@ -251,6 +272,7 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         },
       });
     } catch (cause) {
+      await recordError(cause);
       const status =
         cause instanceof UpstreamError &&
         cause.upstreamStatus !== null &&

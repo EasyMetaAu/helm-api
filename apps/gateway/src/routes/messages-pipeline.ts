@@ -1090,8 +1090,7 @@ export function createMessagesPipeline(
             // .output_text, Gemini reads candidates[].content.parts[].text. Fail-open —
             // an empty/degraded body persists nothing.
             if (memory !== undefined) {
-              const finalAlias =
-                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              const finalAlias = result.decision.final?.model_alias ?? null;
               const memoryObserve = memory.observe;
               const responseMessages =
                 protocol === "openai_responses"
@@ -1143,8 +1142,7 @@ export function createMessagesPipeline(
           // any tool messages) from the projected IR. Fail-open inside core; it
           // cannot turn a successful response into an error.
           if (memory !== undefined) {
-            const finalAlias =
-              result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+            const finalAlias = result.decision.final?.model_alias ?? null;
             const memoryObserve = memory.observe;
             const outbound = outboundFromIR(irResponse);
             await runObserve(() =>
@@ -1281,8 +1279,7 @@ export function createMessagesPipeline(
                       responsesDeltas.overflowBytes(),
                     )
                   : null);
-              const finalAlias =
-                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              const finalAlias = result.decision.final?.model_alias ?? null;
               if (protocol === "openai_responses") {
                 const cancellation = requestCancellationReason(signal);
                 if (cancellation !== null) {
@@ -1422,8 +1419,7 @@ export function createMessagesPipeline(
             // stamp still lands for auto-compaction pricing; empty
             // responseMessages persist nothing.
             if (memory !== undefined && !assistant.limited) {
-              const finalAlias =
-                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              const finalAlias = result.decision.final?.model_alias ?? null;
               const memoryObserve = memory.observe;
               const responseMessages: IRMessage[] =
                 assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];
@@ -1445,8 +1441,7 @@ export function createMessagesPipeline(
             // records telemetry, so stamp usage whenever the provider emitted a
             // usage tail. Cost pricing is opportunistic when the composition root
             // wired costOf. Budget settlement remains gated inside settleBudget().
-            const finalAlias =
-              result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+            const finalAlias = result.decision.final?.model_alias ?? null;
             try {
               const cost =
                 lastUsage && finalAlias && budget?.costOf

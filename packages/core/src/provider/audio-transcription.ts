@@ -9,10 +9,14 @@ import { SpeechParameterError } from "./media-speech.js";
 import {
   type OpenAIClientDeps,
   type ProviderCallOptions,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
   readUpstreamJsonWithinBudget,
+  safeUpstreamHeaders,
+  UpstreamError,
 } from "./openai.js";
 
-export class AudioTranscriptionError extends Error {
+export class AudioTranscriptionError extends UpstreamError {
   constructor(
     readonly code:
       | "provider_unavailable"
@@ -22,8 +26,21 @@ export class AudioTranscriptionError extends Error {
       | "transcription_capacity_exhausted",
     readonly status = 502,
     readonly retryAfter?: number,
+    upstream?: {
+      raw?: unknown;
+      status?: number;
+      headers?: Record<string, string>;
+      cause?: unknown;
+    },
   ) {
-    super(code);
+    super(
+      "upstream_error",
+      code,
+      upstream?.raw ?? null,
+      upstream?.status ?? null,
+      upstream?.headers ?? null,
+      upstream?.cause,
+    );
   }
 }
 export interface AudioTranscriptionClient {
@@ -128,6 +145,7 @@ export function createAudioTranscriptionClient(
         if (req.diarize) url.searchParams.set("diarize_model", "v2");
         for (const keyword of req.keywords ?? []) url.searchParams.append("keyterm", keyword);
       }
+      const scrub = providerErrorScrubber(deps.config, auth);
       let response: Response;
       try {
         response = await (deps.fetch ?? globalThis.fetch)(url.toString(), {
@@ -137,32 +155,56 @@ export function createAudioTranscriptionClient(
           body,
           signal,
         });
-      } catch {
-        throw new AudioTranscriptionError("outcome_unknown");
+      } catch (cause) {
+        throw new AudioTranscriptionError("outcome_unknown", 502, undefined, {
+          cause: scrub(cause),
+        });
       }
       if (!response.ok) {
-        await response.body?.cancel();
+        const diagnostic = {
+          raw: await readUpstreamErrorBody(response, scrub, deps.responseWorkAdmission),
+          status: response.status,
+          headers: scrub(safeUpstreamHeaders(response.headers)) as Record<string, string>,
+        };
         // A provider 5xx cannot prove that the paid operation did not execute.
         throw new AudioTranscriptionError(
           response.status >= 500 || response.status === 408
             ? "outcome_unknown"
             : "upstream_rejected",
           response.status >= 500 ? 502 : response.status,
+          undefined,
+          diagnostic,
         );
       }
       let result: unknown;
       try {
         result = await readUpstreamJsonWithinBudget(response, deps.responseWorkAdmission);
-      } catch {
-        throw new AudioTranscriptionError("outcome_unknown");
+      } catch (cause) {
+        throw new AudioTranscriptionError("outcome_unknown", 502, undefined, {
+          cause: scrub(cause),
+        });
       }
       if (kind === "openai") {
         const parsed = AudioTranscriptionResultSchema.safeParse(result);
-        if (!parsed.success) throw new AudioTranscriptionError("upstream_invalid_response");
+        if (!parsed.success)
+          throw new AudioTranscriptionError("upstream_invalid_response", 502, undefined, {
+            raw: scrub(result),
+            status: response.status,
+            headers: providerErrorScrubber(deps.config)(
+              safeUpstreamHeaders(response.headers),
+            ) as Record<string, string>,
+          });
         return parsed.data;
       }
       const parsed = DeepgramResult.safeParse(result);
-      if (!parsed.success) throw new AudioTranscriptionError("upstream_invalid_response");
+      if (!parsed.success)
+        throw new AudioTranscriptionError("upstream_invalid_response", 502, undefined, {
+          raw: scrub(result),
+          status: response.status,
+          headers: providerErrorScrubber(deps.config)(
+            safeUpstreamHeaders(response.headers),
+          ) as Record<string, string>,
+        });
       const { metadata, results } = parsed.data;
       const alternative = results.channels[0]?.alternatives[0];
       return AudioTranscriptionResultSchema.parse({

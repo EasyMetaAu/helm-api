@@ -5,6 +5,7 @@ import {
   normalizeBailianTranscription,
   type ResponsesRegistryRecord,
   SqliteBudgetStore,
+  UpstreamError,
 } from "@helm/core";
 import { BailianTranscriptionRequestSchema, MediaPricingSchema } from "@helm/shared";
 import { Hono } from "hono";
@@ -647,4 +648,43 @@ it("persists a client-assigned ASR id before submit and recovers unknown submiss
   t.retrieve.mockResolvedValue({ id: submittedId ?? "", status: "done" });
   expect((await t.app.request(`${t.root}/${result.request_id}`)).status).toBe(200);
   expect(t.retrieve).toHaveBeenCalledWith(submittedId, expect.any(AbortSignal));
+});
+
+it("records safe native media rejection diagnostics without retrying a paid create", async () => {
+  const enqueueTelemetry = vi.fn();
+  const t = setup("video", {
+    now: () => 1000,
+    redact: (value: unknown) => value,
+    capturePayloads: () => false,
+    captureSessions: () => false,
+    telemetry: { insert: vi.fn() },
+    writes: { enqueueTelemetry },
+  } as unknown as RecordServedDeps);
+  t.create.mockRejectedValueOnce(
+    Object.assign(
+      new UpstreamError(
+        "upstream_error",
+        "private prompt",
+        {
+          error: {
+            code: "invalid_api_key",
+            message: "private prompt https://asset.test?token=secret",
+          },
+          request_id: "upstream-error-123",
+          authorization: "Bearer secret",
+        },
+        401,
+      ),
+      { outcome: "rejected" },
+    ),
+  );
+  const response = await t.post();
+  expect(response.status).toBe(400);
+  expect(t.create).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain('"upstream_status":401');
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain("invalid_api_key");
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain("private prompt");
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain("https://asset.test/");
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).not.toContain("token=secret");
+  expect(JSON.stringify(enqueueTelemetry.mock.calls)).not.toContain("Bearer secret");
 });

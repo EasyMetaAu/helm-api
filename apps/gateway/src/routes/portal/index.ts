@@ -1,13 +1,7 @@
-import type {
-  BudgetStore,
-  KeyStore,
-  RequestPayload,
-  RequestPayloadMeta,
-  RequestPayloadPartRecord,
-  TelemetryStore,
-} from "@helm/core";
-import { readWeeklyBudget } from "@helm/core";
+import type { BudgetStore, KeyStore, TelemetryStore } from "@helm/core";
+import { readWeeklyBudget, redact } from "@helm/core";
 import {
+  DecisionRecordSchema,
   PortalMemorySettingsRequestSchema,
   RequestsQuerySchema,
   StatsQuerySchema,
@@ -21,6 +15,12 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../../runtime/memory-admission.js";
+import type { AdminApiDeps } from "../admin/deps.js";
+import {
+  enrichAccountLabels,
+  type RequestPayloadDeps,
+  registerRequestPayloadRoutes,
+} from "../admin/requests.js";
 import { assertOwnsTrace } from "./ownership.js";
 
 // The self-service portal REST surface (docs/12 §4.2). EVERY handler write-forces
@@ -32,7 +32,9 @@ import { assertOwnsTrace } from "./ownership.js";
 export interface PortalApiDeps {
   budgetStore?: Pick<BudgetStore, "peek">;
   memoryAdmission?: BodyMemoryAdmission;
-  keyStore: Pick<KeyStore, "updateKey">;
+  responseWorkAdmission?: RequestPayloadDeps["responseWorkAdmission"];
+  keyStore: Pick<KeyStore, "updateKey"> & Partial<Pick<KeyStore, "getById">>;
+  apiKeyPools?: AdminApiDeps["apiKeyPools"];
   telemetry: Pick<
     TelemetryStore,
     | "aggregate"
@@ -43,6 +45,12 @@ export interface PortalApiDeps {
     | "getPayload"
     | "getPayloadMeta"
     | "getPayloadPart"
+    | "getPayloadPartEncoded"
+    | "getPayloadPartStream"
+    | "getSessionRevisionMeta"
+    | "getSessionByRef"
+    | "listSessionRevisionsPage"
+    | "streamSessionRevisionsPage"
   >;
   now?: () => number;
   // Map a stored served-model value (which is the internal wire `provider_model`,
@@ -232,6 +240,7 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
   app.get("/portal/api/requests/:traceId", async (c) => {
     const identity = c.get("identity");
     const traceId = c.req.param("traceId");
+    c.header("cache-control", "no-store");
     // OWNERSHIP FIRST (R1) — before any getByRequestId read.
     if ((await assertOwnsTrace(deps.telemetry, identity.keyId, traceId)) !== "ok") {
       return c.json({ error: "request not found" }, 404);
@@ -239,66 +248,44 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
     const rec = await deps.telemetry.getByRequestId(traceId);
     if (!rec) return c.json({ error: "request not found" }, 404);
     const createdAt = await deps.telemetry.getCreatedAt(traceId);
+    const [labeled] = await enrichAccountLabels(
+      [redact(DecisionRecordSchema.parse(rec), { payloadKeys: [] })],
+      deps,
+      () => {},
+    );
+    const ownKey = await deps.keyStore.getById?.(identity.keyId);
     return c.json({
       ...toPortalDecisionView(rec),
+      decision: {
+        ...labeled,
+        key_name: ownKey?.name ?? null,
+        ...(createdAt ? { created_at: createdAt.getTime() } : {}),
+      },
       ...(createdAt ? { created_at: createdAt.getTime() } : {}),
     });
   });
 
-  // GET /portal/api/requests/:traceId/payload?part=meta|request|response — the caller's
-  // own request/response bodies. Metadata enables lazy loading without exposing the
-  // presence of upstream_request; that part stays rejected (supply-chain, §4.3 R7).
-  app.get("/portal/api/requests/:traceId/payload", async (c) => {
-    const identity = c.get("identity");
-    const traceId = c.req.param("traceId");
-    const part = c.req.query("part");
-    // Whitelist metadata plus the two portal-visible parts. Reject BEFORE touching
-    // the store so upstream is never even read for a portal caller.
-    if (part !== "meta" && part !== "request" && part !== "response") {
-      return c.json({ error: "part must be 'meta', 'request', or 'response'" }, 400);
-    }
-    if ((await assertOwnsTrace(deps.telemetry, identity.keyId, traceId)) !== "ok") {
+  app.use("/portal/api/requests/:traceId/*", async (c, next) => {
+    const requestId = c.req.param("traceId");
+    const keyId = c.get("identity").keyId;
+    if ((await assertOwnsTrace(deps.telemetry, keyId, requestId)) !== "ok")
       return c.json({ error: "request not found" }, 404);
-    }
-    if (part === "meta") {
-      const meta = await getPortalPayloadMeta(deps, traceId);
-      if (!meta) return c.json({ captured: false });
-      return c.json({
-        captured: true,
-        created_at: meta.createdAt.getTime(),
-        parts: {
-          request: meta.parts.request,
-          response: meta.parts.response,
-        },
-      });
-    }
-    const p = await getPayloadPart(deps, traceId, part);
-    if (!p) return c.json({ captured: false });
-    return c.json({
-      captured: true,
-      part,
-      value: p.json === null ? null : parseMaybeJson(p.json),
-      created_at: p.createdAt.getTime(),
-    });
+    c.header("cache-control", "no-store");
+    return next();
   });
-}
-
-async function getPortalPayloadMeta(
-  deps: PortalApiDeps,
-  requestId: string,
-): Promise<RequestPayloadMeta | null> {
-  if (deps.telemetry.getPayloadMeta) return deps.telemetry.getPayloadMeta(requestId);
-  const payload = await deps.telemetry.getPayload(requestId);
-  if (!payload) return null;
-  return {
-    requestId: payload.requestId,
-    createdAt: payload.createdAt,
-    parts: {
-      request: payload.requestJson !== null,
-      response: payload.responseJson !== null,
-      upstreamRequest: false,
-    },
-  };
+  registerRequestPayloadRoutes(
+    app,
+    {
+      ...deps,
+      authorizeSession: async (requestId, sessionRef) => {
+        const keyId = await deps.telemetry.getApiKeyId(requestId);
+        const session = await deps.telemetry.getSessionByRef?.(sessionRef);
+        return keyId !== null && session?.apiKeyId === keyId;
+      },
+    } satisfies RequestPayloadDeps,
+    "/portal/api/requests",
+    true,
+  );
 }
 
 // Resolve each usage row to a public label and merge rows sharing it, so the
@@ -332,34 +319,4 @@ function aggregateByLabel(
     }
   }
   return [...byLabel.values()].sort((a, b) => b.total_tokens - a.total_tokens);
-}
-
-// Mirror admin's part reader: prefer the narrow getPayloadPart, fall back to the
-// whole-payload read for adapters/doubles that only implement getPayload.
-async function getPayloadPart(
-  deps: PortalApiDeps,
-  requestId: string,
-  part: "request" | "response",
-): Promise<RequestPayloadPartRecord | null> {
-  if (deps.telemetry.getPayloadPart) return deps.telemetry.getPayloadPart(requestId, part);
-  const p = await deps.telemetry.getPayload(requestId);
-  if (!p) return null;
-  return {
-    requestId: p.requestId,
-    part,
-    json: partJson(p, part),
-    createdAt: p.createdAt,
-  };
-}
-
-function partJson(p: RequestPayload, part: "request" | "response"): string | null {
-  return part === "request" ? p.requestJson : p.responseJson;
-}
-
-function parseMaybeJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
 }

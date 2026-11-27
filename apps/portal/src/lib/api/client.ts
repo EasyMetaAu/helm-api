@@ -103,3 +103,20 @@ export async function mcpTool<T>(
   if (body.result?.isError) throw new ApiError(200, text);
   return JSON.parse(text) as T;
 }
+
+// Binary and JSON request-detail reads use the same bearer lifecycle as apiGet.
+export async function apiFetch(
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const key = getKey();
+  if (!key) throw new ApiError(401, "no api key");
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${key}`);
+  const response = await fetch(url, { ...init, headers });
+  if (response.status === 401) {
+    clearKey();
+    throw new ApiError(401, "unauthorized");
+  }
+  return response;
+}

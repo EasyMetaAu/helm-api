@@ -57,6 +57,7 @@ import {
 } from "@helm/shared";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
+  createSSEErrorObserver,
   REQUEST_TIMEOUT_REASON,
   requestCancellationReason,
 } from "../request-cancellation.js";
@@ -1376,6 +1377,18 @@ interface DiagnosticBudget {
 function diagnosticString(value: string, budget: DiagnosticBudget): string {
   if (budget.remainingChars <= 0) return "[diagnostic truncated]";
   const safe = value
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (raw) => {
+      try {
+        const url = new URL(raw);
+        url.username = "";
+        url.password = "";
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      } catch {
+        return raw;
+      }
+    })
     .replace(
       /\b(authorization|(?:x[_-]?)?proxy[_-]?authorization)\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/gi,
       "$1=[redacted]",
@@ -1442,20 +1455,37 @@ function diagnosticValue(
 
 // Build the credential-safe per-attempt error_detail. Keep status/body/headers and
 // transport cause/stack; remove only actual credentials before persistence.
+const diagnosticScrubbers = new WeakMap<object, (value: unknown) => unknown>();
+
 export function errorDetailOf(err: unknown): AttemptErrorDetail {
+  const scrub =
+    err instanceof Error
+      ? (diagnosticScrubbers.get(err) ?? ((value: unknown) => value))
+      : (value: unknown) => value;
   const budget: DiagnosticBudget = {
     remainingChars: DIAGNOSTIC_TOTAL_STRING_MAX,
     remainingNodes: DIAGNOSTIC_NODE_MAX,
   };
   const message = diagnosticString(err instanceof Error ? err.message : String(err), budget);
-  const stack = err instanceof Error && err.stack ? diagnosticString(err.stack, budget) : null;
+  const stack =
+    err instanceof Error && err.stack ? diagnosticString(String(scrub(err.stack)), budget) : null;
   const cause =
-    err instanceof Error && err.cause !== undefined ? diagnosticValue(err.cause, budget) : null;
+    err instanceof Error && err.cause !== undefined
+      ? diagnosticValue(scrub(err.cause), budget)
+      : null;
   if (err instanceof UpstreamError) {
     return {
       upstream_status: err.upstreamStatus,
       message,
-      provider_raw: toRawRecord(err.providerRaw, budget),
+      provider_raw:
+        err.upstreamStatus === null &&
+        err.cause !== undefined &&
+        typeof err.providerRaw === "object" &&
+        err.providerRaw !== null &&
+        "error" in err.providerRaw &&
+        err.providerRaw.error === err.cause
+          ? null
+          : toRawRecord(err.providerRaw, budget),
       provider_headers: toRawRecord(err.upstreamHeaders, budget) as Record<string, string> | null,
       cause,
       stack,
@@ -1956,6 +1986,39 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           outboundRequests.push({ ...parsed.data, sequence: ++outboundSequence });
         };
         let attemptTelemetry: PassthroughTelemetry = passthrough;
+        let diagnosticScrub: (value: unknown) => unknown = (value) => value;
+        const onDiagnosticScrubber = (scrub: (value: unknown) => unknown) => {
+          diagnosticScrub = scrub;
+        };
+        const scrubFailure = (error: unknown) => {
+          if (error instanceof UpstreamError) {
+            // Keep subtype and identity: Codex capacity/affinity errors carry
+            // trusted retry semantics that must survive diagnostic handling.
+            diagnosticScrubbers.set(error, diagnosticScrub);
+            Object.assign(error, {
+              message: String(diagnosticScrub(error.message)),
+              providerRaw: diagnosticScrub(error.providerRaw),
+              upstreamHeaders: diagnosticScrub(error.upstreamHeaders),
+            });
+          }
+          return error;
+        };
+        let pendingStreamError: AttemptErrorDetail | null = null;
+        const observeStream = async function* (source: AsyncIterable<string>, protocol: Protocol) {
+          const observe = createSSEErrorObserver(protocol, (error) => {
+            const attempt = attempts.findLast((row) => row.alias === alias && row.status === "ok");
+            pendingStreamError = errorDetailOf(scrubFailure(error));
+            if (attempt) attempt.error_detail = pendingStreamError;
+          });
+          try {
+            for await (const chunk of source) {
+              observe(chunk);
+              yield chunk;
+            }
+          } catch (error) {
+            throw scrubFailure(error);
+          }
+        };
 
         // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
         //    provider model (not the originally-requested alias) — the gateway
@@ -2058,6 +2121,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 return peekStream(
                   () => {
                     const raw = passthroughStream(passthroughBody, {
+                      onDiagnosticScrubber,
                       anthropicIdentityContext,
                       signal: preOutputAbort
                         ? AbortSignal.any([attemptSignal, preOutputAbort.signal])
@@ -2108,16 +2172,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                         target.targetProviderProtocol === "anthropic_messages" &&
                         (toolCallXmlRecoveryEnabled?.() ?? true),
                     });
-                    return passthroughClassifier
-                      ? guardPreOutputFailure(raw, passthroughClassifier, {
-                          ...(firstOutputTimeoutMs
-                            ? {
-                                firstOutputTimeoutMs,
-                                onTimeout: () => preOutputAbort?.abort(),
-                              }
-                            : {}),
-                        })
-                      : raw;
+                    return observeStream(
+                      passthroughClassifier
+                        ? guardPreOutputFailure(raw, passthroughClassifier, {
+                            ...(firstOutputTimeoutMs
+                              ? {
+                                  firstOutputTimeoutMs,
+                                  onTimeout: () => preOutputAbort?.abort(),
+                                }
+                              : {}),
+                          })
+                        : raw,
+                      req.protocol,
+                    );
                   },
                   attemptSignal,
                   alias,
@@ -2127,7 +2194,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             );
             settleBreaker("success");
             // Streamed usage is not known at peek time → cost null, backfilled later.
-            attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
+            attempts.push({
+              ...okRow(alias, elapsed(), null, attemptTelemetry),
+              error_detail: pendingStreamError,
+            });
             return {
               attempts,
               final: { status: "ok", alias, providerModel },
@@ -2165,6 +2235,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 peekStream(
                   () => {
                     const raw = provider.chatCompletionStream(rendered.body, {
+                      onDiagnosticScrubber,
                       anthropicIdentityContext,
                       signal: attemptSignal,
                       overloadRetry,
@@ -2178,9 +2249,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                       onOutboundRequest,
                       optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
                     });
-                    return translateClassifier
-                      ? guardPreOutputFailure(raw, translateClassifier)
-                      : raw;
+                    return observeStream(
+                      translateClassifier ? guardPreOutputFailure(raw, translateClassifier) : raw,
+                      "openai_chat",
+                    );
                   },
                   attemptSignal,
                   alias,
@@ -2197,7 +2269,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               ),
             );
             // Streamed usage is not known at peek time → cost null (not measured).
-            attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
+            attempts.push({
+              ...okRow(alias, elapsed(), null, attemptTelemetry),
+              error_detail: pendingStreamError,
+            });
             return {
               attempts,
               final: { status: "ok", alias, providerModel },

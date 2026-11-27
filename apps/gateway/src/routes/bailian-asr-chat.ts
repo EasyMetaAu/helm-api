@@ -8,13 +8,19 @@ import {
   SpeechAccountingError,
   type TranscriptionAccounting,
 } from "@helm/core";
-import type { AudioTranscriptionResult, MediaPricing, MediaSpendRecord } from "@helm/shared";
+import type {
+  AttemptErrorDetail,
+  AudioTranscriptionResult,
+  MediaPricing,
+  MediaSpendRecord,
+} from "@helm/shared";
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
 import { z } from "zod";
 import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
 import type { AudioSpeechRouteDeps } from "./audio-speech.js";
+import { errorDetailOf } from "./execute.js";
 import { splitSSEFrames } from "./messages-pipeline.js";
 export interface ShortAsrTarget {
   client: Pick<ProviderClient, "chatCompletion" | "chatCompletionStream"> | null;
@@ -33,6 +39,7 @@ export interface ShortAsrDeps extends Pick<AudioSpeechRouteDeps, "budgetGate" | 
     traceId: string,
     status: "ok" | "error",
     spend?: MediaSpendRecord,
+    errorDetail?: AttemptErrorDetail,
   ): Promise<void>;
 }
 const NativeDuration = z.object({
@@ -136,6 +143,7 @@ export async function handleBailianAsrChat(
     status: "ok" | "error",
     result?: Pick<AudioTranscriptionResult, "usage">,
     notSent = false,
+    error?: unknown,
   ) => {
     if (settled) return;
     settled = true;
@@ -156,7 +164,14 @@ export async function handleBailianAsrChat(
           { requests: 1, tokens: 0, costUsd: null },
           Date.now(),
         );
-      await deps.record?.(target, identity.keyId, c.get("trace_id"), status, spend);
+      await deps.record?.(
+        target,
+        identity.keyId,
+        c.get("trace_id"),
+        status,
+        spend,
+        error === undefined ? undefined : errorDetailOf(error),
+      );
     } catch {
       c.get("logger")?.log("error", "media.asr_accounting_failed", { trace_id: c.get("trace_id") });
     }
@@ -212,8 +227,8 @@ export async function handleBailianAsrChat(
           "ok",
           seconds === undefined ? undefined : { usage: { type: "duration", seconds } },
         );
-      } catch {
-        await settle("error");
+      } catch (error) {
+        await settle("error", undefined, false, error);
         if (!abort.signal.aborted)
           await out.write('data: {"error":{"code":"asr_stream_failed"}}\n\n');
       } finally {
@@ -248,7 +263,7 @@ export async function handleBailianAsrChat(
     });
   } catch (error) {
     const notSent = error instanceof MediaHttpError && error.outcome !== "unknown";
-    await settle("error", undefined, notSent);
+    await settle("error", undefined, notSent, error);
     return fail(502, spend && !notSent ? "outcome_unknown" : "asr_upstream_failed");
   }
 }

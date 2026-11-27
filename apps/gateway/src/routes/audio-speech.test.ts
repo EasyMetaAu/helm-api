@@ -1,3 +1,4 @@
+import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
@@ -246,4 +247,27 @@ describe("speech spend reservation", () => {
     expect((await x.call()).status).toBeGreaterThanOrEqual(500);
     expect(x.speech).not.toHaveBeenCalled();
   });
+});
+
+it("records actual upstream speech error details", async () => {
+  const x = setup();
+  x.deps.record = vi.fn();
+  x.speech.mockRejectedValue(
+    new UpstreamError(
+      "upstream_error",
+      "speech rejected",
+      { error: { message: "voice missing", code: "invalid_voice" } },
+      422,
+    ),
+  );
+  await x.call();
+  expect(x.deps.record).toHaveBeenCalledWith(
+    expect.objectContaining({
+      status: "error",
+      errorDetail: expect.objectContaining({
+        upstream_status: 422,
+        provider_raw: { error: { message: "voice missing", code: "invalid_voice" } },
+      }),
+    }),
+  );
 });

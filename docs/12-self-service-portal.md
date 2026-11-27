@@ -66,7 +66,7 @@ Every handler derives scope from `c.get("identity")`. Caller-supplied `key_id` o
 | `GET /portal/api/usage/stats` | Aggregates only the authenticated `key_id`; returns totals, hourly/daily series, public model labels, and budget caps. Internal wire-model names are mapped to a public alias or `other`. |
 | `GET /portal/api/requests` | Paginated, filtered request list with `apiKeyId` forced to the authenticated key. |
 | `GET /portal/api/requests/{requestId}` | Ownership-gated, whitelist-projected request detail. The identifier is the unique value returned in `X-Helm-Request-Id`, not a reusable client trace. |
-| `GET /portal/api/requests/{requestId}/payload?part=meta\|request\|response` | Lazy access to the owned client request/response only. `upstream_request` is deliberately unavailable. |
+| `GET /portal/api/requests/{requestId}/payload?part=meta\|request\|response\|upstream_request` | Lazy access to the owned request, response, and forwarded body. Stored parts use encoded transport. |
 
 The portal does not expose an API for key rotation, revocation, budgets, rate
 limits, lane caps, provider accounts, runtime settings, cleanup, or replay.
@@ -84,24 +84,30 @@ portal applies an explicit guard before reading a record or payload:
 
 This ordering prevents both cross-key reads and request-id existence probing.
 
-`toPortalDecisionView()` is an allow-list projection. It exposes only:
+`toPortalDecisionView()` remains the compact list projection. The single-request
+endpoint also returns a schema-validated, credential-redacted `decision` containing
+the same recorded routing, classifier/eval, policy, provider attempts, account label,
+wire model, token/cost breakdown, and upstream error diagnostics as the admin detail.
+This expands the former supply-chain display restriction at the operator's request;
+it does not grant management actions, replay, or access to another key's requests.
 
-- unique Helm request id, client correlation trace id, and requested model;
-- public served-model alias and selected lane;
-- terminal status/error class;
-- total latency and cost;
-- prompt, completion, cache-read, and cache-creation token counts.
+The detail viewer lazily reads request, response, and forwarded upstream bodies.
+It uses the same fidelity markers and bounded session reconstruction as admin.
+Session recovery additionally verifies the stored session belongs to the request's
+key; exact payload reads do not require a session row. `metadata_only` requests do
+not expose retained legacy bodies. Missing captures and pruned records remain
+explicitly unavailable rather than fabricating content.
 
-It deliberately omits classifier/eval reasoning, policy internals, candidate and
-provider-attempt chains, provider names, wire model ids, OAuth account labels,
-service tier/region details, upstream errors, and upstream payloads. Adding a new
-field to `DecisionRecord` therefore cannot silently add it to the portal.
+Stored bodies use encoded transport without server-side global blob expansion.
+Non-streamed encoded reads acquire the shared response-work budget before a
+size-bounded, single-table read; the lease is released after consumption/cancellation.
+Portal does not expose the admin global blob endpoint. Historical externalized image
+references without recorded per-request ownership remain visible as references,
+with an explicit restoration warning. Inline and URL images continue to render.
 
-Captured client request/response bodies are still sensitive. They are available
-only when capture was enabled for that request, the retained row has not been
-pruned, and the authenticated key owns the request. Disabling capture stops new
-writes but does not hide older retained rows. See
-[07 · Error Model & Observability](07-observability.md).
+`GET /portal/api/requests/{requestId}/session-revisions` exposes bounded revision
+pages only after request and session ownership checks, allowing browser-side
+reconstruction when server-side recovery is too large.
 
 ## Memory scope
 
