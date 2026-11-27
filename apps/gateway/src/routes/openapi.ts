@@ -161,6 +161,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         ArkImageGenerationResponse: component(ArkImageGenerationResponseSchema),
         ArkVideoGenerationRequest: arkRequestComponent(ArkVideoGenerationRequestSchema, [
           "seedance-video",
+          "seedance-video-flash",
         ]),
         ArkThreeDGenerationRequest: arkRequestComponent(ArkThreeDGenerationRequestSchema, [
           "seed3d",
@@ -654,7 +655,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           description:
             "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
             "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
-            "the paid create is attempted once. Seedance uses model seedance-video with Ark content items; its request_id is a Helm-owned UUID retained for seven days. Enrolled asset:// references require an administrator grant bound to this Helm key and the current Ark credential. Unknown USD pricing rejects spend-capped keys.",
+            "the paid create is attempted once. Seedance uses model seedance-video or seedance-video-flash with Ark content items; its request_id is a Helm-owned UUID retained for seven days. Enrolled asset:// references require an administrator grant bound to this Helm key and the current Ark credential. Unknown USD pricing rejects spend-capped keys.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,

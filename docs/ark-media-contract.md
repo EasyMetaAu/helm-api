@@ -11,6 +11,7 @@
 | Seedream Flash | `doubao-seedream-5-0-flash-260915` | `POST /v1/images/generations` | `POST /images/generations` |
 | Seedream Pro | `doubao-seedream-5-0-pro-260628` | 同上 | 同上 |
 | Seedance 2.5 | `doubao-seedance-2-5-260628` | `POST /v1/videos/generations`，`GET /v1/videos/{request_id}` | `POST /contents/generations/tasks`，`GET /contents/generations/tasks/{id}` |
+| Seedance 2.5 Flash | `doubao-seedance-2-5-flash-261115` | 同上，模型名 `seedance-video-flash` | 同一原生任务 API |
 | Seed3D 2.0 | `doubao-seed3d-2-0-260328` | `POST /v1/3d/generations`，`GET /v1/3d/{request_id}` | 同一原生任务 API |
 
 上游基址为 `https://ark.cn-beijing.volces.com/api/v3`。所有 model 都是完整枚举；拒绝旧版本、`auto`、Endpoint ID 和未解析 alias，绝不自动替换模型。公开别名的名称和配置映射仍由主控 T04 决定；应先按权限解析到已配置 alias/精确 ID，再进入本 schema，不得借此绕过 `blockedModels` 或 `allowCustomModel`。
@@ -71,6 +72,14 @@ URL schema 只做语法准入，不做 DNS 解析、不声称证明地址公网�
 本期不包含 MOV 专业输出、返回尾帧选项、Draft、webhook、frames、service_tier、priority、execution_expires_after、tools、列表/删除、编辑/延长。`seed/camera_fixed` 是官方限定旧 1.0 模型的字段，2.5 拒绝。返回 metadata 中出现的已知只读字段可保留，并不意味着开放相应创建能力。
 
 上游校验视频总时长≤30秒、音频总时长≤30秒，及实际格式/分辨率/帧率；URL schema 不能证明这些性质。1080p 编码的播放器兼容性需实际产物验收。参考图写“首尾帧”仅是提示词，不等于 API 的 first_frame/last_frame 约束。
+
+## Seedance 2.5 Flash
+
+2026-11-27 核对：[模型列表](https://www.volcengine.com/docs/82379/1330310)、[创建任务](https://www.volcengine.com/docs/82379/1520757)、[官方价格](https://www.volcengine.com/docs/82379/1544106)。
+入口为 `seedance-video-flash`，具体别名 `ark/seedance-2.5-flash`，上游 ID 为 `doubao-seedance-2-5-flash-261115`。
+沿用上述文本、首尾帧和显式 reference 模式；支持 4–30 秒、24 fps、480p/720p（不支持 1080p）。
+参考上限为 10 张图、5 个视频、5 段音频。Helm 保持现有 MP4 子集和权限、素材授权、任务归属、预算校验。
+成功任务按实际 `usage.completion_tokens` 结算：不含输入视频 ¥46/百万 tokens，含输入视频 ¥28/百万 tokens；保留 CNY，不作无依据的 USD 换算。
 
 ## Seed3D 2.0
 

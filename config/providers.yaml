@@ -392,6 +392,8 @@ providers:
         provider_model: doubao-seedream-5-0-flash-260915
       - alias: ark/seedream-5.0-pro
         provider_model: doubao-seedream-5-0-pro-260628
+      - alias: ark/seedance-2.5-flash
+        provider_model: doubao-seedance-2-5-flash-261115
       - alias: ark/seedance-2.5
         provider_model: doubao-seedance-2-5-260628
       - alias: ark/seed3d-2.0

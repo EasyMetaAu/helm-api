@@ -1044,6 +1044,15 @@ ark/seedream-5.0-pro:
   maxContextTokens: 0
   maxOutputTokens: null
 
+ark/seedance-2.5-flash:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  outputVideo: true
+  maxContextTokens: 0
+  maxOutputTokens: null
+
 ark/seedance-2.5:
   supportsTools: false
   jsonOutput: none

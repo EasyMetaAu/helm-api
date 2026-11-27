@@ -6,7 +6,10 @@ export const ArkImageModelSchema = z.enum([
   "doubao-seedream-5-0-flash-260915",
   "doubao-seedream-5-0-pro-260628",
 ]);
-export const ArkVideoModelSchema = z.literal("doubao-seedance-2-5-260628");
+export const ArkVideoModelSchema = z.enum([
+  "doubao-seedance-2-5-260628",
+  "doubao-seedance-2-5-flash-261115",
+]);
 export const ArkThreeDModelSchema = z.literal("doubao-seed3d-2-0-260328");
 const Nonblank = z.string().refine((value) => value.trim().length > 0, "Must not be blank");
 const Count = z.number().int().nonnegative();
@@ -177,8 +180,17 @@ export const ArkVideoGenerationRequestSchema = z
       audios.length;
     const issue = (message: string) => ctx.addIssue({ code: "custom", path: ["content"], message });
     if (texts.length > 1) issue("At most one text item is supported");
-    if (images.length > 30 || videos.length > 10 || audios.length > 10)
-      issue("Reference limits are 30 images, 10 videos and 10 audios");
+    const flash = body.model === "doubao-seedance-2-5-flash-261115";
+    const imageLimit = flash ? 10 : 30;
+    const avLimit = flash ? 5 : 10;
+    if (images.length > imageLimit || videos.length > avLimit || audios.length > avLimit)
+      issue(`Reference limits are ${imageLimit} images, ${avLimit} videos and ${avLimit} audios`);
+    if (flash && body.resolution === "1080p")
+      ctx.addIssue({
+        code: "custom",
+        path: ["resolution"],
+        message: "Seedance 2.5 Flash supports 480p and 720p only",
+      });
     if (first.length || last.length) {
       if (first.length !== 1 || last.length > 1 || references > 0)
         issue(
