@@ -134,6 +134,14 @@ function renderPage(
 }
 
 describe('providers page', () => {
+  it('hides the upstream usage disclosure when no upstream is configured', async () => {
+    const { container } = renderPage();
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const summary = [...container.querySelectorAll('summary')].find(
+      (element) => element.textContent?.trim() === 'Upstream usage',
+    );
+    expect(summary).not.toBeVisible();
+  });
   afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.stubGlobal(

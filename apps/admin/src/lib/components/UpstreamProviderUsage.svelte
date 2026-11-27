@@ -7,6 +7,7 @@
   import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format';
   import { t } from '$lib/i18n';
 
+  let { onvisibility }: { onvisibility?: (visible: boolean) => void } = $props();
   let result = $state<UpstreamProviderUsage | null>(null);
   let error = $state(false);
   let busy = $state(false);
@@ -20,9 +21,13 @@
       if (active) {
         result = next;
         error = false;
+        onvisibility?.(next.configured);
       }
     } catch {
-      if (active) error = true;
+      if (active) {
+        error = true;
+        onvisibility?.(true);
+      }
     } finally {
       busy = false;
     }

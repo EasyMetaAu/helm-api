@@ -7,6 +7,7 @@
   let keyPools = $state<ApiKeyPoolView[]>([]);
   let providerSearch = $state('');
   let authentication = $state('all');
+  let upstreamUsageVisible = $state(false);
   const matchesSearch = (value: string) =>
     value.toLowerCase().includes(providerSearch.trim().toLowerCase());
   import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
@@ -1801,9 +1802,9 @@
     {/if}
   </section>
 
-  <details>
+  <details hidden={!upstreamUsageVisible}>
     <summary class="w-fit cursor-pointer text-sm text-ink-muted">{$t('Upstream usage')}</summary
-    ><UpstreamProviderUsage />
+    ><UpstreamProviderUsage onvisibility={(visible) => (upstreamUsageVisible = visible)} />
   </details>
 
   {#if confirming}
