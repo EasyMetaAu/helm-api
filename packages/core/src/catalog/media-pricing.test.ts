@@ -12,6 +12,7 @@ import { buildModelsList } from "./models-list.js";
 const expected = {
   "ark/seedream-5.0-flash": [0, 0.12],
   "ark/seedream-5.0-pro": [0.02, 0.3, 0.6, 0.15, 0.3],
+  "ark/seedance-2.5-flash": [46, 46, 28, 28],
   "ark/seedance-2.5": [70, 70, 77, 42, 42, 46, 31, 19],
   "ark/seed3d-2.0": [2.4],
   "bailian/qwen-image-3.0-pro": [0.02, 0.25, 0.5],
@@ -64,11 +65,14 @@ describe("native media model pricing configuration", () => {
       expect(pricing?.media, model.alias).toMatchObject({
         providerModel: model.provider_model,
         currency: model.alias.startsWith("minimax/") ? "USD" : "CNY",
-        verifiedOn: updatedCards.has(model.alias)
-          ? "2026-11-20"
-          : model.alias === "bailian/paraformer-v2"
-            ? "2026-11-16"
-            : "2026-10-14",
+        verifiedOn:
+          model.alias === "ark/seedance-2.5-flash"
+            ? "2026-11-27"
+            : updatedCards.has(model.alias)
+              ? "2026-11-20"
+              : model.alias === "bailian/paraformer-v2"
+                ? "2026-11-16"
+                : "2026-10-14",
         basis: "official_list_price",
       });
       expect(

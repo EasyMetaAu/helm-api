@@ -30,6 +30,9 @@ const BindingSchema = z.strictObject({
 type Binding = z.infer<typeof BindingSchema>;
 export const ARK_VIDEO_MODELS = new Set([
   "ark/seedance-2.5",
+  "ark/seedance-2.5-flash",
+  "seedance-video-flash",
+  "doubao-seedance-2-5-flash-261115",
   "seedance-video",
   "doubao-seedance-2-5-260628",
 ]);
