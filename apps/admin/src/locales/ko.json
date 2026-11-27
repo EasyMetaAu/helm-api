@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "사용량 (최근 24시간)",
   "requests": "요청",
   "Rotate model API keys across accounts.": "여러 계정의 모델 API 키를 순환 사용합니다.",
-  "Manage subscriptions and API key accounts in one place.": "구독과 API 키 계정을 한곳에서 관리합니다.",
+  "Manage subscriptions and API key accounts in one place.": "모든 제공업체와 계정을 한 목록에서 관리하세요.",
   "{requests} requests · {tokens} tokens": "요청 {requests}회 · 토큰 {tokens}개",
   "Test API key": "API 키 테스트",
   "Test passed": "테스트 성공",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "Leave blank to keep the saved password",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "Requests and account tests use this proxy. A proxy failure never falls back to direct access.",
   "Default request parameters (JSON)": "Default request parameters (JSON)",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model."
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.",
+  "Authentication": "인증 방식",
+  "All authentication methods": "모든 인증 방식",
+  "No key required": "키 불필요",
+  "OAuth account strategy": "OAuth 계정 전략",
+  "No matching providers. Add a provider or change the filters.": "일치하는 제공업체가 없습니다. 추가하거나 필터를 변경하세요.",
+  "No saved keys": "저장된 키 없음",
+  "Shared by {count} connections": "연결 {count}개가 공유",
+  "Delete account": "계정 삭제",
+  "Saved key": "저장된 키",
+  "Connection settings": "연결 및 모델 설정",
+  "Shared account changes apply to every connection listed here.": "계정 설정은 아래 모든 공유 연결에 적용됩니다.",
+  "Keys are already saved. Use account settings to add or replace a key.": "키가 저장되어 있습니다. 추가하거나 교체하려면 계정 설정을 사용하세요."
 }

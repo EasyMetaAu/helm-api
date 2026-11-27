@@ -108,6 +108,7 @@ export const ManagedProviderViewSchema = z.object({
   map_developer_role_to_system: z.boolean().default(false),
   normalize_reasoning_delta_alias: z.boolean().default(false),
   poolId: z.string(),
+  keyless: z.boolean().default(false),
   managed: z.boolean(),
   legacyCredentialAvailable: z.boolean(),
 });

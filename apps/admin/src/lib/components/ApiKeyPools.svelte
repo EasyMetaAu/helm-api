@@ -9,11 +9,23 @@
     type ApiKeyTestResult,
     type ApiKeyPoolView,
     type ApiKeyAccountView,
+    type ManagedProviderView,
   } from '@helm/shared';
   import { t, locale } from '$lib/i18n';
   import { formatCount, formatTokens, formatUsd } from '$lib/format';
   import Modal from './Modal.svelte';
 
+  let {
+    headless = false,
+    onloaded = () => {},
+    providers = [],
+    onconfigure = () => {},
+  }: {
+    headless?: boolean;
+    onloaded?: (pools: ApiKeyPoolView[]) => void;
+    providers?: ManagedProviderView[];
+    onconfigure?: (provider: ManagedProviderView) => void;
+  } = $props();
   let pools = $state<ApiKeyPoolView[]>([]);
   let busy = $state(false);
   let error = $state('');
@@ -107,7 +119,7 @@
         (account.models === null || account.models.includes(model)) &&
         !/image|realtime|audio|live|tts|whisper|transcri/i.test(model),
     );
-  function openTest(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
+  export function openTest(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
     testTarget = { pool, account };
     const choices = testModels(pool, account);
     testModel = defaultTestModel(choices);
@@ -152,6 +164,7 @@
     const res = await fetch(base, { cache: 'no-store' });
     if (!res.ok) throw new Error($t('Could not load API key providers'));
     pools = ApiKeyPoolsViewSchema.parse(await res.json()).pools;
+    onloaded(pools);
   }
   async function run(action: () => Promise<void>) {
     busy = true;
@@ -204,7 +217,7 @@
     adding = null;
     await load();
   }
-  function edit(pool: string, account: ApiKeyAccountView) {
+  export function edit(pool: string, account: ApiKeyAccountView) {
     editing = { pool, account };
     name = account.name;
     priority = account.priority;
@@ -271,249 +284,302 @@
           quota_exhausted: $t('Quota exhausted'),
           invalid: $t('Invalid credential'),
         }[account.state];
+  export async function refreshView() {
+    await run(load);
+  }
+  export function addKeys(poolId: string) {
+    adding = poolId;
+    keys = '';
+    error = '';
+  }
+  export function removeAccount(pool: string, account: ApiKeyAccountView) {
+    deleting = { pool, account };
+  }
+  export function toggleAccount(pool: string, account: ApiKeyAccountView) {
+    void run(async () => {
+      await write(accountUrl(pool, account.id), 'PATCH', { enabled: !account.enabled });
+      await load();
+    });
+  }
+  export function batchTest(pool: ApiKeyPoolView) {
+    batchPool = pool;
+    batchResults = [];
+    batchModel = defaultTestModel(
+      pool.models.filter((model) =>
+        pool.accounts.some((a) => recoverable(a) && testModels(pool, a).includes(model)),
+      ),
+    );
+  }
+  export function canTest(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
+    return testModels(pool, account).length > 0;
+  }
+  export function canRecover(pool: ApiKeyPoolView) {
+    return pool.accounts.some((a) => recoverable(a) && testModels(pool, a).length > 0);
+  }
+  export function canRecoverAccount(account: ApiKeyAccountView) {
+    return recoverable(account);
+  }
+  export function recoverAccount(pool: ApiKeyPoolView, account: ApiKeyAccountView) {
+    openTest(pool, account);
+    void testAccount();
+  }
+  export function accountStatus(account: ApiKeyAccountView) {
+    return stateLabel(account);
+  }
+  export function accountStatusClass(account: ApiKeyAccountView) {
+    return statusClass(account);
+  }
 </script>
 
-<section class="mt-2 flex flex-col gap-2" aria-label={$t('API key providers')}>
-  <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
-    <h2 class="section-header" title={$t('Rotate model API keys across accounts.')}>
-      {$t('API key providers')}
-    </h2>
-    <div class="ml-auto flex items-center gap-2">
-      <button
-        type="button"
-        class="btn-secondary shrink-0"
-        disabled={busy}
-        onclick={() => run(load)}
-      >
-        <svg
-          class="size-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          aria-hidden="true"
-          ><path d="M20 7v5h-5M4 17v-5h5" /><path
-            d="M6.1 7a7 7 0 0 1 11.55-1.7L20 8M4 16l2.35 2.7A7 7 0 0 0 17.9 17"
-          /></svg
+{#if headless && error && !editing && !adding && !deleting && !testTarget && !batchPool}<p
+    role="alert"
+    class="alert-error"
+  >
+    {error}
+  </p>{/if}
+{#if !headless}
+  <section class="mt-2 flex flex-col gap-2" aria-label={$t('API key providers')}>
+    <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h2 class="section-header" title={$t('Rotate model API keys across accounts.')}>
+        {$t('API key providers')}
+      </h2>
+      <div class="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          class="btn-secondary shrink-0"
+          disabled={busy}
+          onclick={() => run(load)}
         >
-        {$t('Refresh API keys')}
-      </button>
-      <button
-        type="button"
-        class="btn-primary"
-        disabled={busy || !pools.some((pool) => pool.configured)}
-        onclick={() => {
-          adding = pools.find((pool) => pool.configured)?.id ?? null;
-          keys = '';
-          error = '';
-        }}>{$t('Add API keys')}</button
-      >
-    </div>
-  </header>
-  <div class="flex flex-col gap-4">
-    {#if error}<p role="alert" class="alert-error">{error}</p>{/if}
-    {#each pools as pool (pool.id)}
-      <div class="flex flex-col gap-2">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h3 class="text-sm font-semibold text-ink">
-            {poolName(pool)}
-          </h3>
-          <span class="field-help">
-            {#if pool.type !== 'openai'}
-              {$t('Out of credit: paused until you add credit and retry.')}
-            {:else}
-              {$t('Monthly retry timezone')}: {pool.timezone} · {$t('Day 1, 00:00')}
-            {/if}
-          </span>
-          <div class="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
-            <button
-              type="button"
-              class="btn-secondary shrink-0"
-              disabled={busy ||
-                testBusy ||
-                batchBusy ||
-                !pool.accounts.some((a) => recoverable(a) && testModels(pool, a).length > 0)}
-              onclick={() => {
-                batchPool = pool;
-                batchResults = [];
-                batchModel = defaultTestModel(
-                  pool.models.filter((model) =>
-                    pool.accounts.some(
-                      (a) => recoverable(a) && testModels(pool, a).includes(model),
+          <svg
+            class="size-4"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            aria-hidden="true"
+            ><path d="M20 7v5h-5M4 17v-5h5" /><path
+              d="M6.1 7a7 7 0 0 1 11.55-1.7L20 8M4 16l2.35 2.7A7 7 0 0 0 17.9 17"
+            /></svg
+          >
+          {$t('Refresh API keys')}
+        </button>
+        <button
+          type="button"
+          class="btn-primary"
+          disabled={busy || !pools.some((pool) => pool.configured)}
+          onclick={() => {
+            adding = pools.find((pool) => pool.configured)?.id ?? null;
+            keys = '';
+            error = '';
+          }}>{$t('Add API keys')}</button
+        >
+      </div>
+    </header>
+    <div class="flex flex-col gap-4">
+      {#if error}<p role="alert" class="alert-error">{error}</p>{/if}
+      {#each pools as pool (pool.id)}
+        <div class="flex flex-col gap-2">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h3 class="text-sm font-semibold text-ink">
+              {poolName(pool)}
+            </h3>
+            <span class="field-help">
+              {#if pool.type !== 'openai'}
+                {$t('Out of credit: paused until you add credit and retry.')}
+              {:else}
+                {$t('Monthly retry timezone')}: {pool.timezone} · {$t('Day 1, 00:00')}
+              {/if}
+            </span>
+            <div class="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+              <button
+                type="button"
+                class="btn-secondary shrink-0"
+                disabled={busy ||
+                  testBusy ||
+                  batchBusy ||
+                  !pool.accounts.some((a) => recoverable(a) && testModels(pool, a).length > 0)}
+                onclick={() => {
+                  batchPool = pool;
+                  batchResults = [];
+                  batchModel = defaultTestModel(
+                    pool.models.filter((model) =>
+                      pool.accounts.some(
+                        (a) => recoverable(a) && testModels(pool, a).includes(model),
+                      ),
                     ),
-                  ),
-                );
-              }}>{$t('Batch test and recover')}</button
-            >
-            <select
-              aria-label={$t('API key rotation strategy')}
-              class="select h-11 min-w-0 flex-1 sm:h-9 sm:w-40 sm:flex-none"
-              value={pool.strategy}
-              disabled={busy || !pool.configured}
-              onchange={(e) =>
-                run(async () => {
-                  await write(`${base}/${encodeURIComponent(pool.id)}/strategy`, 'PUT', {
-                    strategy: e.currentTarget.value,
-                  });
-                  await load();
-                })}
-            >
-              <option value="round_robin">{$t('Round robin')}</option><option
-                value="manual_priority">{$t('Manual priority')}</option
+                  );
+                }}>{$t('Batch test and recover')}</button
               >
-            </select>
-          </div>
-        </div>
-        {#if !pool.configured}<p class="alert-warn">
-            {$t('Encrypted credential storage is not configured.')}
-          </p>{/if}
-        {#if pool.accounts.length === 0}
-          <div class="empty-state">
-            {$t(
-              'No managed API keys. Existing environment credentials remain in use only until the pool is first configured.',
-            )}
-          </div>
-        {:else}
-          <div class="cards-table-frame compact overflow-visible">
-            <table class="cards-table">
-              <thead class="table-head"
-                ><tr>
-                  <th class="px-3 py-2 table-mode:w-[30%]">{$t('Account')}</th>
-                  <th class="px-3 py-2 table-mode:w-[25%]">{$t('Status')}</th>
-                  <th class="px-3 py-2">{$t('Usage (last 24 hours)')}</th>
-                  {#if pool.strategy === 'manual_priority'}<th class="px-3 py-2"
-                      >{$t('Priority')}</th
-                    >{/if}
-                  <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
-                </tr></thead
+              <select
+                aria-label={$t('API key rotation strategy')}
+                class="select h-11 min-w-0 flex-1 sm:h-9 sm:w-40 sm:flex-none"
+                value={pool.strategy}
+                disabled={busy || !pool.configured}
+                onchange={(e) =>
+                  run(async () => {
+                    await write(`${base}/${encodeURIComponent(pool.id)}/strategy`, 'PUT', {
+                      strategy: e.currentTarget.value,
+                    });
+                    await load();
+                  })}
               >
-              <tbody>
-                {#each pool.accounts as account (account.id)}
-                  {@const usage = pool.usage.find((row) => row.account === account.id)}
-                  <tr>
-                    <td data-label={$t('Account')}
-                      ><div class="font-medium text-ink-strong">{account.name}</div>
-                      <code class="mt-0.5 block text-xs text-ink-muted">{account.mask}</code></td
-                    >
-                    <td data-label={$t('Status')}>
-                      <span class={statusClass(account)}>{stateLabel(account)}</span>
-                      {#if account.reason}<details class="mt-1 text-xs text-ink-muted">
-                          <summary
-                            class="w-fit cursor-pointer rounded focus-visible:outline-2 focus-visible:outline-offset-2"
-                            >{$t('Details')}</summary
-                          >
-                          <p class="mt-1 max-w-xs whitespace-normal break-words">
-                            {account.reason}
-                            {#if account.reasonMessage}<span class="mt-1 block"
-                                >{account.reasonMessage}</span
-                              >{/if}
-                          </p>
-                        </details>{/if}
-                      {#if account.nextRetryAt}<p class="field-help mt-1 whitespace-normal">
-                          {$t('Next recovery attempt')}: {new Date(
-                            account.nextRetryAt,
-                          ).toLocaleString($locale)}
-                        </p>{/if}
-                      {#if account.probeUntil && account.probeUntil > Date.now()}<p
-                          class="field-help mt-1"
-                        >
-                          {$t('Recovery request in progress')}
-                        </p>{/if}
-                    </td>
-                    <td data-label={$t('Usage (last 24 hours)')} class="tabular-nums">
-                      <div class="text-ink-body">
-                        {$t('{requests} requests · {tokens} tokens', {
-                          requests: formatCount(usage?.requests ?? 0),
-                          tokens: formatTokens(usage?.tokens ?? 0),
-                        })}
-                      </div>
-                      <div class="field-help mt-0.5" title={$t('Estimated cost')}>
-                        {formatUsd(usage?.costUsd)}
-                      </div>
-                    </td>
-                    {#if pool.strategy === 'manual_priority'}<td
-                        data-label={$t('Priority')}
-                        class="tabular-nums text-ink-body">{account.priority}</td
+                <option value="round_robin">{$t('Round robin')}</option><option
+                  value="manual_priority">{$t('Manual priority')}</option
+                >
+              </select>
+            </div>
+          </div>
+          {#if !pool.configured}<p class="alert-warn">
+              {$t('Encrypted credential storage is not configured.')}
+            </p>{/if}
+          {#if pool.accounts.length === 0}
+            <div class="empty-state">
+              {$t(
+                'No managed API keys. Existing environment credentials remain in use only until the pool is first configured.',
+              )}
+            </div>
+          {:else}
+            <div class="cards-table-frame compact overflow-visible">
+              <table class="cards-table">
+                <thead class="table-head"
+                  ><tr>
+                    <th class="px-3 py-2 table-mode:w-[30%]">{$t('Account')}</th>
+                    <th class="px-3 py-2 table-mode:w-[25%]">{$t('Status')}</th>
+                    <th class="px-3 py-2">{$t('Usage (last 24 hours)')}</th>
+                    {#if pool.strategy === 'manual_priority'}<th class="px-3 py-2"
+                        >{$t('Priority')}</th
                       >{/if}
-                    <td>
-                      <div class="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          class="btn-secondary"
-                          disabled={busy ||
-                            testBusy ||
-                            batchBusy ||
-                            testModels(pool, account).length === 0}
-                          onclick={() => openTest(pool, account)}>{$t('Test')}</button
-                        >
-                        <button
-                          type="button"
-                          class="btn-secondary"
-                          disabled={busy}
-                          onclick={() => edit(pool.id, account)}>{$t('Manage')}</button
-                        >
-                        <details class="menu">
-                          <summary
-                            class="menu-trigger"
-                            title={$t('More actions')}
-                            aria-disabled={busy}
-                            onclick={(e) => {
-                              if (busy) e.preventDefault();
-                            }}
-                            ><span aria-hidden="true">⋯</span><span class="sr-only"
-                              >{$t('More actions')}</span
-                            ></summary
-                          >
-                          <div class="menu-panel w-48">
-                            <button
-                              type="button"
-                              class="menu-item"
-                              disabled={busy}
-                              onclick={() =>
-                                run(async () => {
-                                  await write(accountUrl(pool.id, account.id), 'PATCH', {
-                                    enabled: !account.enabled,
-                                  });
-                                  await load();
-                                })}>{account.enabled ? $t('Pause') : $t('Resume')}</button
+                    <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
+                  </tr></thead
+                >
+                <tbody>
+                  {#each pool.accounts as account (account.id)}
+                    {@const usage = pool.usage.find((row) => row.account === account.id)}
+                    <tr>
+                      <td data-label={$t('Account')}
+                        ><div class="font-medium text-ink-strong">{account.name}</div>
+                        <code class="mt-0.5 block text-xs text-ink-muted">{account.mask}</code></td
+                      >
+                      <td data-label={$t('Status')}>
+                        <span class={statusClass(account)}>{stateLabel(account)}</span>
+                        {#if account.reason}<details class="mt-1 text-xs text-ink-muted">
+                            <summary
+                              class="w-fit cursor-pointer rounded focus-visible:outline-2 focus-visible:outline-offset-2"
+                              >{$t('Details')}</summary
                             >
-                            {#if account.enabled && account.state !== 'invalid' && (account.state !== 'ready' || account.deniedModels.length > 0)}
+                            <p class="mt-1 max-w-xs whitespace-normal break-words">
+                              {account.reason}
+                              {#if account.reasonMessage}<span class="mt-1 block"
+                                  >{account.reasonMessage}</span
+                                >{/if}
+                            </p>
+                          </details>{/if}
+                        {#if account.nextRetryAt}<p class="field-help mt-1 whitespace-normal">
+                            {$t('Next recovery attempt')}: {new Date(
+                              account.nextRetryAt,
+                            ).toLocaleString($locale)}
+                          </p>{/if}
+                        {#if account.probeUntil && account.probeUntil > Date.now()}<p
+                            class="field-help mt-1"
+                          >
+                            {$t('Recovery request in progress')}
+                          </p>{/if}
+                      </td>
+                      <td data-label={$t('Usage (last 24 hours)')} class="tabular-nums">
+                        <div class="text-ink-body">
+                          {$t('{requests} requests · {tokens} tokens', {
+                            requests: formatCount(usage?.requests ?? 0),
+                            tokens: formatTokens(usage?.tokens ?? 0),
+                          })}
+                        </div>
+                        <div class="field-help mt-0.5" title={$t('Estimated cost')}>
+                          {formatUsd(usage?.costUsd)}
+                        </div>
+                      </td>
+                      {#if pool.strategy === 'manual_priority'}<td
+                          data-label={$t('Priority')}
+                          class="tabular-nums text-ink-body">{account.priority}</td
+                        >{/if}
+                      <td>
+                        <div class="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            class="btn-secondary"
+                            disabled={busy ||
+                              testBusy ||
+                              batchBusy ||
+                              testModels(pool, account).length === 0}
+                            onclick={() => openTest(pool, account)}>{$t('Test')}</button
+                          >
+                          <button
+                            type="button"
+                            class="btn-secondary"
+                            disabled={busy}
+                            onclick={() => edit(pool.id, account)}>{$t('Manage')}</button
+                          >
+                          <details class="menu">
+                            <summary
+                              class="menu-trigger"
+                              title={$t('More actions')}
+                              aria-disabled={busy}
+                              onclick={(e) => {
+                                if (busy) e.preventDefault();
+                              }}
+                              ><span aria-hidden="true">⋯</span><span class="sr-only"
+                                >{$t('More actions')}</span
+                              ></summary
+                            >
+                            <div class="menu-panel w-48">
                               <button
                                 type="button"
                                 class="menu-item"
-                                disabled={busy ||
-                                  testBusy ||
-                                  batchBusy ||
-                                  testModels(pool, account).length === 0 ||
-                                  Boolean(account.probeUntil && account.probeUntil > Date.now())}
-                                onclick={() => {
-                                  openTest(pool, account);
-                                  void testAccount();
-                                }}>{$t('Try recovery')}</button
+                                disabled={busy}
+                                onclick={() =>
+                                  run(async () => {
+                                    await write(accountUrl(pool.id, account.id), 'PATCH', {
+                                      enabled: !account.enabled,
+                                    });
+                                    await load();
+                                  })}>{account.enabled ? $t('Pause') : $t('Resume')}</button
                               >
-                            {/if}
-                            <button
-                              type="button"
-                              class="menu-item-danger"
-                              disabled={busy}
-                              onclick={() => {
-                                deleting = { pool: pool.id, account };
-                              }}>{$t('Delete')}</button
-                            >
-                          </div>
-                        </details>
-                      </div>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </div>
-    {/each}
-  </div>
-</section>
+                              {#if account.enabled && account.state !== 'invalid' && (account.state !== 'ready' || account.deniedModels.length > 0)}
+                                <button
+                                  type="button"
+                                  class="menu-item"
+                                  disabled={busy ||
+                                    testBusy ||
+                                    batchBusy ||
+                                    testModels(pool, account).length === 0 ||
+                                    Boolean(account.probeUntil && account.probeUntil > Date.now())}
+                                  onclick={() => {
+                                    openTest(pool, account);
+                                    void testAccount();
+                                  }}>{$t('Try recovery')}</button
+                                >
+                              {/if}
+                              <button
+                                type="button"
+                                class="menu-item-danger"
+                                disabled={busy}
+                                onclick={() => {
+                                  deleting = { pool: pool.id, account };
+                                }}>{$t('Delete')}</button
+                              >
+                            </div>
+                          </details>
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  </section>
+{/if}
 
 {#if adding}
   <Modal
@@ -691,6 +757,60 @@
           'Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.',
         )}
       </p>
+      {#if headless}
+        <p class="field-help">
+          {$t('Saved key')}: <code>{editing.account.mask}</code> · {$t(
+            'Leave blank to keep existing keys',
+          )}
+        </p>
+        {@const currentPool = pools.find((p) => p.id === editing?.pool)}
+        {#if currentPool}
+          <label class="block text-sm"
+            >{$t('API key rotation strategy')}
+            <select
+              class="select mt-1 w-full"
+              value={currentPool.strategy}
+              disabled={busy}
+              onchange={(e) =>
+                run(async () => {
+                  await write(`${base}/${encodeURIComponent(currentPool.id)}/strategy`, 'PUT', {
+                    strategy: e.currentTarget.value,
+                  });
+                  await load();
+                })}
+            >
+              <option value="round_robin">{$t('Round robin')}</option><option
+                value="manual_priority">{$t('Manual priority')}</option
+              >
+            </select>
+          </label>
+          <details class="form-section p-3">
+            <summary class="cursor-pointer text-sm font-semibold"
+              >{$t('Connection settings')}</summary
+            >
+            <p class="field-help mt-2">
+              {$t('Shared account changes apply to every connection listed here.')}
+            </p>
+            {#each providers.filter((p) => p.poolId === currentPool.id) as provider (provider.id)}
+              <div class="mt-3 flex items-center justify-between gap-3">
+                <span class="text-sm"
+                  >{provider.label}<span class="field-help block break-all"
+                    >{provider.base_url}</span
+                  ></span
+                >
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  onclick={() => {
+                    editing = null;
+                    onconfigure(provider);
+                  }}>{$t('Configure')}</button
+                >
+              </div>
+            {/each}
+          </details>
+        {/if}
+      {/if}
       <div class="card-actions">
         <button
           type="button"

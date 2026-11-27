@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "最近 24 小时用量",
   "requests": "次请求",
   "Rotate model API keys across accounts.": "在多个账户间轮换模型 API 密钥。",
-  "Manage subscriptions and API key accounts in one place.": "统一管理订阅提供商和密钥提供商。",
+  "Manage subscriptions and API key accounts in one place.": "统一管理所有提供商与账户。",
   "{requests} requests · {tokens} tokens": "{requests} 次请求 · {tokens} Token",
   "Test API key": "测试 API 密钥",
   "Test passed": "测试通过",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "留空保留已保存的密码",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "实际请求和账号测试均使用此代理；代理故障时不会改为直连。",
   "Default request parameters (JSON)": "默认请求参数（JSON）",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "支持 temperature、top_p、max_tokens、reasoning_effort。请求和路由设置优先，请填写模型支持的值。"
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "支持 temperature、top_p、max_tokens、reasoning_effort。请求和路由设置优先，请填写模型支持的值。",
+  "Authentication": "认证方式",
+  "All authentication methods": "全部认证方式",
+  "No key required": "无需密钥",
+  "OAuth account strategy": "OAuth 账户策略",
+  "No matching providers. Add a provider or change the filters.": "暂无匹配的提供商，请添加提供商或调整筛选。",
+  "No saved keys": "尚未保存密钥",
+  "Shared by {count} connections": "{count} 个连接共用",
+  "Delete account": "删除账户",
+  "Saved key": "已保存密钥",
+  "Connection settings": "接口与模型配置",
+  "Shared account changes apply to every connection listed here.": "账户设置会应用到以下所有共用连接。",
+  "Keys are already saved. Use account settings to add or replace a key.": "密钥已保存。添加或更换密钥请使用账户管理。"
 }

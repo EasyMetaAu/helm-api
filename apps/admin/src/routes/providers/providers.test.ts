@@ -200,13 +200,76 @@ describe('providers page', () => {
     });
   });
 
-  it('puts subscription accounts before the API key pool', async () => {
+  it('uses one provider list with an authentication field instead of separate provider sections', async () => {
     renderPage();
-    const subscription = screen.getByRole('heading', { name: 'Subscription Providers' });
-    const api = screen.getByRole('heading', { name: 'API key providers' });
-    expect(
-      subscription.compareDocumentPosition(api) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    await screen.findByTestId('provider-account-row');
+    expect(screen.getByRole('columnheader', { name: 'Authentication' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Subscription Providers' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Provider connections' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Key providers' })).toBeNull();
+    expect(screen.getAllByRole('table')).toHaveLength(1);
+  });
+
+  it('lists shared key pools once and filters keyless connections without duplicating tables', async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === '/admin/api/providers')
+          return Response.json({
+            configured: true,
+            providers: [
+              ...['openai', 'responses'].map((id) => ({
+                id,
+                label: id,
+                type: 'openai',
+                base_url: 'https://api.example.test/v1',
+                models: [],
+                poolId: 'shared',
+                managed: true,
+                legacyCredentialAvailable: false,
+              })),
+              {
+                id: 'home',
+                label: 'Home GPU',
+                type: 'openai',
+                base_url: 'http://192.168.1.2/v1',
+                models: [],
+                poolId: 'home',
+                keyless: true,
+                managed: false,
+                legacyCredentialAvailable: false,
+              },
+            ],
+          });
+        if (url === '/admin/api/api-key-pools')
+          return Response.json({
+            pools: [
+              {
+                id: 'shared',
+                type: 'openai',
+                configured: true,
+                timezone: 'UTC',
+                strategy: 'round_robin',
+                models: ['m'],
+                accounts: [],
+                usage: [],
+              },
+            ],
+          });
+        return original(url, init);
+      }),
+    );
+    renderPage();
+    await screen.findByText('Home GPU');
+    expect(screen.getAllByTestId('key-provider-row')).toHaveLength(1);
+    expect(screen.getByText('Shared by 2 connections')).toBeInTheDocument();
+    expect(screen.getAllByRole('table')).toHaveLength(1);
+    await fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'none' } });
+    expect(screen.queryByTestId('provider-account-row')).toBeNull();
+    expect(screen.queryByTestId('key-provider-row')).toBeNull();
+    expect(screen.getByTestId('unpooled-provider-row')).toHaveTextContent('No key required');
+    expect(screen.queryByText('No saved keys')).toBeNull();
   });
 
   it('requires the explicit Claude confirmation and cannot dismiss by backdrop or Escape', async () => {
@@ -340,7 +403,7 @@ describe('providers page', () => {
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 
-    expect(screen.getByText('Subscription Providers')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Authentication' })).toBeInTheDocument();
     expect(screen.getByLabelText('Account usage strategy')).toHaveValue('balanced');
     expect(
       screen.getByTitle(
@@ -1003,7 +1066,7 @@ describe('providers page', () => {
     expect(resetUsageLimit).not.toHaveBeenCalled();
   });
 
-  it('keeps the account table to six columns and tucks rare actions into a row menu', () => {
+  it('keeps the account table to seven columns and tucks rare actions into a row menu', () => {
     renderPage({
       providers: [
         provider({
@@ -1022,7 +1085,7 @@ describe('providers page', () => {
         }),
       ],
     });
-    expect(screen.getAllByRole('columnheader')).toHaveLength(6);
+    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
     const row = screen.getByTestId('provider-account-row');
     // Health sits beside the account it describes, so a laptop-width table has
     // no narrow status column to squeeze.
@@ -1064,11 +1127,11 @@ describe('providers page', () => {
     expect(within(row).getByText('+2')).toBeInTheDocument();
   });
 
-  it('shows the not-configured warning and disables Connect when OAuth is unavailable', () => {
+  it('shows the OAuth warning without hiding the unified add-provider entry', () => {
     renderPage({ configured: false, providers: [], usage: [], quota: [] });
 
     expect(screen.getByText(/OAuth login is disabled/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /connect/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add provider' })).toBeEnabled();
   });
 
   it('saves a non-negative integer priority and refreshes the page data', async () => {

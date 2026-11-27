@@ -1,13 +1,22 @@
 <script lang="ts">
   import UpstreamProviderUsage from '$lib/components/UpstreamProviderUsage.svelte';
   import ManagedProviders from '$lib/components/ManagedProviders.svelte';
-  let apiProviderRevision = $state(0);
+  let providerEditor = $state<ReturnType<typeof ManagedProviders>>();
+  let keyManager = $state<ReturnType<typeof ApiKeyPools>>();
+  let connections = $state<ManagedProviderView[]>([]);
+  let keyPools = $state<ApiKeyPoolView[]>([]);
+  let providerSearch = $state('');
+  let authentication = $state('all');
+  const matchesSearch = (value: string) =>
+    value.toLowerCase().includes(providerSearch.trim().toLowerCase());
   import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import { accountDetailHref } from '$lib/oauth-account-id.js';
   import {
+    type ManagedProviderView,
+    type ApiKeyPoolView,
     isCodexQuotaWindowPlaceholder,
     selectCodexAccountWeeklyQuotaWindows,
     usableAnthropicResetGrant,
@@ -920,6 +929,46 @@
       disconnecting = false;
     }
   }
+  const visibleOAuthRows = $derived(
+    rows.filter(
+      (row) =>
+        (authentication === 'all' || authentication === 'oauth') &&
+        matchesSearch(
+          `${row.provider.name} ${row.account.account} ${row.account.models.join(' ')}`,
+        ),
+    ),
+  );
+  const keyRows = $derived(
+    keyPools
+      .flatMap((pool) => {
+        const linked = connections.filter((p) => !p.keyless && p.poolId === pool.id);
+        const label = linked.find((p) => p.id === pool.id)?.label ?? linked[0]?.label ?? pool.id;
+        return (pool.accounts.length ? pool.accounts : [null]).map((account) => ({
+          pool,
+          account,
+          linked,
+          label,
+        }));
+      })
+      .filter(
+        (row) =>
+          (authentication === 'all' || authentication === 'key') &&
+          matchesSearch(
+            `${row.label} ${row.account?.name ?? ''} ${row.linked.map((p) => `${p.label} ${p.base_url}`).join(' ')} ${row.pool.models.join(' ')}`,
+          ),
+      ),
+  );
+  const unpooledConnections = $derived(
+    connections.filter(
+      (p) =>
+        !keyPools.some((pool) => pool.id === p.poolId) &&
+        (authentication === 'all' || authentication === (p.keyless ? 'none' : 'key')) &&
+        matchesSearch(`${p.label} ${p.base_url} ${p.models.map((m) => m.alias).join(' ')}`),
+    ),
+  );
+  const visibleCount = $derived(
+    visibleOAuthRows.length + keyRows.length + unpooledConnections.length,
+  );
 </script>
 
 <section class="page">
@@ -931,72 +980,97 @@
   </header>
 
   <ManagedProviders
+    bind:this={providerEditor}
+    headless
+    onloaded={(value) => (connections = value)}
     onOAuth={() => {
       reconnecting = null;
       showConnect = true;
     }}
     onchange={() => {
-      apiProviderRevision += 1;
+      void keyManager?.refreshView();
     }}
   />
+  <ApiKeyPools
+    bind:this={keyManager}
+    headless
+    providers={connections}
+    onloaded={(value) => (keyPools = value)}
+    onconfigure={(provider) => providerEditor?.start(provider)}
+  />
 
-  <UpstreamProviderUsage />
-
-  <section class="flex flex-col gap-2" aria-labelledby="subscription-providers">
+  <section class="flex flex-col gap-3" aria-label={$t('Providers')}>
     <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h2 id="subscription-providers" class="section-header order-1 shrink-0">
-        {$t('Subscription Providers')}
-      </h2>
-
-      {#if rows.length > 0}
-        {@const selectedStrategy =
-          strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
-          strategyOptions[0]}
-        <div
-          class="order-3 flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 lg:order-2 lg:flex-1 lg:basis-0 lg:flex-nowrap"
-        >
-          <label
-            class="flex min-w-0 flex-1 items-center gap-2 sm:flex-none"
-            title={$t(
-              'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
-            )}
-          >
-            <span class="shrink-0 text-sm text-ink-muted">{$t('Account usage strategy')}</span>
-            <select
-              class="select h-11 min-w-0 flex-1 disabled:opacity-50 sm:h-9 sm:w-44 sm:flex-none"
-              aria-label={$t('Account usage strategy')}
-              value={overview.selectionStrategy}
-              disabled={savingStrategy}
-              onchange={(e) =>
-                saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
-            >
-              {#each strategyOptions as option (option.value)}
-                <option value={option.value}>{$t(option.label)}</option>
-              {/each}
-            </select>
-          </label>
-          <p
-            class="field-help min-w-0 basis-full sm:flex-1 sm:basis-0 sm:truncate"
-            title={$t(selectedStrategy.description)}
-          >
-            {$t(selectedStrategy.description)}
-          </p>
-        </div>
-      {/if}
-
-      <div class="order-2 ml-auto flex shrink-0 items-center gap-2 lg:order-3">
-        <RefreshControl onRefresh={refresh} onAutoRefresh={autoRefresh} />
-        <button
-          type="button"
-          class="btn-primary"
-          disabled={!overview.configured}
-          onclick={() => {
-            reconnecting = null;
-            showConnect = true;
-          }}>{$t('Connect')}</button
+      <input
+        class="input min-w-0 flex-1 sm:max-w-xs"
+        type="search"
+        aria-label={$t('Search providers')}
+        placeholder={$t('Search providers')}
+        bind:value={providerSearch}
+      />
+      <select
+        class="select w-full sm:w-44"
+        aria-label={$t('Authentication')}
+        bind:value={authentication}
+      >
+        <option value="all">{$t('All authentication methods')}</option><option value="oauth"
+          >OAuth</option
+        ><option value="key">API Key</option><option value="none">{$t('No key required')}</option>
+      </select>
+      <div class="ml-auto flex items-center gap-2">
+        <RefreshControl
+          onRefresh={async () => {
+            await Promise.all([refresh(), keyManager?.refreshView(), providerEditor?.load()]);
+          }}
+          onAutoRefresh={async () => {
+            await Promise.all([autoRefresh(), keyManager?.refreshView(), providerEditor?.load()]);
+          }}
+        />
+        <button type="button" class="btn-primary" onclick={() => providerEditor?.start()}
+          >{$t('Add provider')}</button
         >
       </div>
     </header>
+    <details class="text-sm">
+      <summary class="w-fit cursor-pointer text-ink-muted">{$t('OAuth account strategy')}</summary>
+      <div class="mt-2 flex flex-wrap items-center gap-3">
+        {#if rows.length > 0}
+          {@const selectedStrategy =
+            strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
+            strategyOptions[0]}
+          <div
+            class="order-3 flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 lg:order-2 lg:flex-1 lg:basis-0 lg:flex-nowrap"
+          >
+            <label
+              class="flex min-w-0 flex-1 items-center gap-2 sm:flex-none"
+              title={$t(
+                'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
+              )}
+            >
+              <span class="shrink-0 text-sm text-ink-muted">{$t('Account usage strategy')}</span>
+              <select
+                class="select h-11 min-w-0 flex-1 disabled:opacity-50 sm:h-9 sm:w-44 sm:flex-none"
+                aria-label={$t('Account usage strategy')}
+                value={overview.selectionStrategy}
+                disabled={savingStrategy}
+                onchange={(e) =>
+                  saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+              >
+                {#each strategyOptions as option (option.value)}
+                  <option value={option.value}>{$t(option.label)}</option>
+                {/each}
+              </select>
+            </label>
+            <p
+              class="field-help min-w-0 basis-full sm:flex-1 sm:basis-0 sm:truncate"
+              title={$t(selectedStrategy.description)}
+            >
+              {$t(selectedStrategy.description)}
+            </p>
+          </div>
+        {/if}
+      </div>
+    </details>
 
     {#if refreshStatusLabel(overview.refresh)}
       <p
@@ -1055,14 +1129,9 @@
       />
     {/if}
 
-    {#if rows.length === 0}
+    {#if visibleCount === 0}
       <div class="empty-state">
-        <p>
-          {$t(
-            'No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.',
-          )}
-          {$t('xAI/SuperGrok is also available.')}
-        </p>
+        {$t('No matching providers. Add a provider or change the filters.')}
       </div>
     {:else}
       <div class="cards-table-frame overflow-visible">
@@ -1070,15 +1139,16 @@
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2">{$t('Provider')}</th>
+              <th class="px-3 py-2">{$t('Authentication')}</th>
               <th class="px-3 py-2">{$t('Models')}</th>
-              <th class="px-3 py-2">{$t('Today')}</th>
+              <th class="px-3 py-2">{$t('Usage')}</th>
               <th class="px-3 py-2">{$t('Quota')}</th>
               <th class="px-3 py-2">{$t('Scheduling')}</th>
               <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
             </tr>
           </thead>
           <tbody>
-            {#each rows as row (keyOf(row.provider.id, row.account.account))}
+            {#each visibleOAuthRows as row (keyOf(row.provider.id, row.account.account))}
               {@const k = keyOf(row.provider.id, row.account.account)}
               {@const usage = usageByKey.get(k)}
               {@const isCodex = row.provider.id === 'openai-codex'}
@@ -1121,7 +1191,7 @@
                    into the account usage-detail page (per-reset-period token usage). -->
                 <td
                   data-label={$t('Provider')}
-                  class="table-mode:w-56 table-mode:whitespace-normal"
+                  class="table-mode:w-56 table-mode:min-w-44 table-mode:whitespace-normal"
                 >
                   <a
                     class="group block"
@@ -1223,6 +1293,7 @@
                 </td>
 
                 <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
+                <td data-label={$t('Authentication')}><span class="badge-neutral">OAuth</span></td>
                 <td data-label={$t('Models')}>
                   {#if row.account.models.length > 0}
                     {@const shown = [...row.account.models]
@@ -1252,7 +1323,8 @@
                 </td>
 
                 <!-- Today's usage -->
-                <td data-label={$t('Today')} class="text-xs">
+                <td data-label={$t('Usage')} class="text-xs">
+                  <p class="field-help">{$t('Today')}</p>
                   {#if usage && usage.requests > 0}
                     <div class="text-ink-body">
                       <span>{$t('{n} req', { n: formatCount(usage.requests) })}</span>
@@ -1540,13 +1612,199 @@
                 </td>
               </tr>
             {/each}
+            {#each keyRows as row (`${row.pool.id}/${row.account?.id ?? 'empty'}`)}
+              {@const account = row.account}
+              {@const accountUsage = row.pool.usage.find((u) => u.account === account?.id)}
+              <tr class="align-top" data-testid="key-provider-row">
+                <td
+                  data-label={$t('Provider')}
+                  class="table-mode:w-56 table-mode:min-w-44 table-mode:whitespace-normal"
+                >
+                  <div class="font-medium text-ink-body">{row.label}</div>
+                  {#if account}<div class="text-xs text-ink-strong">{account.name}</div>
+                    <code class="text-xs text-ink-muted">{account.mask}</code>
+                    <div class="mt-1">
+                      <span class={keyManager?.accountStatusClass(account) ?? 'badge-neutral'}
+                        >{keyManager?.accountStatus(account)}</span
+                      >
+                    </div>
+                  {:else}<span class="badge-warn">{$t('No saved keys')}</span>{/if}
+                  {#if row.linked.length > 1}<p class="field-help mt-1">
+                      {$t('Shared by {count} connections', { count: row.linked.length })}
+                    </p>{/if}
+                </td>
+                <td data-label={$t('Authentication')}><span class="badge-neutral">API Key</span></td
+                >
+                <td data-label={$t('Models')}
+                  ><div class="flex max-w-64 flex-wrap gap-1">
+                    {#each (account?.models ?? row.pool.models).slice(0, 3) as model}<code
+                        class="badge-neutral text-xs">{model}</code
+                      >{/each}
+                    {#if (account?.models ?? row.pool.models).length > 3}<span class="badge-neutral"
+                        >+{(account?.models ?? row.pool.models).length - 3}</span
+                      >{/if}
+                  </div></td
+                >
+                <td data-label={$t('Usage')} class="text-xs"
+                  ><p class="field-help">{$t('Last 24 hours')}</p>
+                  <p>
+                    {formatCount(accountUsage?.requests ?? 0)}
+                    {$t('requests')} · {formatTokens(accountUsage?.tokens ?? 0)} Token
+                  </p>
+                  <p class="text-ink-muted">{formatUsd(accountUsage?.costUsd)}</p>
+                </td>
+                <td
+                  data-label={$t('Quota')}
+                  class="table-mode:max-w-48 table-mode:whitespace-normal"
+                  ><span class="text-ink-muted">—</span>{#if account?.reason}<details
+                      class="mt-1 text-xs text-ink-muted"
+                    >
+                      <summary class="cursor-pointer">{$t('Details')}</summary>
+                      <p class="max-w-xs whitespace-normal break-words">
+                        {account.reason}{#if account.reasonMessage}<span class="mt-1 block"
+                            >{account.reasonMessage}</span
+                          >{/if}
+                      </p>
+                    </details>{/if}
+                  {#if account?.nextRetryAt}<p class="field-help">
+                      {$t('Next recovery attempt')}: {new Date(
+                        account.nextRetryAt,
+                      ).toLocaleString()}
+                    </p>{/if}
+                </td>
+                <td data-label={$t('Scheduling')} class="text-xs">
+                  <p>
+                    {row.pool.strategy === 'manual_priority'
+                      ? $t('Manual priority')
+                      : $t('Round robin')}
+                  </p>
+                  {#if account}<p class="mt-1">
+                      {$t('Priority')}: <span class="tabular-nums">{account.priority}</span>
+                    </p>{/if}
+                </td>
+                <td
+                  ><div class="flex items-center justify-end gap-2">
+                    {#if account}
+                      <button
+                        type="button"
+                        class="btn-secondary"
+                        disabled={!keyManager?.canTest(row.pool, account)}
+                        onclick={() => keyManager?.openTest(row.pool, account)}>{$t('Test')}</button
+                      >
+                      <button
+                        type="button"
+                        class="btn-secondary"
+                        onclick={() => keyManager?.edit(row.pool.id, account)}
+                        >{$t('Manage')}</button
+                      >
+                    {:else}<button
+                        type="button"
+                        class="btn-primary"
+                        disabled={!row.pool.configured}
+                        onclick={() => keyManager?.addKeys(row.pool.id)}
+                        >{$t('Add API keys')}</button
+                      >{/if}
+                    <details class="menu">
+                      <summary class="menu-trigger" title={$t('More actions')}
+                        ><span aria-hidden="true">⋯</span><span class="sr-only"
+                          >{$t('More actions')}</span
+                        ></summary
+                      >
+                      <div class="menu-panel w-64">
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={!row.pool.configured}
+                          onclick={() => keyManager?.addKeys(row.pool.id)}
+                          >{$t('Add API keys')}</button
+                        >
+                        <button
+                          type="button"
+                          class="menu-item"
+                          disabled={!keyManager?.canRecover(row.pool)}
+                          onclick={() => keyManager?.batchTest(row.pool)}
+                          >{$t('Batch test and recover')}</button
+                        >
+                        {#if account}<button
+                            type="button"
+                            class="menu-item"
+                            onclick={() => keyManager?.toggleAccount(row.pool.id, account)}
+                            >{account.enabled ? $t('Pause') : $t('Resume')}</button
+                          >{/if}
+                        {#if account && keyManager?.canRecoverAccount(account) && keyManager?.canTest(row.pool, account)}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            onclick={() => keyManager?.recoverAccount(row.pool, account)}
+                            >{$t('Try recovery')}</button
+                          >
+                        {/if}
+                        {#each row.linked as connection}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            onclick={() => providerEditor?.start(connection)}
+                            >{$t('Configure')} · {connection.label}</button
+                          >
+                          {#if connection.managed}<button
+                              type="button"
+                              class="menu-item-danger"
+                              onclick={() => providerEditor?.askDelete(connection)}
+                              >{$t('Delete provider')} · {connection.label}</button
+                            >{/if}
+                        {/each}
+                        {#if account}<button
+                            type="button"
+                            class="menu-item-danger"
+                            onclick={() => keyManager?.removeAccount(row.pool.id, account)}
+                            >{$t('Delete account')}</button
+                          >{/if}
+                      </div>
+                    </details>
+                  </div></td
+                >
+              </tr>
+            {/each}
+            {#each unpooledConnections as connection (connection.id)}
+              <tr class="align-top" data-testid="unpooled-provider-row">
+                <td data-label={$t('Provider')}
+                  ><div class="font-medium text-ink-body">{connection.label}</div>
+                  <p class="field-help break-all">{connection.base_url}</p></td
+                >
+                <td data-label={$t('Authentication')}
+                  ><span class="badge-neutral"
+                    >{connection.keyless ? $t('No key required') : 'API Key'}</span
+                  ></td
+                >
+                <td data-label={$t('Models')}
+                  ><div class="flex max-w-64 flex-wrap gap-1">
+                    {#each connection.models.slice(0, 3) as model}<code
+                        class="badge-neutral text-xs">{model.alias}</code
+                      >{/each}
+                  </div></td
+                >
+                <td data-label={$t('Usage')}>—</td><td data-label={$t('Quota')}>—</td><td
+                  data-label={$t('Scheduling')}>—</td
+                >
+                <td class="table-mode:text-right"
+                  >{#if connection.keyless}<span class="field-help">{$t('Configuration file')}</span
+                    >{:else}<button
+                      class="btn-secondary"
+                      onclick={() => providerEditor?.start(connection)}>{$t('Manage here')}</button
+                    >{/if}</td
+                >
+              </tr>
+            {/each}
           </tbody>
         </table>
       </div>
     {/if}
   </section>
 
-  {#key apiProviderRevision}<ApiKeyPools />{/key}
+  <details>
+    <summary class="w-fit cursor-pointer text-sm text-ink-muted">{$t('Upstream usage')}</summary
+    ><UpstreamProviderUsage />
+  </details>
 
   {#if confirming}
     <Modal

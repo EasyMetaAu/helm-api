@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "使用量（過去 24 時間）",
   "requests": "リクエスト",
   "Rotate model API keys across accounts.": "複数のアカウントでモデル用 API キーを順番に使用します。",
-  "Manage subscriptions and API key accounts in one place.": "サブスクリプションと API キーアカウントをまとめて管理します。",
+  "Manage subscriptions and API key accounts in one place.": "すべてのプロバイダーとアカウントを一つの一覧で管理。",
   "{requests} requests · {tokens} tokens": "{requests} リクエスト · {tokens} トークン",
   "Test API key": "API キーをテスト",
   "Test passed": "テスト成功",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "Leave blank to keep the saved password",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "Requests and account tests use this proxy. A proxy failure never falls back to direct access.",
   "Default request parameters (JSON)": "Default request parameters (JSON)",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model."
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.",
+  "Authentication": "認証方式",
+  "All authentication methods": "すべての認証方式",
+  "No key required": "キー不要",
+  "OAuth account strategy": "OAuth アカウント戦略",
+  "No matching providers. Add a provider or change the filters.": "一致するプロバイダーがありません。追加するか絞り込みを変更してください。",
+  "No saved keys": "保存済みキーなし",
+  "Shared by {count} connections": "{count} 接続で共有",
+  "Delete account": "アカウント削除",
+  "Saved key": "保存済みキー",
+  "Connection settings": "接続とモデルの設定",
+  "Shared account changes apply to every connection listed here.": "アカウント設定は以下の共有接続すべてに適用されます。",
+  "Keys are already saved. Use account settings to add or replace a key.": "キーは保存済みです。追加・変更はアカウント設定で行います。"
 }

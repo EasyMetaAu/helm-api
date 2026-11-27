@@ -120,7 +120,7 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
     await page.getByLabel("Upstream model ID", { exact: true }).fill("k3.1-pro");
     await page.getByRole("button", { name: "Save provider", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    const api = page.getByRole("region", { name: "Key providers", exact: true });
+    const api = page.getByRole("region", { name: "Providers", exact: true });
     const row = api.getByRole("row").filter({ hasText: "Kimi · 主账号" });
     await row.getByRole("button", { name: "Manage", exact: true }).click();
     await page.getByLabel("Priority", { exact: true }).fill("10");
@@ -157,8 +157,16 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
     await page.reload();
     await expect(api.getByRole("row").filter({ hasText: "Kimi · 主账号" })).toContainText("10");
     await expectBorderToken(
-      page.getByRole("region", { name: "Key provider connections" }).locator("table").locator(".."),
+      page.getByRole("region", { name: "Providers", exact: true }).locator("table").locator(".."),
     );
+    await row.getByRole("button", { name: "Manage", exact: true }).click();
+    await page.getByRole("dialog").getByText("Connection settings", { exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Configure", exact: true }).click();
+    await expect(page.getByLabel("API key", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toContainText("Keys are already saved");
+    await page.getByRole("button", { name: "Save provider", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(row).toContainText("10");
     const evidence = process.env.HELM_UI_EVIDENCE_DIR;
     if (evidence) {
       mkdirSync(evidence, { recursive: true });
@@ -191,9 +199,10 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
     await page.getByRole("button", { name: "OAuth login", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Delete Kimi", exact: true }).click();
+    await row.locator("summary.menu-trigger").click();
+    await row.getByRole("button", { name: "Delete provider · Kimi", exact: true }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Delete Kimi", exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("key-provider-row")).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally {
     await handle?.dispose?.();

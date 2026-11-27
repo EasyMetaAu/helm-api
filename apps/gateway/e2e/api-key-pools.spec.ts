@@ -60,20 +60,19 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       if (!localStorage.getItem("helm_admin_locale"))
         localStorage.setItem("helm_admin_locale", "en");
     });
+    await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(url);
     await expect(page).toHaveURL(url);
     await expect(page).toHaveTitle(/Helm/i);
-    const section = page.getByRole("region", { name: "Key providers", exact: true });
-    const subscriptions = page.getByRole("region", { name: "Subscription Providers", exact: true });
-    await expect(subscriptions.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
-    expect(
-      await subscriptions.evaluate((node) => {
-        const api = document.querySelector('section[aria-label="Key providers"]');
-        return Boolean(api && node.compareDocumentPosition(api) & Node.DOCUMENT_POSITION_FOLLOWING);
-      }),
-    ).toBe(true);
-    await expect(section.getByRole("button", { name: "Add API keys" })).toBeEnabled();
-    await section.getByRole("button", { name: "Add API keys" }).click();
+    const section = page.getByRole("region", { name: "Providers", exact: true });
+    await expect(page.getByRole("table")).toHaveCount(1);
+    await expect(section.getByRole("columnheader", { name: "Authentication" })).toBeVisible();
+    await section
+      .getByRole("row")
+      .filter({ hasText: "openai" })
+      .getByRole("button", { name: "Add API keys", exact: true })
+      .first()
+      .click();
     await page
       .getByLabel("API keys (one per line)")
       .fill("sk-proj-ui-test-first\nsk-proj-ui-test-second");
@@ -124,10 +123,8 @@ test("API key provider import, pause, edit and delete through the real admin UI"
         paused.getByText("Provider reports insufficient credit for this request.", { exact: true }),
       ).toBeVisible();
       await paused.getByText("Details", { exact: true }).click();
-      await section
-        .getByRole("button", { name: "Batch test and recover", exact: true })
-        .first()
-        .click();
+      await paused.locator("summary.menu-trigger").click();
+      await paused.getByRole("button", { name: "Batch test and recover", exact: true }).click();
       const batch = page.getByRole("dialog", { name: "Batch test and recover", exact: true });
       await batch.getByRole("button", { name: "Run test", exact: true }).click();
       await expect(batch.getByText(/Test passed/)).toHaveCount(2);
@@ -139,8 +136,10 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       recoveryDb.$sqlite.close();
     }
     let row = section.getByRole("row").filter({ hasText: "API 1" });
-    await expect(row.getByRole("button", { name: "Delete", exact: true })).not.toBeVisible();
-    await row.locator("summary").click();
+    await expect(
+      row.getByRole("button", { name: "Delete account", exact: true }),
+    ).not.toBeVisible();
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Pause", exact: true }).click();
     await expect(row.getByText("Paused manually")).toBeVisible();
     await expect(row.getByRole("button", { name: "Try recovery" })).toHaveCount(0);
@@ -149,13 +148,18 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
     row = section.getByRole("row").filter({ hasText: "Primary account" });
     await expect(row).toBeVisible();
-    await row.locator("summary").click();
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Resume", exact: true }).click();
     await expect(row.getByText("Available", { exact: true })).toBeVisible();
-    await section.getByLabel("API key rotation strategy").first().selectOption("manual_priority");
-    await expect(section.getByLabel("API key rotation strategy").first()).toHaveValue(
+    await row.getByRole("button", { name: "Manage", exact: true }).click();
+    await page
+      .getByRole("dialog")
+      .getByLabel("API key rotation strategy")
+      .selectOption("manual_priority");
+    await expect(page.getByRole("dialog").getByLabel("API key rotation strategy")).toHaveValue(
       "manual_priority",
     );
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
     const readback = await page.request.get(`http://127.0.0.1:${port}/admin/api/api-key-pools`, {
       headers: adminHeaders,
     });
@@ -163,11 +167,16 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     expect(text).not.toContain("sk-proj-ui-test");
     expect(JSON.parse(text).pools[0].accounts).toHaveLength(2);
     expect(JSON.parse(text).pools[0].strategy).toBe("manual_priority");
-    await row.locator("summary").click();
-    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    await row.locator("summary.menu-trigger").click();
+    await row.getByRole("button", { name: "Delete account", exact: true }).click();
     await page.getByRole("button", { name: "Confirm delete" }).click();
     await expect(section.getByText("Primary account", { exact: true })).toHaveCount(0);
-    await section.getByRole("button", { name: "Add API keys", exact: true }).click();
+    await section
+      .getByRole("row")
+      .filter({ hasText: "anthropic-api" })
+      .getByRole("button", { name: "Add API keys", exact: true })
+      .first()
+      .click();
     await page.getByLabel("Provider type", { exact: true }).selectOption("anthropic-api");
     await page.getByLabel("API keys (one per line)").fill("sk-ant-api03-ui-test");
     await page.getByRole("button", { name: "Save API keys", exact: true }).click();
@@ -308,10 +317,12 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       await page.setViewportSize({ width: 1440, height: 1100 });
       const lastAccount = page.getByRole("row").filter({ hasText: "OpenAI 4" });
       await lastAccount.locator("summary").click();
-      await expect(lastAccount.getByRole("button", { name: "删除", exact: true })).toBeVisible();
+      await expect(
+        lastAccount.getByRole("button", { name: "删除账户", exact: true }),
+      ).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(
-        lastAccount.getByRole("button", { name: "删除", exact: true }),
+        lastAccount.getByRole("button", { name: "删除账户", exact: true }),
       ).not.toBeVisible();
       await page.screenshot({
         path: join(evidenceDir, "api-key-pools-desktop.png"),
@@ -338,7 +349,7 @@ test("API key provider import, pause, edit and delete through the real admin UI"
         .getByRole("button", { name: "关闭", exact: true })
         .click();
       await page
-        .getByRole("heading", { name: "密钥提供商", exact: true })
+        .getByRole("heading", { name: "提供商", exact: true })
         .evaluate((node) => node.scrollIntoView({ block: "start" }));
       await page.screenshot({
         path: join(evidenceDir, "api-key-pools-mobile-api.png"),

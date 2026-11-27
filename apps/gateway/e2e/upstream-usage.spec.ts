@@ -151,6 +151,10 @@ test("upstream usage renders quota and history without account mutations", async
     });
   });
   await page.goto("/admin/providers");
+  await page
+    .locator("summary")
+    .filter({ hasText: /^Upstream usage$/ })
+    .click();
   const section = page.getByRole("region", { name: "Upstream usage" });
   await expect(section.getByText("74%", { exact: true })).toBeVisible();
   await expect(section.getByText("https://upstream.example", { exact: true })).toBeVisible();

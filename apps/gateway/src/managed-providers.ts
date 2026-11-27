@@ -228,6 +228,7 @@ export class ManagedProviders {
         map_developer_role_to_system: p.map_developer_role_to_system,
         normalize_reasoning_delta_alias: p.normalize_reasoning_delta_alias,
         poolId: p.api_key_pool?.id ?? p.name,
+        keyless: !p.api_key_env && !p.api_key_pool,
         managed: this.owns(p.name),
         legacyCredentialAvailable: !!(p.api_key_env && process.env[p.api_key_env]),
       }));
