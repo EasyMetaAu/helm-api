@@ -39,12 +39,24 @@ it("accepts an official OpenAI transcription provider with an existing API key p
     api_key_pool: { id: "openai" },
   };
   expect(ProviderConfigSchema.safeParse(pooled).success).toBe(true);
-  expect(ProviderConfigSchema.safeParse({ ...pooled, type: "deepgram" }).success).toBe(false);
   expect(
     ProviderConfigSchema.safeParse({ ...pooled, base_url: "http://api.openai.com" }).success,
   ).toBe(false);
   expect(
     ProviderConfigSchema.safeParse({ ...pooled, base_url: "https://proxy.example/v1" }).success,
+  ).toBe(false);
+});
+
+it("accepts a managed Deepgram key pool without an environment credential", () => {
+  const provider = {
+    name: "deepgram-transcription",
+    type: "deepgram",
+    base_url: "https://api.deepgram.com",
+    api_key_pool: { id: "deepgram", credential_type: "compatible" },
+  };
+  expect(ProviderConfigSchema.safeParse(provider).success).toBe(true);
+  expect(
+    ProviderConfigSchema.safeParse({ ...provider, api_key_pool: undefined }).success,
   ).toBe(false);
 });
 
