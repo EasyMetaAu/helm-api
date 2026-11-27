@@ -292,6 +292,13 @@ describe("Anthropic adapter header semantics", () => {
 
   it("preserves actual relay SDK metadata and reviewed optional fields without inventing absent ones", async () => {
     const unreviewedMemoryAndFileFields = [
+      "x-tfs-fedauthredirect",
+      "x-ms-continuationtoken",
+      "x-next-page",
+      "anthropic-ratelimit-unified-overage-group",
+      "x-amz-signature",
+      "x-served-file-picture-pages",
+      "x-takes-edits",
       "x-ccr-file-save",
       "x-asks-for-saves",
       "x-claude-code-upload-ahead",

@@ -55,9 +55,9 @@ it("accepts a managed Deepgram key pool without an environment credential", () =
     api_key_pool: { id: "deepgram", credential_type: "compatible" },
   };
   expect(ProviderConfigSchema.safeParse(provider).success).toBe(true);
-  expect(
-    ProviderConfigSchema.safeParse({ ...provider, api_key_pool: undefined }).success,
-  ).toBe(false);
+  expect(ProviderConfigSchema.safeParse({ ...provider, api_key_pool: undefined }).success).toBe(
+    false,
+  );
 });
 
 for (const type of ["openai-audio", "deepgram", "doubao-speech", "whisperx-asr"]) {

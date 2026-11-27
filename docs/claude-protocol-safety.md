@@ -185,3 +185,11 @@ Helm 可能把请求路由到第三方 relay，因此仍保留凭证/租户隔�
 2026-11-21 核对官方 2.1.328 和 2.1.329 Darwin arm64 包的 npm SHA512 完整性及二进制 SHA256。2.1.329 内嵌 JavaScript 的 SDK 版本仍为 0.128.0（字节偏移 291936887）。对比引号内以 `x-` 或 `anthropic-` 开头的名称，新增 10 项，移除 6 项。新制品保留现有审核清单中的 10 个请求头名称，以及文本、引用、工具 JSON、thinking、签名和 compaction 的增量事件名。此次为静态制品核对；账号身份、权限和请求头转发继续沿用现有规则。[官方发行记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21329)
 
 2026-11-21 增量检查 2.1.329 → 2.1.330 官方 Darwin arm64 包，均通过 npm SHA512 校验，旧二进制与审核记录一致；新 SHA256 为 `f7c5093b9dd6560d08af28bc27b123fb55091deae3180ac39df199522da86815`。内嵌 SDK 仍为 0.128.0（293554353）。同口径引号头集合 400 → 401，新增 `X-CCR-File-Save`、`x-asks-for-saves`（318402101/318402123）用于 MCP 文件保存握手，移除 `X-XSRF-TOKEN`；新增字段不加入 Messages 白名单，边界测试验证剥离。现有 10 项审核头、文本/引用/工具 JSON/thinking/signature/compaction SSE 分支保持，附加保护头名单仍在（306035881）。已读官方 2.1.330 发行说明；此次仅静态读取公开包，未运行下载的 CLI，不宣称全部动态行为一致。
+
+
+2026-11-27 增量审查官方 Darwin arm64 2.1.330 → 2.1.332 平台包，两个包均通过 npm SHA512 校验，旧二进制与审核记录一致；新版 SHA256 为 `5b8214f8f082f3187420b27b4063b9b4f4d9412cd66ea436d6d1966ad582700f`，SDK 仍为 0.128.0（310329750）。仅静态读取公开制品，未执行下载的 CLI 或访问账号。[官方发行记录](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21332)
+
+- 同口径引号字段扫描 401 → 407，10 个已审查头保留。新增仓库 API 字段 `X-TFS-FedAuthRedirect`、`x-ms-continuationtoken`、`x-next-page`，额度响应 `anthropic-ratelimit-unified-overage-group`，签名查询 `x-amz-signature`，文件元数据 `x-served-file-picture-pages` 和 MCP schema `x-takes-edits`；移除内部 schema 标记 `x-claude-code-keep-branch`。新增项不加入 Messages 白名单，定向回归验证剥离。
+- 主请求（319197076）、流式发送（319246017）和普通 count_tokens（317281924）在检查窗口中保持既有结构。新 beta `subagent-review-2026-11-17` 用于独立 safeguard 请求和能力探测；Helm 不自行生成。SDK SSE 发出和累积（311466817、311469608）保留文本、引用、工具 JSON、thinking、signature 和含 encrypted_content 的 compaction。
+- 新增条件 metadata.user_id.cd（312033125）包含客户端派生的关联值；本次保持已有客户端 metadata 透传契约，不生成该字段，不将其用于认证，不改变账户身份校验和受保护字段覆盖顺序。cc_project 新增远程会话条件属于客户端归因行为。压缩开关及 oat02 token 后缀不要求扩大 Helm 的请求头或凭证信任范围。
+- 有限静态审查未发现本次必须修改的协议实现，不代表全部动态客户端行为一致；真实上游验收另行记录。
