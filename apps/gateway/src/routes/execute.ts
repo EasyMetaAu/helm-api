@@ -139,6 +139,8 @@ export interface ExecuteAdapterDeps {
    *  defaultProvider (that would cross subscription/credential boundaries). Absent →
    *  the gate is off (back-compat for tests that don't wire OAuth). */
   knownOAuthPrefixes?: ReadonlySet<string>;
+  isManagedProvider?: (name: string) => boolean;
+  isManagedAlias?: (alias: string) => boolean;
   /** LIVE set of currently-exposed (curated) OAuth `<provider>/<model>` aliases,
    *  re-read per request so a Manage-dialog curation removal / disconnect takes
    *  effect immediately: a subscription alias NOT in this set fails CLOSED
@@ -355,6 +357,8 @@ function resolveAttemptTarget(input: {
   providers?: Map<string, ProviderClient>;
   registry: ProviderRegistry;
   knownOAuthPrefixes?: ReadonlySet<string>;
+  isManagedProvider?: (name: string) => boolean;
+  isManagedAlias?: (alias: string) => boolean;
   oauthAliases?: () => ReadonlySet<string>;
   oauthWireModels?: () => ReadonlyMap<string, string>;
   oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
@@ -365,6 +369,8 @@ function resolveAttemptTarget(input: {
     providers,
     registry,
     knownOAuthPrefixes,
+    isManagedProvider,
+    isManagedAlias,
     oauthAliases,
     oauthWireModels,
     oauthProviderProtocols,
@@ -405,6 +411,14 @@ function resolveAttemptTarget(input: {
     };
   }
 
+  if ((prefix && isManagedProvider?.(prefix)) || isManagedAlias?.(alias))
+    return {
+      provider: undefined,
+      providerName: prefix,
+      providerModel: alias.slice(slash + 1),
+      targetProviderProtocol: "openai_chat",
+      providerRequiresCompatibilityRewrite: false,
+    };
   if (prefix && providers?.has(prefix)) {
     // Structural fallback for a NON-subscription `provider/model` alias the registry
     // never enumerated but whose provider client IS registered by name. Subscription
@@ -1474,6 +1488,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     visualContextCompressor = optimizeVisualContext,
   } = deps;
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
+  const isManagedProvider = deps.isManagedProvider;
+  const isManagedAlias = deps.isManagedAlias;
   const oauthAliases = deps.oauthAliases;
   const oauthWireModels = deps.oauthWireModels;
   const xaiOAuthModels = deps.xaiOAuthModels;
@@ -1690,6 +1706,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         providers,
         registry,
         knownOAuthPrefixes,
+        isManagedProvider,
+        isManagedAlias,
         oauthAliases,
         oauthWireModels,
         oauthProviderProtocols,

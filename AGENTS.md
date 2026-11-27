@@ -7,7 +7,7 @@ Helm API 是一个**开源、自托管**的 LLM 路由网关（"LLM 世界的 ng
 ## 核心原则（不可妥协）
 
 1. **网关与 UI 解耦**：核心网关（路由、分类、provider 执行、协议互译、存储）必须能**脱离管理界面 headless 独立运行**。core 逻辑不得 import 任何框架（Hono / SvelteKit）。
-2. **配置即代码**：行为由 `config/*.yaml` + 环境变量驱动，不靠改代码。配置加载用 Zod 校验，**非法配置 fail-closed（拒绝启动）**，绝不带病运行。
+2. **配置驱动**：行为由 `config/*.yaml`、环境变量及管理端持久化配置驱动，不靠改代码。Provider 接管后以加密 Store 为权威；未接管配置继续支持 headless 部署。配置加载用 Zod 校验，**非法配置 fail-closed（拒绝启动）**，绝不带病运行。
 3. **辅助环节 fail-open，边界校验 fail-closed**：分类/eval 失败回退到 `runtime.default_lane`（出厂值为 `balanced`）并记录；Memory 失败保持请求不变，其他可选缓存/信号读取按各自契约降级。鉴权、schema、硬配额、显式禁用项与确定性客户端错误必须拒绝；执行链耗尽时返回协议形状的结构化错误。
 4. **确定性优先**：第 1 层规则是纯函数、零网络、可单测；eval（第 2 层）`temperature:0`、默认关闭、带缓存。
 5. **两种 fallback 分清楚**：分类兜底（→ `runtime.default_lane`）与执行兜底（→ 链内下一个 model）是两套机制、两套日志字段，绝不混淆（见 docs/03、04）。
@@ -104,7 +104,7 @@ pnpm build          # 构建网关 + admin + portal + ops bundle
 
 - 强制 API key 鉴权；启动无 key 则生成一把 root key，打印一次并写入配置的 `0600` recovery file（docs/06）。
 - 管理界面用 HTTP Basic；当前 `buildServer()` 的部署入口只从 `HELM_ADMIN_*` 环境变量读取（`resolveAdminAuth` 的 config 分支仅供直接调用/测试），未配凭证却显式开启时启动告警（docs/11）。
-- 静态 provider 凭证经环境变量注入；OAuth token 只加密写入 Store。二者都不写进仓库或常规日志。
+- Provider API Key 与 OAuth token 均可加密写入 Store，在管理界面维护；未接管的静态 provider 继续兼容环境变量凭证。接管后不得回退旧环境变量。凭据不写进仓库或常规日志。
 
 ---
 

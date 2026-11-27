@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { ProviderParametersSchema, ProviderProxySchema } from "./managed-provider.js";
 
-export const ApiKeyProviderTypeSchema = z.enum(["openai", "anthropic"]);
+export const ApiKeyProviderTypeSchema = z.enum(["openai", "anthropic", "compatible"]);
 export type ApiKeyProviderType = z.infer<typeof ApiKeyProviderTypeSchema>;
 export function apiKeyMatchesProvider(key: string, type: ApiKeyProviderType): boolean {
+  if (type === "compatible") return true;
+  if (!/^sk-[A-Za-z0-9_-]+$/.test(key)) return false;
   return type === "anthropic"
     ? key.startsWith("sk-ant-") && !key.startsWith("sk-ant-oat") && !key.startsWith("sk-ant-admin")
     : !key.startsWith("sk-ant-");
@@ -10,6 +13,7 @@ export function apiKeyMatchesProvider(key: string, type: ApiKeyProviderType): bo
 
 export const ApiKeyPoolConfigSchema = z
   .object({
+    credential_type: ApiKeyProviderTypeSchema.optional(),
     id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
     strategy: z.enum(["round_robin", "manual_priority"]).default("round_robin"),
     reset_timezone: z
@@ -28,9 +32,9 @@ export const ApiKeyPoolConfigSchema = z
 export const UpstreamApiKeySchema = z
   .string()
   .trim()
-  .min(12)
-  .max(512)
-  .regex(/^sk-[A-Za-z0-9_-]+$/)
+  .min(8)
+  .max(8192)
+  .regex(/^\S+$/)
   .refine((key) => !key.startsWith("sk-admin-"), "Admin keys cannot serve model requests");
 export const ApiKeyAccountInputSchema = z
   .object({
@@ -45,6 +49,8 @@ export const ApiKeyAccountPatchSchema = z
     enabled: z.boolean().optional(),
     priority: z.number().int().min(0).max(1000).optional(),
     models: z.array(z.string().min(1).max(200)).max(500).nullable().optional(),
+    proxy: ProviderProxySchema.nullable().optional(),
+    parameters: ProviderParametersSchema.optional(),
   })
   .strict();
 export type ApiKeyPoolConfig = z.infer<typeof ApiKeyPoolConfigSchema>;
@@ -55,6 +61,11 @@ export const ApiKeyAccountViewSchema = z.object({
   id: z.string(),
   name: z.string(),
   mask: z.string(),
+  proxy: ProviderProxySchema.omit({ password: true })
+    .extend({ hasPassword: z.boolean() })
+    .nullable()
+    .optional(),
+  parameters: ProviderParametersSchema.optional(),
   enabled: z.boolean(),
   priority: z.number(),
   models: z.array(z.string()).nullable(),
@@ -76,6 +87,7 @@ export const ApiKeyPoolsViewSchema = z.object({
       timezone: z.string(),
       strategy: z.enum(["round_robin", "manual_priority"]),
       models: z.array(z.string()),
+      testableModels: z.array(z.string()).optional(),
       accounts: z.array(ApiKeyAccountViewSchema),
       usage: z.array(
         z.object({

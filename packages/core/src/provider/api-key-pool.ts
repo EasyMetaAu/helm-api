@@ -9,6 +9,7 @@ import {
   type ApiKeyProviderType,
   apiKeyMatchesProvider,
   type Protocol,
+  ProviderProxySchema,
 } from "@helm/shared";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
@@ -22,8 +23,10 @@ const DAY = 86_400_000;
 const AccountSchema = ApiKeyAccountViewSchema.omit({ mask: true }).extend({
   key: z.string(),
   generation: z.string(),
+  transportGeneration: z.string().optional(),
   fingerprint: z.string(),
   probeId: z.string().nullable(),
+  proxy: ProviderProxySchema.nullable().optional(),
 });
 const DocumentSchema = z.object({
   accounts: z.array(AccountSchema),
@@ -218,7 +221,19 @@ export class ApiKeyAccounts {
   async list(): Promise<ApiKeyAccountView[]> {
     await this.refresh();
     return this.entries().map((a) =>
-      ApiKeyAccountViewSchema.parse({ ...a, mask: `••••${a.key.slice(-4)}` }),
+      ApiKeyAccountViewSchema.parse({
+        ...a,
+        proxy: a.proxy
+          ? {
+              type: a.proxy.type,
+              host: a.proxy.host,
+              port: a.proxy.port,
+              username: a.proxy.username,
+              hasPassword: !!a.proxy.password,
+            }
+          : null,
+        mask: `••••${a.key.slice(-4)}`,
+      }),
     );
   }
   async add(inputs: ApiKeyAccountInput[]): Promise<void> {
@@ -277,6 +292,24 @@ export class ApiKeyAccounts {
           deniedModels: [],
         });
       }
+      if (
+        patch.proxy &&
+        patch.proxy.password === undefined &&
+        a.proxy &&
+        patch.proxy.type === a.proxy.type &&
+        patch.proxy.host === a.proxy.host &&
+        patch.proxy.port === a.proxy.port &&
+        patch.proxy.username === a.proxy.username
+      ) {
+        patch.proxy.password = a.proxy.password;
+      }
+      if (
+        (patch.proxy !== undefined &&
+          JSON.stringify(patch.proxy) !== JSON.stringify(a.proxy ?? null)) ||
+        (patch.parameters !== undefined &&
+          JSON.stringify(patch.parameters) !== JSON.stringify(a.parameters ?? {}))
+      )
+        a.transportGeneration = randomUUID();
       Object.assign(a, patch);
     });
   }
@@ -358,7 +391,7 @@ export class ApiKeyAccounts {
       if (kind === "billing") {
         a.state = "quota_exhausted";
         a.nextRetryAt =
-          this.deps.providerType === "anthropic"
+          this.deps.providerType !== "openai" && this.deps.providerType !== undefined
             ? null
             : attempt.probeId
               ? this.now() + DAY
@@ -397,7 +430,7 @@ export class ApiKeyAccounts {
       if (exhaustedProbe && error !== null && kind !== "invalid") {
         a.state = "quota_exhausted";
         a.nextRetryAt =
-          this.deps.providerType === "anthropic"
+          this.deps.providerType !== "openai" && this.deps.providerType !== undefined
             ? null
             : Math.max(a.nextRetryAt ?? 0, this.now() + DAY);
       }
@@ -431,7 +464,7 @@ export function createApiKeyPoolClient(deps: {
   accounts: ApiKeyAccounts;
   models: readonly string[];
   protocol: Protocol;
-  createClient: (key: string) => ProviderClient;
+  createClient: (key: string, account?: Readonly<Account>) => ProviderClient;
   legacyClient?: ProviderClient;
   strategy?: "round_robin" | "manual_priority";
   onSelect?: (id: string) => void;
@@ -504,7 +537,9 @@ export function createApiKeyPoolClient(deps: {
     await deps.accounts.refresh();
     if (!deps.accounts.configured() && deps.legacyClient) return deps.legacyClient;
     const accounts = deps.accounts.entries();
-    const nextSignature = accounts.map((a) => `${a.id}:${a.generation}`).join("|");
+    const nextSignature = accounts
+      .map((a) => `${a.id}:${a.generation}:${a.transportGeneration ?? ""}`)
+      .join("|");
     if (!pool || signature !== nextSignature) {
       const members: OAuthPoolMember[] = accounts.map((a) => ({
         account: `${a.id}@${a.generation}`,
@@ -523,7 +558,7 @@ export function createApiKeyPoolClient(deps: {
               (row?.models === null || row?.models.includes(m)) && !row?.deniedModels.includes(m),
           );
         },
-        client: wrap(a.id, a.generation, deps.createClient(a.key)),
+        client: wrap(a.id, a.generation, deps.createClient(a.key, a)),
       }));
       pool = createOAuthPoolClient({
         members,

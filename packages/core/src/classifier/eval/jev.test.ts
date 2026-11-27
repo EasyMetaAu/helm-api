@@ -129,3 +129,18 @@ describe("external Decisions transport", () => {
     ).rejects.toThrow("invalid Jev response");
   });
 });
+
+it("resolves managed JEV endpoint, credential and proxy together on every call", async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json(response()));
+  const binding = vi.fn(async () => ({
+    apiKey: "managed-secret",
+    baseUrl: "https://managed.example/v1",
+    fetch: fetcher,
+  }));
+  const invoke = createJevInvoker({ apiKey: () => undefined, resolveBinding: binding });
+  await invoke(input, "typesafe/jev-1.13", new AbortController().signal);
+  expect(fetcher.mock.calls[0]?.[0]).toBe("https://managed.example/alpha/decisions");
+  expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+    "Bearer managed-secret",
+  );
+});

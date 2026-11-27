@@ -56,6 +56,9 @@ const questions = {
 
 export interface JevTransportDeps {
   apiKey: () => string | undefined;
+  resolveBinding?: (
+    model?: string,
+  ) => Promise<{ apiKey: string; baseUrl: string; fetch: typeof fetch } | null>;
   baseUrl?: string;
   fetch?: typeof fetch;
 }
@@ -71,14 +74,24 @@ export class JevError extends Error {
 
 /** One fixed endpoint and credential source for internal eval and public Decisions. */
 function createJevTransport(deps: JevTransportDeps) {
-  const endpoint = `${(deps.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/v1\/?$/, "")}/alpha/decisions`;
   return async (request: unknown, signal: AbortSignal): Promise<unknown> => {
-    const key = deps.apiKey();
+    const binding = deps.resolveBinding
+      ? await deps.resolveBinding(
+          request &&
+            typeof request === "object" &&
+            "model" in request &&
+            typeof request.model === "string"
+            ? request.model
+            : undefined,
+        )
+      : undefined;
+    const key = deps.resolveBinding ? binding?.apiKey : deps.apiKey();
+    const endpoint = `${(binding?.baseUrl ?? deps.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/v1\/?$/, "")}/alpha/decisions`;
     if (!key) throw new JevError(503, "Jev credential unavailable");
     const body = JSON.stringify(request);
     // ponytail: conservative byte ceiling; add token-aware sizing only if needed.
     if (Buffer.byteLength(body, "utf8") > 32_000) throw new JevError(413, "Jev input too large");
-    const res = await (deps.fetch ?? fetch)(endpoint, {
+    const res = await (binding?.fetch ?? deps.fetch ?? fetch)(endpoint, {
       method: "POST",
       redirect: "error",
       signal,

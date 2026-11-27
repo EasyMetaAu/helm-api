@@ -125,3 +125,20 @@ describe("createMemoryEmbedder (docs/14)", () => {
     expect(responseWorkAdmission.reservedBytes).toBe(0);
   });
 });
+
+it("uses live managed embedding credentials and the configured wire model", async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: [{ embedding: [1, 2] }] }));
+  const embedder = createMemoryEmbedder({
+    embeddingModel: "custom/alias",
+    providers: [],
+    resolveBinding: async () => ({
+      baseUrl: "https://managed.example/v1",
+      apiKey: "managed-secret",
+      providerModel: "wire-embedding",
+      fetch: fetcher,
+    }),
+  });
+  await embedder!.embed(["hello"]);
+  expect(fetcher.mock.calls[0]?.[0]).toBe("https://managed.example/v1/embeddings");
+  expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).model).toBe("wire-embedding");
+});

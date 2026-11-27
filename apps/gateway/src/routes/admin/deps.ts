@@ -475,6 +475,7 @@ export interface CleanupAccess {
 }
 
 export interface AdminApiDeps {
+  onApiKeyMutation?: () => Promise<void>;
   arkAssets?: import("../../ark-asset-grants.js").ArkAssetGrants;
   apiKeyPools?: ReadonlyMap<
     string,
@@ -484,6 +485,7 @@ export interface AdminApiDeps {
       timezone: string;
       strategy: "round_robin" | "manual_priority";
       models: string[];
+      testableModels?: string[];
       createTestClient?: (key: string, model: string) => ProviderClient | null;
     }
   >;

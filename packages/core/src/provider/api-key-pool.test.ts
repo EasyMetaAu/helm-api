@@ -561,3 +561,36 @@ it("redacts account credentials before exposing a saved upstream reason", async 
   );
   expect((await accounts.list())[0]?.reasonMessage).toBe("Rejected key [redacted]");
 });
+
+describe("compatible provider accounts", () => {
+  it("stores arbitrary keys and proxy credentials encrypted, masks reads and rebuilds on proxy changes", async () => {
+    const { store, data } = memoryStore();
+    const accounts = new ApiKeyAccounts({
+      store,
+      encKey: KEY,
+      poolId: "kimi",
+      providerType: "compatible",
+      timezone: "UTC",
+    });
+    await accounts.add([{ name: "Primary", key: "vendor-key-without-sk-prefix" }]);
+    const id = accounts.entries()[0]!.id;
+    const generation = accounts.entries()[0]!.generation;
+    await accounts.update(id, {
+      proxy: { type: "http", host: "127.0.0.1", port: 8080, password: "private-proxy-password" },
+      parameters: { temperature: 0.4 },
+      priority: 3,
+    });
+    expect(accounts.entries()[0]!.generation).toBe(generation);
+    expect(accounts.entries()[0]!.transportGeneration).toBeTypeOf("string");
+    const view = await accounts.list();
+    expect(JSON.stringify(view)).not.toContain("private-proxy-password");
+    expect(view[0]).toMatchObject({
+      priority: 3,
+      proxy: { hasPassword: true },
+      parameters: { temperature: 0.4 },
+    });
+    expect(JSON.stringify([...data.values()])).not.toContain("vendor-key-without");
+    await accounts.update(id, { proxy: { type: "http", host: "127.0.0.1", port: 8080 } });
+    expect(accounts.entries()[0]?.proxy?.password).toBe("private-proxy-password");
+  });
+});

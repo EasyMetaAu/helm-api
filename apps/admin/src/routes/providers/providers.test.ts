@@ -142,6 +142,8 @@ describe('providers page', () => {
         if (url.startsWith('/admin/api/upstream/provider-usage'))
           return Response.json({ configured: false });
         if (url === '/admin/api/api-key-pools') return Response.json({ pools: [] });
+        if (url === '/admin/api/providers')
+          return Response.json({ configured: true, providers: [] });
         throw new Error(`Unexpected request: ${url}`);
       }),
     );

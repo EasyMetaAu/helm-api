@@ -1,5 +1,7 @@
 <script lang="ts">
   import UpstreamProviderUsage from '$lib/components/UpstreamProviderUsage.svelte';
+  import ManagedProviders from '$lib/components/ManagedProviders.svelte';
+  let apiProviderRevision = $state(0);
   import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
@@ -928,6 +930,16 @@
     </div>
   </header>
 
+  <ManagedProviders
+    onOAuth={() => {
+      reconnecting = null;
+      showConnect = true;
+    }}
+    onchange={() => {
+      apiProviderRevision += 1;
+    }}
+  />
+
   <UpstreamProviderUsage />
 
   <section class="flex flex-col gap-2" aria-labelledby="subscription-providers">
@@ -1534,7 +1546,7 @@
     {/if}
   </section>
 
-  <ApiKeyPools />
+  {#key apiProviderRevision}<ApiKeyPools />{/key}
 
   {#if confirming}
     <Modal
