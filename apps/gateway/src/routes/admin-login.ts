@@ -36,7 +36,7 @@ function escapeHtml(value: string): string {
   );
 }
 
-function sameOrigin(c: Context): boolean {
+export function sameOrigin(c: Context): boolean {
   if (c.req.header("Sec-Fetch-Site") === "same-origin") return true;
   const origin = c.req.header("Origin");
   if (origin === undefined) return true;

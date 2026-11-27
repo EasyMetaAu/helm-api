@@ -85,6 +85,7 @@ export {
   type ReasoningEffort,
   ReasoningEffortSchema,
 } from "./config/lanes-schema.js";
+export * from "./config/managed-provider.js";
 // Policy model (config/policies.yaml, docs/04) — server-side first-match routing
 // rules; composed into HelmConfigSchema and re-exported by @helm/core.
 export {

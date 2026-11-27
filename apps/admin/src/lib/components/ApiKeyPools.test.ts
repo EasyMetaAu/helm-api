@@ -287,3 +287,42 @@ it('batch tests recoverable keys sequentially and skips manual pauses', async ()
     expect(results[1]?.textContent).toContain('Test passed');
   });
 });
+
+it('disables text connectivity tests for media-only providers', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({
+        pools: [
+          {
+            id: 'video',
+            configured: true,
+            timezone: 'UTC',
+            strategy: 'manual_priority',
+            models: ['seedance-pro'],
+            testableModels: [],
+            usage: [],
+            accounts: [
+              {
+                id: 'a',
+                name: 'Video account',
+                mask: '••••1234',
+                enabled: true,
+                priority: 1,
+                models: null,
+                state: 'ready',
+                reason: null,
+                nextRetryAt: null,
+                probeUntil: null,
+                deniedModels: [],
+              },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+  render(ApiKeyPools);
+  await screen.findByText('Video account');
+  expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled();
+});

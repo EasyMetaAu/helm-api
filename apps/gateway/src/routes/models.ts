@@ -20,7 +20,7 @@ export interface ModelsRouteDeps {
   // Capability/pricing catalog (loadRuntimeCatalog), immutable for the process.
   catalog: Map<string, CatalogEntry>;
   // Configured provider aliases: config.providers[].models[].alias.
-  providerAliases: string[];
+  providerAliases: string[] | (() => string[]);
   /** Live alias-to-wire-model map for client-family discovery only. */
   modelNames?: () => ReadonlyMap<string, string>;
   // Live curated subscription (OAuth) aliases — `<provider>/<model>` ids synthesized
@@ -65,7 +65,9 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     // OAuth aliases are part of the fingerprint so an entitlement expiry is visible
     // immediately; lane/config drift still uses the short TTL.
     const oauth = deps.oauthAliases ? [...deps.oauthAliases()].sort() : [];
-    const fp = `${caps.allowCustomModel ? 1 : 0}|${JSON.stringify(caps.allowedLanes)}|${JSON.stringify(caps.blockedModels)}|${JSON.stringify(oauth)}`;
+    const aliases =
+      typeof deps.providerAliases === "function" ? deps.providerAliases() : deps.providerAliases;
+    const fp = `${caps.allowCustomModel ? 1 : 0}|${JSON.stringify(caps.allowedLanes)}|${JSON.stringify(caps.blockedModels)}|${JSON.stringify(oauth)}|${JSON.stringify(aliases)}`;
     const now = Date.now();
     const hit = cache.get(fp);
     if (hit && now - hit.at < TTL_MS) return hit.value;
@@ -75,7 +77,7 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     const value = buildModelsList({
       lanes: deps.lanes(),
       catalog: deps.catalog,
-      providerAliases: oauth.length ? [...deps.providerAliases, ...oauth] : deps.providerAliases,
+      providerAliases: oauth.length ? [...aliases, ...oauth] : aliases,
       allowCustomModel: caps.allowCustomModel,
       allowedLanes: caps.allowedLanes,
       blockedModels: caps.blockedModels,

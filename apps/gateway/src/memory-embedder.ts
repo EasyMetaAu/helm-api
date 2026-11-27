@@ -27,6 +27,12 @@ const DEFAULT_EMBED_TIMEOUT_MS = 30_000;
 
 export function createMemoryEmbedder(deps: {
   embeddingModel: string | undefined;
+  resolveBinding?: (model: string) => Promise<{
+    baseUrl: string;
+    apiKey?: string;
+    providerModel: string;
+    fetch: typeof fetch;
+  } | null>;
   providers: readonly EmbedderProvider[];
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
@@ -49,28 +55,34 @@ export function createMemoryEmbedder(deps: {
   const provider = hasPrefix
     ? deps.providers.find((p) => p.name === model.slice(0, slash))
     : deps.providers[0];
-  if (provider?.base_url === undefined) return undefined; // unresolvable → vector leg off
+  if (provider?.base_url === undefined && !deps.resolveBinding) return undefined; // unresolvable → vector leg off
 
-  const baseUrl = provider.base_url.replace(/\/+$/, "");
+  const baseUrl = (provider?.base_url ?? "").replace(/\/+$/, "");
   const env = deps.env ?? process.env;
-  const apiKey = provider.api_key_env !== undefined ? env[provider.api_key_env] : undefined;
+  const apiKey = provider?.api_key_env !== undefined ? env[provider.api_key_env] : undefined;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_EMBED_TIMEOUT_MS;
 
   return {
     async embed(texts: string[]): Promise<Float32Array[]> {
       if (texts.length === 0) return [];
-      const res = await fetchImpl(`${baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(apiKey !== undefined ? { authorization: `Bearer ${apiKey}` } : {}),
+      const binding = deps.resolveBinding ? await deps.resolveBinding(model) : undefined;
+      if (deps.resolveBinding && !binding) throw new Error("Embedding provider unavailable");
+      const effectiveKey = binding?.apiKey ?? apiKey;
+      const res = await (binding?.fetch ?? fetchImpl)(
+        `${(binding?.baseUrl ?? baseUrl).replace(/\/+$/, "")}/embeddings`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(effectiveKey !== undefined ? { authorization: `Bearer ${effectiveKey}` } : {}),
+          },
+          body: JSON.stringify({ model: binding?.providerModel ?? providerModel, input: texts }),
+          // A bounded timeout so the OPTIONAL vector leg can never block a tool call or
+          // stick an embedding worker on one job (callers fail open on reject).
+          signal: AbortSignal.timeout(timeoutMs),
         },
-        body: JSON.stringify({ model: providerModel, input: texts }),
-        // A bounded timeout so the OPTIONAL vector leg can never block a tool call or
-        // stick an embedding worker on one job (callers fail open on reject).
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      );
       if (!res.ok) throw new Error(`embeddings request failed: ${res.status}`);
       const json = await readUpstreamJsonWithinBudget<OpenAiEmbeddingsResponse>(
         res,

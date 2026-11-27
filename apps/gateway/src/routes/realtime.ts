@@ -217,7 +217,11 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
       if (check.overBudget) return error(c, 429, "weekly usage budget exceeded", "budget_exceeded");
     }
     const blocked = createBlockedModelMatcher(identity.blockedModels);
-    if (blocked?.matches(model) || blocked?.matches(target.alias)) {
+    if (
+      blocked?.matches(model) ||
+      blocked?.matches(target.alias) ||
+      blocked?.matches(target.providerModel)
+    ) {
       return error(c, 400, `model '${model}' is blocked for this key`, "model_blocked");
     }
 

@@ -232,15 +232,14 @@ export const ProviderConfigSchema = z
             (!p.media_account_id || url.pathname.replace(/\/+$/, "") !== "")) ||
           (p.type === "openai-audio" &&
             p.api_key_pool &&
+            p.api_key_pool.credential_type !== "compatible" &&
             (url.origin !== "https://api.openai.com" || !/^\/v1\/?$/.test(url.pathname))) ||
           url.protocol !== "https:" ||
           url.username ||
           url.password ||
           url.search ||
           url.hash ||
-          (!p.api_key_env &&
-            !(p.type === "openai-audio" && p.api_key_pool) &&
-            !isInternalProvider(p)) ||
+          (!p.api_key_env && !p.api_key_pool && !isInternalProvider(p)) ||
           p.oauth
         )
           throw new Error("invalid audio provider");
@@ -262,7 +261,7 @@ export const ProviderConfigSchema = z
       });
       return;
     }
-    if (!p.media_account_id || !p.api_key_env || p.oauth) {
+    if (!p.media_account_id || (!p.api_key_env && !p.api_key_pool) || p.oauth) {
       ctx.addIssue({
         code: "custom",
         path: ["media_account_id"],
@@ -310,7 +309,21 @@ export const ProviderConfigSchema = z
   .refine(
     (p) =>
       !p.api_key_pool ||
-      ["openai", "openai-responses-generic", "openai-audio", "anthropic"].includes(p.type),
+      [
+        "openai",
+        "openai-responses-generic",
+        "openai-audio",
+        "anthropic",
+        "gemini",
+        "deepseek-responses",
+        "helm",
+        "ark",
+        "bailian-media",
+        "minimax-media",
+        "doubao-speech",
+        "deepgram",
+        "whisperx-asr",
+      ].includes(p.type),
     {
       message: "API key pools require an OpenAI Chat, Responses, audio or Anthropic provider",
     },

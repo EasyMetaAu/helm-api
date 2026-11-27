@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     ApiKeyPoolsViewSchema,
+    ProviderParametersSchema,
+    ProviderProxySchema,
     apiKeyMatchesProvider,
     ApiKeyTestResultSchema,
     type ApiKeyTestResult,
@@ -22,6 +24,14 @@
   let replacement = $state('');
   let priority = $state(50);
   let models = $state('');
+  let useProxy = $state(false);
+  let proxyType = $state<'http' | 'https' | 'socks5'>('http');
+  let proxyHost = $state('');
+  let proxyPort = $state(8080);
+  let proxyUser = $state('');
+  let proxyPassword = $state('');
+  let savedProxyPassword = $state(false);
+  let parameters = $state('');
   let deleting = $state<{ pool: string; account: ApiKeyAccountView } | null>(null);
   let testTarget = $state<{ pool: ApiKeyPoolView; account: ApiKeyAccountView } | null>(null);
   let testModel = $state('');
@@ -92,7 +102,7 @@
     return ApiKeyTestResultSchema.parse(await res.json());
   }
   const testModels = (pool: ApiKeyPoolView, account: ApiKeyAccountView) =>
-    pool.models.filter(
+    (pool.testableModels ?? pool.models).filter(
       (model) =>
         (account.models === null || account.models.includes(model)) &&
         !/image|realtime|audio|live|tts|whisper|transcri/i.test(model),
@@ -200,12 +210,37 @@
     priority = account.priority;
     models = account.models?.join('\n') ?? '';
     replacement = '';
+    useProxy = !!account.proxy;
+    proxyType = account.proxy?.type ?? 'http';
+    proxyHost = account.proxy?.host ?? '';
+    proxyPort = account.proxy?.port ?? 8080;
+    proxyUser = account.proxy?.username ?? '';
+    proxyPassword = '';
+    savedProxyPassword = account.proxy?.hasPassword ?? false;
+    parameters =
+      account.parameters && Object.keys(account.parameters).length
+        ? JSON.stringify(account.parameters, null, 2)
+        : '';
   }
   async function save() {
     if (!editing) return;
+    const parsedParameters = ProviderParametersSchema.parse(
+      parameters.trim() ? JSON.parse(parameters) : {},
+    );
+    const proxy = useProxy
+      ? ProviderProxySchema.parse({
+          type: proxyType,
+          host: proxyHost,
+          port: Number(proxyPort),
+          ...(proxyUser ? { username: proxyUser } : {}),
+          ...(proxyPassword ? { password: proxyPassword } : {}),
+        })
+      : null;
     await write(accountUrl(editing.pool, editing.account.id), 'PATCH', {
       name,
       priority,
+      proxy,
+      parameters: parsedParameters,
       models: models.trim()
         ? models
             .split(/\r?\n/)
@@ -215,6 +250,7 @@
       ...(replacement.trim() ? { key: replacement.trim() } : {}),
     });
     replacement = '';
+    proxyPassword = '';
     editing = null;
     await load();
   }
@@ -283,7 +319,7 @@
             {poolName(pool)}
           </h3>
           <span class="field-help">
-            {#if pool.type === 'anthropic'}
+            {#if pool.type !== 'openai'}
               {$t('Out of credit: paused until you add credit and retry.')}
             {:else}
               {$t('Monthly retry timezone')}: {pool.timezone} · {$t('Day 1, 00:00')}
@@ -584,12 +620,84 @@
           bind:value={models}
         ></textarea></label
       >
+      <fieldset class="form-section space-y-3 p-3">
+        <legend class="px-1 text-sm font-semibold">{$t('Account proxy')}</legend>
+        <label class="checkbox-field"
+          ><input class="checkbox" type="checkbox" bind:checked={useProxy} />{$t(
+            'Use a proxy for this account',
+          )}</label
+        >
+        {#if useProxy}
+          <div class="grid grid-cols-2 gap-3">
+            <label class="text-sm"
+              >{$t('Proxy protocol')}<select class="select mt-1 w-full" bind:value={proxyType}
+                ><option value="http">HTTP</option><option value="https">HTTPS</option><option
+                  value="socks5">SOCKS5</option
+                ></select
+              ></label
+            ><label class="text-sm"
+              >{$t('Proxy port')}<input
+                class="input mt-1 w-full"
+                type="number"
+                bind:value={proxyPort}
+                min="1"
+                max="65535"
+                required
+              /></label
+            >
+          </div>
+          <label class="block text-sm"
+            >{$t('Proxy host')}<input
+              class="input mt-1 w-full"
+              bind:value={proxyHost}
+              required
+              placeholder="127.0.0.1"
+            /></label
+          >
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="text-sm"
+              >{$t('Proxy username')}<input
+                class="input mt-1 w-full"
+                bind:value={proxyUser}
+                autocomplete="off"
+              /></label
+            ><label class="text-sm"
+              >{$t('Proxy password')}<input
+                class="input mt-1 w-full"
+                type="password"
+                bind:value={proxyPassword}
+                autocomplete="new-password"
+                placeholder={savedProxyPassword ? $t('Leave blank to keep the saved password') : ''}
+              /></label
+            >
+          </div>
+        {/if}
+        <p class="field-help">
+          {$t(
+            'Requests and account tests use this proxy. A proxy failure never falls back to direct access.',
+          )}
+        </p>
+      </fieldset>
+      <label class="block text-sm"
+        >{$t('Default request parameters (JSON)')}<textarea
+          class="input mt-1 w-full font-mono text-xs"
+          rows="3"
+          bind:value={parameters}
+          placeholder={'{"temperature": 0.7, "max_tokens": 4096}'}
+        ></textarea></label
+      >
+      <p class="field-help">
+        {$t(
+          'Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.',
+        )}
+      </p>
       <div class="card-actions">
         <button
           type="button"
           class="btn-secondary"
           disabled={busy}
           onclick={() => {
+            proxyPassword = '';
             editing = null;
             replacement = '';
           }}>{$t('Cancel')}</button

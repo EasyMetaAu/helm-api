@@ -170,6 +170,7 @@ import type {
   TargetProviderProtocol,
 } from "@helm/shared";
 import {
+  apiKeyMatchesProvider,
   appendMutationList,
   cloneCarrierWithBody,
   ErrorClassSchema,
@@ -180,6 +181,8 @@ import {
   makeHelmError,
   nativePassthroughBody,
   OutboundRequestAuditSchema,
+  PricingSchema,
+  ProviderConfigSchema,
 } from "@helm/shared";
 import { createApp } from "./app.js";
 import { ArkAssetGrants } from "./ark-asset-grants.js";
@@ -188,6 +191,8 @@ import { readBuildInfo } from "./build-info.js";
 import { createCodexResponsesWebSocketConnector } from "./codex-responses-websocket.js";
 import { INTERNAL_API_KEY_ID } from "./internal-key.js";
 import { createJsonLogger, type Logger } from "./logging.js";
+import { accountClient, ManagedAccountClients } from "./managed-provider-client.js";
+import { ManagedProviders } from "./managed-providers.js";
 import { createMemoryEmbedder } from "./memory-embedder.js";
 import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm.js";
 import { createSelfHttpClient } from "./memory-self-http.js";
@@ -253,6 +258,7 @@ import { readApiKeyPools } from "./routes/admin/api-key-pools.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import type { OAuthMutationOptions } from "./routes/admin/deps.js";
 import { registerAdminApi } from "./routes/admin/index.js";
+import { registerManagedProviderRoutes } from "./routes/admin/managed-providers.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createOAuthUsageReader } from "./routes/admin/oauth-usage-reader.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -1924,7 +1930,10 @@ function createProviderClient(
           })
         : createAudioTranscriptionClient(p.type === "deepgram" ? "deepgram" : "openai", {
             config: { ...base, ...cred },
-            officialPool: p.type === "openai-audio" && !!p.api_key_pool,
+            officialPool:
+              p.type === "openai-audio" &&
+              !!p.api_key_pool &&
+              p.api_key_pool.credential_type !== "compatible",
             fetch: providerFetch,
           })),
       mediaOnly: true,
@@ -2507,6 +2516,11 @@ export async function buildServer(
   // (composition root, principle 7) — core only ever sees the decoded key buffer.
   const usesPresetOAuth = config.providers.some((p) => p.oauth && isOAuthPreset(p.oauth));
   const oauthEncKey = loadEncKeyFromEnv();
+  const managedProviders = new ManagedProviders(store.config, oauthEncKey ?? undefined, [
+    ...config.providers,
+  ]);
+  await managedProviders.load();
+  config.providers = managedProviders.providers();
   const transcriptionResultKey = loadEncKeyFromEnv(
     process.env,
     "HELM_TRANSCRIPTION_RESULT_ENC_KEY",
@@ -2866,8 +2880,9 @@ export async function buildServer(
   // come ONLY from the env var each api_key_env names (principle 7). The e2e/test
   // harness points every provider at the mock via HELM_PROVIDER_BASE_URL (used as
   // the shared fallback base_url when a provider omits one).
-  const first = config.providers[0];
-  if (!first) throw new Error("no provider configured");
+  const first =
+    config.providers[0] ??
+    ProviderConfigSchema.parse({ name: "unconfigured", api_key_pool: { id: "unconfigured" } });
   // A primary credential is optional on a new install: configured candidates with
   // no client are skipped by the executor, while an OAuth subscription connected
   // later becomes routable through the hot pool. Invalid PRESENT credentials still
@@ -3508,91 +3523,188 @@ export async function buildServer(
       timezone: string;
       strategy: "round_robin" | "manual_priority";
       models: string[];
+      testableModels: string[];
       createTestClient?: (key: string, model: string) => ProviderClient | null;
     }
   >();
-  for (const p of config.providers) {
-    const poolConfig = p.api_key_pool;
-    if (!poolConfig) continue;
-    const type = p.type === "anthropic" ? "anthropic" : "openai";
-    let pool = apiKeyPools.get(poolConfig.id);
-    if (
-      pool &&
-      (pool.type !== type ||
-        pool.timezone !== poolConfig.reset_timezone ||
-        pool.strategy !== poolConfig.strategy)
-    )
-      throw new Error(
-        "providers sharing an API key pool must use the same type, strategy and timezone",
-      );
-    if (!pool) {
-      const accounts = oauthEncKey
-        ? new ApiKeyAccounts({
-            store: store.config,
-            encKey: oauthEncKey,
-            poolId: poolConfig.id,
-            providerType: type,
-            timezone: poolConfig.reset_timezone,
-            probeLeaseMs: timeoutMs + 60_000,
-          })
-        : null;
-      if (accounts) await accounts.refresh();
-      else if ((await store.config.get(`provider.api_keys.${poolConfig.id}`)) !== null)
-        throw new Error("Stored API keys require HELM_OAUTH_ENC_KEY; refusing plaintext fallback");
-      pool = {
-        type,
-        accounts,
-        timezone: poolConfig.reset_timezone,
-        strategy: poolConfig.strategy,
-        models: [],
-        createTestClient: (apiKey, model) => {
-          const provider = config.providers.find(
-            (candidate) =>
-              candidate.api_key_pool?.id === poolConfig.id &&
-              candidate.models.some((entry) => entry.provider_model === model),
+  let managedBindings = new Map<string, ManagedAccountClients>();
+  let syncManagedProviders: () => Promise<void> = async () => {};
+  async function buildApiPools(
+    providers: ProviderConfigShared[],
+    clients: Map<string, ProviderClient>,
+  ) {
+    const nextPools: typeof apiKeyPools = new Map();
+    const nextBindings = new Map<string, ManagedAccountClients>();
+    for (const p of providers) {
+      const poolConfig = p.api_key_pool;
+      if (!poolConfig) continue;
+      const type =
+        p.api_key_pool?.credential_type ?? (p.type === "anthropic" ? "anthropic" : "openai");
+      let pool = nextPools.get(poolConfig.id);
+      if (
+        pool &&
+        (pool.type !== type ||
+          pool.timezone !== poolConfig.reset_timezone ||
+          pool.strategy !== poolConfig.strategy)
+      )
+        throw new Error(
+          "providers sharing an API key pool must use the same type, strategy and timezone",
+        );
+      if (!pool) {
+        const accounts = oauthEncKey
+          ? new ApiKeyAccounts({
+              store: store.config,
+              encKey: oauthEncKey,
+              poolId: poolConfig.id,
+              providerType: type,
+              timezone: poolConfig.reset_timezone,
+              probeLeaseMs: timeoutMs + 60_000,
+            })
+          : null;
+        if (accounts) await accounts.refresh();
+        else if ((await store.config.get(`provider.api_keys.${poolConfig.id}`)) !== null)
+          throw new Error(
+            "Stored API keys require HELM_OAUTH_ENC_KEY; refusing plaintext fallback",
           );
-          return provider
-            ? createProviderClient(
-                provider,
-                {
-                  baseUrl: baseUrlOverride || provider.base_url || fallbackBaseUrl,
-                  timeoutMs: 30_000,
-                },
-                { apiKey },
-                resolveProviderProxy(provider, accountSettings),
-              )
-            : null;
-        },
-      };
-      apiKeyPools.set(poolConfig.id, pool);
-    }
-    pool.models = [...new Set([...pool.models, ...p.models.map((m) => m.provider_model)])];
-    if (!pool.accounts) continue;
-    const proxy = resolveProviderProxy(p, accountSettings);
-    configuredClients.set(
-      p.name,
-      createApiKeyPoolClient({
-        accounts: pool.accounts,
-        models: p.models.map((m) => m.provider_model),
-        protocol: p.targetProviderProtocol,
-        strategy: poolConfig.strategy,
-        legacyClient: configuredClients.get(p.name),
-        createClient: (apiKey) =>
+        pool = {
+          type,
+          accounts,
+          timezone: poolConfig.reset_timezone,
+          strategy: poolConfig.strategy,
+          models: [],
+          testableModels: [],
+          createTestClient: (apiKey, model) => {
+            const provider = providers.find(
+              (candidate) =>
+                candidate.api_key_pool?.id === poolConfig.id &&
+                candidate.models.some((entry) => entry.provider_model === model),
+            );
+            if (!provider) return null;
+            const account = pool?.accounts?.entries().find((a) => a.key === apiKey);
+            const client = createProviderClient(
+              provider,
+              {
+                baseUrl: baseUrlOverride || provider.base_url || fallbackBaseUrl,
+                timeoutMs: 30_000,
+              },
+              { apiKey },
+              account?.proxy ?? undefined,
+            );
+            if (client.mediaOnly) return null;
+            return account
+              ? accountClient(client, account, async () => {
+                  await syncManagedProviders();
+                  await pool!.accounts!.refresh();
+                  const current = pool!.accounts!.entries().find((a) => a.id === account.id);
+                  if (
+                    !nextBindings.get(provider.name)?.isActive() ||
+                    !current ||
+                    !current.enabled ||
+                    current.generation !== account.generation ||
+                    current.transportGeneration !== account.transportGeneration
+                  )
+                    throw new Error("Provider account changed before test");
+                })
+              : client;
+          },
+        };
+        nextPools.set(poolConfig.id, pool);
+      }
+      pool.models = [...new Set([...pool.models, ...p.models.map((m) => m.provider_model)])];
+      if (!clients.get(p.name)?.mediaOnly)
+        pool.testableModels = [
+          ...new Set([
+            ...pool.testableModels,
+            ...p.models
+              .map((m) => m.provider_model)
+              .filter((m) => !/image|realtime|audio|live|tts|whisper|transcri/i.test(m)),
+          ]),
+        ];
+      if (!pool.accounts) continue;
+      const connection = new ManagedAccountClients(
+        pool.accounts,
+        `${p.type}:${p.base_url}`,
+        (account) =>
           createProviderClient(
             p,
             { baseUrl: baseUrlOverride || p.base_url || fallbackBaseUrl, timeoutMs },
-            { apiKey },
-            proxy,
+            { apiKey: account.key },
+            account.proxy ?? undefined,
           ),
-        onSelect: (account) =>
+        (owner) =>
           markServingAccount(
             poolConfig.id,
-            account,
+            owner,
             p.models.map((m) => m.alias),
           ),
-      }),
-    );
+        () => syncManagedProviders(),
+        managedProviders.legacyBinding(p.name),
+      );
+      nextBindings.set(p.name, connection);
+      const proxy = resolveProviderProxy(p, accountSettings);
+      clients.set(
+        p.name,
+        createApiKeyPoolClient({
+          accounts: pool.accounts,
+          models: p.models.map((m) => m.provider_model),
+          protocol: p.targetProviderProtocol,
+          strategy: poolConfig.strategy,
+          legacyClient: clients.get(p.name),
+          createClient: (apiKey, account) =>
+            account
+              ? accountClient(
+                  createProviderClient(
+                    p,
+                    { baseUrl: baseUrlOverride || p.base_url || fallbackBaseUrl, timeoutMs },
+                    { apiKey },
+                    account.proxy ?? proxy,
+                  ),
+                  account,
+                  async () => {
+                    await syncManagedProviders();
+                    await pool!.accounts!.refresh();
+                    const current = pool!.accounts!.entries().find((a) => a.id === account.id);
+                    if (
+                      !connection.isActive() ||
+                      !current ||
+                      current.generation !== account.generation ||
+                      current.transportGeneration !== account.transportGeneration ||
+                      !current.enabled
+                    )
+                      throw new Error("Provider account changed before send");
+                  },
+                )
+              : createProviderClient(
+                  p,
+                  { baseUrl: baseUrlOverride || p.base_url || fallbackBaseUrl, timeoutMs },
+                  { apiKey },
+                  proxy,
+                ),
+          onSelect: (account) =>
+            markServingAccount(
+              poolConfig.id,
+              account,
+              p.models.map((m) => m.alias),
+            ),
+        }),
+      );
+    }
+
+    return { pools: nextPools, bindings: nextBindings };
   }
+  const initialPools = await buildApiPools(config.providers, configuredClients);
+  for (const [id, pool] of initialPools.pools) apiKeyPools.set(id, pool);
+  managedBindings = initialPools.bindings;
+  const boundProvider = (name: string, model?: string, owner?: string | null) => {
+    const bindings = managedBindings.get(name);
+    if (bindings?.accounts.configured()) return bindings.select(model, owner);
+    const client = providerClients.get(name);
+    const p = config.providers.find((p) => p.name === name);
+    const key = p?.api_key_env ? process.env[p.api_key_env] : undefined;
+    return client
+      ? { client, owner: p?.media_account_id ?? null, account: key ? { key } : undefined }
+      : null;
+  };
 
   provider = configuredClients.get(first.name) ?? provider;
 
@@ -3915,6 +4027,35 @@ export async function buildServer(
         })
       : null;
   const decisionsProvider = config.providers.find((p) => p.name === "openrouter");
+  const auxiliaryBinding = async (name: string, wireModel?: string) => {
+    const p = config.providers.find((p) => p.name === name);
+    if (!p?.base_url) return null;
+    const bindings = managedBindings.get(name);
+    if (bindings) {
+      await bindings.accounts.refresh();
+      if (bindings.accounts.configured()) {
+        const selected = bindings.select(wireModel);
+        if (!selected) return null;
+        const transport = makeProviderFetch(p, selected.account.proxy ?? undefined) ?? fetch;
+        return {
+          apiKey: selected.account.key,
+          baseUrl: baseUrlOverride || p.base_url,
+          fetch: (async (input, init) => {
+            await syncManagedProviders();
+            await bindings.accounts.refresh();
+            if (!bindings.select(wireModel, selected.owner))
+              throw new Error("Provider account changed before send");
+            return transport(input, init);
+          }) as typeof fetch,
+        };
+      }
+    }
+    const apiKey = p.api_key_env ? process.env[p.api_key_env] : undefined;
+    return apiKey
+      ? { apiKey, baseUrl: baseUrlOverride || p.base_url, fetch: makeProviderFetch(p) ?? fetch }
+      : null;
+  };
+
   const classify = buildClassifyAdapter({
     getClassifierConfig: () => classifierConfig,
     lanes,
@@ -3925,6 +4066,7 @@ export async function buildServer(
     // self-HTTP client (visible in /admin/requests); else straight to the primary provider.
     provider: selfHttpClient ?? { chatCompletion: (...args) => provider.chatCompletion(...args) },
     invokeDecisions: createJevInvoker({
+      resolveBinding: (model) => auxiliaryBinding("openrouter", model),
       apiKey: () =>
         decisionsProvider?.api_key_env ? process.env[decisionsProvider.api_key_env] : undefined,
       baseUrl: baseUrlOverride ?? decisionsProvider?.base_url,
@@ -3938,7 +4080,7 @@ export async function buildServer(
       catalog.get(first.models.find((candidate) => candidate.provider_model === model)?.alias ?? "")
         ?.capabilities.requestCompatibility,
   });
-  const registry = buildRegistry(
+  let currentRegistry = buildRegistry(
     routableProviders,
     first.name,
     baseUrl,
@@ -3946,6 +4088,85 @@ export async function buildServer(
     lanes,
     fallbackBaseUrl,
   );
+  const registry = {
+    resolve: (alias: string) => {
+      const explicit = config.providers.some((p) => p.models.some((m) => m.alias === alias));
+      const prefix = alias.split("/", 1)[0]!;
+      if ((managedProviders.owns(prefix) || managedProviders.ownsAlias(alias)) && !explicit)
+        return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+      const result = currentRegistry.resolve(alias);
+      if (result.ok && managedProviders.owns(result.value.providerName) && !explicit)
+        return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+      return result;
+    },
+    list: () => currentRegistry.list().filter((alias) => registry.resolve(alias).ok),
+  };
+  const baseCatalog = new Map(catalog);
+  const applyManagedCatalog = () => {
+    catalog.clear();
+    for (const [key, value] of baseCatalog) catalog.set(key, value);
+    for (const { input } of managedProviders.definitions())
+      for (const model of input.models) {
+        const existing = baseCatalog.get(model.alias) ?? baseCatalog.get(model.provider_model);
+        if (model.capabilities || existing)
+          catalog.set(model.alias, {
+            modelKey: model.alias,
+            capabilities: model.capabilities ?? existing!.capabilities,
+            pricing:
+              model.pricing ??
+              existing?.pricing ??
+              PricingSchema.parse({ inputPerMTokUsd: null, outputPerMTokUsd: null }),
+            source: existing?.source ?? "override",
+          });
+      }
+  };
+  applyManagedCatalog();
+  let managedMutationChain: Promise<unknown> = Promise.resolve();
+  const managedMutation = <T>(action: () => Promise<T>): Promise<T> => {
+    const result = managedMutationChain.then(action);
+    managedMutationChain = result.catch(() => {});
+    return result;
+  };
+  let managedRefreshPending = false;
+  const applyManagedProviders = async () => {
+    managedRefreshPending = true;
+    const nextProviders = managedProviders.providers();
+    const nextRegistry = buildRegistry(
+      [...nextProviders, ...synthesizedOAuth.providers],
+      first.name,
+      baseUrl,
+      first.api_key_env,
+      lanes,
+      fallbackBaseUrl,
+    );
+    const nextClients = new Map(configuredClients);
+    for (const p of config.providers) if (!p.oauth) nextClients.delete(p.name);
+    for (const [name, client] of buildProviderClients(
+      nextProviders.filter((p) => !p.oauth),
+      fallbackBaseUrl,
+      timeoutMs,
+      oauthCtx,
+      accountSettings,
+    ))
+      nextClients.set(name, client);
+    const next = await buildApiPools(nextProviders, nextClients);
+    for (const bindings of managedBindings.values()) bindings.retire();
+    managedBindings = next.bindings;
+    apiKeyPools.clear();
+    for (const [id, pool] of next.pools) apiKeyPools.set(id, pool);
+    config.providers = nextProviders;
+    configuredClients = nextClients;
+    currentRegistry = nextRegistry;
+    providerClients = new Map([...configuredClients, ...oauthPoolClients]);
+    provider = configuredClients.get(first.name) ?? createUnavailableProviderClient(first.name);
+    applyManagedCatalog();
+    managedRefreshPending = false;
+  };
+  syncManagedProviders = () =>
+    managedMutation(async () => {
+      managedRefreshPending = (await managedProviders.loadIfChanged()) || managedRefreshPending;
+      if (managedRefreshPending) await applyManagedProviders();
+    });
   const resolveMemoryLlmModel = (alias: string): MemoryModelResolution | null => {
     // Observability: route memory LLM calls (summarize/merge/extractFacts) back through
     // helm's own /v1 gateway so they appear in /admin/requests. The task's model `alias`
@@ -3976,6 +4197,7 @@ export async function buildServer(
         ? { client, requestCompatibility, providerModel: resolved.value.providerModel }
         : null;
     }
+    if (managedProviders.owns(prefix) || managedProviders.ownsAlias(alias)) return null;
     if (prefix && providerClients.has(prefix)) {
       const client = providerClients.get(prefix);
       return client
@@ -3996,6 +4218,30 @@ export async function buildServer(
   const memoryEmbedder = createMemoryEmbedder({
     embeddingModel: config.memory.llm.embedding_model,
     providers: config.providers,
+    resolveBinding: async (model) => {
+      const resolved = registry.resolve(model);
+      if (
+        !resolved.ok &&
+        (managedProviders.owns(model.split("/", 1)[0]!) || managedProviders.ownsAlias(model))
+      )
+        return null;
+      const name = resolved.ok
+        ? resolved.value.providerName
+        : model.includes("/")
+          ? model.split("/", 1)[0]!
+          : first.name;
+      const wire = resolved.ok
+        ? resolved.value.providerModel
+        : model.includes("/")
+          ? model.slice(model.indexOf("/") + 1)
+          : model;
+      const binding = await auxiliaryBinding(name, wire);
+      if (binding) return { ...binding, providerModel: wire };
+      const p = config.providers.find((p) => p.name === name);
+      return p?.base_url && !p.api_key_env && !p.api_key_pool && !p.oauth
+        ? { baseUrl: p.base_url, providerModel: wire, fetch: makeProviderFetch(p) ?? fetch }
+        : null;
+    },
     timeoutMs: config.memory.llm.timeout_ms,
     responseWorkAdmission: runtimeResponseWorkAdmission(),
   });
@@ -4052,6 +4298,23 @@ export async function buildServer(
     },
   });
 
+  app.use("*", async (c, next) => {
+    try {
+      await syncManagedProviders();
+    } catch {
+      return c.json(
+        {
+          error: {
+            message: "Provider configuration unavailable",
+            type: "api_error",
+            code: "provider_unavailable",
+          },
+        },
+        503,
+      );
+    }
+    return next();
+  });
   app.use("*", relayClientIdentityMiddleware());
   app.use("*", outboundPrivacyMiddleware(config.runtime.outbound_privacy));
 
@@ -4130,6 +4393,7 @@ export async function buildServer(
     },
     timeoutMs: config.runtime.request_timeout_ms,
     invoke: createJevDecisionsInvoker({
+      resolveBinding: (model) => auxiliaryBinding("openrouter", model),
       apiKey: () =>
         decisionsProvider?.api_key_env ? process.env[decisionsProvider.api_key_env] : undefined,
       baseUrl: baseUrlOverride ?? decisionsProvider?.base_url,
@@ -4160,7 +4424,7 @@ export async function buildServer(
   registerModelsRoute(app, {
     lanes: () => lanes,
     catalog,
-    providerAliases: config.providers.flatMap((p) => p.models.map((m) => m.alias)),
+    providerAliases: () => config.providers.flatMap((p) => p.models.map((m) => m.alias)),
     // Live curated subscription aliases — the SAME hot-reloadable set the executor
     // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
     // routability never disagree.
@@ -4394,6 +4658,8 @@ export async function buildServer(
             // pool (fail-closed), bypassing the startup registry — so de-curation /
             // disconnect take effect immediately and never cross provider boundaries.
             knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
+            isManagedProvider: (name) => managedProviders.owns(name),
+            isManagedAlias: (alias) => managedProviders.ownsAlias(alias),
             oauthAliases: availableOAuthAliases,
             oauthWireModels: () => oauthWireModelMap,
             xaiOAuthModels: () => xaiOAuthModelMap,
@@ -4435,6 +4701,7 @@ export async function buildServer(
             if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) return false;
             if (registry.resolve(alias).ok) return true; // providers.yaml alias
             // Structural `provider/...` fallback: the named client forwards the bare id.
+            if (prefix && managedProviders.owns(prefix)) return false;
             if (prefix && providerClients.has(prefix)) return true;
             return false; // bare unknown name: rejected (no Phase-0 silent fallback)
           },
@@ -4527,7 +4794,9 @@ export async function buildServer(
               "bailian-media"
             )
               continue;
-            const client = providerClients.get(target.value.providerName)?.shortAsr ?? null;
+            const client =
+              boundProvider(target.value.providerName, target.value.providerModel)?.client
+                .shortAsr ?? null;
             return {
               client,
               alias,
@@ -4668,7 +4937,78 @@ export async function buildServer(
     // (effectiveOAuthModelOptions) so a Manage-dialog curation edit is reflected here
     // WITHOUT a restart — one source of truth shared with the structural router
     // (execute.ts). Network-free; deduped by alias, sorted.
-    const configuredAliases = config.providers.flatMap((p) => p.models.map((m) => m.alias));
+    registerManagedProviderRoutes(app, {
+      list: async () => {
+        const providers = managedProviders.describe();
+        for (const p of providers)
+          if (
+            p.legacyCredentialAvailable &&
+            (await store.config.get(`provider.api_keys.${p.poolId}`)) !== null
+          )
+            p.legacyCredentialAvailable = false;
+        return { configured: !!oauthEncKey, providers };
+      },
+      save: (input) =>
+        managedMutation(async () => {
+          if (!oauthEncKey) throw new Error("Encrypted storage is unavailable");
+          const previous = config.providers.find((p) => p.name === input.provider.id);
+          const legacy =
+            input.importLegacy &&
+            previous?.api_key_env &&
+            (await store.config.get(
+              `provider.api_keys.${previous.api_key_pool?.id ?? previous.name}`,
+            )) === null
+              ? process.env[previous.api_key_env]
+              : undefined;
+          const candidate = managedProviders.check(input.provider);
+          const requestedKey = input.key ?? legacy;
+          if (
+            requestedKey &&
+            !apiKeyMatchesProvider(
+              requestedKey,
+              candidate.api_key_pool?.credential_type ?? "compatible",
+            )
+          )
+            throw new Error("Credential does not match provider");
+          await managedProviders.save(input.provider);
+          await applyManagedProviders();
+          const accounts = apiKeyPools.get(managedProviders.poolId(input.provider.id))?.accounts;
+          if (!accounts) throw new Error("Provider accounts unavailable");
+          const key = input.key ?? legacy;
+          if (key && !accounts.entries().some((a) => a.key === key)) {
+            await accounts.add([{ name: input.accountName, key }]);
+            await managedProviders.touch();
+          }
+          if (legacy && key === legacy && previous?.base_url) {
+            const original = accounts.entries().find((a) => a.key === legacy);
+            if (original)
+              await managedProviders.bindLegacy(input.provider.id, {
+                accountId: original.id,
+                generation: original.generation,
+                endpoint: `${previous.type}:${previous.base_url}`,
+                owner: previous.media_account_id ?? null,
+              });
+          }
+          await applyManagedProviders();
+        }),
+      remove: (id) =>
+        managedMutation(async () => {
+          const poolId = managedProviders.poolId(id);
+          await managedProviders.remove(id);
+          await applyManagedProviders();
+          if (!config.providers.some((p) => p.api_key_pool?.id === poolId) && oauthEncKey) {
+            const accounts = new ApiKeyAccounts({
+              store: store.config,
+              encKey: oauthEncKey,
+              poolId,
+              providerType: "compatible",
+              timezone: "UTC",
+            });
+            await accounts.refresh();
+            for (const a of accounts.entries()) await accounts.remove(a.id);
+          }
+        }),
+    });
     const modelAliases = async (): Promise<ModelOption[]> => {
       const oauthOptions = oauthCtx
         ? await effectiveOAuthModelOptions(oauthCtx, store.config, ROUTABLE_OAUTH_IDS, {
@@ -4683,7 +5023,8 @@ export async function buildServer(
           })
         : [];
       const byAlias = new Map<string, ModelOption>();
-      for (const alias of configuredAliases) byAlias.set(alias, { alias, accounts: [] });
+      for (const alias of config.providers.flatMap((p) => p.models.map((m) => m.alias)))
+        byAlias.set(alias, { alias, accounts: [] });
       // OAuth options win on a clash (they carry the exposing accounts).
       for (const opt of oauthOptions) byAlias.set(opt.alias, opt);
       for (const option of byAlias.values()) {
@@ -4728,9 +5069,14 @@ export async function buildServer(
       arkAssets: new ArkAssetGrants(
         store.config,
         store.keys,
-        (name) => providerClients.get(name)?.arkAssetScope,
+        (name) => boundProvider(name)?.client.arkAssetScope,
       ),
       apiKeyPools,
+      onApiKeyMutation: () =>
+        managedMutation(async () => {
+          await managedProviders.touch();
+          await applyManagedProviders();
+        }),
       rules: ruleStore,
       keyStore,
       budgetStore: store.budget,
@@ -5208,6 +5554,21 @@ export async function buildServer(
   const resolveRealtimeTarget = (
     requestedModel: string,
   ): { client: ProviderClient; providerModel: string; alias: string } | null => {
+    const explicit = registry.resolve(requestedModel);
+    if (explicit.ok && managedProviders.owns(explicit.value.providerName)) {
+      const client = boundProvider(
+        explicit.value.providerName,
+        explicit.value.providerModel,
+      )?.client;
+      return client?.realtimeCall
+        ? { client, providerModel: explicit.value.providerModel, alias: requestedModel }
+        : null;
+    }
+    if (
+      managedProviders.owns(requestedModel.split("/", 1)[0]!) ||
+      managedProviders.ownsAlias(requestedModel)
+    )
+      return null;
     const bareModel = requestedModel.includes("/")
       ? requestedModel.slice(requestedModel.indexOf("/") + 1)
       : requestedModel;
@@ -5337,12 +5698,9 @@ export async function buildServer(
     if (catalog.get(r.value.alias)?.capabilities.outputImage !== true) return null;
     const kind: "openai" | "gemini" =
       r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
-    const client = providerClients.get(r.value.providerName);
+    const client = boundProvider(r.value.providerName, r.value.providerModel)?.client;
     // Configured image model but credential/client missing → "unavailable" (503),
     // distinct from an unknown model id (404). An OAuth provider has no api_key_env.
-    if (r.value.apiKeyEnv && process.env[r.value.apiKeyEnv] === undefined) {
-      return { kind: "unavailable" as const };
-    }
     if (client === undefined) return { kind: "unavailable" as const };
     // A provider that implements neither image method isn't an image model → null.
     const method = kind === "gemini" ? client.nativePassthrough : client.imageGeneration;
@@ -5452,8 +5810,15 @@ export async function buildServer(
       const configuredProvider = relay.ok
         ? config.providers.find((p) => p.name === relay.value.providerName)
         : undefined;
+      const binding = relay.ok
+        ? boundProvider(relay.value.providerName, relay.value.providerModel)
+        : null;
       const nativeTask = configuredProvider
-        ? nativeMediaProfile(configuredProvider, "video")
+        ? nativeMediaProfile(
+            configuredProvider,
+            "video",
+            binding?.account ? { key: binding.account.key, owner: binding.owner } : undefined,
+          )
         : undefined;
       if ((isArk || nativeTask) && operation === "extension") continue;
       if (
@@ -5473,7 +5838,8 @@ export async function buildServer(
             ? "grok-imagine-video-1.5"
             : (oauthWireModelMap.get(alias) ?? alias.slice(slash + 1));
       if (catalog.get(providerAlias)?.capabilities.outputVideo !== true) continue;
-      const client = providerClients.get(providerName);
+      const client =
+        binding?.client ?? (!configuredProvider ? providerClients.get(providerName) : undefined);
       const create = operation === "extension" ? client?.videoExtension : client?.videoGeneration;
       if (!create) continue;
       const target: VideoCreateTarget = {
@@ -5483,7 +5849,8 @@ export async function buildServer(
         providerAlias,
         providerName,
         providerModel,
-        providerAccount: nativeTask ? (configuredProvider?.media_account_id ?? null) : null,
+        providerAccount:
+          binding?.owner ?? (nativeTask ? (configuredProvider?.media_account_id ?? null) : null),
         client: {
           create: async (body, signal, onAccountSelected) => {
             const call = await withServingAccountCapture(() =>
@@ -5504,7 +5871,7 @@ export async function buildServer(
   const arkAssets = new ArkAssetGrants(
     store.config,
     store.keys,
-    (name) => providerClients.get(name)?.arkAssetScope,
+    (name) => boundProvider(name)?.client.arkAssetScope,
   );
   const mediaRoutes: VideosRouteDeps = {
     authorizeArkAssets: (identity, target, assets) =>
@@ -5549,7 +5916,12 @@ export async function buildServer(
         typeof body.model === "string" ? resolveVideoTarget(body.model, operation) : null,
       poll: async (record) => {
         if (!record.providerName) return null;
-        const client = providerClients.get(record.providerName);
+        const binding = boundProvider(
+          record.providerName,
+          record.providerModel ?? undefined,
+          record.providerAccount ?? null,
+        );
+        const client = binding?.client;
         if (!client?.videoRetrieve) return null;
         return {
           ...(config.providers.find((p) => p.name === record.providerName)?.type === "ark"
@@ -5557,7 +5929,13 @@ export async function buildServer(
             : {}),
           nativeTask: (() => {
             const p = config.providers.find((p) => p.name === record.providerName);
-            return p ? nativeMediaProfile(p, "video") : undefined;
+            return p
+              ? nativeMediaProfile(
+                  p,
+                  "video",
+                  binding?.account ? { key: binding.account.key, owner: binding.owner } : undefined,
+                )
+              : undefined;
           })(),
           retrieve: (requestId, signal) =>
             client.videoRetrieve?.(requestId, {
@@ -5584,8 +5962,15 @@ export async function buildServer(
             const target = registry.resolve(alias);
             if (!target.ok) continue;
             const p = config.providers.find((p) => p.name === target.value.providerName);
-            const nativeTask = p ? nativeMediaProfile(p, "transcription") : undefined;
-            const client = providerClients.get(target.value.providerName);
+            const binding = boundProvider(target.value.providerName, target.value.providerModel);
+            const nativeTask = p
+              ? nativeMediaProfile(
+                  p,
+                  "transcription",
+                  binding?.account ? { key: binding.account.key, owner: binding.owner } : undefined,
+                )
+              : undefined;
+            const client = binding?.client;
             if (!nativeTask || !client?.transcriptionCreate) continue;
             // The route validates after lane authorization and returns 400 for bad input.
             // Skipping invalid input here would misreport it as provider unavailable (503).
@@ -5596,7 +5981,7 @@ export async function buildServer(
               providerAlias: alias,
               providerName: target.value.providerName,
               providerModel: target.value.providerModel,
-              providerAccount: p?.media_account_id ?? null,
+              providerAccount: binding?.owner ?? p?.media_account_id ?? null,
               pricing: catalog.get(alias)?.pricing.media,
               client: {
                 create: (request, signal, _account, providerRequestId) =>
@@ -5608,8 +5993,21 @@ export async function buildServer(
         },
         poll: async (record) => {
           const p = config.providers.find((p) => p.name === record.providerName);
-          const nativeTask = p ? nativeMediaProfile(p, "transcription") : undefined;
-          const client = record.providerName ? providerClients.get(record.providerName) : undefined;
+          const binding = record.providerName
+            ? boundProvider(
+                record.providerName,
+                record.providerModel ?? undefined,
+                record.providerAccount ?? null,
+              )
+            : null;
+          const nativeTask = p
+            ? nativeMediaProfile(
+                p,
+                "transcription",
+                binding?.account ? { key: binding.account.key, owner: binding.owner } : undefined,
+              )
+            : undefined;
+          const client = binding?.client;
           if (!nativeTask || !client?.transcriptionRetrieve) return null;
           const retrieve = client.transcriptionRetrieve;
           return {
@@ -5637,7 +6035,8 @@ export async function buildServer(
         if (!target.ok || catalog.get(alias)?.capabilities.outputAudio !== true) continue;
         const p = config.providers.find((p) => p.name === target.value.providerName);
         if (!p || !["bailian-media", "minimax-media", "doubao-speech"].includes(p.type)) continue;
-        const client = providerClients.get(target.value.providerName);
+        const binding = boundProvider(target.value.providerName, target.value.providerModel);
+        const client = binding?.client;
         if (!client?.ttsSpeech) continue;
         return {
           client: {
@@ -5741,7 +6140,8 @@ export async function buildServer(
       for (const alias of isLane ? expandLaneChain(selection, lanes) : [selection]) {
         const target = registry.resolve(alias);
         if (!target.ok) continue;
-        const client = providerClients.get(target.value.providerName);
+        const binding = boundProvider(target.value.providerName, target.value.providerModel);
+        const client = binding?.client;
         if (!client?.transcribe) continue;
         const provider = config.providers.find((p) => p.name === target.value.providerName);
         const endpoint = provider && whisperxEndpoint(provider);
@@ -5853,7 +6253,8 @@ export async function buildServer(
         for (const alias of aliases) {
           const target = registry.resolve(alias);
           if (!target.ok || catalog.get(alias)?.capabilities.outputThreeD !== true) continue;
-          const client = providerClients.get(target.value.providerName);
+          const binding = boundProvider(target.value.providerName, target.value.providerModel);
+          const client = binding?.client;
           if (!client?.mediaOnly || !client.threeDGeneration) continue;
           const create = client.threeDGeneration;
           return {
@@ -5862,7 +6263,7 @@ export async function buildServer(
             providerAlias: alias,
             providerName: target.value.providerName,
             providerModel: target.value.providerModel,
-            providerAccount: null,
+            providerAccount: binding?.owner ?? null,
             client: { create: (request, signal) => create(request, { signal }) },
           };
         }
@@ -5870,7 +6271,11 @@ export async function buildServer(
       },
       poll: async (record) => {
         if (!record.providerName) return null;
-        const client = providerClients.get(record.providerName);
+        const client = boundProvider(
+          record.providerName,
+          record.providerModel ?? undefined,
+          record.providerAccount ?? null,
+        )?.client;
         if (!client?.mediaOnly || !client.threeDRetrieve) return null;
         const retrieve = client.threeDRetrieve;
         return {

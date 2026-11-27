@@ -21,13 +21,18 @@ import type { NativeMediaTaskProfile } from "./native-media-tasks.js";
 export function nativeMediaProfile(
   p: ProviderConfig,
   kind: "video" | "transcription",
+  binding?: { key: string; owner: string | null },
 ): NativeMediaTaskProfile | undefined {
   if (!["bailian-media", "minimax-media", "doubao-speech"].includes(p.type)) return undefined;
   if (p.type === "doubao-speech" && kind !== "transcription") return undefined;
   if (p.type === "minimax-media" && kind === "transcription") return undefined;
-  const credential = p.api_key_env ? process.env[p.api_key_env] : undefined;
+  const credential = binding?.key ?? (p.api_key_env ? process.env[p.api_key_env] : undefined);
   if (!credential || !p.media_account_id || !p.base_url) return undefined;
-  const endpointIdentity = mediaEndpointIdentity(p.base_url, p.media_account_id, credential);
+  const endpointIdentity = mediaEndpointIdentity(
+    p.base_url,
+    binding?.owner ?? p.media_account_id,
+    credential,
+  );
   if (p.type === "doubao-speech")
     return {
       profile: "doubao",

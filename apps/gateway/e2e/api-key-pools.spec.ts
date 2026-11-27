@@ -63,12 +63,12 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await page.goto(url);
     await expect(page).toHaveURL(url);
     await expect(page).toHaveTitle(/Helm/i);
-    const section = page.getByRole("region", { name: "API key providers", exact: true });
+    const section = page.getByRole("region", { name: "Key providers", exact: true });
     const subscriptions = page.getByRole("region", { name: "Subscription Providers", exact: true });
     await expect(subscriptions.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
     expect(
       await subscriptions.evaluate((node) => {
-        const api = document.querySelector('section[aria-label="API key providers"]');
+        const api = document.querySelector('section[aria-label="Key providers"]');
         return Boolean(api && node.compareDocumentPosition(api) & Node.DOCUMENT_POSITION_FOLLOWING);
       }),
     ).toBe(true);
@@ -338,7 +338,7 @@ test("API key provider import, pause, edit and delete through the real admin UI"
         .getByRole("button", { name: "关闭", exact: true })
         .click();
       await page
-        .getByRole("heading", { name: "API 密钥提供商", exact: true })
+        .getByRole("heading", { name: "密钥提供商", exact: true })
         .evaluate((node) => node.scrollIntoView({ block: "start" }));
       await page.screenshot({
         path: join(evidenceDir, "api-key-pools-mobile-api.png"),

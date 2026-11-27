@@ -153,7 +153,7 @@ never diverge.
 
 ![Classifier — Layer-2 eval toggle, confidence threshold, rule dimensions, and eval limits](assets/screenshots/05-classifier.png)
 
-### Providers (OAuth subscriptions)
+### Providers (OAuth and API keys)
 
 - **Providers** (`/providers`) — connect and manage **OAuth subscription** backends
   (Claude Pro/Max, ChatGPT Codex, GitHub Copilot, and experimental xAI
@@ -290,6 +290,28 @@ never diverge.
 
 ### API key providers
 
+The **Add provider** action offers OAuth login or API key entry. OAuth uses the existing
+subscription authorization flow. API connections support presets (including Kimi), custom
+HTTP(S) endpoints, protocol selection, model alias-to-upstream-ID mappings, and optional
+capability/pricing metadata. Saving applies the connection live without editing source or
+restarting the gateway. All credentials and managed definitions require the existing
+`HELM_OAUTH_ENC_KEY` and are encrypted in ConfigStore.
+
+**Take over configuration** imports an existing YAML provider and optionally its environment
+credential. Once managed, that provider uses stored keys only: an empty or disabled pool never
+falls back to its old environment variable. Deletion persists across restarts. Deployment
+operators can remove obsolete environment entries after completing migration; the UI does
+not edit deployment files. Unmanaged YAML remains supported for headless installations.
+
+Each API account supports HTTP/HTTPS/SOCKS5 proxy settings and default `temperature`, `top_p`,
+`max_tokens`, and `reasoning_effort` parameters. Explicit request/lane values win. Proxy passwords
+are omitted from read APIs, and configured proxy failures never cause a direct connection.
+Priority chooses keys within one connection (lower numbers first); lane order chooses between
+providers. Async media polling stays bound to its original account and endpoint. Ordinary account
+edits retain that identity; replacing its key or endpoint invalidates old task credentials.
+Media-only connections do not expose text connectivity tests.
+
+
 Providers includes an **API key providers** section alongside subscriptions. Operators can
 bulk-add model keys, rename or replace an account, restrict its models, set priority, pause,
 resume, request recovery and delete it. The list shows masked keys, availability or failure
@@ -297,7 +319,7 @@ reason, next recovery attempt, request/token counts and estimated cost for the l
 Recovery actions do not claim that upstream balance was reset. The round-robin/manual-priority
 selector applies only to this API key pool; subscription strategies are unchanged.
 
-Use the shared **Add API keys** action and select **Provider type** (OpenAI or Claude/Anthropic).
+Use the shared **Add API keys** action and select the configured provider (OpenAI, Claude/Anthropic, Kimi, or another API connection).
 Keys remain grouped by provider, with independent strategy and per-key tests. Claude API keys
 use `anthropic-api`, distinct from Claude subscription accounts. Their low-credit error pauses
 use until an operator adds credit and selects **Try recovery**; there is no claimed monthly reset.

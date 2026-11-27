@@ -3,6 +3,7 @@ import { ApiKeyAccountInputSchema, ApiKeyAccountPatchSchema } from "@helm/shared
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../../app.js";
+import { sameOrigin } from "../admin-login.js";
 import type { AdminApiDeps } from "./deps.js";
 
 export async function readApiKeyPools(deps: Pick<AdminApiDeps, "apiKeyPools" | "oauthUsage">) {
@@ -35,6 +36,7 @@ export async function readApiKeyPools(deps: Pick<AdminApiDeps, "apiKeyPools" | "
         timezone: pool.timezone,
         strategy: pool.accounts?.strategy(pool.strategy) ?? pool.strategy,
         models: pool.models,
+        testableModels: pool.testableModels,
         accounts,
         usage: [...aggregated.values()],
       };
@@ -51,8 +53,10 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
     return c.json({ pools });
   });
   const apply = async (c: Context<AppEnv>, action: () => Promise<void>) => {
+    if (!sameOrigin(c)) return c.json({ error: "Untrusted request origin" }, 403);
     try {
       await action();
+      await deps.onApiKeyMutation?.();
       return c.body(null, 204);
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
@@ -112,6 +116,7 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
   });
   // Test exactly the selected key. A successful leased test can recover an automatic pause.
   app.post("/admin/api/api-key-pools/:pool/accounts/:id/test", async (c) => {
+    if (!sameOrigin(c)) return c.json({ error: "Untrusted request origin" }, 403);
     c.header("cache-control", "no-store");
     const parsed = z
       .object({ model: z.string().min(1).max(200) })
@@ -126,7 +131,7 @@ export function registerApiKeyPoolRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
     const account = pool.accounts!.entries().find((entry) => entry.id === id);
     if (!account) return c.json({ error: "API key account not found" }, 404);
     if (
-      !pool.models.includes(model) ||
+      !(pool.testableModels ?? pool.models).includes(model) ||
       (account.models !== null && !account.models.includes(model)) ||
       /image|realtime|audio|live|tts|whisper|transcri/i.test(model)
     )
