@@ -29,6 +29,7 @@ import {
   checkSpeechBudget,
   SpeechAdmissionError,
 } from "./audio-speech.js";
+import { clientErrorMessage } from "./client-error.js";
 import { errorDetailOf } from "./execute.js";
 import type { MessagesIdentity } from "./messages.js";
 import type {
@@ -123,6 +124,7 @@ export function registerAudioTranscriptionsRoute(
     // Admission uses only auth/budget/rate/concurrency; resolution is specific to this media kind.
     const admission = deps;
     let spend: MediaSpendRecord | undefined;
+    let errorDetail: AttemptErrorDetail | undefined;
     let callerOperationId: string | undefined;
     try {
       const identity = await admitSpeechIdentity(
@@ -302,7 +304,6 @@ export function registerAudioTranscriptionsRoute(
         }
       }
       let result: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>> | undefined;
-      let errorDetail: AttemptErrorDetail | undefined;
       let errorCode: string | undefined;
       let releaseUncertain = false;
       try {
@@ -444,7 +445,8 @@ export function registerAudioTranscriptionsRoute(
           error: {
             code,
             ...(spend ? { operation_id: callerOperationId ?? spend.id } : {}),
-            message: code,
+            message: clientErrorMessage(errorDetail, code),
+            trace_id: c.get("trace_id"),
             type: status < 500 ? "invalid_request_error" : "upstream_error",
           },
         },

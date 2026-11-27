@@ -25,6 +25,7 @@ import {
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
+import { clientErrorMessage } from "./client-error.js";
 import {
   atEventBoundary,
   createStreamAbort,
@@ -555,7 +556,12 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
-            markStartedStreamError(result.decision, re.error_class, err);
+            markStartedStreamError(
+              result.decision,
+              re.error_class,
+              err instanceof PipelineError ? undefined : err,
+            );
+            re.message = clientErrorMessage(result.decision.final.error_detail, re.message);
             const out = transformer.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`data: ${data}\n\n`);

@@ -1,4 +1,4 @@
-import { createArkMediaClient, type ResponsesRegistryRecord } from "@helm/core";
+import { createArkMediaClient, type ResponsesRegistryRecord, UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
@@ -852,9 +852,14 @@ describe("Ark video tasks", () => {
     const app = restart({ record: { ...deps.record, capturePayloads: () => false }, log });
     const response = await post(app, arkBody());
     expect(response.status).toBe(status);
-    expect(await response.json()).toMatchObject({
+    const wire = (await response.json()) as { error: { message: string } };
+    expect(wire).toMatchObject({
       error: { code: status === 400 ? "upstream_rejected" : "outcome_unknown" },
     });
+    expect(wire.error.message).toContain("InvalidParameter.InputImage");
+    expect(wire.error.message).toContain("ark-request-123");
+    for (const secret of [credential, signedUrl, "private-signature"])
+      expect(JSON.stringify(wire)).not.toContain(secret);
     const detail = enqueueTelemetry.mock.calls[0]?.[0]?.decision.provider_attempts[0]?.error_detail;
     expect(detail).toMatchObject({
       upstream_status: status,
@@ -1388,4 +1393,27 @@ it.each([true, false])("releases validation request memory when authorized=%s", 
   expect(response.status).toBe(allowed ? 200 : 403);
   expect(memoryAdmission.reservedBytes).toBe(0);
   expect(s.create).not.toHaveBeenCalled();
+});
+
+it("returns Ark polling identifiers without exposing account-linked error text", async () => {
+  const { app, retrieve } = setupArk();
+  const created = await post(app, arkBody());
+  const { request_id } = (await created.json()) as { request_id: string };
+  retrieve.mockRejectedValueOnce(
+    new UpstreamError(
+      "upstream_error",
+      "Ark upstream returned HTTP 403",
+      {
+        error: { code: "AccessDenied", message: "account-linked private detail" },
+        request_id: "poll-upstream-id",
+      },
+      403,
+    ),
+  );
+  const response = await pollArk(app, request_id);
+  expect(response.status).toBe(502);
+  const wire = await response.text();
+  expect(wire).toContain("AccessDenied");
+  expect(wire).toContain("poll-upstream-id");
+  expect(wire).not.toContain("account-linked");
 });

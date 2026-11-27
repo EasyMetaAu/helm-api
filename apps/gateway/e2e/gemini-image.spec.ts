@@ -66,7 +66,11 @@ test.describe("gemini image generation e2e", () => {
     });
     expect(res.status()).toBe(503);
     expect(await res.json()).toMatchObject({
-      error: { code: 503, status: "INTERNAL", message: "image create outcome is unknown" },
+      error: {
+        code: 503,
+        status: "INTERNAL",
+        message: "image create outcome is unknown [upstream HTTP 500; code=500]",
+      },
     });
   });
 

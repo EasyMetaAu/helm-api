@@ -91,3 +91,29 @@ it("retains incurred cost and usage when a committed stream ends in an upstream 
   expect(d.cost_breakdown.total_usd).toBe(0.02);
   expect(d.usage?.completion_tokens).toBe(4);
 });
+
+it("preserves a pre-output attempt diagnosis when surfacing a pipeline failure", () => {
+  const d = decision();
+  const detail = {
+    upstream_status: 402,
+    message: "rejected",
+    provider_raw: { error: { message: "quota exhausted" } },
+  };
+  d.provider_attempts[0]!.error_detail = detail;
+  markStartedStreamError(d, "all_providers_failed");
+  expect(d.final.error_detail).toEqual(detail);
+});
+
+it("does not mistake classified upstream errors containing aborted for client cancellation", async () => {
+  const { requestCancellationReason } = await import("./request-cancellation.js");
+  const { PipelineError } = await import("./routes/messages-pipeline.js");
+  for (const error of [
+    new UpstreamError("upstream_error", "transaction aborted", null, 500),
+    new PipelineError("all_providers_failed", "transaction aborted", "t"),
+  ]) {
+    const controller = new AbortController();
+    expect(requestCancellationReason(controller.signal, error)).toBeNull();
+    controller.abort();
+    expect(requestCancellationReason(controller.signal, error)).toBe("client_abort");
+  }
+});

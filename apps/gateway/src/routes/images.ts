@@ -33,6 +33,7 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
+import { clientErrorMessage } from "./client-error.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import {
   type ImageAttempt,
@@ -723,7 +724,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         c,
         outcome.httpStatus as ContentfulStatusCode,
         outcome.errorClass === "invalid_request" ? "invalid_request_error" : "upstream_error",
-        outcome.message,
+        clientErrorMessage(
+          outcome.attempts.findLast((attempt) => !attempt.skipped && attempt.error_detail)
+            ?.error_detail,
+          outcome.message,
+          false,
+        ),
         outcome.errorCode ??
           (outcome.errorClass === "invalid_request"
             ? "invalid_request"

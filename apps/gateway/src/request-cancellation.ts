@@ -25,6 +25,10 @@ export function requestCancellationReason(
     if (signal.reason === REQUEST_TIMEOUT_REASON) return REQUEST_TIMEOUT_REASON;
     return "client_abort";
   }
+  // Classified provider/pipeline failures may quote upstream text such as
+  // "transaction aborted". Only the live signal can cancel those failures.
+  if (caught instanceof UpstreamError || (caught instanceof Error && "error_class" in caught))
+    return null;
   return caught instanceof Error &&
     (caught.name === "AbortError" || caught.message.includes("aborted"))
     ? "client_abort"
@@ -54,8 +58,11 @@ export function markStartedStreamError(
   errorReason: string,
   error?: unknown,
 ): void {
-  const detail = error === undefined ? decision.final.error_detail : errorDetailOf(error);
   const attempt = decision.provider_attempts?.findLast((a) => !a.skipped);
+  const detail =
+    error === undefined
+      ? (decision.final.error_detail ?? attempt?.error_detail)
+      : errorDetailOf(error);
   if (attempt) {
     if (detail) attempt.error_detail = detail;
   }

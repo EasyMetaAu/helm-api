@@ -515,3 +515,37 @@ it.each([
   expect(result.attempts[0]?.status).toBe(preOutput ? "error" : "ok");
   if (!preOutput) expect(observed).toBe(wire);
 });
+
+it("returns the final actual upstream rejection when the candidate chain is exhausted", async () => {
+  const provider = {
+    chatCompletion: vi.fn().mockRejectedValue(
+      new UpstreamError(
+        "upstream_error",
+        "upstream returned 503",
+        {
+          error: { code: "overloaded", message: "Provider temporarily overloaded" },
+          request_id: "req-overload",
+        },
+        503,
+      ),
+    ),
+    chatCompletionStream: vi.fn(),
+  } as unknown as ProviderClient;
+  const execute = createExecute({
+    defaultProvider: provider,
+    providers: new Map([["mock", provider]]),
+    registry: registry({ a: "m-a" }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+  });
+  const out = await execute(plan(["a"]), req());
+  expect(out.final.status).toBe("error");
+  if (out.final.status !== "error") throw new Error("expected failure");
+  expect(out.final.error.error_class).toBe("all_providers_failed");
+  expect(out.final.error.http_status).toBe(502);
+  expect(out.final.error.message).toContain("Provider temporarily overloaded");
+  expect(out.final.error.message).toContain("req-overload");
+  expect(out.final.error.provider_raw).toBeNull();
+});

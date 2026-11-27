@@ -1116,7 +1116,12 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
   it("stream error frame is captured in the payload", async () => {
     async function* events(): AsyncIterable<{ type: string }> {
       yield { type: "message_start" };
-      throw new Error("upstream blew up mid-stream");
+      throw new UpstreamError(
+        "upstream_error",
+        "upstream returned 503",
+        { error: { message: "capacity unavailable", code: "overloaded" } },
+        503,
+      );
     }
     const { record, insertPayload } = makeRecord({ capturePayloads: true });
     const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
@@ -1131,6 +1136,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 
     expect(insertPayload).toHaveBeenCalledOnce();
     const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(arg.responseJson).toContain("capacity unavailable");
     expect(arg.responseJson).toContain("event: error");
     expect(arg.responseJson).toContain("error");
   });

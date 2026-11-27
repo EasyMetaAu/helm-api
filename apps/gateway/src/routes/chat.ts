@@ -50,6 +50,7 @@ import {
 } from "../runtime/memory-admission.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
+import { clientErrorMessage } from "./client-error.js";
 import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
 import {
   atEventBoundary,
@@ -1019,7 +1020,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             markStartedStreamError(result.decision, errorClass, err);
             const errBody = makeHelmError({
               error_class: errorClass,
-              message: timedOut ? "upstream timed out" : "upstream error",
+              message: clientErrorMessage(
+                result.decision.final.error_detail,
+                timedOut ? "upstream timed out" : "upstream error",
+              ),
               trace_id: traceId,
             });
             await sse.write(`data: ${JSON.stringify({ error: errBody })}\n\n`);

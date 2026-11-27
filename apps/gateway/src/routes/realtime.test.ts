@@ -148,7 +148,10 @@ describe("registerRealtimeRoutes", () => {
 
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({
-      error: { code: "upstream_error", message: "Voice session access denied." },
+      error: {
+        code: "upstream_error",
+        message: "Voice session access denied. [upstream HTTP 403]",
+      },
     });
   });
 
@@ -246,11 +249,14 @@ it("records realtime HTTP rejection content for the owning key", async () => {
       400,
     ),
   );
-  await app.request("/v1/realtime/calls", {
+  const response = await app.request("/v1/realtime/calls", {
     method: "POST",
     headers: { Authorization: "Bearer helm-key" },
     body: multipart({ model: "gpt-realtime-1.5" }),
   });
+  expect(((await response.json()) as { error: { message: string } }).error.message).toContain(
+    "unsupported session",
+  );
   expect(recordError).toHaveBeenCalledWith(
     expect.objectContaining({
       keyId: "key-1",

@@ -48,6 +48,7 @@ import {
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
 import { servedByAccount, stampServingAccount } from "../runtime/serving-account.js";
+import { clientErrorMessage } from "./client-error.js";
 import { errorDetailOf } from "./execute.js";
 import {
   atEventBoundary,
@@ -1776,7 +1777,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     code:
                       lifecycleFailureCode ??
                       (isUpstreamTimeout(err) ? "timeout" : "internal_error"),
-                    message: err instanceof Error ? err.message : "upstream error",
+                    message: clientErrorMessage(
+                      err instanceof UpstreamError ? finalErrorDetail : null,
+                      isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
+                    ),
                     traceId,
                     sequenceNumber: nextErrorSequence,
                     recovery: lifecycleRecovery,

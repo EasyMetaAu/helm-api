@@ -260,7 +260,10 @@ it("records actual upstream speech error details", async () => {
       422,
     ),
   );
-  await x.call();
+  const response = await x.call();
+  expect(((await response.json()) as { error: { message: string } }).error.message).toContain(
+    "voice missing",
+  );
   expect(x.deps.record).toHaveBeenCalledWith(
     expect.objectContaining({
       status: "error",

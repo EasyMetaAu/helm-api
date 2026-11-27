@@ -2763,7 +2763,15 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       }),
       streamIR: async function* () {
         yield { type: "response.created", sequence_number: 0 };
-        throw new Error("upstream exploded");
+        throw new UpstreamError(
+          "upstream_error",
+          "upstream returned 503",
+          {
+            error: { message: "upstream transaction aborted", code: "overloaded" },
+            request_id: "response-upstream-123",
+          },
+          503,
+        );
       },
     });
     const app = buildApp(deps);
@@ -2784,7 +2792,8 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       sequence_number: number;
     };
     expect(env).toMatchObject({ type: "error", code: "internal_error", param: null });
-    expect(env.message).toBe("upstream exploded");
+    expect(env.message).toContain("upstream transaction aborted");
+    expect(env.message).toContain("response-upstream-123");
     expect(typeof env.sequence_number).toBe("number");
   });
 
@@ -3398,7 +3407,8 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(insertPayload).toHaveBeenCalledOnce();
     const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
     expect(arg.responseJson).toContain("event: error");
-    expect(arg.responseJson).toContain("upstream exploded");
+    expect(arg.responseJson).toContain("upstream error");
+    expect(arg.responseJson).not.toContain("upstream exploded");
   });
 
   // ── Finding 3: the non-stream outbound transform must run INSIDE the failure-
