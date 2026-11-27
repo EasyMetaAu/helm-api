@@ -176,6 +176,29 @@ it("manages custom providers end to end without env keys, applies edits live and
       await (await request("/admin/api/api-key-pools", { headers: admin })).json(),
     ).pools.find((p) => p.id === "dormant")!;
     expect(dormant.accounts).toHaveLength(0);
+    expect(
+      (
+        await request("/admin/api/providers", {
+          method: "POST",
+          headers: admin,
+          body: JSON.stringify({
+            provider: {
+              id: "media-only",
+              label: "Media",
+              type: "bailian-media",
+              base_url: "https://example.com/api/v1",
+              media_account_id: "media",
+              models: [{ alias: "media/video", provider_model: "wan3.0" }],
+            },
+            key: "vendor-media-key",
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const media = ApiKeyPoolsViewSchema.parse(
+      await (await request("/admin/api/api-key-pools", { headers: admin })).json(),
+    ).pools.find((p) => p.id === "media-only")!;
+    expect(media.testableModels).toEqual([]);
     const saved = await save();
     expect(await saved.clone().text()).not.toContain("vendor-kimi-private-key");
     expect(saved.status).toBe(200);

@@ -3611,7 +3611,16 @@ export async function buildServer(
         nextPools.set(poolConfig.id, pool);
       }
       pool.models = [...new Set([...pool.models, ...p.models.map((m) => m.provider_model)])];
-      if (!clients.get(p.name)?.mediaOnly)
+      const mediaOnly = [
+        "ark",
+        "bailian-media",
+        "minimax-media",
+        "doubao-speech",
+        "openai-audio",
+        "deepgram",
+        "whisperx-asr",
+      ].includes(p.type);
+      if (!mediaOnly)
         pool.testableModels = [
           ...new Set([
             ...pool.testableModels,
@@ -3688,6 +3697,7 @@ export async function buildServer(
             ),
         }),
       );
+      if (mediaOnly) clients.get(p.name)!.mediaOnly = true;
     }
 
     return { pools: nextPools, bindings: nextBindings };
