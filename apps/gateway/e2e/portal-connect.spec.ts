@@ -129,19 +129,33 @@ test("a completed test opens its own portal request record", async ({ page }) =>
   await page.route("**/portal/api/requests/own-request", (route) =>
     route.fulfill({
       json: {
-        request_id: "own-request",
-        trace_id: "own-request",
-        requested_model: "auto",
-        served_model: "fixture-model",
-        lane: "balanced",
-        status: "ok",
-        error_reason: null,
-        latency_ms: 10,
-        cost_usd: null,
-        usage: null,
-        requested_reasoning_effort: null,
-        reasoning_effort: null,
-        attempts: [],
+        decision: {
+          request_id: "own-request",
+          trace_id: "own-request",
+          requested_model: "auto",
+          created_at: Date.now(),
+          classifier: {
+            task_type: "chat",
+            complexity: "low",
+            confidence: 1,
+            decided_by: "default",
+            constraints: {},
+            explanation: [],
+          },
+          policy: { matched_policy_id: null, reason: "default" },
+          lane: { selected_lane: "balanced", candidate_chain: ["fixture-model"] },
+          provider_attempts: [],
+          final: {
+            status: "ok",
+            model_alias: "fixture-model",
+            provider_model: "fixture-model",
+            error_reason: null,
+          },
+          latency_total_ms: 10,
+          fallback_count: 0,
+          usage: null,
+          cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+        },
       },
     }),
   );
@@ -155,7 +169,11 @@ test("a completed test opens its own portal request record", async ({ page }) =>
   await expect(page.getByText("Inference completed", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "View test request" }).click();
   await expect(page).toHaveURL(/\/portal\/requests\/own-request$/);
-  await expect(page.getByRole("heading", { name: "Request", exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByText("fixture-model", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Request trail", exact: true, level: 1 }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("request-summary").getByText("fixture-model", { exact: true }),
+  ).toBeVisible();
   expect(errors).toEqual([]);
 });
