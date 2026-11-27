@@ -48,8 +48,10 @@ describe('upstream provider usage', () => {
   it('shows upstream source, quota, scoped history link and no account mutations', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(response));
     vi.stubGlobal('fetch', fetcher);
-    render(UpstreamProviderUsage);
+    const onvisibility = vi.fn();
+    render(UpstreamProviderUsage, { onvisibility });
     await screen.findByText('Claude upstream');
+    expect(onvisibility).toHaveBeenCalledWith(true);
     expect(screen.getByText('https://helm.example')).toBeInTheDocument();
     expect(screen.getByText('74%')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /remote-account/ })).toHaveAttribute(
@@ -137,8 +139,10 @@ describe('upstream provider usage', () => {
       'fetch',
       vi.fn(async () => Response.json({ configured: false })),
     );
-    const { container } = render(UpstreamProviderUsage);
+    const onvisibility = vi.fn();
+    const { container } = render(UpstreamProviderUsage, { onvisibility });
     await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onvisibility).toHaveBeenCalledWith(false));
     expect(container.querySelector('section')).toBeNull();
   });
 });
