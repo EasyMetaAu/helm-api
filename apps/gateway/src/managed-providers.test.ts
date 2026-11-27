@@ -98,3 +98,22 @@ it("refreshes another instance after edits and account changes, retaining provid
   expect(replica.providers().map((p) => p.name)).toEqual(["last"]);
   expect(replica.ownsAlias("new-alias")).toBe(true);
 });
+
+it("identifies credential-free internal connections without changing configured pool bindings", () => {
+  const manager = new ManagedProviders({ get: async () => null, set: async () => {} }, undefined, [
+    ProviderConfigSchema.parse({
+      name: "home",
+      type: "openai",
+      base_url: "http://192.168.199.5/v1",
+    }),
+    ProviderConfigSchema.parse({
+      name: "relay",
+      type: "openai",
+      api_key_pool: { id: "custom-pool" },
+    }),
+  ]);
+  expect(manager.describe()).toMatchObject([
+    { id: "home", keyless: true },
+    { id: "relay", keyless: false, poolId: "custom-pool" },
+  ]);
+});

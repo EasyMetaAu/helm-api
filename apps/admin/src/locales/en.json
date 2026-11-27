@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "Usage (last 24 hours)",
   "requests": "requests",
   "Rotate model API keys across accounts.": "Rotate model API keys across accounts.",
-  "Manage subscriptions and API key accounts in one place.": "Manage subscription providers and key providers in one place.",
+  "Manage subscriptions and API key accounts in one place.": "Manage every provider and account in one list.",
   "{requests} requests · {tokens} tokens": "{requests} requests · {tokens} tokens",
   "Test API key": "Test API key",
   "Test passed": "Test passed",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "Leave blank to keep the saved password",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "Requests and account tests use this proxy. A proxy failure never falls back to direct access.",
   "Default request parameters (JSON)": "Default request parameters (JSON)",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model."
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.",
+  "Authentication": "Authentication",
+  "All authentication methods": "All authentication methods",
+  "No key required": "No key required",
+  "OAuth account strategy": "OAuth account strategy",
+  "No matching providers. Add a provider or change the filters.": "No matching providers. Add a provider or change the filters.",
+  "No saved keys": "No saved keys",
+  "Shared by {count} connections": "Shared by {count} connections",
+  "Delete account": "Delete account",
+  "Saved key": "Saved key",
+  "Connection settings": "Connection settings",
+  "Shared account changes apply to every connection listed here.": "Shared account changes apply to every connection listed here.",
+  "Keys are already saved. Use account settings to add or replace a key.": "Keys are already saved. Use account settings to add or replace a key."
 }

@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "Uso (últimas 24 horas)",
   "requests": "solicitações",
   "Rotate model API keys across accounts.": "Alterna as chaves API de modelos entre contas.",
-  "Manage subscriptions and API key accounts in one place.": "Gerencie assinaturas e contas com chaves API em um só lugar.",
+  "Manage subscriptions and API key accounts in one place.": "Gerencie todos os provedores e contas em uma lista.",
   "{requests} requests · {tokens} tokens": "{requests} solicitações · {tokens} tokens",
   "Test API key": "Testar chave API",
   "Test passed": "Teste aprovado",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "Leave blank to keep the saved password",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "Requests and account tests use this proxy. A proxy failure never falls back to direct access.",
   "Default request parameters (JSON)": "Default request parameters (JSON)",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model."
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.",
+  "Authentication": "Autenticação",
+  "All authentication methods": "Todos os métodos",
+  "No key required": "Sem chave",
+  "OAuth account strategy": "Estratégia de contas OAuth",
+  "No matching providers. Add a provider or change the filters.": "Nenhum provedor encontrado. Adicione um ou altere os filtros.",
+  "No saved keys": "Sem chaves salvas",
+  "Shared by {count} connections": "Compartilhada por {count} conexões",
+  "Delete account": "Excluir conta",
+  "Saved key": "Chave salva",
+  "Connection settings": "Configuração de conexão e modelos",
+  "Shared account changes apply to every connection listed here.": "As configurações da conta se aplicam a todas estas conexões.",
+  "Keys are already saved. Use account settings to add or replace a key.": "As chaves já estão salvas. Adicione ou substitua nas configurações da conta."
 }

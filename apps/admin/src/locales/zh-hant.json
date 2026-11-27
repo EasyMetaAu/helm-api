@@ -1180,7 +1180,7 @@
   "Usage (last 24 hours)": "用量（最近 24 小時）",
   "requests": "次請求",
   "Rotate model API keys across accounts.": "在多個帳戶間輪換模型 API 金鑰。",
-  "Manage subscriptions and API key accounts in one place.": "統一管理訂閱提供商和金鑰提供商。",
+  "Manage subscriptions and API key accounts in one place.": "統一管理所有提供商與帳戶。",
   "{requests} requests · {tokens} tokens": "{requests} 次請求 · {tokens} Token",
   "Test API key": "測試 API 金鑰",
   "Test passed": "測試通過",
@@ -1332,5 +1332,17 @@
   "Leave blank to keep the saved password": "Leave blank to keep the saved password",
   "Requests and account tests use this proxy. A proxy failure never falls back to direct access.": "Requests and account tests use this proxy. A proxy failure never falls back to direct access.",
   "Default request parameters (JSON)": "Default request parameters (JSON)",
-  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "支援 temperature、top_p、max_tokens、reasoning_effort。請求和通道設定優先，請填寫模型支援的值。"
+  "Supported fields: temperature, top_p, max_tokens, reasoning_effort. Request and lane settings take precedence. Use only values supported by this model.": "支援 temperature、top_p、max_tokens、reasoning_effort。請求和通道設定優先，請填寫模型支援的值。",
+  "Authentication": "認證方式",
+  "All authentication methods": "全部認證方式",
+  "No key required": "無需密鑰",
+  "OAuth account strategy": "OAuth 帳戶策略",
+  "No matching providers. Add a provider or change the filters.": "暫無符合的提供商，請新增提供商或調整篩選。",
+  "No saved keys": "尚未儲存密鑰",
+  "Shared by {count} connections": "{count} 個連線共用",
+  "Delete account": "刪除帳戶",
+  "Saved key": "已儲存密鑰",
+  "Connection settings": "介面與模型設定",
+  "Shared account changes apply to every connection listed here.": "帳戶設定會套用到以下所有共用連線。",
+  "Keys are already saved. Use account settings to add or replace a key.": "密鑰已儲存。新增或更換密鑰請使用帳戶管理。"
 }

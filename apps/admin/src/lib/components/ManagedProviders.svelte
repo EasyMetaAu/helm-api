@@ -7,7 +7,17 @@
   } from '@helm/shared';
   import { t } from '$lib/i18n';
   import Modal from './Modal.svelte';
-  let { onOAuth, onchange = () => {} }: { onOAuth: () => void; onchange?: () => void } = $props();
+  let {
+    onOAuth,
+    onchange = () => {},
+    onloaded = () => {},
+    headless = false,
+  }: {
+    onOAuth: () => void;
+    onchange?: () => void;
+    onloaded?: (providers: ManagedProviderView[]) => void;
+    headless?: boolean;
+  } = $props();
   let providers = $state<ManagedProviderView[]>([]);
   let available = $state(false);
   let error = $state('');
@@ -16,7 +26,6 @@
   let open = $state<'choice' | 'api' | null>(null);
   let editing = $state<ManagedProviderView | null>(null);
   let deleting = $state<ManagedProviderView | null>(null);
-  let search = $state('');
   let preset = $state('custom');
   let id = $state('');
   let label = $state('');
@@ -63,18 +72,15 @@
     ['deepgram', 'Deepgram'],
     ['whisperx-asr', 'WhisperX'],
   ];
-  const filtered = $derived(
-    providers.filter((p) =>
-      `${p.label} ${p.id} ${p.base_url}`.toLowerCase().includes(search.toLowerCase()),
-    ),
-  );
-  async function load() {
+  export async function load() {
     try {
       const res = await fetch('/admin/api/providers', { cache: 'no-store' });
       if (!res.ok) throw Error();
       const data = await res.json();
       available = data.configured === true;
       providers = ManagedProviderViewSchema.array().parse(data.providers);
+      onloaded(providers);
+      error = '';
     } catch {
       error = $t('Could not load provider connections.');
     }
@@ -88,7 +94,7 @@
     editing = null;
     error = '';
   }
-  function start(provider: ManagedProviderView | null = null) {
+  export function start(provider: ManagedProviderView | null = null) {
     editing = provider;
     error = '';
     notice = '';
@@ -165,6 +171,10 @@
       busy = false;
     }
   }
+  export function askDelete(provider: ManagedProviderView) {
+    deleting = provider;
+    error = '';
+  }
   async function remove() {
     if (!deleting) return;
     busy = true;
@@ -186,77 +196,10 @@
   }
 </script>
 
-<section class="flex flex-col gap-4" aria-label={$t('Provider connections')}>
-  <div class="flex flex-wrap items-center justify-between gap-3">
-    <div>
-      <h2 class="section-header">{$t('Provider connections')}</h2>
-      <p class="field-help">
-        {$t('Connect with OAuth or an API key. Manage models, priorities and proxies here.')}
-      </p>
-    </div>
-    <button class="btn-primary" onclick={() => start()}>{$t('Add provider')}</button>
-  </div>
-  {#if error && !open && !deleting}<p class="alert-error" role="alert">{error}</p>{/if}
-  {#if notice}<p class="alert-success" role="status">{notice}</p>{/if}
-  {#if providers.length}
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <span class="badge-neutral">{$t('API key providers')} · {providers.length}</span><input
-        class="input w-full sm:w-64"
-        type="search"
-        aria-label={$t('Search providers')}
-        placeholder={$t('Search providers')}
-        bind:value={search}
-      />
-    </div>
-    <div class="table-wrap max-h-72 overflow-auto bg-surface">
-      <table class="table-base">
-        <thead class="table-head"
-          ><tr class="text-ink-muted"
-            ><th class="p-3">{$t('Provider')}</th><th class="p-3 hidden md:table-cell"
-              >{$t('Endpoint')}</th
-            ><th class="p-3">{$t('Models')}</th><th class="p-3">{$t('Management')}</th><th
-              class="p-3"><span class="sr-only">{$t('Actions')}</span></th
-            ></tr
-          ></thead
-        >
-        <tbody
-          >{#each filtered as provider (provider.id)}<tr class="table-row"
-              ><td class="p-3"
-                ><div class="font-semibold">{provider.label}</div>
-                <div class="text-xs text-ink-muted">{provider.type}</div></td
-              ><td class="p-3 hidden md:table-cell max-w-72 truncate" title={provider.base_url}
-                >{provider.base_url}</td
-              ><td class="p-3 tabular-nums">{provider.models.length}</td><td class="p-3"
-                ><span class={provider.managed ? 'badge-ok' : 'badge-neutral'}
-                  >{provider.managed ? $t('Managed here') : $t('Configuration file')}</span
-                ></td
-              ><td class="p-3"
-                ><div class="flex flex-wrap justify-end gap-2">
-                  <button class="btn-secondary" onclick={() => start(provider)}
-                    >{provider.managed ? $t('Configure') : $t('Manage here')}</button
-                  >{#if provider.managed}<button
-                      class="btn-danger-outline"
-                      aria-label={`${$t('Delete')} ${provider.label}`}
-                      onclick={() => {
-                        deleting = provider;
-                        error = '';
-                      }}>{$t('Delete')}</button
-                    >{/if}
-                </div></td
-              ></tr
-            >{/each}</tbody
-        >
-      </table>
-    </div>
-    <p class="field-help">
-      {$t(
-        'Account priority selects a key within a provider. Cross-provider order is configured in Lanes.',
-      )} <a class="underline" href="/admin/lanes">{$t('Lanes')}</a>
-    </p>
-  {:else if available}<div class="empty-state">
-      {$t('Add your first API provider. No configuration file edits are needed.')}
-    </div>{/if}
-</section>
+{#if !headless}<button class="btn-primary" onclick={() => start()}>{$t('Add provider')}</button
+  >{/if}
+{#if error && !open && !deleting}<p class="alert-error" role="alert">{error}</p>{/if}
+{#if notice}<p class="alert-success" role="status">{notice}</p>{/if}
 
 {#if open === 'choice'}
   <Modal label={$t('Add provider')} onclose={close}>
@@ -367,31 +310,40 @@
             required
           /></label
         >{/if}
-      <fieldset class="form-section p-4">
-        <legend class="px-2 text-sm font-semibold">{$t('API key account')}</legend>
-        <div class="grid gap-3 sm:grid-cols-[1fr_2fr]">
-          <label class="block text-sm"
-            >{$t('Account name')}<input class="input mt-1 w-full" bind:value={accountName} /></label
-          ><label class="block text-sm"
-            >{$t('API key')}<input
-              class="input mt-1 w-full"
-              type="password"
-              autocomplete="new-password"
-              bind:value={key}
-              placeholder={editing ? $t('Leave blank to keep existing keys') : '••••••••••••••••'}
-              required={!editing && !importLegacy}
-            /></label
-          >
-        </div>
-        {#if editing?.legacyCredentialAvailable}<label class="checkbox-field mt-3"
-            ><input class="checkbox" type="checkbox" bind:checked={importLegacy} />{$t(
-              'Import the current environment key into encrypted storage',
-            )}</label
-          >{/if}
-        <p class="field-help mt-2">
-          {$t('Manage priority, model access and a separate proxy for each key after saving.')}
+      {#if editing?.managed}
+        <p class="field-help">
+          {$t('Keys are already saved. Use account settings to add or replace a key.')}
         </p>
-      </fieldset>
+      {:else}
+        <fieldset class="form-section p-4">
+          <legend class="px-2 text-sm font-semibold">{$t('API key account')}</legend>
+          <div class="grid gap-3 sm:grid-cols-[1fr_2fr]">
+            <label class="block text-sm"
+              >{$t('Account name')}<input
+                class="input mt-1 w-full"
+                bind:value={accountName}
+              /></label
+            ><label class="block text-sm"
+              >{$t('API key')}<input
+                class="input mt-1 w-full"
+                type="password"
+                autocomplete="new-password"
+                bind:value={key}
+                placeholder={editing ? $t('Leave blank to keep existing keys') : '••••••••••••••••'}
+                required={!editing && !importLegacy}
+              /></label
+            >
+          </div>
+          {#if editing?.legacyCredentialAvailable}<label class="checkbox-field mt-3"
+              ><input class="checkbox" type="checkbox" bind:checked={importLegacy} />{$t(
+                'Import the current environment key into encrypted storage',
+              )}</label
+            >{/if}
+          <p class="field-help mt-2">
+            {$t('Manage priority, model access and a separate proxy for each key after saving.')}
+          </p>
+        </fieldset>
+      {/if}
       <fieldset class="space-y-3">
         <legend class="text-sm font-semibold">{$t('Model associations')}</legend>
         <p class="field-help">
