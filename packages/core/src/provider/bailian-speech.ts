@@ -12,7 +12,7 @@ import {
   speechMime,
 } from "./media-speech.js";
 import { runSpeechSession } from "./media-speech-session.js";
-import type { OpenAIClientDeps } from "./openai.js";
+import { type OpenAIClientDeps, providerErrorScrubber, UpstreamError } from "./openai.js";
 
 const Control = z.object({
   header: z.object({ event: z.string(), task_id: z.string().optional() }),
@@ -106,9 +106,15 @@ export function createBailianSpeechClient(
             emit({ type: "audio", audio: data });
             return;
           }
-          const { header, payload } = Control.parse(JSON.parse(data));
+          const rawPacket: unknown = JSON.parse(data);
+          const { header, payload } = Control.parse(rawPacket);
           if (header.task_id !== taskId) throw new Error("speech task identity mismatch");
-          if (header.event === "task-failed") throw new Error("Bailian speech task failed");
+          if (header.event === "task-failed")
+            throw new UpstreamError(
+              "upstream_error",
+              "Bailian speech task failed",
+              providerErrorScrubber(deps.config, auth)(rawPacket),
+            );
           if (header.event === "task-started") {
             started = true;
             return "started";

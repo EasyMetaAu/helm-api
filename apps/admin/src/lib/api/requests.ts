@@ -260,7 +260,7 @@ interface RawAttempt {
   } | null;
 }
 
-interface RawDecisionRecord {
+export interface RawDecisionRecord {
   request_id?: string;
   trace_id?: string;
   // Epoch ms the gateway recorded the request (store metadata flattened onto the

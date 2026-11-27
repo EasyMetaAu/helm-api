@@ -250,7 +250,7 @@ class UnexpectedResponseBodyError extends Error {
   }
 }
 
-async function unexpectedResponseBody(
+export async function unexpectedResponseBody(
   response: IncomingMessage,
   maxBytes: number,
   timeoutMs: number,

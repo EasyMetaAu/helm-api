@@ -3486,6 +3486,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     },
 
     async *chatCompletionStream(req, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const model = String((req as Record<string, unknown>).model ?? "");
       const modelInfo = await resolveModelInfo(model);
       const result = await requestWithRetry(
@@ -3546,6 +3547,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // the upstream Responses SSE is BYTE-RELAYED unchanged via readResponsesSSERaw — no SSE
     // re-mapping state machine to mangle reasoning.encrypted_content / tools (principle 8).
     async *nativePassthroughStream(body, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const reportRecovery = (eligible: boolean, reason?: string) => {
         try {
           opts?.onStreamRecoveryEligibility?.({ eligible, ...(reason ? { reason } : {}) });
@@ -4718,6 +4720,7 @@ export function createGenericOpenAIResponsesClient(
     },
 
     async *chatCompletionStream(req, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const model = String((req as Record<string, unknown>).model ?? "");
       const res = await requestJson("responses", {
         method: "POST",
@@ -4770,6 +4773,7 @@ export function createGenericOpenAIResponsesClient(
     closeResponsesWebSocketSession: closeWebSocketSession,
 
     async *nativePassthroughStream(body, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const session = isNativePassthroughCarrier(body)
         ? Object.entries(body.headers).find(
             ([name]) => name.toLowerCase() === CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,

@@ -687,10 +687,13 @@ export {
   type OpenAIClientDeps,
   type ProviderClient,
   type ProviderConfig,
+  providerErrorScrubber,
   type RealtimeCallRequest,
   type RealtimeCallResult,
   type RealtimeSidebandTarget,
+  readUpstreamErrorBody,
   readUpstreamJsonWithinBudget,
+  safeUpstreamHeaders,
   UpstreamError,
 } from "./provider/openai.js";
 export {

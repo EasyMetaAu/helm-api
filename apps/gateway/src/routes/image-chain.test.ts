@@ -366,6 +366,7 @@ describe("Ark media write outcomes", () => {
     expect(result.errorCode).toBe(code);
     expect(result.message).not.toContain("account-linked");
     expect(result.providerRaw).toBeNull();
+    expect(result.attempts[0]?.error_detail?.provider_raw).toEqual(error.providerRaw);
     expect(attempt).toHaveBeenCalledTimes(1);
     if (outcome !== "unknown") expect(breaker.recordFailure).not.toHaveBeenCalled();
   });

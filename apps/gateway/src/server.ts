@@ -271,7 +271,7 @@ import { handleBailianAsrChat } from "./routes/bailian-asr-chat.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { registerDecisionsRoute } from "./routes/decisions.js";
-import { createExecute } from "./routes/execute.js";
+import { createExecute, errorDetailOf } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
 import type { ImageChainTarget, ResolveImageChain } from "./routes/image-chain.js";
 import { buildImageDecision } from "./routes/image-telemetry.js";
@@ -302,6 +302,7 @@ import {
 import { registerThreeDRoute } from "./routes/three-d.js";
 import { createTranscriptionResultStore } from "./routes/transcription-results.js";
 import { registerTtsRoute } from "./routes/tts.js";
+import { recordUpstreamFailure } from "./routes/upstream-failure.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
   registerMediaTaskRoutes,
@@ -4559,6 +4560,7 @@ export async function buildServer(
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
   registerPortalApi(app, {
+    apiKeyPools,
     budgetStore: store.budget,
     memoryAdmission: requestBodyMemoryAdmission,
     keyStore,
@@ -4818,7 +4820,7 @@ export async function buildServer(
           }
           return null;
         },
-        record: async (target, keyId, traceId, status, spend) => {
+        record: async (target, keyId, traceId, status, spend, errorDetail) => {
           const decision = buildImageDecision({
             requestId: spend?.id ?? crypto.randomUUID(),
             traceId,
@@ -4835,7 +4837,7 @@ export async function buildServer(
                 error_class: status === "ok" ? null : "upstream_error",
                 latency_ms: 0,
                 cost_usd: spend?.costUsd ?? null,
-                error_detail: null,
+                error_detail: errorDetail ?? null,
               },
             ],
             served: status === "ok" ? { alias: target.alias, providerModel: target.model } : null,
@@ -5258,13 +5260,33 @@ export async function buildServer(
       throw new Error("native token counter requires unrestricted model selection");
     const client = providerClients.get(target.providerName);
     if (!client?.countTokens) throw new Error("native token counter unavailable");
-    return await client.countTokens(
-      { ...body, model: target.providerModel },
-      {
-        signal,
-        requestCompatibility: catalog.get(target.alias)?.capabilities.requestCompatibility,
-      },
-    );
+    try {
+      return await client.countTokens(
+        { ...body, model: target.providerModel },
+        {
+          signal,
+          requestCompatibility: catalog.get(target.alias)?.capabilities.requestCompatibility,
+        },
+      );
+    } catch (error) {
+      await recordUpstreamFailure(
+        {
+          telemetry,
+          writes: writeQueue,
+          redact: (value) => redact(value),
+          now: Date.now,
+          capturePayloads: () => false,
+        },
+        {
+          keyId: identity.keyId,
+          alias: target.alias,
+          model: target.providerModel,
+          operation: "count_tokens",
+          error,
+        },
+      );
+      throw error;
+    }
   };
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
@@ -5613,6 +5635,34 @@ export async function buildServer(
     registry: realtimeCallRegistry,
     budgetGate,
     resolve: resolveRealtimeTarget,
+    recordError: async ({ keyId, traceId, alias, model, error }) => {
+      const detail = errorDetailOf(error);
+      const decision = buildImageDecision({
+        requestId: crypto.randomUUID(),
+        traceId,
+        keyPrefix: null,
+        requested: model,
+        selectedLane: "realtime",
+        candidateChain: [alias],
+        attempts: [
+          {
+            alias,
+            skipped: false,
+            skip_reason: null,
+            status: "error",
+            error_class: "upstream_error",
+            latency_ms: 0,
+            cost_usd: null,
+            error_detail: detail,
+          },
+        ],
+        served: null,
+        finalErrorClass: "upstream_error",
+        usage: null,
+        policyReason: "realtime",
+      });
+      await writeQueue.enqueueTelemetry({ decision, apiKeyId: keyId, createdAt: new Date() });
+    },
     auth: {
       resolve: async (credential) => {
         const identity = await resolveIdentity(credential);
@@ -6064,7 +6114,16 @@ export async function buildServer(
       }
       return null;
     },
-    record: async ({ identity, selection, status, traceId, usage, costUsd, operationId }) => {
+    record: async ({
+      identity,
+      selection,
+      status,
+      traceId,
+      usage,
+      costUsd,
+      operationId,
+      errorDetail,
+    }) => {
       const success = status === "completed";
       const decision = buildImageDecision({
         requestId: crypto.randomUUID(),
@@ -6082,7 +6141,7 @@ export async function buildServer(
             error_class: success ? null : status,
             latency_ms: 0,
             cost_usd: costUsd ?? null,
-            error_detail: null,
+            error_detail: errorDetail ?? null,
           },
         ],
         served: success ? { alias: selection.alias, providerModel: selection.model } : null,
@@ -6184,6 +6243,7 @@ export async function buildServer(
       traceId,
       result,
       errorCode,
+      errorDetail,
       costUsd,
       operationId,
     }) => {
@@ -6204,7 +6264,7 @@ export async function buildServer(
             error_class: success ? null : (errorCode ?? "upstream_error"),
             latency_ms: 0,
             cost_usd: costUsd ?? null,
-            error_detail: null,
+            error_detail: errorDetail ?? null,
           },
         ],
         served: success ? { alias: selection.alias, providerModel: selection.model } : null,

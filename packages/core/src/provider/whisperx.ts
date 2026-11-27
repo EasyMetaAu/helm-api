@@ -3,7 +3,13 @@ import { z } from "zod";
 import { pcmWavDurationSeconds } from "../budget/transcription-accounting.js";
 import { type AudioTranscriptionClient, AudioTranscriptionError } from "./audio-transcription.js";
 import { SpeechParameterError } from "./media-speech.js";
-import { type OpenAIClientDeps, readUpstreamJsonWithinBudget } from "./openai.js";
+import {
+  type OpenAIClientDeps,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
+  readUpstreamJsonWithinBudget,
+  safeUpstreamHeaders,
+} from "./openai.js";
 
 const Timed = z.object({ start: z.number().nonnegative(), end: z.number().nonnegative() });
 const Word = z.object({
@@ -56,6 +62,7 @@ export function createWhisperXClient(
         ...(opts?.signal ? [opts.signal] : []),
       ]);
       signal.throwIfAborted();
+      const scrub = providerErrorScrubber(deps.config);
       let response: Response;
       try {
         response = await (deps.fetch ?? globalThis.fetch)(
@@ -68,11 +75,17 @@ export function createWhisperXClient(
             signal,
           },
         );
-      } catch {
-        throw new AudioTranscriptionError("outcome_unknown");
+      } catch (cause) {
+        throw new AudioTranscriptionError("outcome_unknown", 502, undefined, {
+          cause: scrub(cause),
+        });
       }
       if (!response.ok) {
-        await response.body?.cancel();
+        const diagnostic = {
+          raw: await readUpstreamErrorBody(response, scrub, deps.responseWorkAdmission),
+          status: response.status,
+          headers: scrub(safeUpstreamHeaders(response.headers)) as Record<string, string>,
+        };
         if (
           response.status === 429 &&
           /\/helm\/?$/.test(new URL(deps.config.baseUrl).pathname) &&
@@ -80,23 +93,36 @@ export function createWhisperXClient(
         ) {
           const retry = response.headers.get("Retry-After") ?? "";
           const retryAfter = /^\d{1,2}$/.test(retry) && Number(retry) > 0 ? Number(retry) : 5;
-          throw new AudioTranscriptionError("transcription_capacity_exhausted", 429, retryAfter);
+          throw new AudioTranscriptionError(
+            "transcription_capacity_exhausted",
+            429,
+            retryAfter,
+            diagnostic,
+          );
         }
         throw new AudioTranscriptionError(
           response.status >= 500 || response.status === 408
             ? "outcome_unknown"
             : "upstream_rejected",
           response.status >= 500 ? 502 : response.status,
+          undefined,
+          diagnostic,
         );
       }
       let data: unknown;
       try {
         data = await readUpstreamJsonWithinBudget(response, deps.responseWorkAdmission);
-      } catch {
-        throw new AudioTranscriptionError("outcome_unknown");
+      } catch (cause) {
+        throw new AudioTranscriptionError("outcome_unknown", 502, undefined, {
+          cause: scrub(cause),
+        });
       }
       const parsed = ResponseSchema.safeParse(data);
-      if (!parsed.success) throw new AudioTranscriptionError("outcome_unknown");
+      if (!parsed.success)
+        throw new AudioTranscriptionError("outcome_unknown", 502, undefined, {
+          raw: scrub(data),
+          status: response.status,
+        });
       const result = parsed.data.result;
       const durationSeconds = result.audio_duration;
       const words = result.word_segments?.flatMap((word) =>

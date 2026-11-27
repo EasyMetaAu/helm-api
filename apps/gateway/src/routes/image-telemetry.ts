@@ -80,6 +80,7 @@ export function buildImageDecision(p: {
             provider_model: null,
             status: "error",
             error_reason: p.finalErrorClass,
+            error_detail: attempted.at(-1)?.error_detail ?? null,
           },
     latency_total_ms: p.attempts.reduce((sum, a) => sum + a.latency_ms, 0),
     fallback_count: Math.max(0, attempted.length - 1),

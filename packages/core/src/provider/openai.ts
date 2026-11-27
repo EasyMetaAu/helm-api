@@ -107,6 +107,8 @@ export interface RealtimeCallRequest {
 }
 
 export interface RealtimeSidebandTarget {
+  /** Host-owned diagnostic sink, bound to the authenticated call owner. */
+  recordError?: (error: unknown) => Promise<void>;
   assertCurrent?: () => void;
   /** Helm relays preserve the authenticated upgrade request's client identity. */
   forwardClientUserAgent?: boolean;
@@ -167,6 +169,8 @@ export interface ProviderCallOptions {
   previousToolTranslation?: ResponsesToolTranslation;
   onToolTranslation?: (state: ResponsesToolTranslation) => void;
   captureUpstream?: (wireBody: string) => void;
+  /** Supplies credential redaction to diagnostic observers without altering wire bytes. */
+  onDiagnosticScrubber?: (scrub: (value: unknown) => unknown) => void;
   /** Allowlisted final-send metadata; no credentials or opaque session state. */
   onOutboundRequest?: (audit: OutboundRequestAudit) => void;
   /** Request-scoped Anthropic defensive recovery switch. The gateway owns the live
@@ -408,6 +412,31 @@ export function safeUpstreamHeaders(headers: Headers): Record<string, string> {
     bytes += nextBytes;
   }
   return safe;
+}
+
+export function providerErrorScrubber(config: OpenAIClientDeps["config"], auth?: string) {
+  return function scrub(raw: unknown): unknown {
+    const secrets = [
+      ...(config.currentSecrets?.() ?? []),
+      config.apiKey,
+      auth,
+      auth?.replace(/^(?:Bearer|Token|Basic)\s+/i, ""),
+    ].filter((v): v is string => Boolean(v));
+    const walk = (value: unknown): unknown => {
+      if (typeof value === "string") {
+        for (const secret of secrets) value = (value as string).split(secret).join("[redacted]");
+        return value;
+      }
+      if (value instanceof Error) return walk(transportErrorNode(value));
+      if (Array.isArray(value)) return value.map(walk);
+      if (value && typeof value === "object")
+        return Object.fromEntries(
+          Object.entries(value).map(([k, v]) => [String(walk(k)), walk(v)]),
+        );
+      return value;
+    };
+    return walk(raw);
+  };
 }
 
 export async function readUpstreamErrorBody(
@@ -1165,6 +1194,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     },
 
     async *chatCompletionStream(req, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       // 401-retry happens here, BEFORE getReader() / any chunk is yielded, so the
       // SSE stream is replayed cleanly from the start (principle 8 — no duplicated
       // or half-emitted events).

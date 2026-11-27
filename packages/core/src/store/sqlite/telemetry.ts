@@ -1364,6 +1364,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
   async getPayloadPartEncoded(
     requestId: string,
     part: RequestPayloadPart,
+    maxBytes?: number,
   ): Promise<EncodedRequestPayloadPartRecord | null> {
     const stmt =
       part === "request"
@@ -1371,9 +1372,23 @@ export class SqliteTelemetryStore implements TelemetryStore {
         : part === "response"
           ? this.stmts().getResponsePart
           : this.stmts().getUpstreamPart;
-    const row = stmt.get(requestId) as
-      | { id: string; value: unknown; generation?: string | null; ts: number }
-      | undefined;
+    const column =
+      part === "request"
+        ? "request_json"
+        : part === "response"
+          ? "response_json"
+          : "upstream_request_json";
+    const row = (
+      maxBytes === undefined
+        ? stmt.get(requestId)
+        : this.db.$sqlite
+            .prepare(
+              `SELECT request_id AS id, ${column} AS value, created_at AS ts
+       FROM request_payloads WHERE request_id = ? AND length(CAST(${column} AS BLOB)) <= ?
+       ${part === "response" ? "AND response_body_generation IS NULL" : ""}`,
+            )
+            .get(requestId, Math.max(0, Math.floor(maxBytes)))
+    ) as { id: string; value: unknown; generation?: string | null; ts: number } | undefined;
     if (row?.generation) row.value = this.readPayloadResponse(requestId, row.generation);
     if (!row || row.value === null || row.value === undefined) return null;
     const bytes =

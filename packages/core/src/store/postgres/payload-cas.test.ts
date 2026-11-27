@@ -158,3 +158,26 @@ describe("PgTelemetryStore — image CAS (Postgres, no manual gzip)", () => {
     expect(JSON.parse(rows[0]?.upstreamRequestJson ?? "")).toEqual(JSON.parse(body));
   });
 });
+
+it("bounds encoded request and upstream reads before materializing stored bytes", async () => {
+  const { db, store } = await setup();
+  try {
+    await store.insertPayload({
+      requestId: "bounded",
+      requestJson: '{"prompt":"owned request"}',
+      upstreamRequestJson: '{"prompt":"forwarded request"}',
+      responseJson: null,
+      createdAt: new Date(1000),
+    });
+    for (const part of ["request", "upstream_request"] as const) {
+      const full = await store.getPayloadPartEncoded("bounded", part);
+      expect(full).not.toBeNull();
+      await expect(store.getPayloadPartEncoded("bounded", part, 1)).resolves.toBeNull();
+      expect(
+        (await store.getPayloadPartEncoded("bounded", part, full!.bytes.byteLength))?.bytes,
+      ).toEqual(full!.bytes);
+    }
+  } finally {
+    void db;
+  }
+});

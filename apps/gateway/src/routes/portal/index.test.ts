@@ -1,9 +1,10 @@
 import {
   type ApiKeyRecord,
+  createResponseWorkAdmission,
   type DecisionRecord,
   hashKey,
   type RequestPayloadPartRecord,
-  type TelemetryStore,
+  type ResponseWorkAdmission,
 } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../../app.js";
@@ -12,7 +13,7 @@ import {
   type BodyMemoryAdmission,
   createBodyMemoryAdmission,
 } from "../../runtime/memory-admission.js";
-import { registerPortalApi } from "./index.js";
+import { type PortalApiDeps, registerPortalApi } from "./index.js";
 
 const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
 type MemoryPatch = {
@@ -121,17 +122,7 @@ function decision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
   };
 }
 
-type PortalTelemetry = Pick<
-  TelemetryStore,
-  | "aggregate"
-  | "queryPage"
-  | "getByRequestId"
-  | "getApiKeyId"
-  | "getCreatedAt"
-  | "getPayload"
-  | "getPayloadMeta"
-  | "getPayloadPart"
->;
+type PortalTelemetry = PortalApiDeps["telemetry"];
 
 function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
   return {
@@ -205,6 +196,15 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
         createdAt: new Date(1000),
       };
     },
+    async getPayloadPartEncoded(_id, part) {
+      return {
+        requestId: "trace_1",
+        part,
+        bytes: Buffer.from(`{"body":"of ${part}"}`),
+        codec: "raw",
+        createdAt: new Date(1000),
+      };
+    },
     async getPayloadPart(_id, part): Promise<RequestPayloadPartRecord | null> {
       return {
         requestId: "trace_1",
@@ -222,6 +222,7 @@ function buildApp(
   tel: PortalTelemetry = telemetry(),
   updateKey: (keyId: string, patch: MemoryPatch) => Promise<void> = vi.fn(async () => {}),
   memoryAdmission?: BodyMemoryAdmission,
+  responseWorkAdmission?: ResponseWorkAdmission,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
@@ -231,11 +232,25 @@ function buildApp(
     keyStore: { updateKey },
     now: () => 10_000,
     memoryAdmission,
+    responseWorkAdmission,
   });
   return app;
 }
 
 describe("portal API", () => {
+  it("includes the owned request's full decision trail", async () => {
+    const res = await buildApp(record()).request("/portal/api/requests/trace_1", { headers: AUTH });
+    const body = await res.json();
+    expect(body).toMatchObject({
+      decision: {
+        request_id: "trace_1",
+        classifier: decision().classifier,
+        provider_attempts: decision().provider_attempts,
+        cost_breakdown: decision().cost_breakdown,
+      },
+    });
+  });
+
   it("all endpoints require API-key auth (401)", async () => {
     const app = buildApp(record());
     for (const path of [
@@ -578,7 +593,7 @@ describe("portal API", () => {
       expect(order).toEqual(["owner"]); // read never happened
     });
 
-    it("returns request_id plus client trace correlation for an owned request, no supply chain", async () => {
+    it("returns the complete owned trail with request and client correlation ids", async () => {
       const tel = telemetry({
         async getByRequestId() {
           return decision({ request_id: "req_internal_1", trace_id: "client_trace_1" });
@@ -595,14 +610,14 @@ describe("portal API", () => {
         served_model: "gpt-5.5",
         created_at: 1000,
       });
-      expect(body).not.toContain("SECRET_ALIAS");
-      expect(body).not.toContain("SECRET_WIRE");
-      expect(body).not.toContain("SECRET_PROVIDER");
-      expect(body).not.toContain("SECRET_PID");
-      expect(body).not.toContain("SECRET_ACCT");
+      expect(body).toContain("SECRET_ALIAS");
+      expect(body).toContain("SECRET_WIRE");
+      expect(body).toContain("SECRET_PROVIDER");
+      expect(body).toContain("SECRET_PID");
+      expect(body).toContain("SECRET_ACCT");
     });
 
-    it("surfaces fallback attempt outcomes/timing but never alias or provider identity (R7)", async () => {
+    it("retains legacy outcomes and includes full provider attempts in the owned decision", async () => {
       const tel = telemetry({
         async getByRequestId() {
           return decision({
@@ -645,9 +660,9 @@ describe("portal API", () => {
         { outcome: "success", latency_ms: 500 },
       ]);
       const serialized = JSON.stringify(body);
-      expect(serialized).not.toContain("SECRET_ALIAS");
-      expect(serialized).not.toContain("SECRET_PROVIDER");
-      expect(serialized).not.toContain("SECRET_WIRE");
+      expect(serialized).toContain("SECRET_ALIAS");
+      expect(serialized).toContain("SECRET_PROVIDER");
+      expect(serialized).toContain("SECRET_WIRE");
     });
 
     it("never returns another key's data even when both records share a request_id shape (cross-key isolation)", async () => {
@@ -693,7 +708,7 @@ describe("portal API", () => {
       for (const part of ["request", "response"]) {
         const res = await buildApp(record()).request(
           `/portal/api/requests/trace_1/payload?part=${part}`,
-          { headers: AUTH },
+          { headers: { ...AUTH, accept: "application/vnd.helm.payload" } },
         );
         expect(res.status, part).toBe(200);
         expect(await res.text()).toContain(`of ${part}`);
@@ -708,21 +723,22 @@ describe("portal API", () => {
       expect(res.status).toBe(200);
       await expect(res.json()).resolves.toEqual({
         captured: true,
+        source: "payload",
+        exact: true,
+        fidelity: "exact",
         created_at: 1000,
-        parts: { request: true, response: true },
+        parts: { request: true, response: true, upstream_request: true },
       });
     });
 
-    it("keeps the metadata whitelist when an adapter falls back to the full payload read", async () => {
-      const tel = telemetry({ getPayloadMeta: undefined });
-      const res = await buildApp(record(), tel).request(
-        "/portal/api/requests/trace_1/payload?part=meta",
-        { headers: AUTH },
-      );
-      expect(res.status).toBe(200);
-      const body = await res.text();
-      expect(JSON.parse(body).parts).toEqual({ request: true, response: true });
-      expect(body).not.toContain("upstream");
+    it("fails closed instead of expanding legacy blobs when an adapter lacks metadata", async () => {
+      const read = vi.fn();
+      const res = await buildApp(
+        record(),
+        telemetry({ getPayloadMeta: undefined, getPayload: read }),
+      ).request("/portal/api/requests/trace_1/payload?part=meta", { headers: AUTH });
+      expect(await res.json()).toMatchObject({ captured: false });
+      expect(read).not.toHaveBeenCalled();
     });
 
     it("checks ownership before reading payload metadata", async () => {
@@ -745,21 +761,15 @@ describe("portal API", () => {
       expect(reads).toEqual(["owner"]);
     });
 
-    it("REJECTS the upstream_request part — supply chain, admin-only (R7)", async () => {
-      const readParts: string[] = [];
-      const tel = telemetry({
-        async getPayloadPart(_id, part) {
-          readParts.push(part);
-          return { requestId: "trace_1", part, json: "{}", createdAt: new Date() };
-        },
-      });
-      const res = await buildApp(record(), tel).request(
+    it("serves the owned upstream part using encoded transport without global blob expansion", async () => {
+      const decode = vi.fn();
+      const res = await buildApp(record(), telemetry({ getPayloadPart: decode })).request(
         "/portal/api/requests/trace_1/payload?part=upstream_request",
-        { headers: AUTH },
+        { headers: { ...AUTH, accept: "application/vnd.helm.payload" } },
       );
-      expect(res.status).toBe(400);
-      // never even reached the store with an upstream read
-      expect(readParts).toEqual([]);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("of upstream_request");
+      expect(decode).not.toHaveBeenCalled();
     });
   });
 });
@@ -789,4 +799,252 @@ it("accounts for portal bodies without adding a wire-size limit", async () => {
   expect(accepted.status).toBe(200);
   expect(updateKey).toHaveBeenCalledTimes(1);
   expect(memoryAdmission.reservedBytes).toBe(0);
+});
+
+describe("Portal full-detail boundaries", () => {
+  it.each([
+    "request",
+    "response",
+    "upstream_request",
+    "meta",
+  ])("denies other keys before reading %s", async (part) => {
+    const read = vi.fn();
+    const app = buildApp(
+      record(),
+      telemetry({
+        getApiKeyId: async () => "other",
+        getByRequestId: read,
+        getPayloadPartEncoded: read,
+        getPayloadMeta: read,
+      }),
+    );
+    expect(
+      (await app.request(`/portal/api/requests/trace_1/payload?part=${part}`, { headers: AUTH }))
+        .status,
+    ).toBe(404);
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("does not expand arbitrary blob references through JSON parts or a global blob route", async () => {
+    const decode = vi.fn();
+    const app = buildApp(record(), telemetry({ getPayloadPart: decode, getPayload: decode }));
+    const result = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+      headers: AUTH,
+    });
+    expect(result.status).toBe(406);
+    expect(decode).not.toHaveBeenCalled();
+    expect(
+      (await app.request(`/portal/api/payload-blobs/${"a".repeat(64)}`, { headers: AUTH })).status,
+    ).toBe(404);
+  });
+  it("preserves metadata-only even if old payload rows remain", async () => {
+    const read = vi.fn();
+    const app = buildApp(
+      record(),
+      telemetry({
+        getByRequestId: async () => decision({ request_content_mode: "none" }),
+        getPayloadPartEncoded: read,
+        getPayloadMeta: read,
+      }),
+    );
+    const result = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+      headers: AUTH,
+    });
+    expect(await result.json()).toMatchObject({ captured: false, reason: "metadata_only" });
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("redacts credential-bearing error fields while retaining upstream status", async () => {
+    const rec = decision();
+    rec.provider_attempts[0]!.error_detail = {
+      upstream_status: 401,
+      message: "rejected",
+      provider_raw: {
+        error: { code: "auth_failed" },
+        api_key: "NEVER_SHOW_KEY",
+        authorization: "Bearer NEVER_SHOW_TOKEN",
+      },
+    };
+    const result = await buildApp(record(), telemetry({ getByRequestId: async () => rec })).request(
+      "/portal/api/requests/trace_1",
+      { headers: AUTH },
+    );
+    const body = await result.text();
+    expect(body).toContain('"upstream_status":401');
+    expect(body).not.toContain("NEVER_SHOW");
+  });
+  it("denies session reads if an owned trace references another key's session", async () => {
+    const read = vi.fn();
+    const app = buildApp(
+      record(),
+      telemetry({
+        getByRequestId: async () =>
+          decision({ session: { ref: "foreign", source: "x-thread-id" } }),
+        getSessionByRef: async () => ({
+          sessionRef: "foreign",
+          apiKeyId: "other",
+          accountId: "acct",
+          source: "x-thread-id",
+          externalSessionId: "same-label",
+          createdAt: new Date(),
+          lastSeenAt: new Date(),
+          headRequestId: null,
+          revisionCount: 1,
+          storedBytes: 1,
+          eventHead: null,
+        }),
+        streamSessionRevisionsPage: read,
+        getPayloadMeta: async () => null,
+      }),
+    );
+    for (const path of ["session-revisions"])
+      expect(
+        (await app.request(`/portal/api/requests/trace_1/${path}`, { headers: AUTH })).status,
+      ).toBe(404);
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("recovers the owned session with fidelity and bounded revision pagination", async () => {
+    const revision = {
+      sessionRef: "mine",
+      requestId: "trace_1",
+      sequence: 1,
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: '[{"role":"user","content":"hello"}]',
+      requestEnvelopeJson: '{"model":"auto","messages":[]}',
+      responseId: null,
+      responseJson: '{"output":"answer"}',
+      fidelity: "semantic",
+      createdAt: new Date(1000),
+    };
+    const app = buildApp(
+      record(),
+      telemetry({
+        getByRequestId: async () => decision({ session: { ref: "mine", source: "x-thread-id" } }),
+        getSessionByRef: async () => ({
+          sessionRef: "mine",
+          apiKeyId: "k1",
+          accountId: "acct",
+          source: "x-thread-id",
+          externalSessionId: "same-label",
+          createdAt: new Date(),
+          lastSeenAt: new Date(),
+          headRequestId: "trace_1",
+          revisionCount: 1,
+          storedBytes: 100,
+          eventHead: null,
+        }),
+        getPayloadMeta: async () => null,
+        getPayloadPartEncoded: async () => null,
+        listSessionRevisionsPage: async () => ({
+          revisions: [revision],
+          nextSequence: null,
+          limited: false,
+        }),
+        streamSessionRevisionsPage: async () => ({
+          revisions: [revision],
+          nextSequence: null,
+          limited: false,
+        }),
+      }),
+    );
+    const payload = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+      headers: AUTH,
+    });
+    expect(await payload.json()).toMatchObject({
+      captured: true,
+      source: "session",
+      exact: false,
+      value: { messages: [{ role: "user", content: "hello" }] },
+    });
+    const page = await app.request("/portal/api/requests/trace_1/session-revisions", {
+      headers: AUTH,
+    });
+    expect(await page.json()).toMatchObject({
+      captured: true,
+      targetRequestId: "trace_1",
+      revisions: [{ requestId: "trace_1" }],
+    });
+  });
+});
+
+it("reads exact payloads with a session reference even when no session row was stored", async () => {
+  const app = buildApp(
+    record(),
+    telemetry({
+      getByRequestId: async () =>
+        decision({ session: { ref: "not-stored", source: "x-thread-id" } }),
+      getSessionByRef: async () => null,
+    }),
+  );
+  const result = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+    headers: { ...AUTH, accept: "application/vnd.helm.payload" },
+  });
+  expect(result.status).toBe(200);
+  expect(await result.text()).toContain("of request");
+});
+it("never falls through to global blob decoding when payload metadata appears between reads", async () => {
+  const decode = vi.fn();
+  let reads = 0;
+  const app = buildApp(
+    record(),
+    telemetry({
+      getPayloadMeta: async () =>
+        ++reads === 1
+          ? null
+          : {
+              requestId: "trace_1",
+              parts: { request: true, response: false, upstreamRequest: false },
+              createdAt: new Date(),
+            },
+      getPayloadPartEncoded: async () => null,
+      getPayloadPart: decode,
+      getPayload: decode,
+    }),
+  );
+  await app.request("/portal/api/requests/trace_1/payload?part=request", { headers: AUTH });
+  expect(decode).not.toHaveBeenCalled();
+});
+it("admits encoded payload reads before accessing stored bytes", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const held = admission.acquire(1024);
+  if (!held.ok) throw Error("fixture admission failed");
+  const encoded = vi.fn();
+  try {
+    const app = buildApp(
+      record(),
+      telemetry({ getPayloadPartEncoded: encoded }),
+      undefined,
+      undefined,
+      admission,
+    );
+    const result = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+      headers: { ...AUTH, accept: "application/vnd.helm.payload" },
+    });
+    expect(await result.json()).toMatchObject({
+      captured: false,
+      reason: "payload_recovery_limited",
+    });
+    expect(encoded).not.toHaveBeenCalled();
+  } finally {
+    held.lease.release();
+  }
+});
+
+it("releases the encoded response budget after the body is consumed", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 4096,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const app = buildApp(record(), telemetry(), undefined, undefined, admission);
+  const result = await app.request("/portal/api/requests/trace_1/payload?part=request", {
+    headers: { ...AUTH, accept: "application/vnd.helm.payload" },
+  });
+  expect(result.status).toBe(200);
+  expect(admission.reservedBytes).toBeGreaterThan(0);
+  await result.arrayBuffer();
+  expect(admission.reservedBytes).toBe(0);
 });

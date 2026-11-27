@@ -794,6 +794,7 @@ export interface TelemetryStore {
   getPayloadPartEncoded?(
     requestId: string,
     part: RequestPayloadPart,
+    maxBytes?: number, // Enforced in the single-row query, before materializing bytes.
   ): Promise<EncodedRequestPayloadPartRecord | null>;
   getPayloadBlob?(sha256: string): Promise<RequestPayloadBlobRecord | null>;
   // Delete payloads with createdAt strictly older than the cutoff (epoch ms).

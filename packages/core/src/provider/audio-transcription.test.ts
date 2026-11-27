@@ -78,3 +78,30 @@ describe("audio transcription protocols", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+it.each([
+  "openai",
+  "deepgram",
+] as const)("retains %s HTTP error body and status without leaking the credential", async (kind) => {
+  const fetch = vi.fn().mockResolvedValue(
+    Response.json(
+      { error: { message: "quota exhausted for actual-secret", limit: 12 } },
+      {
+        status: 429,
+        headers: { "x-request-id": "upstream-123", "x-diagnostic": "actual-secret" },
+      },
+    ),
+  );
+  await expect(
+    createAudioTranscriptionClient(kind, {
+      config: { baseUrl: "https://example.test", apiKey: "actual-secret" },
+      fetch,
+    }).transcribe({ model: "model" }, file),
+  ).rejects.toMatchObject({
+    code: "upstream_rejected",
+    upstreamStatus: 429,
+    providerRaw: { error: { message: "quota exhausted for [redacted]", limit: 12 } },
+    upstreamHeaders: { "x-request-id": "upstream-123", "x-diagnostic": "[redacted]" },
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});

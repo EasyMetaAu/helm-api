@@ -4,7 +4,10 @@ import { MediaHttpError, parseMediaInput } from "./media-http.js";
 import {
   type OpenAIClientDeps,
   type ProviderCallOptions,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
   readUpstreamJsonWithinBudget,
+  safeUpstreamHeaders,
 } from "./openai.js";
 export const DoubaoAsrRequestSchema = z.strictObject({
   model: z.literal("bigmodel"),
@@ -121,25 +124,57 @@ export function createDoubaoAsrClient(deps: OpenAIClientDeps) {
           signal,
         },
       );
-    } catch {
-      throw new MediaHttpError("unknown", "upstream_error", "ASR outcome unknown");
+    } catch (cause) {
+      throw new MediaHttpError(
+        "unknown",
+        "upstream_error",
+        "ASR outcome unknown",
+        null,
+        null,
+        null,
+        providerErrorScrubber(deps.config)(cause),
+      );
     }
     const code = Number(response.headers.get("X-Api-Status-Code"));
     if (!response.ok || ![20000000, 20000001, 20000002, 20000003].includes(code)) {
-      await response.body?.cancel();
+      const rawError = await readUpstreamErrorBody(
+        response,
+        providerErrorScrubber(deps.config),
+        deps.responseWorkAdmission,
+      );
       const rejected = [45000002, 45000131, 45000132, 45000151].includes(code);
       throw new MediaHttpError(
         rejected ? "rejected" : "unknown",
         "upstream_error",
         "ASR upstream status requires reconciliation",
-        null,
+        rawError,
         response.status,
+        providerErrorScrubber(deps.config)(safeUpstreamHeaders(response.headers)) as Record<
+          string,
+          string
+        >,
       );
     }
     if (path === "submit") {
+      if (code !== 20000000) {
+        const rawError = await readUpstreamErrorBody(
+          response,
+          providerErrorScrubber(deps.config),
+          deps.responseWorkAdmission,
+        );
+        throw new MediaHttpError(
+          "unknown",
+          "upstream_error",
+          "ASR submission not confirmed",
+          rawError,
+          response.status,
+          providerErrorScrubber(deps.config)(safeUpstreamHeaders(response.headers)) as Record<
+            string,
+            string
+          >,
+        );
+      }
       await response.body?.cancel();
-      if (code !== 20000000)
-        throw new MediaHttpError("unknown", "upstream_error", "ASR submission not confirmed");
       return { id, code };
     }
     if (code !== 20000000) {

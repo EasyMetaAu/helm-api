@@ -7,6 +7,7 @@ import {
   type DecisionRecord,
   type ResponsesRegistryRecord,
   type TranscriptionAccounting,
+  UpstreamError,
 } from "@helm/core";
 import {
   type MediaPricing,
@@ -35,7 +36,6 @@ import {
   ARK_THREE_D_MODELS,
   ARK_VIDEO_MODELS,
   type ArkTaskKind,
-  arkMediaErrorDetail,
   decodeArkTaskBinding,
   encodeArkTaskBinding,
   isArkTaskRecord,
@@ -45,6 +45,7 @@ import {
   updateArkTaskState,
 } from "./ark-media-task.js";
 import { applyAsyncMediaCost, captureAsyncMediaBilling } from "./async-media-cost.js";
+import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import { PASSTHROUGH_CLASSIFIER } from "./image-telemetry.js";
 import { isNativeMediaTaskRecord } from "./media-task-binding.js";
@@ -64,6 +65,7 @@ import {
   recordServed,
   withRequestContentMode,
 } from "./payload-capture.js";
+import { recordUpstreamFailure } from "./upstream-failure.js";
 
 type MediaTaskKind = ArkTaskKind | "transcription";
 const VIDEO_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -243,6 +245,7 @@ function buildVideoDecision(input: {
             provider_model: null,
             status: "error",
             error_reason: input.errorClass,
+            ...(input.errorDetail ? { error_detail: input.errorDetail } : {}),
           },
     latency_total_ms: input.latencyMs,
     fallback_count: 0,
@@ -657,7 +660,7 @@ export function registerMediaTaskRoutes(
         },
       );
     } catch (failure) {
-      const errorDetail = isArk ? arkMediaErrorDetail(failure) : null;
+      const errorDetail = errorDetailOf(failure);
       if (errorDetail !== null) {
         try {
           deps.log?.(`${kind}.create_failed`, {
@@ -692,7 +695,14 @@ export function registerMediaTaskRoutes(
     }
     const upstreamRequestId = isArk ? parseArkTaskCreate(upstream) : upstream.request_id;
     if (typeof upstreamRequestId !== "string" || upstreamRequestId.length === 0) {
-      await recordStart("error", "outcome_unknown", null);
+      await recordStart(
+        "error",
+        "outcome_unknown",
+        null,
+        errorDetailOf(
+          new UpstreamError("upstream_error", "upstream response missing task ID", upstream),
+        ),
+      );
       return errorJson(c, 503, "video create outcome is unknown", "outcome_unknown");
     }
     const publicId = isArk ? randomUUID() : upstreamRequestId;
@@ -870,10 +880,21 @@ export function registerMediaTaskRoutes(
       return errorJson(c, 502, "media task provider binding differs", "upstream_error");
     if (arkBinding === null && (client.providerType === "ark" || kind === "three-d"))
       return errorJson(c, 502, "media task binding is missing", "upstream_error");
+    const recordFailure = (cause: unknown) =>
+      recordUpstreamFailure(deps.record, {
+        keyId: identity.keyId,
+        alias: record.providerAlias ?? "media",
+        model: record.providerModel ?? "media",
+        operation: `${kind}_poll`,
+        error: cause,
+        requestId: pollRequestId,
+        traceId: c.get("trace_id"),
+      });
     let upstream: Record<string, unknown>;
     try {
       upstream = await client.retrieve(arkBinding?.upstreamId ?? requestId, requestSignal(c));
-    } catch {
+    } catch (cause) {
+      await recordFailure(cause);
       deps.log?.(`${kind}.poll.lifecycle`, {
         request_id: pollRequestId,
         video_request_id: requestId,
@@ -896,6 +917,7 @@ export function registerMediaTaskRoutes(
           ? { success: false as const }
           : { success: true as const, data: normalized };
     if (!parsed.success) {
+      await recordFailure(new UpstreamError("upstream_error", "invalid task result", upstream));
       deps.log?.(`${kind}.poll.lifecycle`, {
         request_id: pollRequestId,
         video_request_id: requestId,
@@ -919,6 +941,8 @@ export function registerMediaTaskRoutes(
     ) {
       await applyAsyncMediaCost(deps, record, kind, arkBinding.mediaBilling, upstream, observedAt);
     }
+    if (parsed.data.status === "failed")
+      await recordFailure(new UpstreamError("upstream_error", "upstream task failed", upstream));
     upstream = parsed.data;
     const status = upstream.status;
     deps.log?.(`${kind}.poll.lifecycle`, {

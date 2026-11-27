@@ -13,6 +13,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
+  createStreamErrorObserver,
   markStartedStreamCancellation,
   markStartedStreamError,
   requestCancellationReason,
@@ -483,6 +484,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       c.set("concurrencyRelease", undefined);
       const releaseRequestMemory = c.get("requestMemoryRelease");
       c.set("requestMemoryRelease", undefined);
+      const observeError = createStreamErrorObserver(result.decision, "gemini");
       return streamSSE(c, async (sse) => {
         const releaseConcurrencyOnce = onceAsync(releaseConcurrency);
         const releaseRequestMemoryOnce = onceAsync(releaseRequestMemory);
@@ -514,6 +516,12 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
               continue;
             }
             const snapshot = item.value;
+            const diagnosticFrame = snapshot as { data?: unknown; raw?: unknown };
+            observeError(
+              typeof diagnosticFrame.raw === "string"
+                ? diagnosticFrame.raw
+                : `data: ${typeof diagnosticFrame.data === "string" ? diagnosticFrame.data : JSON.stringify(snapshot)}\n\n`,
+            );
             if (result.nativePassthrough === true) {
               const frame = snapshot as { data?: unknown; raw?: unknown };
               if (typeof frame.raw === "string") {
@@ -547,7 +555,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
-            markStartedStreamError(result.decision, re.error_class);
+            markStartedStreamError(result.decision, re.error_class, err);
             const out = transformer.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`data: ${data}\n\n`);

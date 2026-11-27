@@ -15,6 +15,7 @@ import {
   transcriptionOperationStoreId,
   UpstreamError,
 } from "@helm/core";
+import type { AttemptErrorDetail } from "@helm/shared";
 import {
   evaluateClientPolicy,
   type MediaPricing,
@@ -27,6 +28,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import type { ConcurrencyGatePort } from "../middleware/concurrency.js";
 import { requestSignal } from "../middleware/limits.js";
+import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
 
@@ -64,6 +66,7 @@ export interface AudioSpeechRouteDeps {
     status: "completed" | "error" | "canceled";
     traceId: string;
     costUsd?: number | null;
+    errorDetail?: AttemptErrorDetail;
     operationId?: string;
   }) => Promise<void>;
 }
@@ -320,6 +323,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         status: "completed" | "error" | "canceled",
         usage?: MediaSpeechUsage,
         notSent = false,
+        error?: unknown,
       ) => {
         if (recorded) return;
         recorded = true;
@@ -349,6 +353,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
             traceId,
             costUsd: spend?.costUsd,
             operationId: spend?.id,
+            errorDetail: error === undefined ? undefined : errorDetailOf(error),
           });
         } catch {
           c.get("logger")?.log("error", "media.speech_accounting_failed", { trace_id: traceId });
@@ -389,6 +394,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
             lease.signal.aborted ? "canceled" : "error",
             undefined,
             isUnbilledSpeechFailure(error),
+            error,
           );
           throw error;
         }
@@ -410,7 +416,8 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
           const event: SpeechEvent = next.value;
           if (event.type === "usage") usage = accumulateSpeechUsage(usage, event.usage);
           if (event.type === "audio") return event.audio;
-          if (event.type === "error") throw new Error("speech upstream failed");
+          if (event.type === "error")
+            throw new UpstreamError("upstream_error", "speech upstream failed", event);
           if (event.type === "completed") {
             await iterator.return?.();
             await finish("completed", usage);
@@ -423,7 +430,7 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
         first = await nextAudio();
       } catch (error) {
         await iterator.return?.();
-        await finish("error", usage, isUnbilledSpeechFailure(error));
+        await finish("error", usage, isUnbilledSpeechFailure(error), error);
         throw error;
       }
       if (!first)
@@ -448,8 +455,8 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
               first = null;
               if (audio) controller.enqueue(audio);
               else controller.close();
-            } catch {
-              const finishing = finish("error", usage);
+            } catch (error) {
+              const finishing = finish("error", usage, false, error);
               abort.abort();
               await iterator.return?.();
               await finishing;

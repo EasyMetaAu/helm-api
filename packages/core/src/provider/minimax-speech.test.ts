@@ -128,3 +128,16 @@ describe("MiniMax speech HTTP", () => {
     });
   });
 });
+
+it("retains the MiniMax business error message and request id", async () => {
+  const body = {
+    base_resp: { status_code: 1004, status_msg: "balance exhausted" },
+    request_id: "mm-123",
+  };
+  await expect(
+    createMiniMaxSpeechClient({
+      config: { baseUrl: "https://api.minimax.io", apiKey: "secret" },
+      fetch: vi.fn().mockResolvedValue(Response.json(body)),
+    }).ttsSpeech(request),
+  ).rejects.toMatchObject({ providerRaw: body });
+});

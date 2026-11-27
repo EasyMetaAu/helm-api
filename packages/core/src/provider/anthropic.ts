@@ -1959,6 +1959,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     },
 
     async *chatCompletionStream(req, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const model = String((req as Record<string, unknown>).model ?? "");
       const translatedBody = {
         ...openaiToAnthropicRequest(req, {
@@ -2040,6 +2041,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // chatCompletionStream), then the upstream SSE is BYTE-RELAYED unchanged via
     // readAnthropicSSERaw — no SSE re-mapping state machine to mis-translate (principle 8).
     async *nativePassthroughStream(body, opts) {
+      opts?.onDiagnosticScrubber?.(scrub);
       const declaredTools = declaredNativeToolNames(body);
       const { res } = await requestWithRetry(
         body,

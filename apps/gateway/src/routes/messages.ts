@@ -18,6 +18,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
+  createStreamErrorObserver,
   markStartedStreamCancellation,
   markStartedStreamError,
   requestCancellationReason,
@@ -683,6 +684,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       c.set("concurrencyRelease", undefined);
       const releaseRequestMemory = c.get("requestMemoryRelease");
       c.set("requestMemoryRelease", undefined);
+      const observeError = createStreamErrorObserver(result.decision, "anthropic_messages");
       return streamSSE(c, async (sse) => {
         const releaseConcurrencyOnce = onceAsync(releaseConcurrency);
         const releaseRequestMemoryOnce = onceAsync(releaseRequestMemory);
@@ -730,6 +732,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 ? (event as { event: string; data: string; raw?: string })
                 : { ...anthropic.transformStreamOut(event), raw: undefined };
             const raw = frame.raw;
+            observeError(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             captured?.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             if (raw !== undefined) {
               await sse.write(raw);
@@ -759,7 +762,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
-            markStartedStreamError(result.decision, errorClass);
+            markStartedStreamError(result.decision, errorClass, err);
             const out = anthropic.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`event: error\ndata: ${data}\n\n`);

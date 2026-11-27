@@ -162,3 +162,26 @@ describe("SqliteTelemetryStore — image CAS + gzip", () => {
     expect(blobCount()).toBe(0); // no surviving reference → reclaimed
   });
 });
+
+it("bounds encoded request and upstream reads before materializing stored bytes", async () => {
+  const { db, store } = setup();
+  try {
+    await store.insertPayload({
+      requestId: "bounded",
+      requestJson: '{"prompt":"owned request"}',
+      upstreamRequestJson: '{"prompt":"forwarded request"}',
+      responseJson: null,
+      createdAt: new Date(1000),
+    });
+    for (const part of ["request", "upstream_request"] as const) {
+      const full = await store.getPayloadPartEncoded("bounded", part);
+      expect(full).not.toBeNull();
+      await expect(store.getPayloadPartEncoded("bounded", part, 1)).resolves.toBeNull();
+      expect(
+        (await store.getPayloadPartEncoded("bounded", part, full!.bytes.byteLength))?.bytes,
+      ).toEqual(full!.bytes);
+    }
+  } finally {
+    db.$sqlite.close();
+  }
+});

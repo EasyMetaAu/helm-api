@@ -469,3 +469,49 @@ describe("createExecute — error_detail provider_raw wrapping", () => {
     expect(Buffer.byteLength(JSON.stringify(detail))).toBeLessThanOrEqual(160 * 1024);
   });
 });
+
+it("retains returned text errors while stripping embedded signed URL credentials", () => {
+  const detail = errorDetailOf(
+    new UpstreamError(
+      "upstream_error",
+      "request rejected",
+      "Bad asset https://private.test/file?X-Amz-Signature=secret&token=private#credential",
+      400,
+    ),
+  );
+  expect(detail.upstream_status).toBe(400);
+  expect(detail.provider_raw).toEqual({ raw: "Bad asset https://private.test/file" });
+});
+
+it.each([
+  false,
+  true,
+])("retains credential-scrubbed SSE diagnostics without changing wire or committed attempts (preOutput=%s)", async (preOutput) => {
+  const { createOpenAIClient } = await import("@helm/core");
+  const output = 'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n';
+  const failure =
+    'data: {"error":{"message":"quota for actual-provider-secret","request_id":"up-123","detail":"original reason"}}\n\n';
+  const wire = (preOutput ? "" : output) + failure;
+  const provider = createOpenAIClient({
+    config: { baseUrl: "https://provider.test", apiKey: "actual-provider-secret" },
+    fetch: vi.fn().mockResolvedValue(new Response(wire)),
+  });
+  const execute = createExecute({
+    defaultProvider: provider,
+    providers: new Map([["mock", provider]]),
+    registry: registry({ a: "model" }),
+    breaker: breaker(),
+    catalog: new Map(),
+    now: clock(),
+    signal: new AbortController().signal,
+  });
+  const result = await execute(plan(["a"]), req({ stream: true }));
+  let observed = "";
+  if (result.stream) for await (const chunk of result.stream) observed += chunk;
+  expect(result.attempts[0]?.error_detail?.provider_raw).toMatchObject({
+    error: { message: "quota for [redacted]", request_id: "up-123", detail: "original reason" },
+  });
+  expect(JSON.stringify(result.attempts)).not.toContain("actual-provider-secret");
+  expect(result.attempts[0]?.status).toBe(preOutput ? "error" : "ok");
+  if (!preOutput) expect(observed).toBe(wire);
+});

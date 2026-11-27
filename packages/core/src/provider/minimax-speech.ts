@@ -22,7 +22,10 @@ import { MiniMaxSubtitleSchema, minimaxTimestamp } from "./minimax-subtitle.js";
 import {
   type OpenAIClientDeps,
   type ProviderCallOptions,
+  providerErrorScrubber,
+  readUpstreamErrorBody,
   readUpstreamJsonWithinBudget,
+  safeUpstreamHeaders,
   UpstreamError,
 } from "./openai.js";
 
@@ -85,23 +88,27 @@ export function createMiniMaxSpeechClient(
       },
     );
     if (!response.ok) {
-      await response.body?.cancel();
+      const scrub = providerErrorScrubber(deps.config, auth);
+      const raw = await readUpstreamErrorBody(response, scrub, deps.responseWorkAdmission);
       throw new UpstreamError(
         "upstream_error",
         "speech upstream rejected request",
-        null,
+        raw,
         response.status,
+        scrub(safeUpstreamHeaders(response.headers)) as Record<string, string>,
       );
     }
-    return { req, response };
+    return { req, response, scrub: providerErrorScrubber(deps.config, auth) };
   }
-  function packet(raw: unknown) {
+  function packet(raw: unknown, scrub: (value: unknown) => unknown) {
     const parsed = Packet.safeParse(raw);
-    if (!parsed.success) throw new UpstreamError("upstream_error", "invalid speech response");
+    if (!parsed.success)
+      throw new UpstreamError("upstream_error", "invalid speech response", scrub(raw));
     if (parsed.data.base_resp.status_code !== 0)
       throw new UpstreamError(
         "upstream_error",
         `speech upstream business error ${parsed.data.base_resp.status_code}`,
+        scrub(raw),
       );
     return parsed.data;
   }
@@ -150,9 +157,10 @@ export function createMiniMaxSpeechClient(
           ...(timestamps.length ? { timestamps } : {}),
         };
       }
-      const { req, response } = await request(raw, false, opts);
+      const { req, response, scrub } = await request(raw, false, opts);
       const result = packet(
         await readUpstreamJsonWithinBudget(response, deps.responseWorkAdmission),
+        scrub,
       );
       return {
         audio: decodeSpeechHex(result.data?.audio ?? ""),
@@ -164,7 +172,7 @@ export function createMiniMaxSpeechClient(
       };
     },
     async *streamSpeech(raw, opts) {
-      const { req, response } = await request(raw, true, opts);
+      const { req, response, scrub } = await request(raw, true, opts);
       if (!response.body) throw new UpstreamError("upstream_error", "speech response missing body");
       try {
         let sequence = 0;
@@ -182,7 +190,7 @@ export function createMiniMaxSpeechClient(
           deps.responseWorkAdmission,
         )) {
           if (!frame.data || frame.data === "[DONE]") continue;
-          const result = packet(JSON.parse(frame.data));
+          const result = packet(JSON.parse(frame.data), scrub);
           // The documented final status=2 audio is a complete aggregate. Never replay it.
           if (result.data?.audio && !(result.data.status === 2 && sawAudio)) {
             const audio = decodeSpeechHex(result.data.audio);

@@ -37,6 +37,7 @@ function setup(
   const client = { realtimeCall } as unknown as ProviderClient;
   const registry = createRealtimeCallRegistry();
   const app = new Hono<AppEnv>();
+  const recordError = vi.fn();
   registerRealtimeRoutes(app, {
     auth: {
       resolve: async (credential) =>
@@ -65,9 +66,10 @@ function setup(
           ? { client, providerModel: model, alias: `openai-codex/${model}` }
           : null,
     registry,
+    recordError,
     concurrencyGate,
   });
-  return { app, realtimeCall, registry, sideband };
+  return { app, realtimeCall, registry, sideband, recordError };
 }
 
 describe("registerRealtimeRoutes", () => {
@@ -232,4 +234,31 @@ it("rejects weekly token-capped realtime sessions before unmetered upstream use"
   });
   expect(response.status).toBe(422);
   expect(realtimeCall).not.toHaveBeenCalled();
+});
+
+it("records realtime HTTP rejection content for the owning key", async () => {
+  const { app, realtimeCall, recordError } = setup();
+  realtimeCall.mockRejectedValue(
+    new UpstreamError(
+      "upstream_error",
+      "realtime rejected",
+      { error: { message: "unsupported session", code: "invalid_session" } },
+      400,
+    ),
+  );
+  await app.request("/v1/realtime/calls", {
+    method: "POST",
+    headers: { Authorization: "Bearer helm-key" },
+    body: multipart({ model: "gpt-realtime-1.5" }),
+  });
+  expect(recordError).toHaveBeenCalledWith(
+    expect.objectContaining({
+      keyId: "key-1",
+      alias: "openai-codex/gpt-realtime-1.5",
+      error: expect.objectContaining({
+        providerRaw: { error: { message: "unsupported session", code: "invalid_session" } },
+        upstreamStatus: 400,
+      }),
+    }),
+  );
 });

@@ -3,11 +3,13 @@ import {
   createBlockedModelMatcher,
   type ResponsesRegistryRecord,
   SpeechAccountingError,
+  UpstreamError,
 } from "@helm/core";
 import {
   AudioTranscriptionResultSchema,
   BailianTranscriptionRequestSchema,
   type MediaSpendRecord,
+  type ProviderAttempt,
 } from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -15,6 +17,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
 import { type AsyncMediaBilling, applyAsyncMediaCost } from "./async-media-cost.js";
+import { errorDetailOf } from "./execute.js";
 import {
   decodeMediaTaskBinding,
   encodeMediaTaskBinding,
@@ -23,6 +26,7 @@ import {
   MediaTaskBindingSchema,
 } from "./media-task-binding.js";
 import type { MessagesIdentity } from "./messages.js";
+import { recordUpstreamFailure } from "./upstream-failure.js";
 import type { VideoCreateTarget, VideosRouteDeps } from "./videos.js";
 
 const ResultSchema = z.strictObject({
@@ -151,6 +155,7 @@ export async function createNativeMediaTask(
     status: "ok" | "error",
     errorClass: string | null,
     upstream: Record<string, unknown> | null,
+    errorDetail?: ProviderAttempt["error_detail"],
   ) => Promise<void>,
   callerOperation?: string,
   mediaBilling?: AsyncMediaBilling,
@@ -348,6 +353,7 @@ export async function createNativeMediaTask(
       "error",
       rejected ? "upstream_rejected" : notSent ? "not_sent" : "outcome_unknown",
       null,
+      errorDetailOf(cause),
     );
     return error(
       c,
@@ -393,13 +399,28 @@ export async function pollNativeMediaTask(
     client.nativeTask.profile !== binding.profile
   )
     return error(c, 409, "task_provider_changed");
+  const recordFailure = (cause: unknown) =>
+    recordUpstreamFailure(deps.record, {
+      keyId: identity.keyId,
+      alias: binding.providerAlias,
+      model: binding.providerModel,
+      operation: `${kind}_poll`,
+      error: cause,
+      requestId: c.get("request_id"),
+      traceId: c.get("trace_id"),
+    });
   try {
     const signal = requestSignal(c);
     const raw = await client.retrieve(binding.upstreamId, signal);
     const normalized = client.nativeTask.normalize(raw, binding.upstreamId, binding.providerModel);
     const parsed = ResultSchema.safeParse(normalized);
-    if (!parsed.success) return error(c, 502, "invalid_task_result");
+    if (!parsed.success) {
+      await recordFailure(new UpstreamError("upstream_error", "invalid task result", raw));
+      return error(c, 502, "invalid_task_result");
+    }
     let result = parsed.data;
+    if (result.status === "failed")
+      await recordFailure(new UpstreamError("upstream_error", "upstream task failed", raw));
     if (result.status === "done" && (kind === "video" ? !result.video : !result.transcription))
       return error(c, 502, "missing_task_artifact");
     if (result.video && new URL(result.video.url).protocol !== "https:")
@@ -462,7 +483,8 @@ export async function pollNativeMediaTask(
       deps.log?.("media.task_state_update_failed", { request_id: requestId });
     }
     return c.json({ request_id: requestId, ...result });
-  } catch {
+  } catch (cause) {
+    await recordFailure(cause);
     return error(c, 502, "task_query_failed");
   }
 }

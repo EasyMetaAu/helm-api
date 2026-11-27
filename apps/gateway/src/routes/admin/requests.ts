@@ -5,6 +5,7 @@ import type {
   RequestPayloadPartRecord,
   ResponseWorkAdmission,
   SessionRevisionRecord,
+  TelemetryStore,
 } from "@helm/core";
 import {
   restoreSessionRevisionJson,
@@ -30,9 +31,9 @@ import type { AdminApiDeps } from "./deps.js";
 
 // Labels are admin-only decoration. Refresh each referenced pool once per page,
 // then resolve the recorded credential generation from the in-memory snapshot.
-async function enrichAccountLabels(
+export async function enrichAccountLabels(
   records: readonly DecisionRecord[],
-  deps: AdminApiDeps,
+  deps: Pick<AdminApiDeps, "apiKeyPools">,
   onUnavailable: (providerId: string) => void,
 ) {
   const poolIds = new Set(
@@ -193,16 +194,46 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     });
   });
 
+  registerRequestPayloadRoutes(app, deps);
+}
+
+export type RequestPayloadDeps = Pick<AdminApiDeps, "responseWorkAdmission"> & {
+  encodedPayloadOnly?: boolean;
+  authorizeSession?: (requestId: string, sessionRef: string) => Promise<boolean>;
+  telemetry: Pick<
+    TelemetryStore,
+    | "getByRequestId"
+    | "getPayload"
+    | "getPayloadMeta"
+    | "getPayloadPart"
+    | "getPayloadPartStream"
+    | "getPayloadPartEncoded"
+    | "getSessionRevisionMeta"
+    | "listSessionRevisionsPage"
+    | "streamSessionRevisionsPage"
+  >;
+};
+
+// Both authenticated surfaces use the same bounded payload/session recovery logic.
+// Portal installs its request and session ownership guards before registering this.
+export function registerRequestPayloadRoutes(
+  app: Hono<AppEnv>,
+  deps: RequestPayloadDeps,
+  prefix = "/admin/api/requests",
+  encodedOnly = false,
+): void {
+  deps = { ...deps, encodedPayloadOnly: encodedOnly };
   // GET /requests/:traceId/payload -> the captured full request/response bodies
   // (admin "System Settings" → capture_payloads). 200 with { captured:true, ... }
   // when present; 200 with { captured:false } when this request was served while
   // capture was OFF (or rows were pruned). The bodies are stored as JSON TEXT;
   // parse them back so the SPA renders structured JSON, falling back to the raw
   // string if it was a non-JSON stream (assembled SSE).
-  app.get("/admin/api/requests/:traceId/payload", async (c) => {
+  app.get(`${prefix}/:traceId/payload`, async (c) => {
     const traceId = c.req.param("traceId");
     const part = parsePayloadPart(c.req.query("part"));
-    if (part === "invalid") return c.json({ error: "invalid payload part" }, 400);
+    if (part === "invalid" || (encodedOnly && part === "full"))
+      return c.json({ error: "invalid payload part" }, 400);
     const recordedDecision = await deps.telemetry.getByRequestId(traceId);
     if (recordedDecision?.request_content_mode === "none") {
       return c.json({ captured: false, source: "unavailable", reason: "metadata_only" });
@@ -210,6 +241,12 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (part === "meta") {
       const meta = await getPayloadMeta(deps, traceId);
       if (!meta) {
+        if (
+          recordedDecision?.session &&
+          deps.authorizeSession &&
+          !(await deps.authorizeSession(traceId, recordedDecision.session.ref))
+        )
+          return c.json({ captured: false, source: "unavailable", reason: "session_unavailable" });
         const sessionMeta = await deps.telemetry.getSessionRevisionMeta?.(traceId);
         if (sessionMeta) {
           const decision = recordedDecision;
@@ -313,9 +350,44 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
         c.req.header("accept")?.includes("application/vnd.helm.payload") &&
         deps.telemetry.getPayloadPartEncoded
       ) {
-        const encoded = await deps.telemetry.getPayloadPartEncoded(traceId, part);
+        const admission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
+        const maxBytes = sessionRecoveryMaxWireBytes(admission);
+        const admitted = encodedOnly
+          ? await readPayloadWithinResponseWork(
+              deps,
+              () => deps.telemetry.getPayloadPartEncoded!(traceId, part, maxBytes),
+              (value) => value.bytes.byteLength,
+            )
+          : null;
+        if (admitted?.status === "limited")
+          return c.json({
+            captured: false,
+            source: "unavailable",
+            reason: "payload_recovery_limited",
+          });
+        const encoded = encodedOnly
+          ? admitted?.status === "loaded"
+            ? admitted.value
+            : null
+          : await deps.telemetry.getPayloadPartEncoded(traceId, part);
         if (encoded) {
-          return c.body(new Uint8Array(encoded.bytes), 200, {
+          const release = admitted?.status === "loaded" ? admitted.release : () => {};
+          let sent = false;
+          const body = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!sent) {
+                sent = true;
+                controller.enqueue(encoded.bytes);
+              } else {
+                controller.close();
+                release();
+              }
+            },
+            cancel() {
+              release();
+            },
+          });
+          return c.body(body, 200, {
             "cache-control": "no-store",
             "content-type": "application/vnd.helm.payload",
             ...(encoded.codec === "gzip" ? { "content-encoding": "gzip" } : {}),
@@ -324,7 +396,16 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
           });
         }
       }
-      const exactMeta = await deps.telemetry.getPayloadMeta?.(traceId);
+      // Portal must never fall through to global blob expansion from a JSON read.
+      if (encodedOnly) {
+        const stored = await getPayloadMeta(deps, traceId);
+        if (stored?.parts[part === "upstream_request" ? "upstreamRequest" : part])
+          return c.json(
+            { captured: false, source: "unavailable", reason: "encoded_payload_required" },
+            406,
+          );
+      }
+      const exactMeta = encodedOnly ? null : await deps.telemetry.getPayloadMeta?.(traceId);
       const partStored =
         exactMeta === undefined ||
         (exactMeta !== null &&
@@ -333,14 +414,15 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
             : part === "response"
               ? exactMeta.parts.response
               : exactMeta.parts.upstreamRequest));
-      const admitted = partStored
-        ? await readPayloadWithinResponseWork(
-            deps,
-            () => getPayloadPart(deps, traceId, part),
-            payloadPartWireBytes,
-            part === "response" ? exactMeta?.responseBytes : undefined,
-          )
-        : ({ status: "missing", value: null } as const);
+      const admitted =
+        !encodedOnly && partStored
+          ? await readPayloadWithinResponseWork(
+              deps,
+              () => getPayloadPart(deps, traceId, part),
+              payloadPartWireBytes,
+              part === "response" ? exactMeta?.responseBytes : undefined,
+            )
+          : ({ status: "missing", value: null } as const);
       if (admitted.status === "limited")
         return c.json({
           captured: false,
@@ -455,7 +537,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // transcript that the server refuses to rebuild (session_recovery_limited) still be
   // inspected. `maxBytes` caps a single page; each row is also hard-capped before
   // JSON serialization so one malformed historical revision cannot bypass the bound.
-  app.get("/admin/api/requests/:traceId/session-revisions", async (c) => {
+  app.get(`${prefix}/:traceId/session-revisions`, async (c) => {
     const traceId = c.req.param("traceId");
     // no_session (not a session request at all) is more fundamental than the store's
     // paging capability, so resolve the session ref FIRST.
@@ -465,6 +547,8 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     }
     const sessionRef = decision?.session?.ref;
     if (!sessionRef) return c.json({ captured: false, reason: "no_session" });
+    if (deps.authorizeSession && !(await deps.authorizeSession(traceId, sessionRef)))
+      return c.json({ error: "request not found" }, 404);
     // Streaming variant (NOT the all-or-nothing listSessionRevisionsPage the server-side
     // rebuild uses): every page returns ≥1 row and always advances the cursor, so a large
     // session pages through instead of dead-ending on an empty page.
@@ -518,7 +602,7 @@ const SESSION_REVISION_PAGE_LIMIT = 100;
 const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 async function getSessionRequest(
-  deps: AdminApiDeps,
+  deps: RequestPayloadDeps,
   requestId: string,
 ): Promise<
   | {
@@ -542,6 +626,8 @@ async function getSessionRequest(
   const decision = await deps.telemetry.getByRequestId(requestId);
   const sessionRef = decision?.session?.ref;
   if (!sessionRef) return { status: "unavailable", reason: "no_session" };
+  if (deps.authorizeSession && !(await deps.authorizeSession(requestId, sessionRef)))
+    return { status: "unavailable", reason: "session_unavailable" };
   if (!listPage) return { status: "unavailable", reason: "session_unavailable" };
   const budget = runtimeMemoryBudget();
   const responseAdmission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
@@ -643,10 +729,11 @@ function parsePayloadPart(value: string | undefined): PayloadPartQuery {
 }
 
 async function getPayloadMeta(
-  deps: AdminApiDeps,
+  deps: RequestPayloadDeps,
   requestId: string,
 ): Promise<RequestPayloadMeta | null> {
   if (deps.telemetry.getPayloadMeta) return deps.telemetry.getPayloadMeta(requestId);
+  if (deps.encodedPayloadOnly) return null;
   const p = await deps.telemetry.getPayload(requestId);
   return p ? metaFromPayload(p) : null;
 }
@@ -664,7 +751,7 @@ function metaFromPayload(p: RequestPayload): RequestPayloadMeta {
 }
 
 async function getPayloadPart(
-  deps: AdminApiDeps,
+  deps: RequestPayloadDeps,
   requestId: string,
   part: RequestPayloadPart,
 ): Promise<RequestPayloadPartRecord | null> {
@@ -697,7 +784,7 @@ function payloadPartWireBytes(payload: RequestPayloadPartRecord): number {
 }
 
 async function readPayloadWithinResponseWork<T>(
-  deps: AdminApiDeps,
+  deps: RequestPayloadDeps,
   read: () => Promise<T | null>,
   wireBytes: (value: T) => number,
   minimumWireBytes = 0,

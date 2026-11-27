@@ -8,6 +8,7 @@ import { z } from "zod";
 import { decodeSpeechHex, type SpeechSocketConnector } from "./media-speech.js";
 import { runSpeechSession } from "./media-speech-session.js";
 import { MiniMaxSubtitleSchema, minimaxTimestamp } from "./minimax-subtitle.js";
+import { providerErrorScrubber, UpstreamError } from "./openai.js";
 
 const Packet = z.object({
   event: z.string().optional(),
@@ -64,12 +65,20 @@ export async function createMiniMaxSpeechSession(
     },
     async receive(data, emit) {
       if (typeof data !== "string") throw new Error("unexpected MiniMax binary frame");
-      const packet = Packet.parse(JSON.parse(data));
+      const rawPacket: unknown = JSON.parse(data);
+      const packet = Packet.parse(rawPacket);
       const code = packet.base_resp?.status_code ?? 0;
       if (code === 2205) {
         // The protocol has no request ID. Retry only an unambiguous rejected input.
         if (pending.length !== 1 || pending[0]?.accepted || retries >= 2)
-          throw new Error("speech backpressure: rejected input cannot safely be replayed");
+          throw new UpstreamError(
+            "upstream_error",
+            "speech backpressure: rejected input cannot safely be replayed",
+            providerErrorScrubber(
+              { baseUrl: options.url },
+              options.headers.Authorization,
+            )(rawPacket),
+          );
         retries++;
         const rejectedText = pending[0]?.text;
         retryPending = (async () => {
@@ -84,7 +93,12 @@ export async function createMiniMaxSpeechSession(
         }
         return;
       }
-      if (code !== 0) throw new Error(`MiniMax speech business error ${code}`);
+      if (code !== 0)
+        throw new UpstreamError(
+          "upstream_error",
+          `MiniMax speech business error ${code}`,
+          providerErrorScrubber({ baseUrl: options.url }, options.headers.Authorization)(rawPacket),
+        );
       if (packet.event === "connected_success") {
         await send("task_start", {
           model: req.model,

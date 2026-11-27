@@ -10,6 +10,7 @@ import {
   transcriptionOperationIdPattern,
   transcriptionOperationStoreId,
 } from "@helm/core";
+import type { AttemptErrorDetail } from "@helm/shared";
 import {
   AudioTranscriptionRequestSchema,
   evaluateClientPolicy,
@@ -28,6 +29,7 @@ import {
   checkSpeechBudget,
   SpeechAdmissionError,
 } from "./audio-speech.js";
+import { errorDetailOf } from "./execute.js";
 import type { MessagesIdentity } from "./messages.js";
 import type {
   TranscriptionResultSelection,
@@ -59,6 +61,7 @@ export interface AudioTranscriptionsRouteDeps
     result?: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>>;
     errorCode?: string;
     costUsd?: number | null;
+    errorDetail?: AttemptErrorDetail;
     operationId?: string;
   }) => Promise<void>;
 }
@@ -299,6 +302,7 @@ export function registerAudioTranscriptionsRoute(
         }
       }
       let result: Awaited<ReturnType<AudioTranscriptionClient["transcribe"]>> | undefined;
+      let errorDetail: AttemptErrorDetail | undefined;
       let errorCode: string | undefined;
       let releaseUncertain = false;
       try {
@@ -316,6 +320,7 @@ export function registerAudioTranscriptionsRoute(
         }
         // Finalize below before returning accounting metadata.
       } catch (error) {
+        errorDetail = errorDetailOf(error);
         if (
           error instanceof AudioTranscriptionError &&
           error.code === "transcription_capacity_exhausted"
@@ -372,6 +377,7 @@ export function registerAudioTranscriptionsRoute(
             status: result ? "completed" : "error",
             result,
             errorCode,
+            errorDetail,
             costUsd: spend?.costUsd,
             operationId: spend ? (callerOperationId ?? spend.id) : undefined,
           });

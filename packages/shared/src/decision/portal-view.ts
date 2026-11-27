@@ -1,13 +1,8 @@
 import type { DecisionRecord } from "./schema.js";
 
-// The lane/result view a key holder is entitled to see for THEIR OWN request
-// (spec §4.3). WHITELIST projection: only fields listed here reach the portal —
-// so adding a field to DecisionRecord can never silently leak it (a blacklist
-// would). Deliberately absent: provider aliases, serving_account, wire model ids,
-// the classifier/eval reasoning chain, the candidate chain, upstream payload —
-// all routing topology / supply-chain IP (principle 6, §8 R7). `attempts` shows
-// that a fallback happened (outcome + latency per try) WITHOUT naming which
-// alias/provider/model was tried — that stays supply-chain internal.
+// Compact lane/result projection for Portal lists and legacy detail consumers.
+// The owned single-request endpoint separately exposes a validated full decision
+// trail. Adding fields here still requires an explicit whitelist change.
 export interface PortalDecisionView {
   /** Unique Helm-generated lookup/ownership id returned as X-Helm-Request-Id. */
   request_id: string;
@@ -49,7 +44,7 @@ export interface PortalDecisionView {
   /** Fallback attempts actually made for THIS request — outcome + latency ONLY.
    *  Deliberately excludes alias/provider_name/provider_model (routing topology
    *  / supply chain, principle 6 §8 R7): a key holder may see "attempt 1 timed
-   *  out, attempt 2 succeeded" but never WHICH provider/model was tried. */
+   *  out, attempt 2 succeeded" without expanding this compact projection. */
   attempts: Array<{
     outcome: "success" | "error" | "timeout" | "rate_limited" | "circuit_open" | "skipped";
     latency_ms: number;

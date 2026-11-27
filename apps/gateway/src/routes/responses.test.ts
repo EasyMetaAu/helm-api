@@ -3877,7 +3877,19 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
       yield { event: "response.failed", data: failedData };
     }
     const decision = {
-      provider_attempts: [{ status: "ok" }],
+      provider_attempts: [
+        {
+          status: "ok",
+          error_detail: {
+            upstream_status: null,
+            message: "The prompt is invalid.",
+            provider_raw: {
+              type: "response.failed",
+              response: { error: { code: "invalid_prompt", message: "The prompt is invalid." } },
+            },
+          },
+        },
+      ],
       final: { status: "ok", model_alias: "gpt-5.6-sol", error_reason: null },
       stream_outcome: null,
     } as unknown as DecisionRecord;
@@ -3920,6 +3932,59 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
     });
   });
 
+  it("does not rebuild diagnostics from an oversized unsanitized terminal frame", async () => {
+    const { record, insert } = makeRecord();
+    const put = vi.fn();
+    const failedData = JSON.stringify({
+      type: "response.failed",
+      response: {
+        id: "resp_fail_1",
+        status: "failed",
+        error: { code: "invalid_prompt", message: "x".repeat(70000) + " actual-provider-secret" },
+      },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.output_text.delta",
+        data: JSON.stringify({ type: "response.output_text.delta", delta: "partial" }),
+      };
+      yield { event: "response.failed", data: failedData };
+    }
+    const decision = {
+      provider_attempts: [{ status: "ok" }],
+      final: { status: "ok", model_alias: "gpt-5.6-sol", error_reason: null },
+      stream_outcome: null,
+    } as unknown as DecisionRecord;
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      run: async () => ({
+        decision,
+        nativePassthrough: true,
+        collect: async () => ({}),
+        streamIR: events,
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_fail_1", status: "failed" }),
+    );
+    expect(insert).toHaveBeenCalledOnce();
+    const persisted = insert.mock.calls[0]?.[0].decision as DecisionRecord;
+    expect(persisted.provider_attempts[0]?.status).toBe("ok");
+    expect(persisted.stream_outcome).toBe("failed");
+    expect(persisted.final.error_detail?.provider_raw).toBeNull();
+    expect(persisted.final.error_detail?.upstream_event).toBe("response.failed");
+    expect(JSON.stringify(persisted.final.error_detail)).not.toContain("actual-provider-secret");
+  });
+
   it("keeps an exact error frame when the upstream then throws a generic EOF error", async () => {
     const { record, insert } = makeRecord();
     async function* events(): AsyncIterable<Record<string, unknown>> {
@@ -3937,7 +4002,19 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
       throw new UpstreamError("upstream_error", "stream closed before response.completed");
     }
     const decision = {
-      provider_attempts: [{ status: "ok" }],
+      provider_attempts: [
+        {
+          status: "ok",
+          error_detail: {
+            upstream_status: null,
+            message: "The prompt is invalid.",
+            provider_raw: {
+              type: "response.failed",
+              response: { error: { code: "invalid_prompt", message: "The prompt is invalid." } },
+            },
+          },
+        },
+      ],
       final: { status: "ok", model_alias: "gpt-5.6-sol", error_reason: null },
       stream_outcome: null,
     } as unknown as DecisionRecord;

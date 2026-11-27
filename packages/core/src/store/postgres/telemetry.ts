@@ -1339,6 +1339,7 @@ export class PgTelemetryStore implements TelemetryStore {
   async getPayloadPartEncoded(
     requestId: string,
     part: RequestPayloadPart,
+    maxBytes?: number,
   ): Promise<EncodedRequestPayloadPartRecord | null> {
     const column =
       part === "request"
@@ -1354,7 +1355,17 @@ export class PgTelemetryStore implements TelemetryStore {
         createdAt: requestPayloads.createdAt,
       })
       .from(requestPayloads)
-      .where(eq(requestPayloads.requestId, requestId))
+      .where(
+        and(
+          eq(requestPayloads.requestId, requestId),
+          maxBytes === undefined
+            ? undefined
+            : sql`octet_length(${column}) <= ${Math.max(0, Math.floor(maxBytes))}`,
+          maxBytes !== undefined && part === "response"
+            ? sql`${requestPayloads.responseBodyGeneration} IS NULL`
+            : undefined,
+        ),
+      )
       .limit(1);
     const row = rows[0];
     if (row && part === "response" && row.generation)
