@@ -434,7 +434,7 @@ describe("registerInteractionsRoute", () => {
     expect(await res.json()).toEqual({
       error: {
         code: 503,
-        message: "image create outcome is unknown",
+        message: "image create outcome is unknown [upstream HTTP 502]",
         status: "INTERNAL",
       },
     });

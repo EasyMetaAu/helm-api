@@ -1,8 +1,10 @@
-import { makeOpenAIError, openaiTransformErrorOut } from "@helm/core";
+import { makeOpenAIError, openaiTransformErrorOut, UpstreamError } from "@helm/core";
 import { type ErrorClass, type HelmError, HelmErrorSchema } from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { clientErrorMessage } from "../routes/client-error.js";
+import { errorDetailOf } from "../routes/execute.js";
 import { RequestAdmissionError } from "../runtime/memory-admission.js";
 
 // The OpenAI error wire shape (type/code/status) lives in ONE place —
@@ -98,13 +100,13 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
     );
   }
 
-  if (isClientDisconnect(err)) {
+  const helm = asHelmError(err);
+  if (helm === null && !(err instanceof UpstreamError) && isClientDisconnect(err)) {
     // Client went away — do not map to 5xx, do not record a provider fault.
     logger.log("info", "request.client_disconnect", { trace_id: traceId });
     return c.body(null, 499 as ContentfulStatusCode);
   }
 
-  const helm = asHelmError(err);
   const errorClass: ErrorClass = helm?.error_class ?? "upstream_error";
 
   // Render via the canonical OpenAI transformer. A real HelmError renders
@@ -114,7 +116,10 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
     ? openaiTransformErrorOut({ ...helm, trace_id: traceId })
     : makeOpenAIError({
         error_class: "upstream_error",
-        message: "internal error",
+        message:
+          err instanceof UpstreamError
+            ? clientErrorMessage(errorDetailOf(err), "upstream request failed")
+            : "internal error",
         trace_id: traceId,
       });
 

@@ -19,6 +19,7 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
+import { clientErrorMessage } from "./client-error.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import {
   type ImageAttempt,
@@ -428,7 +429,12 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       return errorJson(
         c,
         outcome.httpStatus as ContentfulStatusCode,
-        outcome.message,
+        clientErrorMessage(
+          outcome.attempts.findLast((attempt) => !attempt.skipped && attempt.error_detail)
+            ?.error_detail,
+          outcome.message,
+          false,
+        ),
         geminiStatusFor(outcome.errorClass),
       );
     }

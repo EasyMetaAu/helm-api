@@ -30,6 +30,7 @@ import {
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
+import { clientErrorMessage } from "./client-error.js";
 import {
   atEventBoundary,
   createStreamAbort,
@@ -762,7 +763,12 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
-            markStartedStreamError(result.decision, errorClass, err);
+            markStartedStreamError(
+              result.decision,
+              errorClass,
+              err instanceof PipelineError ? undefined : err,
+            );
+            re.message = clientErrorMessage(result.decision.final.error_detail, re.message);
             const out = anthropic.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`event: error\ndata: ${data}\n\n`);

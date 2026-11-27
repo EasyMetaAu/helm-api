@@ -45,6 +45,7 @@ import {
   updateArkTaskState,
 } from "./ark-media-task.js";
 import { applyAsyncMediaCost, captureAsyncMediaBilling } from "./async-media-cost.js";
+import { clientErrorMessage } from "./client-error.js";
 import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import { PASSTHROUGH_CLASSIFIER } from "./image-telemetry.js";
@@ -145,7 +146,18 @@ function errorJson(
   message: string,
   code: string,
 ): Response {
-  return c.json({ error: { message, type: "invalid_request_error", code, param: null } }, status);
+  return c.json(
+    {
+      error: {
+        message,
+        type: "invalid_request_error",
+        code,
+        param: null,
+        trace_id: c.get("trace_id"),
+      },
+    },
+    status,
+  );
 }
 
 function isTerminal(status: unknown): status is string {
@@ -685,13 +697,18 @@ export function registerMediaTaskRoutes(
           return errorJson(
             c,
             rejected.upstreamStatus as ContentfulStatusCode,
-            "media create was rejected by the provider",
+            clientErrorMessage(errorDetail, "media create was rejected by the provider", false),
             "upstream_rejected",
           );
         }
       }
       await recordStart("error", "outcome_unknown", null, errorDetail);
-      return errorJson(c, 503, "video create outcome is unknown", "outcome_unknown");
+      return errorJson(
+        c,
+        503,
+        clientErrorMessage(errorDetail, "video create outcome is unknown", !isArk),
+        "outcome_unknown",
+      );
     }
     const upstreamRequestId = isArk ? parseArkTaskCreate(upstream) : upstream.request_id;
     if (typeof upstreamRequestId !== "string" || upstreamRequestId.length === 0) {
@@ -903,7 +920,12 @@ export function registerMediaTaskRoutes(
         status: "upstream_error",
         terminal: false,
       });
-      return errorJson(c, 502, "video poll failed", "upstream_error");
+      return errorJson(
+        c,
+        502,
+        clientErrorMessage(errorDetailOf(cause), "video poll failed", arkBinding === null),
+        "upstream_error",
+      );
     }
     const observedAt = (deps.now ?? Date.now)();
     const normalized =

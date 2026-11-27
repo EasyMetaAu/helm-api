@@ -680,6 +680,12 @@ it("records safe native media rejection diagnostics without retrying a paid crea
   );
   const response = await t.post();
   expect(response.status).toBe(400);
+  const wire = (await response.json()) as { error: { message: string } };
+  expect(wire.error.message).toContain("invalid_api_key");
+  expect(wire.error.message).toContain("401");
+  expect(wire.error.message).toContain("upstream-error-123");
+  expect(JSON.stringify(wire)).not.toContain("token=secret");
+  expect(JSON.stringify(wire)).not.toContain("Bearer secret");
   expect(t.create).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain('"upstream_status":401');
   expect(JSON.stringify(enqueueTelemetry.mock.calls)).toContain("invalid_api_key");

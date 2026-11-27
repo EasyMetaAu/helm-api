@@ -21,6 +21,8 @@ import {
   RequestAdmissionError,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
+import { clientErrorMessage } from "./client-error.js";
+import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 
 const FORWARDED_HEADERS = [
@@ -291,7 +293,12 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
           status === 503
           ? status
           : 502,
-        cause instanceof Error ? cause.message : "realtime upstream failed",
+        clientErrorMessage(
+          cause instanceof UpstreamError ? errorDetailOf(cause) : null,
+          cause instanceof UpstreamError
+            ? errorDetailOf(cause).message
+            : "realtime upstream failed",
+        ),
         "upstream_error",
       );
     }

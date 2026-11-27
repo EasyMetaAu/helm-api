@@ -560,7 +560,7 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
       error: {
-        message: "Unknown parameter: 'response_format'.",
+        message: "Unknown parameter: 'response_format'. [upstream HTTP 400; code=400]",
         type: "invalid_request_error",
         code: "invalid_request",
         param: null,

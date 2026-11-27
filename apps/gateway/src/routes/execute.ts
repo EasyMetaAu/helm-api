@@ -61,6 +61,7 @@ import {
   REQUEST_TIMEOUT_REASON,
   requestCancellationReason,
 } from "../request-cancellation.js";
+import { clientErrorMessage } from "./client-error.js";
 import {
   usageFromAnthropicResponse,
   usageFromGeminiResponse,
@@ -2790,6 +2791,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       message = nativeItemsSkipped
         ? "request carries Responses native items (e.g. Codex sub-agent / encrypted agent_message) that cannot be translated to another provider; the only compatible providers were unavailable, and no cross-provider fallback is possible for this request"
         : "all providers in the candidate chain failed";
+    }
+    if (errorClass === "all_providers_failed") {
+      const detail = attempts.findLast(
+        (attempt) => !attempt.skipped && attempt.error_detail,
+      )?.error_detail;
+      message = clientErrorMessage(detail, message);
     }
     return {
       attempts,

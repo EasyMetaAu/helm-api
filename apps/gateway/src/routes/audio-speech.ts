@@ -28,6 +28,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import type { ConcurrencyGatePort } from "../middleware/concurrency.js";
 import { requestSignal } from "../middleware/limits.js";
+import { clientErrorMessage } from "./client-error.js";
 import { errorDetailOf } from "./execute.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
@@ -500,7 +501,13 @@ export function registerAudioSpeechRoute(app: Hono<AppEnv>, deps: AudioSpeechRou
       return c.json(
         {
           error: {
-            message: known ? error.message : "speech request failed",
+            message: known
+              ? error.message
+              : clientErrorMessage(
+                  error instanceof UpstreamError ? errorDetailOf(error) : null,
+                  "speech request failed",
+                ),
+            trace_id: c.get("trace_id"),
             ...(spend ? { operation_id: spend.id } : {}),
             type: known ? "invalid_request_error" : "upstream_error",
             code: known ? error.code : spend ? "outcome_unknown" : "upstream_error",

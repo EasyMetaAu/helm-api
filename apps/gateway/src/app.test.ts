@@ -282,3 +282,43 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect((await app.request("/healthz")).status).toBe(200);
   });
 });
+
+it("returns a scrubbed upstream explanation from utility endpoints without exposing internals", async () => {
+  const { UpstreamError } = await import("@helm/core");
+  const { logger } = fakeLogger();
+  const response = handleError(
+    new UpstreamError(
+      "upstream_error",
+      "upstream returned 400",
+      {
+        error: { code: "invalid_input", message: "Input must contain messages" },
+        secret: "private",
+        request_id: "up-123",
+      },
+      400,
+    ),
+    mockCtx(logger, "trace-123"),
+  );
+  expect(response.status).toBe(502);
+  const body = (await response.json()) as { error: { message: string; trace_id: string } };
+  expect(body.error.message).toContain("Input must contain messages");
+  expect(body.error.message).toContain("up-123");
+  expect(body.error.trace_id).toBe("trace-123");
+  expect(JSON.stringify(body)).not.toContain("private");
+});
+
+it("does not turn an aborted upstream transaction into an empty client-disconnect response", async () => {
+  const { logger } = fakeLogger();
+  const response = handleError(
+    new HelmHttpError(
+      makeHelmError({
+        error_class: "all_providers_failed",
+        message: "transaction aborted",
+        trace_id: "t",
+      }),
+    ),
+    mockCtx(logger, "t"),
+  );
+  expect(response.status).toBe(502);
+  expect(await response.text()).toContain("transaction aborted");
+});

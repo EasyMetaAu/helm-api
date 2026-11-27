@@ -17,6 +17,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app.js";
 import { requestSignal } from "../middleware/limits.js";
 import { type AsyncMediaBilling, applyAsyncMediaCost } from "./async-media-cost.js";
+import { clientErrorMessage } from "./client-error.js";
 import { errorDetailOf } from "./execute.js";
 import {
   decodeMediaTaskBinding,
@@ -59,13 +60,18 @@ function error(
   status: ContentfulStatusCode,
   code: string,
   operationId?: string,
+  detail?: ProviderAttempt["error_detail"],
 ): Response {
   return c.json(
     {
       error: {
         type: "upstream_error",
         code,
-        message: code === "budget_exceeded" ? "usage budget exceeded" : code.replaceAll("_", " "),
+        message: clientErrorMessage(
+          detail,
+          code === "budget_exceeded" ? "usage budget exceeded" : code.replaceAll("_", " "),
+        ),
+        trace_id: c.get("trace_id"),
         ...(operationId ? { operation_id: operationId } : {}),
       },
     },
@@ -349,17 +355,19 @@ export async function createNativeMediaTask(
     } catch {
       /* The pre-dispatch durable reservation remains for reconciliation. */
     }
+    const detail = errorDetailOf(cause);
     await recordStart(
       "error",
       rejected ? "upstream_rejected" : notSent ? "not_sent" : "outcome_unknown",
       null,
-      errorDetailOf(cause),
+      detail,
     );
     return error(
       c,
       rejected ? 400 : 503,
       rejected ? "upstream_rejected" : notSent ? "upstream_not_sent" : "outcome_unknown",
       receipt,
+      detail,
     );
   }
 }
@@ -485,6 +493,6 @@ export async function pollNativeMediaTask(
     return c.json({ request_id: requestId, ...result });
   } catch (cause) {
     await recordFailure(cause);
-    return error(c, 502, "task_query_failed");
+    return error(c, 502, "task_query_failed", undefined, errorDetailOf(cause));
   }
 }
