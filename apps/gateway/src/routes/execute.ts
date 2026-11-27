@@ -1455,15 +1455,24 @@ function diagnosticValue(
 
 // Build the credential-safe per-attempt error_detail. Keep status/body/headers and
 // transport cause/stack; remove only actual credentials before persistence.
+const diagnosticScrubbers = new WeakMap<object, (value: unknown) => unknown>();
+
 export function errorDetailOf(err: unknown): AttemptErrorDetail {
+  const scrub =
+    err instanceof Error
+      ? (diagnosticScrubbers.get(err) ?? ((value: unknown) => value))
+      : (value: unknown) => value;
   const budget: DiagnosticBudget = {
     remainingChars: DIAGNOSTIC_TOTAL_STRING_MAX,
     remainingNodes: DIAGNOSTIC_NODE_MAX,
   };
   const message = diagnosticString(err instanceof Error ? err.message : String(err), budget);
-  const stack = err instanceof Error && err.stack ? diagnosticString(err.stack, budget) : null;
+  const stack =
+    err instanceof Error && err.stack ? diagnosticString(String(scrub(err.stack)), budget) : null;
   const cause =
-    err instanceof Error && err.cause !== undefined ? diagnosticValue(err.cause, budget) : null;
+    err instanceof Error && err.cause !== undefined
+      ? diagnosticValue(scrub(err.cause), budget)
+      : null;
   if (err instanceof UpstreamError) {
     return {
       upstream_status: err.upstreamStatus,
@@ -1981,17 +1990,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const onDiagnosticScrubber = (scrub: (value: unknown) => unknown) => {
           diagnosticScrub = scrub;
         };
-        const scrubFailure = (error: unknown) =>
-          error instanceof UpstreamError
-            ? new UpstreamError(
-                error.errorClass,
-                String(diagnosticScrub(error.message)),
-                diagnosticScrub(error.providerRaw),
-                error.upstreamStatus,
-                diagnosticScrub(error.upstreamHeaders) as Record<string, string> | null,
-                diagnosticScrub(error.cause),
-              )
-            : error;
+        const scrubFailure = (error: unknown) => {
+          if (error instanceof UpstreamError) {
+            // Keep subtype and identity: Codex capacity/affinity errors carry
+            // trusted retry semantics that must survive diagnostic handling.
+            diagnosticScrubbers.set(error, diagnosticScrub);
+            Object.assign(error, {
+              message: String(diagnosticScrub(error.message)),
+              providerRaw: diagnosticScrub(error.providerRaw),
+              upstreamHeaders: diagnosticScrub(error.upstreamHeaders),
+            });
+          }
+          return error;
+        };
         let pendingStreamError: AttemptErrorDetail | null = null;
         const observeStream = async function* (source: AsyncIterable<string>, protocol: Protocol) {
           const observe = createSSEErrorObserver(protocol, (error) => {
