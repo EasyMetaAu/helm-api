@@ -20,8 +20,6 @@ const providerPageKeys = [
   '{n} resets remaining',
   'Claude reset is currently cooling down',
   'Claude reset affects every connected token in the same Claude organization',
-  'Reset Claude usage',
-  'Confirm Claude usage reset',
   'Failed to reset Claude usage',
   'Failed to load OAuth providers',
   'Failed to refresh providers',

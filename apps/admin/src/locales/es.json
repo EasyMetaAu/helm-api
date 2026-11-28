@@ -1383,5 +1383,14 @@
   "Lane · fallback": "Lane · fallback",
   "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.",
   "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.",
-  "{n} accounts": "{n} accounts"
+  "{n} accounts": "{n} accounts",
+  "Weekly limit resets": "Weekly limit resets",
+  "Fable resets": "Fable resets",
+  "Other Claude resets": "Other Claude resets",
+  "Reset weekly limit": "Reset weekly limit",
+  "Reset Fable allowance": "Reset Fable allowance",
+  "Confirm {action}": "Confirm {action}",
+  "Resets the whole 7-day limit for this Claude account.": "Resets the whole 7-day limit for this Claude account.",
+  "Refills the Fable allowance and gives back what Fable used of the weekly limit. It does not reset the whole week.": "Refills the Fable allowance and gives back what Fable used of the weekly limit. It does not reset the whole week.",
+  "Restores the Claude limits listed below.": "Restores the Claude limits listed below."
 }
