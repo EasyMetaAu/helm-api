@@ -1377,10 +1377,10 @@
   "On": "On",
   "Via proxy": "Via proxy",
   "Connects directly, no proxy": "Connects directly, no proxy",
-  "Lower numbers are used first. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "Lower numbers are used first. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.",
   "This key pool takes turns. Its priority still applies in lanes that mix accounts by priority, or after switching it to manual priority.": "This key pool takes turns. Its priority still applies in lanes that mix accounts by priority, or after switching it to manual priority.",
   "Mix accounts by priority": "Mix accounts by priority",
   "In pool": "In pool",
   "Lane · fallback": "Lane · fallback",
-  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first. Lane names stay as fallbacks after them. Set priorities on the Providers page."
+  "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.",
+  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page."
 }

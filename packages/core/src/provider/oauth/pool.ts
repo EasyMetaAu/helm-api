@@ -632,11 +632,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): PriorityAccount[] {
     const nowMs = now();
     const preferred = preferHealthyTier(eligibleEntries(nowMs, exclude, model), nowMs);
+    const sharingEligible = new Set(preferred);
     const eligible = new Set(preferredCapacityTier(preferred, avoidBusy).candidates);
     return entries.map((entry) => ({
       account: entry.member.account,
       priority: entry.member.routingPriority ?? entry.member.priority,
       eligible: eligible.has(entry),
+      sharingEligible: sharingEligible.has(entry),
     }));
   }
   function priorityPinned(req: InternalRequest): boolean {
@@ -1733,6 +1735,29 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       snapshot: async (model, request) =>
         prioritySnapshot(model, undefined, request ? isUserMessageRequest(request) : false),
       isPinned: priorityPinned,
+      affinityHash: (request) => {
+        try {
+          const key = request.native_request
+            ? stickyKeyFromNative(request.native_request)
+            : stickyKeyFromChat({
+                ...request.provider_raw,
+                // These normalized fields are forwarded on the translated path.
+                ...(request.prompt_cache_key === undefined
+                  ? {}
+                  : { prompt_cache_key: request.prompt_cache_key }),
+                ...(request.user === undefined ? {} : { user: request.user }),
+                ...(request.safety_identifier === undefined
+                  ? {}
+                  : { safety_identifier: request.safety_identifier }),
+              } as ChatCompletionRequest);
+          return key && !isStrictAccountSticky(key)
+            ? createHash("sha256").update(key).digest("hex")
+            : null;
+        } catch {
+          // Soft affinity is advisory. Strict identity validation still runs at dispatch.
+          return null;
+        }
+      },
     },
     ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
     supportsResponsesNativeItems: entries.every(

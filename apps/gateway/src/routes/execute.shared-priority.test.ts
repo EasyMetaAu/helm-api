@@ -34,6 +34,7 @@ afterEach(() => vi.useRealTimers());
 type ProviderCallOptions = NonNullable<Parameters<ProviderClient["chatCompletion"]>[1]>;
 interface Scenario {
   wallClock?: boolean;
+  priorityRandom?: () => number;
   nestedLanePriority?: "no-direct" | "with-direct";
   keyStrategy?: "round_robin" | "manual_priority";
   keyModel?: string;
@@ -237,6 +238,7 @@ async function fixture(stream: boolean, scenario: Scenario = {}) {
   });
   const priorityEvents: Record<string, unknown>[] = [];
   const execute = createExecute({
+    accountPriorityRandom: scenario.priorityRandom,
     log: (_level, event, fields) => {
       if (event === "provider.account_priority") priorityEvents.push(fields);
     },
@@ -693,16 +695,20 @@ it("a preview read failure leaves default routing and credential checks at their
   expect(f.calls).toEqual(["subscription-A"]);
 });
 
-it("uses lane order for equal non-default priorities and logs actual account order", async () => {
-  const f = await fixture(false, { success: "key-A" });
+it("shares equal non-default priorities across pools and logs actual account order", async () => {
+  const f = await fixture(false, { success: "key-A", priorityRandom: () => 0.5 });
   for (const member of f.members) member.priority = 20;
   const result = await f.run();
-  expect(f.calls).toEqual(["subscription-A", "subscription-B", "key-A"]);
+  expect(f.calls).toEqual(["subscription-A", "key-A"]);
   expect(f.priorityEvents.map((event) => [event.priority, event.sequence])).toEqual([
     [20, 1],
     [20, 2],
-    [20, 3],
   ]);
+  expect(f.priorityEvents[0]).toMatchObject({
+    pool_selection_reason: "weighted_random",
+    pool_weight: 2,
+    tier_pool_count: 2,
+  });
   expect(result.final.status).toBe("ok");
 });
 

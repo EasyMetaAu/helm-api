@@ -14,6 +14,7 @@ import {
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { ConfigStore } from "../store/ports.js";
+import { AccountPriorityCursor } from "./account-priority.js";
 import { AudioTranscriptionError } from "./audio-transcription.js";
 import { guardPreOutputFailure, preOutputClassifierFor } from "./failover-guard.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./oauth/pool.js";
@@ -598,6 +599,8 @@ export function createApiKeyPoolClient(deps: {
               (lanePriority ? [{ account: "static", priority: 50, eligible: true }] : [])
             );
           },
+          affinityHash: (request: import("@helm/shared").InternalRequest) =>
+            pool?.accountPriority?.affinityHash?.(request) ?? null,
           isPinned: (request: import("@helm/shared").InternalRequest) =>
             pool?.accountPriority?.isPinned(request) ?? false,
         } satisfies NonNullable<ProviderClient["accountPriority"]>;
@@ -613,6 +616,15 @@ export function createApiKeyPoolClient(deps: {
             "upstream_error",
             `API key pool does not support ${String(property)}`,
           );
+        if (
+          !active.accountPriority &&
+          (property === "chatCompletion" ||
+            property === "nativePassthrough" ||
+            streamMethods.has(String(property)))
+        ) {
+          const cursor = record(args[1]).accountPriorityCursor;
+          if (cursor instanceof AccountPriorityCursor) cursor.onSelect?.("static", 50);
+        }
         return Reflect.apply(fn, active, args) as unknown;
       };
       if (streamMethods.has(String(property)))

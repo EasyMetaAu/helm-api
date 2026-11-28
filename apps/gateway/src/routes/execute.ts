@@ -128,6 +128,8 @@ interface ProviderProtocolMetadata {
 }
 
 export interface ExecuteAdapterDeps {
+  /** Per-request cross-pool randomness; injectable for deterministic tests. */
+  accountPriorityRandom?: () => number;
   /** Default/fallback provider client: used only for unknown aliases
    *  (Phase-0 single-provider passthrough). */
   defaultProvider: ProviderClient;
@@ -2048,6 +2050,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Past the gates → this candidate is attempted against the upstream. A
         // failure from here on is a PROVIDER fault, not a capability gap.
         attemptedAny = true;
+        if (!provider.accountPriority) accountPriorityCursor?.onSelect?.("static", 50);
 
         const outboundRequests: import("@helm/shared").OutboundRequestAudit[] = [];
         passthrough.outbound_requests = outboundRequests;
@@ -3030,9 +3033,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       let sequence = 0;
       const holders = new Map<string, ServingAccountHolder>();
       const parentHolder = servingAccountStore.getStore();
+      const affinityHash =
+        [...group]
+          .sort()
+          .map((member) => resolveTarget(member).provider?.accountPriority?.affinityHash?.(req))
+          .find((hash) => hash != null) ?? null;
       const outcome = await coordinateAccountPriority(
         group.map((member) => ({
           alias: member,
+          pool: resolveTarget(member).providerName ?? member,
           candidates:
             laneSnapshots.get(member) ??
             pools.find((pool) => pool.alias === member)?.candidates ??
@@ -3046,12 +3055,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               account,
               priority,
               sequence: ++sequence,
+              ...cursor.poolSelection,
             });
           };
           const holder: ServingAccountHolder = { selected: null };
           holders.set(member, holder);
           return servingAccountStore.run(holder, () => runAlias(member, cursor));
         },
+        { affinityHash, random: deps.accountPriorityRandom },
       );
       // The last completed alias is the winner/terminal attempt; cancelled cursors retain only actual pre-output failures.
       const finalAlias =

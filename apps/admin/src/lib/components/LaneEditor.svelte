@@ -368,7 +368,7 @@
         <span class="field-label">{$t('Mix accounts by priority')}</span>
         <span class="field-help">
           {$t(
-            'When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first. Lane names stay as fallbacks after them. Set priorities on the Providers page.',
+            'When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.',
           )}
         </span>
       </div>

@@ -246,8 +246,9 @@ does not change the selected lane's group. Bare model names are not group member
 With a non-default eligible priority, the group executes at its first member's
 position in the expanded chain. Earlier lane expansions remain before it; after
 the group, the remaining expanded candidates retain their order, with already
-consumed group members skipped. Accounts sort by ascending priority, then original chain
-index. Within one pool and priority tier, the pool keeps its existing tiebreak/LRU.
+consumed group members skipped. Accounts sort by ascending priority. At an equal
+priority, eligible member pools share traffic as described below. Within one pool
+and priority tier, the pool keeps its existing strategy/tiebreak/LRU.
 OAuth pools and API-key pools of **either** `manual_priority` or `round_robin`
 participate; this opt-in overrides round-robin's usual disregard for stored
 priorities. Providers using a static/environment key or no key count as one account
@@ -287,8 +288,55 @@ members, routing is exactly the flag-off path.
 For an alias-mapped request, the client's requested model may be promoted to the
 head of the chain. A higher-priority account on another direct member can still
 serve first: the opted-in lane represents one pool of approved substitutes.
-Promotion remains the tie-break order for equal account priorities. Explicit
-single-model requests and strict account affinity retain their existing behavior.
+Equal-priority members share traffic, so promotion does not reserve the first
+choice for the requested model either. Chain order still resolves multiple aliases
+of the same selected pool. Explicit single-model requests and strict account
+affinity retain their existing behavior.
+
+### Equal-priority sharing across pools
+
+Both same-wire-model OAuth/manual-key groups (#1070) and opted-in lane groups
+(#1071) use the same scheduling rule: **same priority means shared traffic across
+pools**, not subscription-first draining. The current lowest eligible priority tier
+runs first. Each member pool's weight is its eligible account count at that tier,
+ignoring instantaneous busy/capacity state; dispatch still handles capacity inside
+the chosen pool and through normal failover. Disabled accounts, model-permission
+failures, parks, cooldowns and exhausted quota remain excluded from the weight.
+This prevents a busy sibling from briefly moving a session to another pool.
+Multiple aliases of the same provider do not count the same account twice. For
+example, two Claude subscriptions, one official API key and one ZenMux key at
+priority 10 receive approximately **2:1:1** of independent requests. Kimi at 20 is
+reached only when the whole tier 10 is unavailable or exhausted for this request.
+
+Without a soft session signal, the coordinator uses weighted random selection.
+With one, it reuses the pools' existing session/cache-key derivation and uses a
+hash for deterministic weighted ordering over sorted pool identities. No new
+session field or persistent binding is introduced. With the same eligible set
+and weights, a session returns to the same pool. Removing another pool preserves
+a surviving winner when its weight is unchanged; changed weights or newly
+eligible pools can remap sessions. A constant soft signal (for example, a fixed
+`user` or device ID shared by every request) maps all that traffic to one pool;
+weighted sharing is across distinct signals or requests without a signal. Strict
+continuation/account pins still bypass shared scheduling and retain their original identity rules.
+
+After a pre-output failure, other pools in the same tier get their turn before
+retrying the failed pool's remaining siblings. Account selection within a chosen
+pool retains its existing strategy, including OAuth `use_expiring` and key-pool
+LRU/manual ordering. A single-pool tier does not draw randomness. All-default
+priorities still bypass grouping, and chains outside a formed group are unchanged.
+Selection reads the cursor snapshots only: it does not acquire accounts, reserve
+quota, or update LRU. Unstarted pools retain their discovery snapshots during a
+long failing attempt; their weights are not refreshed until their normal pool
+execution begins. This pre-existing staleness is not a live global capacity view.
+State is per request; this is probabilistic sharing, not a global traffic quota
+or cross-process scheduling transaction.
+
+The existing `provider.account_priority` event adds `pool`,
+`pool_selection_reason` (`weighted_random`, `sticky`, or `single_pool`),
+`pool_weight`, `tier_pool_count`, and `affinity_hash` (a truncated digest, or null).
+Events describe reached selections, including static members; no raw session ID,
+cache key, request body, or credential is logged. Attempt/fallback records and
+final `serving_account` keep their existing meanings.
 
 Admin API shape (no new UI is required by the backend):
 

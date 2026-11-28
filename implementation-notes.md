@@ -8,6 +8,18 @@
 ---
 
 
+## 2026-11-28 · 同优先级跨池共享流量（docs/04）
+
+**决定与范围。** 在 #1070 相同 wire model 与 #1071 lane 共享组内，同级不再按 chain index 耗尽前池，而按当前最低可用级中各池的合格账号数分配首选机会。两个订阅、一个官方 key、一个 ZenMux key 均为 10 时，独立请求按 2:1:1 概率使用；Kimi20 只在 10 级对本请求已不可用或耗尽后进入。组成员、默认 50 绕过、严格账号亲和、媒体排除和 manual_priority 门槛均沿用既有规则；不增加配置、管理接口或 SQLite/Postgres schema，不修改版本。
+
+**最小机制。** 复用游标快照与请求级协调器，按 pool 身份去重账号，以加权 rendezvous（指数竞赛）产生池顺序。未携带软会话信号时使用可注入随机源；有信号时复用池原有 native/chat 黏性提取并散列，不创建新的 session 规则。选择阶段不 acquire、不预占 quota、不改 LRU。池内保留 OAuth 策略和 key LRU；发生 pre-output 故障后，本请求先给同级其他池机会，再回到尚有 sibling 的池。每级 visited 集只属于当前请求；故障修订计数识别重复抛出同一 Error 对象，正常 count_tokens/send 之间的暂停则保持同一次池选择。别名翻译、延迟 exact count、breaker/probe、deadline、usage park、400 短路、free429、断连和输出后不重放继续由原执行路径负责。
+
+**可观测性与取舍。** 原 `provider.account_priority` 日志增加 pool、pool_selection_reason、pool_weight、tier_pool_count 和截断 affinity_hash；静态成员也在真正到达发送路径后记录。不输出原始 session/cache key。相同候选集及权重保证同会话选同池；删去其他池且剩余权重不变时保持存活首选。资格/权重改变或新增池可能重新映射，这是无跨请求状态的加权共享边界，不承诺永久绑定。概率分配不保证短窗口精确比例，也不提供跨进程配额事务。客户端 requested-model promotion 不再决定不同池的同级首选；同池多个 alias 仍沿用链顺序。该条更新前两条历史记录中的同级 chain-index 规则。
+
+**独立复审修正。** 快照另带忽略瞬时 busy/capacity 的 sharingEligible，跨池权重据此计算；原 eligible 与池内容量避让、排队/失败兜底不变，disabled、模型许可、park、冷却及额度仍约束权重。软亲和提取出错返回 null，严格身份校验继续在实际派发边界处理。未托管 key 池代理回落到静态客户端时，在真实文本调用处补发原选择事件，避免代理始终暴露 accountPriority 导致日志缺失。固定 user/device 等软信号会把所有流量稳定映射到一个池；分享比例适用于不同信号或无信号请求。未启动池在长失败尝试期间沿用发现快照、权重不实时刷新，这是既有快照时效边界。 本轮先运行 gateway 回归得到 4 个预期失败（会话漂移、两种身份提取异常、静态代理漏日志），修复后仅跑本轮改动测试：gateway 14 / core 8 均通过；`CI=true pnpm typecheck`、`pnpm lint` 均 exit 0，lint 206 warnings / 5 infos。未触碰 controller 的 apps/admin 改动。
+
+**验证状态。** 真实 gateway→OAuth/API key 池测试先复现 400 次全走订阅、key 为 0、失败后 A→B 而非 A→key→ZenMux，再实现共享；覆盖流式/非流式、软会话、同 wire model、默认绕过、单池、最终归属及选择日志。纯函数/协调器覆盖资格、去重、稳定映射、动态 park、重复 Error 和并发请求隔离；静态成员日志另经 RED→GREEN。最终定向回归 10 文件 / 263 测试通过，config samples 21 测试通过；`CI=true pnpm typecheck` 与 `pnpm lint` 均 exit 0（lint 报 206 warnings / 8 infos，其中新增测试有 3 个模板字符串风格提示），`git diff --check` 通过。原默认顺序表征文件未修改。未提交、未部署、未执行真实上游验收。
+
 ## 2026-11-28 · Lane 作为共享账号池：已实现本地切片（docs/04）
 
 **管理界面。** Lanes 编辑器新增「按优先级混用账号」开关（共享 `Switch` 组件）。开启后，主选和备选中的每一项都会标上「进池」或「通道 · 兜底」。管理端 API 客户端 `normalizeLane` 原本只保留已知字段，现在也会保留 `shared_account_priority`；否则在页面上保存任意一个通道，都会悄悄把这个开关从配置里删掉。Providers 页面优先级列的提示文字也已同步更新。
@@ -105,15 +117,9 @@ UI 继续使用既有接口：OAuth 从 `GET /admin/api/oauth/:provider/account?
 
 Lukin 明确要求家庭 GPU 无认证，并增加 `.5` 的本地 Qwen 接入。仅明确私有 IPv4 的 OpenAI 兼容与 WhisperX provider 可省略上游凭据；已配置的凭据缺失不静默降级。公网 Helm API 的访问控制保持。自有模型按零供应商现金价格记账，仍保留实际 token/音频秒数及容量限制。
 
-## 2026-11-21 · GPU 转写的容量与结果恢复（docs/04、06、native-media）
-
-WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一规范化入口共用跨 key 容量。调用方可预存 `asr_` 操作号；结果用独立 `HELM_TRANSCRIPTION_RESULT_ENC_KEY` 加密保留六小时，断连后按原号恢复。原号不能重复派发，读取仍核验当前 key、账户与 lane 权限。GPU 的原生秒数和零现金价格进入现有用量账本。
-
-重复操作在读取上传和预占次数前先读回拒绝；可恢复操作要求结果加密存储已配置。工作器明确忙碌释放媒体金额，但已通过网关的周请求次数仍按现行失败请求规则计入，不宣称退回次数。
-
-只有专用 `/helm` 工作器返回带 `X-ASR-Admission: gpu-busy` 的 429，才释放尚未使用的预留并允许原号退避重试；其他未知结果保留原操作核对。现役异步转写的账户上界、单音轨及未知费用语义保持。0.30.96 发布准备确认 CLI 快照没有变化。
-
 ## 更早历史总览
+
+2026-11-21：GPU 转写容量与恢复——按真实音频帧限制时长，共用容量；加密结果保留六小时，原操作号禁止重复派发，仅工作器明确 gpu-busy 时允许退避重试。完整记录见 Git 历史。
 
 2026-11-21：豆包录音空白时间戳——只过滤非空纯空白且双端为 -1 的 words 占位，保留全文及真实时间；其他非法时间仍拒绝，既有任务只读查询即可。
 

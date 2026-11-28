@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { InternalRequest } from "@helm/shared";
 import { z } from "zod";
 
@@ -6,6 +7,8 @@ export const PriorityAccountSchema = z.object({
   account: z.string(),
   priority: z.number().int().nonnegative(),
   eligible: z.boolean(),
+  /** Sharing weight ignores transient capacity; dispatch eligibility still includes it. */
+  sharingEligible: z.boolean().optional(),
 });
 export type PriorityAccount = z.infer<typeof PriorityAccountSchema>;
 export interface AccountPriorityPool {
@@ -18,6 +21,8 @@ export interface AccountPriorityPool {
     lanePriority?: boolean,
   ): Promise<PriorityAccount[]>;
   isPinned(request: InternalRequest): boolean;
+  /** Digest of the existing pool soft-affinity key; never returns raw session data. */
+  affinityHash?(request: InternalRequest): string | null;
 }
 export function nextPriority(accounts: readonly PriorityAccount[]): number | null {
   const eligible = accounts.filter((account) => account.eligible);
@@ -53,6 +58,67 @@ export function priorityGroups(
     );
 }
 
+export interface PriorityPoolEntry {
+  alias: string;
+  /** Stable provider/pool identity; aliases of one pool must not multiply its weight. */
+  pool?: string;
+  candidates: readonly PriorityAccount[];
+}
+export interface PrioritySharingOptions {
+  affinityHash?: string | null;
+  random?: () => number;
+}
+export const PriorityPoolSelectionSchema = z.object({
+  pool: z.string(),
+  pool_selection_reason: z.enum(["weighted_random", "sticky", "single_pool"]),
+  pool_weight: z.number().int().positive(),
+  tier_pool_count: z.number().int().positive(),
+  affinity_hash: z.string().nullable(),
+});
+export type PriorityPoolSelection = z.infer<typeof PriorityPoolSelectionSchema>;
+
+/** Weighted rendezvous: exponential races give each pool weight / total probability.
+ * Sorted identities make seeded random draws and sticky ranking independent of chain order.
+ * A removed peer does not disturb a surviving sticky winner (with unchanged weights).
+ */
+export function rankPriorityPools(
+  entries: readonly PriorityPoolEntry[],
+  priority: number,
+  options: PrioritySharingOptions = {},
+): { pool: string; weight: number }[] {
+  const accounts = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    const pool = entry.pool ?? entry.alias;
+    for (const account of entry.candidates) {
+      if (!(account.sharingEligible ?? account.eligible) || account.priority !== priority) continue;
+      const set = accounts.get(pool) ?? new Set<string>();
+      set.add(account.account);
+      accounts.set(pool, set);
+    }
+  }
+  const weights = [...accounts]
+    .map(([pool, set]) => ({ pool, weight: set.size }))
+    .sort((a, b) => (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
+  if (weights.length < 2) return weights;
+  return weights
+    .map((entry) => {
+      const draw = options.affinityHash
+        ? (createHash("sha256")
+            .update(JSON.stringify([options.affinityHash, entry.pool]))
+            .digest()
+            .readUIntBE(0, 6) +
+            0.5) /
+          2 ** 48
+        : (options.random ?? Math.random)();
+      const unit = Number.isFinite(draw)
+        ? Math.min(1 - Number.EPSILON, Math.max(Number.EPSILON, draw))
+        : 0.5;
+      return { ...entry, score: -Math.log(unit) / entry.weight };
+    })
+    .sort((a, b) => a.score - b.score || (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0))
+    .map(({ pool, weight }) => ({ pool, weight }));
+}
+
 /** Internal control flow, never a provider fault or a client-facing error. */
 export class PriorityCursorCancelled extends Error {
   constructor() {
@@ -65,7 +131,16 @@ export class AccountPriorityCursor {
   state: "new" | "running" | "waiting" | "done" = "new";
   candidates: readonly PriorityAccount[];
   priority: number | null = null;
-  lastError: unknown;
+  private error: unknown;
+  failureRevision = 0;
+  get lastError(): unknown {
+    return this.error;
+  }
+  set lastError(error: unknown) {
+    this.error = error;
+    this.failureRevision++;
+  }
+  poolSelection?: PriorityPoolSelection;
   onSelect?: (account: string, priority: number) => void;
   private permit: { resolve: () => void; reject: (error: unknown) => void } | null = null;
   private localSnapshot?: () => readonly PriorityAccount[];
@@ -149,12 +224,11 @@ export class AccountPriorityCursor {
 
 /** Only one alias runs at a time. Others are suspended before selecting/sending. */
 export async function coordinateAccountPriority<T>(
-  entries: readonly {
-    alias: string;
-    candidates: readonly PriorityAccount[];
+  entries: readonly (PriorityPoolEntry & {
     snapshot?: () => Promise<readonly PriorityAccount[]>;
-  }[],
+  })[],
   run: (alias: string, cursor: AccountPriorityCursor) => Promise<T | undefined>,
+  options: PrioritySharingOptions = {},
 ): Promise<T | undefined> {
   let revision = 0;
   let wake: (() => void) | undefined;
@@ -168,6 +242,10 @@ export async function coordinateAccountPriority<T>(
     cursor: new AccountPriorityCursor(entry.candidates, changed, entry.snapshot),
     task: undefined as Promise<void> | undefined,
   }));
+  const visited = new Map<number, Set<string>>();
+  // Starting a pool and its first wait are one choice. A second preflight/send wait
+  // without a pool fault also retains that choice; only a fault rotates peers.
+  let continuing: { alias: string; priority: number; failureRevision: number } | undefined;
   let result: T | undefined;
   let failure: unknown;
   let failed = false;
@@ -189,8 +267,58 @@ export async function coordinateAccountPriority<T>(
             (nextPriority(a.cursor.candidates) ?? -Infinity) -
             (nextPriority(b.cursor.candidates) ?? -Infinity),
         );
-        const selected = ready[0];
+        let selected = ready[0];
         if (!selected) break;
+        const priority = nextPriority(selected.cursor.candidates);
+        if (priority !== null) {
+          const tier = ready.filter((state) => nextPriority(state.cursor.candidates) === priority);
+          const same =
+            continuing?.priority === priority
+              ? tier.find(
+                  (state) =>
+                    state.alias === continuing?.alias &&
+                    state.cursor.failureRevision === continuing.failureRevision,
+                )
+              : undefined;
+          if (same) selected = same;
+          else {
+            const seenPools = visited.get(priority) ?? new Set<string>();
+            let available = tier.filter((state) => !seenPools.has(state.pool ?? state.alias));
+            if (!available.length) {
+              seenPools.clear();
+              available = tier;
+            }
+            const ranked = rankPriorityPools(
+              available.map((state) => ({ ...state, candidates: state.cursor.candidates })),
+              priority,
+              options,
+            );
+            const chosen = ranked[0];
+            if (!chosen) break;
+            selected =
+              available.find((state) => (state.pool ?? state.alias) === chosen.pool) ?? selected;
+            const tierPoolCount = new Set(tier.map((state) => state.pool ?? state.alias)).size;
+            selected.cursor.poolSelection = {
+              pool: chosen.pool,
+              pool_selection_reason:
+                tierPoolCount === 1
+                  ? "single_pool"
+                  : options.affinityHash
+                    ? "sticky"
+                    : "weighted_random",
+              pool_weight: chosen.weight,
+              tier_pool_count: tierPoolCount,
+              affinity_hash: options.affinityHash?.slice(0, 16) ?? null,
+            };
+            seenPools.add(chosen.pool);
+            visited.set(priority, seenPools);
+            continuing = {
+              alias: selected.alias,
+              priority,
+              failureRevision: selected.cursor.failureRevision,
+            };
+          }
+        }
         if (selected.cursor.state === "new") {
           selected.cursor.state = "running";
           selected.task = run(selected.alias, selected.cursor)
