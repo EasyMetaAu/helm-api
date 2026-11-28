@@ -203,6 +203,105 @@ thread lane constraints into the Capability Filter. Runtime capability checks ar
 derived from the normalized request and model catalog. Changing a lane constraint
 alone therefore does not alter candidate filtering today.
 
+### Lane-wide account priority (opt-in)
+
+`shared_account_priority` is an optional **boolean** on a lane. Absent or `false`
+keeps the existing routing behavior, including same-wire-model OAuth/manual-key
+priority groups. Shipped defaults leave it off. An invalid value such as `"true"`
+fails config validation.
+
+```yaml
+claude-sonnet:
+  shared_account_priority: true
+  primary: anthropic/claude-sonnet-5-5
+  fallback:
+    - anthropic-api/claude-sonnet-5-5
+    - zenmux-anthropic/claude-sonnet-5.5
+    - kimi/k3.1-pro[1m]
+    - balanced
+balanced:
+  primary: gpt-sol
+  fallback: []
+gpt-sol:
+  primary: openai-codex/gpt-6.2-sol
+  fallback: []
+```
+
+Only the selected lane's **direct provider/model alias entries** (`primary` and
+`fallback[]`) join its account-priority group. A lane-name reference never
+contributes members, at any depth. In the example, directly listed
+`kimi/k3.1-pro[1m]` joins the Claude group; `balanced → gpt-sol →
+openai-codex/gpt-6.2-sol` remains ordinary execution fallback. Listing `kimi` as a
+lane name instead would also leave Kimi outside the group. This distinction is
+intentional: account priority is global, but group membership is local to the
+selected lane. A Codex priority of 10 for GPT work must not promote GPT into the
+Claude group through a fallback lane.
+
+Membership does not alter lane expansion. Aliases are deduplicated, and only aliases
+remaining in the authorized, expanded, `blocked_models`-filtered chain may
+participate. An alias reached through a nested lane may join only if the selected
+lane also lists that exact provider/model alias directly. A nested lane's own flag
+does not change the selected lane's group. Bare model names are not group members.
+
+With a non-default eligible priority, the group executes at its first member's
+position in the expanded chain. Earlier lane expansions remain before it; after
+the group, the remaining expanded candidates retain their order, with already
+consumed group members skipped. Accounts sort by ascending priority, then original chain
+index. Within one pool and priority tier, the pool keeps its existing tiebreak/LRU.
+OAuth pools and API-key pools of **either** `manual_priority` or `round_robin`
+participate; this opt-in overrides round-robin's usual disregard for stored
+priorities. Providers using a static/environment key or no key count as one account
+at priority **50**. If all eligible priorities are 50, the entire expanded chain and
+original pool strategies are preserved, including the position of nested fallbacks.
+
+Cheap local capability, protocol-history and estimated-context checks run before
+forming the group; locally incompatible aliases never join. Skip records are
+written only when execution reaches the alias in chain order. The executor reuses each alias's own
+translator, upstream model, price and breaker. This allows an OpenAI-protocol Kimi
+provider to serve an Anthropic request through the existing translation path.
+Media aliases and upstream `auto` selectors are excluded from shared scheduling.
+Strict account/continuation affinity and failed account discovery retain legacy
+chain order. Existing pre-output retries, terminal client errors, usage parks,
+abort handling and no-replay-after-output behavior remain in force.
+
+Account discovery caches snapshots by provider client and wire model within each
+scheduling pass. Group discovery performs no exact `count_tokens` calls or account
+selection. A breaker preview immediately releases any acquired HALF_OPEN probe;
+only an alias actually reached by execution retains a probe during its attempt.
+Dispatch resolves the live target again and repeats the local checks, then runs
+exact `count_tokens` lazily with the account cursor when supported. An exact
+context overflow advances the coordinator to the next member. This avoids token
+counting, quota/LRU updates and parking for unreached accounts. Client abort stops
+discovery/preflight without a misleading token-count failure warning. Normal
+credential checks still run at dispatch; account settings and provider changes
+are not a cross-process scheduling transaction.
+
+A single direct member bypasses lane discovery and coordination; if eligibility
+checks leave only one member, it also runs through ordinary alias execution.
+Aliases outside the lane group retain the legacy #1070 same-wire-model grouping
+(including its manual-priority API-key gate). Direct members separate those legacy
+segments, so a legacy group cannot jump across the lane group. With no direct
+members, routing is exactly the flag-off path.
+
+**Client model promotion does not override account priority inside the group.**
+For an alias-mapped request, the client's requested model may be promoted to the
+head of the chain. A higher-priority account on another direct member can still
+serve first: the opted-in lane represents one pool of approved substitutes.
+Promotion remains the tie-break order for equal account priorities. Explicit
+single-model requests and strict account affinity retain their existing behavior.
+
+Admin API shape (no new UI is required by the backend):
+
+- `GET /admin/api/lanes`: `[{ "name": "claude-sonnet", "primary": "...", "shared_account_priority": true, ... }]`.
+- `GET /admin/api/lanes/:name`: the lane object without `name`.
+- `PUT /admin/api/lanes/:name`: a full lane object with optional `shared_account_priority: true | false`.
+- `PUT /admin/api/lanes`: the complete `{ "lane-name": { ... } }` map, retaining the configured default lane.
+
+GET preserves an absent field; clients should display absence as off. PUT and the
+comment-preserving YAML serializer retain true/false and remove the field when it
+is omitted from the replacement object. Account `priority` continues to use the
+existing OAuth account and API-key-pool account endpoints; there is no DB migration.
+
 The shipped quality/cost lanes (the three ranked lanes; `LANE_RANK` orders only
 these: economy=0 < balanced=1 < premium=2):
 

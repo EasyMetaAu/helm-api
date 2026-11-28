@@ -44,3 +44,16 @@ export function expandLaneChain(laneName: string, lanes: LanesConfig): string[] 
   visit(laneName, new Set<string>());
   return chain;
 }
+
+/** Only directly listed provider/model aliases join; lane references never contribute members. */
+export function lanePriorityMembers(laneName: string, lanes: LanesConfig): string[] {
+  const lane = lanes[laneName];
+  if (!lane?.shared_account_priority) return [];
+  return [
+    ...new Set(
+      [lane.primary, ...lane.fallback].filter(
+        (entry) => !Object.hasOwn(lanes, entry) && entry.indexOf("/") > 0 && !entry.endsWith("/"),
+      ),
+    ),
+  ];
+}

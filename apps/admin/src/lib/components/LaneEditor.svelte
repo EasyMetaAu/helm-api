@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tooltip } from '$lib/tooltip';
+  import Switch from './Switch.svelte';
   import { untrack } from 'svelte';
   import { type Lane, REASONING_EFFORTS, type ReasoningEffort } from '$lib/api/lanes.js';
   import type { ModelOption } from '$lib/api/models.js';
@@ -48,6 +49,10 @@
   let maxLatency = $state<number | null>(initial.constraints.max_latency_ms ?? null);
   // Lane-forced reasoning effort; '' = unforced (the request-driven default).
   let reasoningEffort = $state<ReasoningEffort | ''>(initial.reasoning_effort ?? '');
+  // Shared account priority: the lane's direct provider/model entries become one pool.
+  let sharedPriority = $state(initial.shared_account_priority === true);
+  // An entry is a lane reference when it names another lane; those never join the pool.
+  const isLaneRef = (entry: string) => laneNames.includes(entry.trim());
   let newFallback = $state('');
   let draggingIndex = $state<number | null>(null);
   let stopPointerDrag: (() => void) | null = null;
@@ -105,6 +110,8 @@
     };
     if (reasoningEffort) next.reasoning_effort = reasoningEffort;
     else delete next.reasoning_effort;
+    if (sharedPriority) next.shared_account_priority = true;
+    else delete next.shared_account_priority;
     onchange(next);
   }
 
@@ -242,7 +249,13 @@
 
   <div class="flex flex-col gap-3 border-t border-slate-100 px-4 pt-3 pb-4">
     <label class="flex flex-col gap-1">
-      <span class="field-label">{$t('Primary')}</span>
+      <span class="field-label flex items-center gap-2"
+        >{$t('Primary')}{#if sharedPriority}<span
+            class={isLaneRef(primary) ? 'badge-neutral' : 'badge-rules'}
+            data-testid="primary-pool-badge"
+            >{isLaneRef(primary) ? $t('Lane · fallback') : $t('In pool')}</span
+          >{/if}</span
+      >
       <input
         name="primary"
         class="input"
@@ -306,6 +319,13 @@
             </button>
             <span class="badge-fallback">{i + 1}</span>
             <span class="flex-1">{f}</span>
+            {#if sharedPriority}
+              {#if isLaneRef(f)}
+                <span class="badge-neutral">{$t('Lane · fallback')}</span>
+              {:else}
+                <span class="badge-rules">{$t('In pool')}</span>
+              {/if}
+            {/if}
             <button
               type="button"
               class="btn-icon"
@@ -334,6 +354,25 @@
         >
       </div>
     </fieldset>
+
+    <div class="flex items-start gap-3 rounded-lg border border-slate-200 p-3">
+      <Switch
+        label={$t('Mix accounts by priority')}
+        checked={sharedPriority}
+        onchange={(value) => {
+          sharedPriority = value;
+          emit();
+        }}
+      />
+      <div class="flex min-w-0 flex-col gap-0.5">
+        <span class="field-label">{$t('Mix accounts by priority')}</span>
+        <span class="field-help">
+          {$t(
+            'When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first. Lane names stay as fallbacks after them. Set priorities on the Providers page.',
+          )}
+        </span>
+      </div>
+    </div>
 
     <div class="flex flex-col gap-2">
       <span class="field-label">{$t('Constraints')}</span>

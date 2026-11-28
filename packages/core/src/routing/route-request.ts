@@ -9,7 +9,7 @@ import {
   type ReasoningEffort,
   type RoutingSignal,
 } from "@helm/shared";
-import { expandLaneChain } from "../lanes/expand-chain.js";
+import { expandLaneChain, lanePriorityMembers } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type BlockedModelMatcher, createBlockedModelMatcher } from "../model-blocking.js";
 import { correlationTraceId } from "../telemetry/decision.js";
@@ -91,6 +91,8 @@ export interface Classification {
 export interface ExecutionPlan {
   selected_lane: string;
   candidate_chain: string[];
+  /** Authorized members of an explicitly opted-in text lane, before capability preflight. */
+  shared_priority_members?: string[];
   explicit_model: string | null;
 }
 
@@ -1123,6 +1125,15 @@ export async function routeRequest(
     req.reasoning_effort_forced = true;
   }
 
+  if (
+    execPlan.explicit_model === null &&
+    deps.lanes[execPlan.selected_lane]?.shared_account_priority
+  ) {
+    const members = new Set(lanePriorityMembers(execPlan.selected_lane, deps.lanes));
+    execPlan.shared_priority_members = execPlan.candidate_chain.filter((alias) =>
+      members.has(alias),
+    );
+  }
   const outcome = await deps.execute(execPlan, req);
 
   const finalRecord: DecisionRecord["final"] =

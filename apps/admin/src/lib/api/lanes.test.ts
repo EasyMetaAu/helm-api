@@ -129,4 +129,26 @@ describe('lanes api client', () => {
     const unforced = JSON.parse(fetchMock.mock.calls[1][1].body as string);
     expect(unforced.reasoning_effort).toBeUndefined();
   });
+
+  it('keeps shared_account_priority through GET and the save body, so saving never drops it', async () => {
+    const fetchMock = fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          laneRow('claude-sonnet', { shared_account_priority: true } as Partial<Lane>),
+          laneRow('balanced'),
+        ]),
+        { status: 200 },
+      ),
+    );
+    const lanes = await listLanes();
+    expect(lanes[0].shared_account_priority).toBe(true);
+    expect('shared_account_priority' in lanes[1]).toBe(false);
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
+    await saveLanes(lanes);
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(body['claude-sonnet'].shared_account_priority).toBe(true);
+    expect('shared_account_priority' in body.balanced).toBe(false);
+  });
 });

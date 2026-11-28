@@ -584,11 +584,19 @@ export function createApiKeyPoolClient(deps: {
           get enabled() {
             return deps.accounts.strategy(deps.strategy) === "manual_priority";
           },
-          snapshot: async (model: string, request?: import("@helm/shared").InternalRequest) => {
+          snapshot: async (
+            model: string,
+            request?: import("@helm/shared").InternalRequest,
+            lanePriority = false,
+          ) => {
             const active = await current();
             // Stored priorities are intentionally ignored by the legacy round-robin policy.
-            if (deps.accounts.strategy(deps.strategy) !== "manual_priority") return [];
-            return active.accountPriority?.snapshot(model, request) ?? [];
+            if (!lanePriority && deps.accounts.strategy(deps.strategy) !== "manual_priority")
+              return [];
+            return (
+              active.accountPriority?.snapshot(model, request) ??
+              (lanePriority ? [{ account: "static", priority: 50, eligible: true }] : [])
+            );
           },
           isPinned: (request: import("@helm/shared").InternalRequest) =>
             pool?.accountPriority?.isPinned(request) ?? false,

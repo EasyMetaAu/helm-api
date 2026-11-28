@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   CreateKeyInput,
   KeyStore,
@@ -19,6 +22,7 @@ import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } 
 import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { parse as parseYaml } from "yaml";
 import type { AppEnv } from "../../app.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { basicAuth } from "../../middleware/basic-auth.js";
@@ -26,6 +30,7 @@ import { handleError } from "../../middleware/error-handler.js";
 import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
 import { registerAdminApi } from "./index.js";
 import { createRuntimeRuleStore } from "./rule-store.js";
+import { createYamlRulePersister } from "./yaml-writeback.js";
 
 // admin.api — the gateway management API. These tests pin the CONTRACT (DoD
 // scenarios 1-8): CRUD lanes/policies/classifier persist to config; keys/requests
@@ -391,6 +396,51 @@ function buildApp(deps: AdminApiDeps, authEnabled = false) {
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
 describe("admin.api lanes", () => {
+  it("round-trips shared priority through single and bulk lane APIs", async () => {
+    const deps = buildDeps();
+    const dir = mkdtempSync(join(tmpdir(), "helm-lane-priority-"));
+    const runtimeRules = createRuntimeRuleStore({
+      lanes: await rules.getLanes(),
+      policies: { policies: [] },
+      classifier: ClassifierConfigSchema.parse({}),
+      persistLanes: createYamlRulePersister(dir).persistLanes,
+    });
+    const app = buildApp({ ...deps, rules: runtimeRules });
+    try {
+      for (const value of [true, false, undefined]) {
+        const body = { primary: "kimi/k3.1-pro[1m]", shared_account_priority: value };
+        const put = await app.request("/admin/api/lanes/balanced", {
+          method: "PUT",
+          headers: JSON_HEADERS,
+          body: JSON.stringify(body),
+        });
+        expect(put.status).toBe(200);
+        expect(await (await app.request("/admin/api/lanes/balanced")).json()).toMatchObject(
+          JSON.parse(JSON.stringify(body)),
+        );
+        const bulk = await app.request("/admin/api/lanes", {
+          method: "PUT",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ balanced: body }),
+        });
+        expect(bulk.status).toBe(200);
+        const stored = parseLanesConfig(parseYaml(readFileSync(join(dir, "lanes.yaml"), "utf8")));
+        expect(stored.balanced?.shared_account_priority).toBe(value);
+        if (value === undefined)
+          expect(stored.balanced).not.toHaveProperty("shared_account_priority");
+        expect(await (await app.request("/admin/api/lanes")).json()).toEqual([
+          expect.objectContaining({
+            name: "balanced",
+            primary: body.primary,
+            ...(value === undefined ? {} : { shared_account_priority: value }),
+          }),
+        ]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("PUT then GET round-trips a lane to config (not DB)", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);

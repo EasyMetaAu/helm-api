@@ -10,9 +10,13 @@ export const PriorityAccountSchema = z.object({
 export type PriorityAccount = z.infer<typeof PriorityAccountSchema>;
 export interface AccountPriorityPool {
   kind: "oauth" | "api_key";
-  /** False keeps this alias in legacy chain order (API-key round_robin). */
+  /** False keeps legacy same-model routing in chain order; an explicit lane opt-in overrides it. */
   readonly enabled?: boolean;
-  snapshot(model: string, request?: InternalRequest): Promise<PriorityAccount[]>;
+  snapshot(
+    model: string,
+    request?: InternalRequest,
+    lanePriority?: boolean,
+  ): Promise<PriorityAccount[]>;
   isPinned(request: InternalRequest): boolean;
 }
 export function nextPriority(accounts: readonly PriorityAccount[]): number | null {

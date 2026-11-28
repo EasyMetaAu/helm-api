@@ -124,3 +124,21 @@ describe("parseLanesConfig", () => {
     }
   });
 });
+
+describe("shared_account_priority", () => {
+  it("preserves absent fields on old configs and accepts explicit booleans", () => {
+    expect(parseLanesConfig({ balanced: { primary: "a/b" } }).balanced).not.toHaveProperty(
+      "shared_account_priority",
+    );
+    for (const value of [true, false]) {
+      expect(
+        parseLanesConfig({ balanced: { primary: "a/b", shared_account_priority: value } }).balanced,
+      ).toHaveProperty("shared_account_priority", value);
+    }
+  });
+  it.each(["true", 1, null, {}])("rejects invalid flag %j", (value) => {
+    expect(() =>
+      parseLanesConfig({ balanced: { primary: "a/b", shared_account_priority: value } }),
+    ).toThrow();
+  });
+});

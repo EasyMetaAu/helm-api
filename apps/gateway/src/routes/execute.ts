@@ -1724,6 +1724,255 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const needsCachedContent =
       typeof req.cached_content === "string" && req.cached_content.length > 0;
 
+    const resolveTarget = (alias: string) =>
+      resolveAttemptTarget({
+        alias,
+        defaultProvider,
+        providers,
+        registry,
+        knownOAuthPrefixes,
+        isManagedProvider,
+        isManagedAlias,
+        oauthAliases,
+        oauthWireModels,
+        oauthProviderProtocols,
+      });
+    // Discovery uses the same local checks without writing attempt telemetry or doing I/O.
+    const localPreflight = (
+      alias: string,
+      target: ResolvedAttemptTarget,
+      elapsed: () => number,
+      preview = false,
+    ) => {
+      const { provider, providerModel } = target;
+      if (!provider) return undefined;
+      const skip = (reason: string) => {
+        if (!preview) {
+          capabilityPruned = true;
+          attempts.push(skipRow(alias, reason, elapsed()));
+        }
+        return undefined;
+      };
+      // 2) Capability filter. Missing catalog data remains fail-open for generic
+      // requests, but not for cached_content: that field is a required Gemini/LiteLLM
+      // cached context handle, not an optional affinity hint.
+      const catalogEntry = xaiCatalogEntry(alias, providerModel);
+      const caps = catalogEntry?.capabilities;
+      const exactContextLimit = effectiveContextLimit(catalogEntry);
+      const canUseExactContextPreflight =
+        target.targetProviderProtocol === "anthropic_messages" &&
+        req.native_request !== undefined &&
+        provider.countTokens !== undefined &&
+        exactContextLimit !== null;
+      if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
+        return skip("capability_metadata_missing");
+      }
+      if (!caps && needsCachedContent) {
+        return skip("no_cached_content_support");
+      }
+      // xAI Imagine images and every video model require Helm's dedicated media
+      // routes. Other providers may intentionally return images through their
+      // native conversational protocol (for example Gemini inlineData).
+      if (
+        provider.mediaOnly === true ||
+        caps?.outputThreeD === true ||
+        caps?.outputVideo === true ||
+        (alias.startsWith("xai/") && caps?.outputImage === true)
+      ) {
+        return skip("media_endpoint_required");
+      }
+      if (caps) {
+        const estimatedPromptTokens = approxPromptTokens(req);
+        const verdict = checkCapability(caps, {
+          needsTools: Array.isArray(req.tools) && req.tools.length > 0,
+          needsForcedToolChoice,
+          needsJson: isJson(req.response_format),
+          needsResponseSchema: isJsonSchema(req.response_format),
+          needsVision:
+            (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
+          needsStreaming: req.stream,
+          needsCachedContent,
+          // Prefer Anthropic's exact native count when available. Passing zero only
+          // defers the approximate input gate; max_tokens and every other capability
+          // check still run here.
+          estimatedPromptTokens:
+            !preview && canUseExactContextPreflight ? 0 : estimatedPromptTokens,
+          maxTokens: req.max_tokens,
+          needsAudio: reqModalities.audio,
+          needsVideo: reqModalities.video,
+          needsDocument: reqModalities.document,
+        });
+        if (!verdict.ok) {
+          if (!preview && verdict.skipReason === "context_too_small") {
+            const limit = exactContextLimit ?? caps.maxContextTokens;
+            const estimatedTotal = estimatedPromptTokens + (req.max_tokens ?? 0);
+            rememberContextOverflow(
+              `prompt is too long: ${Math.trunc(estimatedTotal)} tokens > ${Math.trunc(
+                limit,
+              )} maximum`,
+              null,
+              undefined,
+            );
+          }
+          return skip(verdict.skipReason ?? "capability");
+        }
+      }
+
+      const protocolSkip = protocolGuardSkipReason(req, target.targetProviderProtocol);
+      if (protocolSkip !== null) {
+        return skip(protocolSkip);
+      }
+
+      const candidateSkip = candidateGuardSkipReason(req, target, alias);
+      if (candidateSkip !== null) {
+        return skip(candidateSkip);
+      }
+
+      // Native protocol passthrough decision for THIS attempt (issue #217), computed
+      // before the Anthropic count_tokens preflight so visual compression can reduce
+      // an over-window native request before we decide to skip the candidate.
+      const passthrough = decideNativePassthroughForAttempt({
+        req,
+        target,
+        enabled: nativeProtocolPassthroughEnabled?.() === true,
+      });
+      if (req.provider_raw?.generate === false && !passthrough.passthrough_used) {
+        return skip("responses_generate_false_requires_native_passthrough");
+      }
+      return { caps, passthrough, exactContextLimit };
+    };
+    const preflight = async (
+      alias: string,
+      target: ResolvedAttemptTarget,
+      elapsed: () => number,
+      accountPriorityCursor?: AccountPriorityCursor,
+    ) => {
+      signal.throwIfAborted();
+      const local = localPreflight(alias, target, elapsed);
+      if (!local || !target.provider) return undefined;
+      const { caps, passthrough, exactContextLimit } = local;
+      const { provider, providerModel } = target;
+      const contextConfirmationKey = `${target.providerName ?? "<default>"}\0${providerModel}`;
+      let visualCompressionMutation: VisualContextCompressionMutation | undefined;
+      let optimizedNativeBody: Record<string, unknown> | null = null;
+      let nativeBodyOptimized = false;
+      const optimizeAnthropicBodyForAttempt = async (
+        body: Record<string, unknown>,
+      ): Promise<Record<string, unknown>> => {
+        if (target.targetProviderProtocol !== "anthropic_messages") return body;
+        try {
+          const optimized = await visualContextCompressor({
+            mode: visualContextCompressionMode?.() ?? "off",
+            targetProviderProtocol: target.targetProviderProtocol,
+            model: providerModel,
+            body,
+            capabilities: caps,
+            requestId: req.request_id,
+          });
+          visualCompressionMutation = optimized.mutation;
+          return optimized.body;
+        } catch (err) {
+          log?.("warn", "visual_context_compression.failed_open", {
+            alias,
+            error_class: errorClassOf(err),
+          });
+          return body;
+        }
+      };
+      const optimizeNativeBodyForAttempt = async (
+        input: NativePassthroughCarrier | Record<string, unknown>,
+      ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
+        if (!passthrough.passthrough_used) return input;
+        const body = nativePassthroughBody(input);
+        if (optimizedNativeBody === null) {
+          optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
+          nativeBodyOptimized = optimizedNativeBody !== body;
+        }
+        if (!nativeBodyOptimized) return input;
+        return isNativePassthroughCarrier(input)
+          ? cloneCarrierWithBody(input, optimizedNativeBody)
+          : optimizedNativeBody;
+      };
+
+      if (
+        target.targetProviderProtocol === "anthropic_messages" &&
+        req.native_request !== undefined &&
+        provider.countTokens !== undefined &&
+        exactContextLimit !== null
+      ) {
+        try {
+          const countInput = prepareNativeRequestForUpstream(
+            { ...nativePassthroughBody(req.native_request) },
+            providerModel,
+            req.protocol,
+            false,
+            provider.nativeProtocolProfile,
+            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+            caps,
+            req.reasoning_effort,
+          );
+          const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
+          const countBody = { ...nativePassthroughBody(optimizedCountInput) };
+          delete countBody.stream;
+          signal.throwIfAborted();
+          const tokenCount = await provider.countTokens(countBody, {
+            signal,
+            accountPriorityCursor,
+            anthropicIdentityContext,
+            requestCompatibility: caps?.requestCompatibility,
+          });
+          signal.throwIfAborted();
+          const inputTokens = countTokensInputTokens(tokenCount);
+          if (inputTokens !== null && inputTokens > exactContextLimit) {
+            capabilityPruned = true;
+            // per-model count_tokens preflight; a larger sibling may still fit, so this
+            // is a fall-back skip (NOT a short-circuit). ≥2 such confirmations at the
+            // terminal still yield a compaction 400.
+            rememberContextOverflow(
+              `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
+                exactContextLimit,
+              )} maximum`,
+              null,
+              contextConfirmationKey,
+            );
+            attempts.push(skipRow(alias, "context_too_small", elapsed()));
+            return undefined;
+          }
+        } catch (err) {
+          if (err instanceof PriorityCursorCancelled || isAbort(err, signal)) throw err;
+          log?.("warn", "anthropic.count_tokens_preflight_failed", {
+            alias,
+            error_class: errorClassOf(err),
+            upstream_status: upstreamStatusOf(err),
+          });
+        }
+      }
+
+      return {
+        target,
+        caps,
+        passthrough,
+        optimizeNativeBodyForAttempt,
+        optimizeAnthropicBodyForAttempt,
+        get visualCompressionMutation() {
+          return visualCompressionMutation;
+        },
+      };
+    };
+    const abortedOutcome = (): ExecuteOutcome => ({
+      attempts,
+      final: {
+        status: "error",
+        error: makeHelmError({
+          error_class: "client_abort",
+          message: "client aborted request",
+          trace_id: correlationTraceId(req),
+        }),
+      },
+      body: null,
+      stream: null,
+    });
+
     const runAlias = async (
       alias: string,
       accountPriorityCursor?: AccountPriorityCursor,
@@ -1751,20 +2000,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // the provider client (so the fallback chain can cross providers). If that
       // resolved provider has no client, skip fail-closed; falling back to the
       // default would cross credential/subscription boundaries.
-      const target = resolveAttemptTarget({
-        alias,
-        defaultProvider,
-        providers,
-        registry,
-        knownOAuthPrefixes,
-        isManagedProvider,
-        isManagedAlias,
-        oauthAliases,
-        oauthWireModels,
-        oauthProviderProtocols,
-      });
+      const target = resolveTarget(alias);
       const { provider, providerModel } = target;
-      const contextConfirmationKey = `${target.providerName ?? "<default>"}\0${providerModel}`;
       if (!provider) {
         onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
@@ -1785,6 +2022,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // probe via recordAbort with the matching token; otherwise the lock stays held and
       // the alias returns circuit_open forever (prod 2026-08-06). Abort must pass the
       // token so a stale CLOSED request cannot release a later probe it never owned.
+      if (signal.aborted) return abortedOutcome();
       const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
@@ -1802,198 +2040,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       };
 
       try {
-        // 2) Capability filter. Missing catalog data remains fail-open for generic
-        // requests, but not for cached_content: that field is a required Gemini/LiteLLM
-        // cached context handle, not an optional affinity hint.
-        const catalogEntry = xaiCatalogEntry(alias, providerModel);
-        const caps = catalogEntry?.capabilities;
-        const exactContextLimit = effectiveContextLimit(catalogEntry);
-        const canUseExactContextPreflight =
-          target.targetProviderProtocol === "anthropic_messages" &&
-          req.native_request !== undefined &&
-          provider.countTokens !== undefined &&
-          exactContextLimit !== null;
-        if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
-          capabilityPruned = true;
-          attempts.push(skipRow(alias, "capability_metadata_missing", elapsed()));
-          return undefined;
-        }
-        if (!caps && needsCachedContent) {
-          capabilityPruned = true;
-          attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
-          return undefined;
-        }
-        // xAI Imagine images and every video model require Helm's dedicated media
-        // routes. Other providers may intentionally return images through their
-        // native conversational protocol (for example Gemini inlineData).
-        if (
-          provider.mediaOnly === true ||
-          caps?.outputThreeD === true ||
-          caps?.outputVideo === true ||
-          (alias.startsWith("xai/") && caps?.outputImage === true)
-        ) {
-          capabilityPruned = true;
-          attempts.push(skipRow(alias, "media_endpoint_required", elapsed()));
-          return undefined;
-        }
-        if (caps) {
-          const estimatedPromptTokens = approxPromptTokens(req);
-          const verdict = checkCapability(caps, {
-            needsTools: Array.isArray(req.tools) && req.tools.length > 0,
-            needsForcedToolChoice,
-            needsJson: isJson(req.response_format),
-            needsResponseSchema: isJsonSchema(req.response_format),
-            needsVision:
-              (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
-            needsStreaming: req.stream,
-            needsCachedContent,
-            // Prefer Anthropic's exact native count when available. Passing zero only
-            // defers the approximate input gate; max_tokens and every other capability
-            // check still run here.
-            estimatedPromptTokens: canUseExactContextPreflight ? 0 : estimatedPromptTokens,
-            maxTokens: req.max_tokens,
-            needsAudio: reqModalities.audio,
-            needsVideo: reqModalities.video,
-            needsDocument: reqModalities.document,
-          });
-          if (!verdict.ok) {
-            capabilityPruned = true;
-            if (verdict.skipReason === "context_too_small") {
-              const limit = exactContextLimit ?? caps.maxContextTokens;
-              const estimatedTotal = estimatedPromptTokens + (req.max_tokens ?? 0);
-              rememberContextOverflow(
-                `prompt is too long: ${Math.trunc(estimatedTotal)} tokens > ${Math.trunc(
-                  limit,
-                )} maximum`,
-                null,
-                undefined,
-              );
-            }
-            attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
-            return undefined;
-          }
-        }
-
-        const protocolSkip = protocolGuardSkipReason(req, target.targetProviderProtocol);
-        if (protocolSkip !== null) {
-          capabilityPruned = true;
-          attempts.push(skipRow(alias, protocolSkip, elapsed()));
-          return undefined;
-        }
-
-        const candidateSkip = candidateGuardSkipReason(req, target, alias);
-        if (candidateSkip !== null) {
-          capabilityPruned = true;
-          attempts.push(skipRow(alias, candidateSkip, elapsed()));
-          return undefined;
-        }
-
-        // Native protocol passthrough decision for THIS attempt (issue #217), computed
-        // before the Anthropic count_tokens preflight so visual compression can reduce
-        // an over-window native request before we decide to skip the candidate.
-        const passthrough = decideNativePassthroughForAttempt({
-          req,
-          target,
-          enabled: nativeProtocolPassthroughEnabled?.() === true,
-        });
-        if (req.provider_raw?.generate === false && !passthrough.passthrough_used) {
-          capabilityPruned = true;
-          attempts.push(
-            skipRow(alias, "responses_generate_false_requires_native_passthrough", elapsed()),
-          );
-          return undefined;
-        }
-        let visualCompressionMutation: VisualContextCompressionMutation | undefined;
-        let optimizedNativeBody: Record<string, unknown> | null = null;
-        let nativeBodyOptimized = false;
-        const optimizeAnthropicBodyForAttempt = async (
-          body: Record<string, unknown>,
-        ): Promise<Record<string, unknown>> => {
-          if (target.targetProviderProtocol !== "anthropic_messages") return body;
-          try {
-            const optimized = await visualContextCompressor({
-              mode: visualContextCompressionMode?.() ?? "off",
-              targetProviderProtocol: target.targetProviderProtocol,
-              model: providerModel,
-              body,
-              capabilities: caps,
-              requestId: req.request_id,
-            });
-            visualCompressionMutation = optimized.mutation;
-            return optimized.body;
-          } catch (err) {
-            log?.("warn", "visual_context_compression.failed_open", {
-              alias,
-              error_class: errorClassOf(err),
-            });
-            return body;
-          }
-        };
-        const optimizeNativeBodyForAttempt = async (
-          input: NativePassthroughCarrier | Record<string, unknown>,
-        ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
-          if (!passthrough.passthrough_used) return input;
-          const body = nativePassthroughBody(input);
-          if (optimizedNativeBody === null) {
-            optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
-            nativeBodyOptimized = optimizedNativeBody !== body;
-          }
-          if (!nativeBodyOptimized) return input;
-          return isNativePassthroughCarrier(input)
-            ? cloneCarrierWithBody(input, optimizedNativeBody)
-            : optimizedNativeBody;
-        };
-
-        if (
-          target.targetProviderProtocol === "anthropic_messages" &&
-          req.native_request !== undefined &&
-          provider.countTokens !== undefined &&
-          exactContextLimit !== null
-        ) {
-          try {
-            const countInput = prepareNativeRequestForUpstream(
-              { ...nativePassthroughBody(req.native_request) },
-              providerModel,
-              req.protocol,
-              false,
-              provider.nativeProtocolProfile,
-              req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
-              caps,
-              req.reasoning_effort,
-            );
-            const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
-            const countBody = { ...nativePassthroughBody(optimizedCountInput) };
-            delete countBody.stream;
-            const tokenCount = await provider.countTokens(countBody, {
-              signal,
-              accountPriorityCursor,
-              anthropicIdentityContext,
-              requestCompatibility: caps?.requestCompatibility,
-            });
-            const inputTokens = countTokensInputTokens(tokenCount);
-            if (inputTokens !== null && inputTokens > exactContextLimit) {
-              capabilityPruned = true;
-              // per-model count_tokens preflight; a larger sibling may still fit, so this
-              // is a fall-back skip (NOT a short-circuit). ≥2 such confirmations at the
-              // terminal still yield a compaction 400.
-              rememberContextOverflow(
-                `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
-                  exactContextLimit,
-                )} maximum`,
-                null,
-                contextConfirmationKey,
-              );
-              attempts.push(skipRow(alias, "context_too_small", elapsed()));
-              return undefined;
-            }
-          } catch (err) {
-            log?.("warn", "anthropic.count_tokens_preflight_failed", {
-              alias,
-              error_class: errorClassOf(err),
-              upstream_status: upstreamStatusOf(err),
-            });
-          }
-        }
+        const preparation = await preflight(alias, target, elapsed, accountPriorityCursor);
+        if (signal.aborted) return abortedOutcome();
+        if (!preparation) return undefined;
+        const { caps, passthrough, optimizeNativeBodyForAttempt, optimizeAnthropicBodyForAttempt } =
+          preparation;
         // Past the gates → this candidate is attempted against the upstream. A
         // failure from here on is a PROVIDER fault, not a capability gap.
         attemptedAny = true;
@@ -2116,7 +2167,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
             attemptTelemetry = withRequestMutations(
               passthrough,
-              visualCompressionMutationLedger(visualCompressionMutation),
+              visualCompressionMutationLedger(preparation.visualCompressionMutation),
             );
             // Pre-output failover guard (principle 5 + 8): a same-protocol byte-relay
             // that 200s then fails IN-BAND before any output (e.g. Responses
@@ -2293,7 +2344,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               mergeRequestMutations(
                 rendered.request_mutations,
                 provider.streamReframed === true ? { stream_reframed: true } : undefined,
-                visualCompressionMutationLedger(visualCompressionMutation),
+                visualCompressionMutationLedger(preparation.visualCompressionMutation),
               ),
             );
             // Streamed usage is not known at peek time → cost null (not measured).
@@ -2347,7 +2398,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
             attemptTelemetry = withRequestMutations(
               passthrough,
-              visualCompressionMutationLedger(visualCompressionMutation),
+              visualCompressionMutationLedger(preparation.visualCompressionMutation),
             );
             const body = await withAttemptDeadline(
               req.attempt_timeout_ms,
@@ -2420,7 +2471,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             passthrough,
             mergeRequestMutations(
               bodyReq.request_mutations,
-              visualCompressionMutationLedger(visualCompressionMutation),
+              visualCompressionMutationLedger(preparation.visualCompressionMutation),
             ),
           );
           settleBreaker("success");
@@ -2770,6 +2821,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // production requests on a 12-candidate chain with fallback_count 0, never
           // reaching the static same-protocol rung that existed precisely for this.
         }
+      } catch (err) {
+        if (err instanceof PriorityCursorCancelled) return undefined;
+        if (isAbort(err, signal)) return abortedOutcome();
+        throw err;
       } finally {
         // Release a HALF_OPEN probe lock on any path that allowed the attempt but
         // never settled success/failure/abort (capability skip after canAttempt,
@@ -2780,98 +2835,190 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       }
     };
 
-    // Resolve metadata first: unrelated/default single-type chains do no scheduling I/O.
-    const discovered: {
-      alias: string;
-      model: string;
-      provider: ProviderClient;
-      pool: NonNullable<ProviderClient["accountPriority"]>;
-    }[] = [];
-    if (plan.candidate_chain.length > 1) {
-      for (const alias of plan.candidate_chain) {
-        const target = resolveAttemptTarget({
-          alias,
-          defaultProvider,
-          providers,
-          registry,
-          knownOAuthPrefixes,
-          isManagedProvider,
-          isManagedAlias,
-          oauthAliases,
-          oauthWireModels,
-          oauthProviderProtocols,
-        });
-        const capability = xaiCatalogEntry(alias, target.providerModel)?.capabilities;
-        if (
-          !target.provider ||
-          target.provider.mediaOnly ||
-          capability?.outputImage ||
-          capability?.outputAudio
-        )
-          continue;
-        const pool = target.provider.accountPriority;
-        if (!pool || target.providerModel === "auto" || target.providerModel.endsWith("/auto"))
-          continue;
-        discovered.push({ alias, model: target.providerModel, provider: target.provider, pool });
-      }
-    }
+    const groups: string[][] = [];
     const pools: {
       alias: string;
       model: string;
       kind: "oauth" | "api_key";
       candidates: PriorityAccount[];
     }[] = [];
-    const snapshots = new Map<ProviderClient, Map<string, Promise<PriorityAccount[]>>>();
-    let pinned = false;
-    for (const entry of discovered) {
-      if (
-        !discovered.some((peer) => peer.model === entry.model && peer.pool.kind !== entry.pool.kind)
-      )
-        continue;
-      let byModel = snapshots.get(entry.provider);
-      if (!byModel) {
-        byModel = new Map();
-        snapshots.set(entry.provider, byModel);
-      }
-      try {
-        let snapshot = byModel.get(entry.model);
-        if (!snapshot) {
-          snapshot = entry.pool.snapshot(entry.model, req);
-          byModel.set(entry.model, snapshot);
+    const laneSnapshots = new Map<string, PriorityAccount[]>();
+    const members = new Set(plan.shared_priority_members ?? []);
+    let schedulingPinned = false;
+    if (members.size > 1) {
+      const eligible: string[] = [];
+      let pinned = false;
+      const snapshots = new Map<ProviderClient, Map<string, Promise<PriorityAccount[]>>>();
+      // Resolve and discover first. If any discovery fails, retain legacy execution order.
+      const targets = plan.candidate_chain
+        .filter((alias) => members.has(alias))
+        .map((alias) => ({
+          alias,
+          target: resolveTarget(alias),
+        }));
+      for (const { alias, target } of targets) {
+        if (signal.aborted) break;
+        const { provider, providerModel: model } = target;
+        const caps = xaiCatalogEntry(alias, model)?.capabilities;
+        if (
+          !provider ||
+          provider.mediaOnly ||
+          caps?.outputImage ||
+          caps?.outputAudio ||
+          caps?.outputVideo ||
+          caps?.outputThreeD ||
+          model === "auto" ||
+          model.endsWith("/auto")
+        )
+          continue;
+        const pool = provider.accountPriority;
+        try {
+          let candidates: PriorityAccount[];
+          if (pool) {
+            let byModel = snapshots.get(provider);
+            if (!byModel) {
+              byModel = new Map();
+              snapshots.set(provider, byModel);
+            }
+            let snapshot = byModel.get(model);
+            if (!snapshot) {
+              snapshot = pool.snapshot(model, req, true);
+              byModel.set(model, snapshot);
+            }
+            candidates = await snapshot;
+            pinned ||= pool.isPinned(req);
+          } else {
+            candidates = [{ account: "static", priority: 50, eligible: true }];
+          }
+          laneSnapshots.set(alias, candidates);
+        } catch {
+          pinned = true;
+          log?.("warn", "provider.account_priority_unavailable", {
+            trace_id: correlationTraceId(req),
+            alias,
+          });
         }
-        const candidates = await snapshot;
-        pinned ||= entry.pool.isPinned(req);
-        pools.push({ alias: entry.alias, model: entry.model, kind: entry.pool.kind, candidates });
-      } catch {
-        // Discovery failure preserves legacy order; real dispatch still validates credentials.
-        pinned = true;
-        log?.("warn", "provider.account_priority_unavailable", {
-          trace_id: correlationTraceId(req),
-          alias: entry.alias,
-        });
       }
+      const hasNonDefault = (aliases: Iterable<string>) =>
+        [...aliases].some((alias) =>
+          laneSnapshots.get(alias)?.some((account) => account.eligible && account.priority !== 50),
+        );
+      // One available alias needs neither a scheduler nor speculative preflight.
+      const available = targets.filter(({ alias }) =>
+        laneSnapshots.get(alias)?.some((account) => account.eligible),
+      );
+      if (!pinned && available.length > 1 && hasNonDefault(laneSnapshots.keys())) {
+        for (const { alias } of available) {
+          if (signal.aborted) break;
+          const target = resolveTarget(alias);
+          if (!localPreflight(alias, target, () => 0, true)) continue;
+          // Preview a breaker without retaining a probe. Dispatch always rechecks.
+          const gate = breaker.canAttempt(alias);
+          if (gate.probeToken !== undefined) breaker.recordAbort(alias, gate.probeToken);
+          if (gate.allow) eligible.push(alias);
+        }
+        if (eligible.length > 1 && hasNonDefault(eligible)) groups.push(eligible);
+      }
+      schedulingPinned = pinned;
     }
-    // A round-robin alias is a chain boundary, not just an excluded group member:
-    // a later manual-priority pool must not leap over it through an earlier OAuth alias.
-    const barriers = new Set(
-      discovered.filter((entry) => entry.pool.enabled === false).map((entry) => entry.alias),
-    );
-    const groups: string[][] = [];
-    if (!pinned) {
-      let segment: typeof pools = [];
-      for (const alias of plan.candidate_chain) {
-        if (barriers.has(alias)) {
-          groups.push(...priorityGroups(segment));
-          segment = [];
-        } else {
-          const pool = pools.find((entry) => entry.alias === alias);
-          if (pool) segment.push(pool);
+    if (signal.aborted) return abortedOutcome();
+    // Direct members belong only to the opted-in lane pool. All other aliases
+    // retain #1070 grouping, including lanes with no direct members at all.
+    const legacyChain = plan.candidate_chain.filter((alias) => !members.has(alias));
+    if (!schedulingPinned) {
+      // Resolve metadata first: unrelated/default single-type chains do no scheduling I/O.
+      const discovered: {
+        alias: string;
+        model: string;
+        provider: ProviderClient;
+        pool: NonNullable<ProviderClient["accountPriority"]>;
+      }[] = [];
+      if (legacyChain.length > 1) {
+        for (const alias of legacyChain) {
+          const target = resolveTarget(alias);
+          const capability = xaiCatalogEntry(alias, target.providerModel)?.capabilities;
+          if (
+            !target.provider ||
+            target.provider.mediaOnly ||
+            capability?.outputImage ||
+            capability?.outputAudio
+          )
+            continue;
+          const pool = target.provider.accountPriority;
+          if (!pool || target.providerModel === "auto" || target.providerModel.endsWith("/auto"))
+            continue;
+          discovered.push({
+            alias,
+            model: target.providerModel,
+            provider: target.provider,
+            pool,
+          });
         }
       }
-      groups.push(...priorityGroups(segment));
+      const snapshots = new Map<ProviderClient, Map<string, Promise<PriorityAccount[]>>>();
+      let pinned = false;
+      for (const entry of discovered) {
+        if (signal.aborted) break;
+        if (
+          !discovered.some(
+            (peer) => peer.model === entry.model && peer.pool.kind !== entry.pool.kind,
+          )
+        )
+          continue;
+        let byModel = snapshots.get(entry.provider);
+        if (!byModel) {
+          byModel = new Map();
+          snapshots.set(entry.provider, byModel);
+        }
+        try {
+          let snapshot = byModel.get(entry.model);
+          if (!snapshot) {
+            snapshot = entry.pool.snapshot(entry.model, req);
+            byModel.set(entry.model, snapshot);
+          }
+          const candidates = await snapshot;
+          pinned ||= entry.pool.isPinned(req);
+          pools.push({
+            alias: entry.alias,
+            model: entry.model,
+            kind: entry.pool.kind,
+            candidates,
+          });
+        } catch {
+          // Discovery failure preserves legacy order; real dispatch still validates credentials.
+          pinned = true;
+          log?.("warn", "provider.account_priority_unavailable", {
+            trace_id: correlationTraceId(req),
+            alias: entry.alias,
+          });
+        }
+      }
+      // A round-robin alias is a chain boundary, not just an excluded group member:
+      // a later manual-priority pool must not leap over it through an earlier OAuth alias.
+      const barriers = new Set([
+        ...members,
+        ...discovered.filter((entry) => entry.pool.enabled === false).map((entry) => entry.alias),
+      ]);
+      if (!pinned) {
+        let segment: typeof pools = [];
+        for (const alias of plan.candidate_chain) {
+          if (barriers.has(alias)) {
+            groups.push(...priorityGroups(segment));
+            segment = [];
+          } else {
+            const pool = pools.find((entry) => entry.alias === alias);
+            if (pool) segment.push(pool);
+          }
+        }
+        groups.push(...priorityGroups(segment));
+      } else {
+        groups.length = 0;
+      }
     }
     const consumed = new Set<string>();
+    // Start a group at its first member, preserving any preceding lane expansion.
     for (const alias of plan.candidate_chain) {
+      if (signal.aborted) return abortedOutcome();
       if (consumed.has(alias)) continue;
       const group = groups.find((members) => members[0] === alias);
       if (!group) {
@@ -2886,7 +3033,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       const outcome = await coordinateAccountPriority(
         group.map((member) => ({
           alias: member,
-          candidates: pools.find((pool) => pool.alias === member)?.candidates ?? [],
+          candidates:
+            laneSnapshots.get(member) ??
+            pools.find((pool) => pool.alias === member)?.candidates ??
+            [],
         })),
         async (member, cursor) => {
           cursor.onSelect = (account, priority) => {
@@ -2910,7 +3060,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         parentHolder.selected = holders.get(finalAlias)?.selected ?? null;
       if (outcome) return outcome;
     }
-
     // Chain exhausted (or empty). Pick the structured terminal error (docs/07):
     //   • empty chain                     → lane_unavailable (503)
     //   • context overflow and every other rejection was a capability skip

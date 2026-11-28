@@ -8,6 +8,22 @@
 ---
 
 
+## 2026-11-28 · Lane 作为共享账号池：已实现本地切片（docs/04）
+
+**管理界面。** Lanes 编辑器新增「按优先级混用账号」开关（共享 `Switch` 组件）。开启后，主选和备选中的每一项都会标上「进池」或「通道 · 兜底」。管理端 API 客户端 `normalizeLane` 原本只保留已知字段，现在也会保留 `shared_account_priority`；否则在页面上保存任意一个通道，都会悄悄把这个开关从配置里删掉。Providers 页面优先级列的提示文字也已同步更新。
+
+**状态与范围。** 基于 main `d44da493` / #1070 实现，尚未提交或部署。新增 lane 字段 `shared_account_priority?: boolean`，缺省不补值、行为等同 false，旧配置及出厂默认均不变。只改变明确开启此字段的已授权文本 lane；不开启时仍使用 #1070 的相同 wire model 分组和 manual-priority API key 门槛，不改分类兜底字段。
+
+**嵌套规则（按 controller 复审修正）。** 只有选中 lane 自己的 primary/fallback 中直接写出的 `provider/model` alias 加入共享组；任何 lane 名引用及其所有后代都不因引用关系入组，裸模型名也不入组。要让 Kimi 替代 Claude，必须直接列出 `kimi/k3.1-pro[1m]`，不能只写 `kimi`。账号 priority 是全局设置，组成员却是 lane 局部配置；因此否决原来的递归 primary 规则，避免 `claude-sonnet → balanced → gpt-sol → openai-codex/gpt-6.2-sol` 把为 GPT 工作设置的 Codex10 偷带入 Claude 组。若同一个 alias 同时在根 lane 直接列出及嵌套展开中出现，按直接成员处理并沿用原展开去重位置。组在首个成员的原链位置执行，之前的 lane 展开不挪动；组结束后按原展开顺序继续其余候选、跳过已消费成员。授权、blocked_models 交集及原展开算法保持。
+
+**调度与默认兼容。** 组内按账号 priority 升序、再按原 chain index；同池同级保留原策略/LRU。OAuth 与两种策略的 API key 池都可参与，lane 开关只在本请求覆盖 round_robin 的旧优先级门槛。无池的静态/环境 key 和免密钥 provider 视为 priority 50。存在非默认可用优先级时，在首个成员位置执行共享组再继续剩余链；全为 50 则完全保留原展开链及原池策略，包括嵌套 fallback 的位置。`auto` 上游选择器及媒体 alias 不参与；严格账号亲和、延续身份或发现失败继续走旧顺序。
+
+**执行边界与预检成本（按独立复审修正）。** 成组前仅进行本地能力、协议历史、上下文估算及 breaker 预览，不发送 exact `count_tokens`、不选账号、不写 attempt/skip 行。预览临时取得的 HALF_OPEN token 立即释放；真正执行 alias 时才重新解析 live target、检查 breaker 与能力，并带该成员的 cursor 延迟执行 exact count。精确计数发现 context_too_small 时协调器继续下一个成员，未到达成员不占 quota/LRU、不因计数错误 park。skip 行只在原执行顺序真正到达 alias 时写入；客户端 abort 立即停止后续发现/预检，计数取消不冒充 provider 警告。没有跨 alias 缓存 native body 或 count 结果，避免 target 替换后复用旧验证。仍使用原游标和池重试，保留 transient sibling retry、usage park、真正 400 短路、free429 skip、abort 不算故障、有效输出后不重放和最终 serving_account 归属；分类与执行 fallback 不合并。
+
+**单成员与剩余链。** 只有一个直接成员时跳过 lane 发现及协调；资格过滤只剩一个成员时也不进入协调器。组外 lane 引用展开的候选继续应用 #1070 相同 wire-model 分组和 manual-priority 门槛，直接成员作为分段边界，防止旧组跨越新 lane 组。零直接成员时完全等同 flag-off。snapshot 在各发现过程按 provider/model 缓存，协调器不额外重读，真正出站 refresh/acquire/settle 保持。配置/账号并发修改不是跨进程调度事务；无数据库 schema 变化，SQLite/Postgres 保持原存储。客户端 requested-model promotion 只影响组内同优先级的链顺序，不能盖过更高优先级账号；这是 lane 作为一组可替代模型的预期语义，显式单 alias 与严格亲和仍保持原行为。
+
+**Admin 契约与验证。** `GET /admin/api/lanes` 返回 `[{name,...Lane}]`，单项 GET 返回 Lane；单项 PUT 接收完整 Lane，批量 PUT 接收完整 lane map。新字段是顶层可选 boolean；省略表示关闭且不写默认字段。测试覆盖 true、false、省略删除经过 GET/PUT→真实 YAML→schema 重载。测试覆盖跨协议流/非流、直接成员与嵌套尾链、blocked_models、全默认顺序、真实计数溢出、断连、breaker 所有权、单成员、组外旧排序、客户端模型 promotion。此次先复现未到达 key 被 count、skip 提前入账、nested remainder 的 A10→B30 顺序、单成员发现及断连计数警告，再修复并运行仅两个改动测试文件（机器负载高，不重跑全套）。前次 17 文件/748 测试记录仍是前次验证，不能视作本次全套验证；本次两个定向文件共 81 测试通过（lane-priority 34、shared-priority 47）；最后各运行一次 `CI=true pnpm typecheck` 和 `pnpm lint` 均 exit 0，lint 为 206 既有 warnings / 5 infos，`git diff --check` 通过。未修改并行 controller 的 apps/admin 文件，未提交或部署，也未做真实上游/生产验收。
+
 ## 2026-11-28 · 跨订阅与 API Key 的账号优先级：首个切片已实现（docs/02、03、04、07、11）
 
 **状态：已实现本地切片，未提交、未运行远程 CI、未部署。** 基线 `49263aa28e8e952347fac5106c77974d86a037e9`。用户解除前次设计门槛后，按原方案补齐可恢复的池执行状态和请求级协调器。原默认顺序表征测试保持原文；新增真实 `routeRequest → createExecute → OAuth/API key pool` 边界测试先证明 A10→B30→K20 的旧行为，再验证 A10→K20→B30。独立只读审查发现的冷却更新、容量/付费额度、legacy key 与错误脱敏问题均补了回归用例。
@@ -97,13 +113,9 @@ WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一
 
 只有专用 `/helm` 工作器返回带 `X-ASR-Admission: gpu-busy` 的 429，才释放尚未使用的预留并允许原号退避重试；其他未知结果保留原操作核对。现役异步转写的账户上界、单音轨及未知费用语义保持。0.30.96 发布准备确认 CLI 快照没有变化。
 
-## 2026-11-21 · 豆包录音的空白时间戳（native-media）
-
-真实录音结果在英文词间插入 `text: " "`、两端时间均为 `-1` 的占位。只从 words 数组过滤非空纯空白且双端严格为 -1 的条目，保留全文、真实词时间和供应商时长。其他负值、空字符串、非数字及 utterance 时间仍拒绝。查询和标准化共用 schema，现有任务只需查询，无需重发付费提交。
-
-发布 0.30.95 按发布流程同步 Grok 1.0.92、Claude Code 2.1.330，Codex 0.171.0 不变；Claude 新增的 MCP 保存字段已静态审查并加入剥离回归，Messages 信任白名单不变。
-
 ## 更早历史总览
+
+2026-11-21：豆包录音空白时间戳——只过滤非空纯空白且双端为 -1 的 words 占位，保留全文及真实时间；其他非法时间仍拒绝，既有任务只读查询即可。
 
 2026-11-21：Qwen Filetrans 原生秒数——标准化 `usage.seconds` 为 duration 用量，金额仍为 unknown，只读查询即可补齐回执。
 

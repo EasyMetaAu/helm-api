@@ -1355,7 +1355,6 @@
   "Keeps using remaining credits when limited": "限流后继续使用剩余额度",
   "Key not working": "密钥不可用",
   "Limited · using credits": "限流 · 使用余额中",
-  "Lower numbers are used first. Subscription accounts and API keys are currently compared within their own pools.": "数字越小越先使用。目前订阅账号和 API Key 各自在自己的池里比较。",
   "Needs sign-in": "需重新登录",
   "Normal": "正常",
   "Search accounts or models": "搜索账号或模型",
@@ -1375,8 +1374,13 @@
   "Claude resets": "Claude 可重置",
   "Fast mode: always use the provider’s faster tier": "快速模式：始终使用提供商的快速档",
   "Options": "选项",
-  "This key pool takes turns; priority applies once it uses manual priority.": "这个密钥池目前是均匀轮换，切换为「手动优先级」后优先级才生效。",
   "On": "开",
   "Via proxy": "通过代理",
-  "Connects directly, no proxy": "直接连接，不走代理"
+  "Connects directly, no proxy": "直接连接，不走代理",
+  "Lower numbers are used first. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "数字越小越先使用。在开启了「按优先级混用账号」的通道里，通道中所有提供商的账号按这个数字一起排序；其他情况下只在各自的池内比较。",
+  "This key pool takes turns. Its priority still applies in lanes that mix accounts by priority, or after switching it to manual priority.": "这个密钥池是均匀轮换。在开启了「按优先级混用账号」的通道里，它的优先级依然生效；切换为「手动优先级」后，在其他通道里也生效。",
+  "Mix accounts by priority": "按优先级混用账号",
+  "In pool": "进池",
+  "Lane · fallback": "通道 · 兜底",
+  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "开启后，本通道直接列出的模型背后的所有账号（订阅、API Key、其他提供商）按优先级排成一个顺序使用，数字越小越先用。通道名引用仍排在它们后面兜底。优先级在「提供商」页面设置。"
 }
