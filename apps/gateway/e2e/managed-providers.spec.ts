@@ -122,8 +122,9 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
     await expect(page.getByRole("dialog")).toHaveCount(0);
     const api = page.getByRole("region", { name: "Providers", exact: true });
     const row = api.getByRole("row").filter({ hasText: "Kimi · 主账号" });
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Manage", exact: true }).click();
-    await page.getByLabel("Priority", { exact: true }).fill("10");
+    await page.getByRole("dialog").getByLabel("Priority", { exact: true }).fill("10");
     await expectBorderToken(page.getByRole("group", { name: "Account proxy", exact: true }));
     await page.getByLabel("Use a proxy for this account").check();
     await page.getByLabel("Proxy host", { exact: true }).fill("127.0.0.1");
@@ -155,10 +156,16 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
       parameters: { temperature: 0.4 },
     });
     await page.reload();
-    await expect(api.getByRole("row").filter({ hasText: "Kimi · 主账号" })).toContainText("10");
+    await expect(
+      api
+        .getByRole("row")
+        .filter({ hasText: "Kimi · 主账号" })
+        .getByRole("spinbutton", { name: "Priority" }),
+    ).toHaveValue("10");
     await expectBorderToken(
       page.getByRole("region", { name: "Providers", exact: true }).locator("table").locator(".."),
     );
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Manage", exact: true }).click();
     await page.getByRole("dialog").getByText("Connection settings", { exact: true }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Configure", exact: true }).click();
@@ -166,7 +173,7 @@ test("managed provider UI creates, proxies, edits and removes a real gateway con
     await expect(page.getByRole("dialog")).toContainText("Keys are already saved");
     await page.getByRole("button", { name: "Save provider", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expect(row).toContainText("10");
+    await expect(row.getByRole("spinbutton", { name: "Priority" })).toHaveValue("10");
     const evidence = process.env.HELM_UI_EVIDENCE_DIR;
     if (evidence) {
       mkdirSync(evidence, { recursive: true });

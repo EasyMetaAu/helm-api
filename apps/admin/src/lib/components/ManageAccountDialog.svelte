@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/tooltip';
   import {
     type AccountModelsMode,
     type AccountProxyInput,
@@ -336,7 +337,13 @@
           {providerName} · <code class="font-mono">{account}</code>
         </p>
       </div>
-      <button type="button" class="btn-icon shrink-0" aria-label={$t('Close')} onclick={close}>
+      <button
+        type="button"
+        class="btn-icon shrink-0"
+        aria-label={$t('Close')}
+        use:tooltip={$t('Close')}
+        onclick={close}
+      >
         <svg
           class="h-5 w-5"
           fill="none"

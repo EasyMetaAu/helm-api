@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/tooltip';
   import { untrack } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -464,7 +465,7 @@
                     <!-- system-managed internal key: read-only, no edit/revoke/delete -->
                   {:else}
                     <details data-testid="key-actions" class="menu">
-                      <summary class="menu-trigger" title={$t('More actions')}>
+                      <summary class="menu-trigger" use:tooltip={$t('More actions')}>
                         <span aria-hidden="true">⋯</span>
                         <span class="sr-only">{$t('More actions')}</span>
                       </summary>

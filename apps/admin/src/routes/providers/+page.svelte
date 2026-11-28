@@ -5,19 +5,27 @@
   let keyManager = $state<ReturnType<typeof ApiKeyPools>>();
   let connections = $state<ManagedProviderView[]>([]);
   let keyPools = $state<ApiKeyPoolView[]>([]);
-  let providerSearch = $state('');
-  let authentication = $state('all');
   let upstreamUsageVisible = $state(false);
-  const matchesSearch = (value: string) =>
-    value.toLowerCase().includes(providerSearch.trim().toLowerCase());
   import ApiKeyPools from '$lib/components/ApiKeyPools.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { invalidateAll } from '$app/navigation';
+  import { goto, invalidateAll, replaceState } from '$app/navigation';
   import { base } from '$app/paths';
+  import { page } from '$app/stores';
+  import {
+    type AccountKind,
+    type AccountListRow,
+    type ProviderListFilters,
+    type SortKey,
+    filterAndSortRows,
+    mostConstrainedWindow,
+    parseProviderListFilters,
+    providerListFiltersToSearch,
+  } from './account-list';
   import { accountDetailHref } from '$lib/oauth-account-id.js';
   import {
     type ManagedProviderView,
     type ApiKeyPoolView,
+    type ApiKeyAccountView,
     isCodexQuotaWindowPlaceholder,
     selectCodexAccountWeeklyQuotaWindows,
     usableAnthropicResetGrant,
@@ -46,6 +54,7 @@
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import Switch from '$lib/components/Switch.svelte';
   import RefreshControl from '$lib/components/RefreshControl.svelte';
   import TestAccountDialog from '$lib/components/TestAccountDialog.svelte';
   import {
@@ -56,6 +65,7 @@
     formatUsd,
   } from '$lib/format';
   import { t } from '$lib/i18n';
+  import { tooltip } from '$lib/tooltip';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
   // owns the flow + encrypted token storage; this page lists connected accounts and
@@ -85,9 +95,6 @@
   } | null>(null);
   let confirming = $state<{ providerId: string; account: string } | null>(null);
   let disconnecting = $state<boolean>(false);
-  // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
-  // to disable the control while saving without blocking the rest of the table.
-  let savingSchedule = $state<Record<string, boolean>>({});
   // One global account-pool strategy applies across every subscription provider pool.
   // Account priority/schedulable remain per-account controls below.
   let savingStrategy = $state<boolean>(false);
@@ -233,39 +240,12 @@
     return null;
   }
 
-  // A short "platform · auth" pill so the supply-chain shape is legible at a glance
-  // (Claude / Codex / Copilot + how it authenticates) without exposing the model
-  // market (Principle 6 — provider aliases stay internal).
-  function typeBadge(p: OAuthProviderStatus, account: OAuthAccount): string {
-    if (p.id === 'anthropic') {
-      const labels = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
-      const plan = account.anthropicPlanType && labels[account.anthropicPlanType];
-      return plan ? `Claude ${plan} · OAuth` : `Claude · ${$t('Plan unknown')} · OAuth`;
-    }
-    if (p.id === 'openai-codex') return `Codex · OAuth`;
-    if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
-    if (p.id === 'xai') return `Grok · OAuth · ${$t('Experimental')}`;
-    return p.flow === 'device_code' ? $t('Device') : 'OAuth';
-  }
-
   function planLabel(plan: string): string {
     return plan
       .split(/[-_\s]+/)
       .filter(Boolean)
       .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`)
       .join(' ');
-  }
-
-  // How many model pills to render inline before collapsing the rest into a "+N"
-  // pill (Copilot can expose 20+; the full list rides in the cell's title tooltip).
-  const MODELS_SHOWN = 3;
-
-  // Compact egress-proxy label ("socks5 · 10.0.0.1:1080"), or null when the account
-  // connects directly. The gateway already REDACTED the password (only `hasPassword`
-  // crosses), so nothing secret is rendered.
-  function proxyLabel(p: OAuthAccount['proxy']): string | null {
-    if (!p) return null;
-    return `${p.type} · ${p.host}:${p.port}`;
   }
 
   // Fuller proxy detail for the hover tooltip — adds the auth shape (username +
@@ -727,23 +707,21 @@
     void invalidateAll();
   }
 
-  // Inline schedule edits reuse the existing PUT seam; on success the route hot-rebuilds
-  // the pool, so we invalidateAll to reflect the live priority/parked state. A 503
-  // "saved but not applied" (or any error) surfaces via `error` without losing the page.
-  async function savePriority(providerId: string, account: string, raw: string): Promise<void> {
-    // Reject what the Manage dialog + API also reject: priority is a NON-NEGATIVE
-    // integer. `Number` (not parseInt) so "1.9" fails instead of silently truncating
-    // to 1, and "-1" is refused (a negative priority would always win pool scheduling).
-    const priority = Number(raw);
-    if (!Number.isInteger(priority) || priority < 0) {
-      error = $t('Priority must be a non-negative integer');
-      return;
-    }
+  // List-level edits: priority and the per-account switches save straight from the
+  // row through the same PUT the Manage dialog uses; the route hot-rebuilds the pool,
+  // so the page reloads its data afterwards. Errors land in the shared banner.
+  let savingSchedule = $state<Record<string, boolean>>({});
+
+  async function updateSchedule(
+    providerId: string,
+    account: string,
+    patch: Parameters<typeof setAccountSchedule>[2],
+  ): Promise<void> {
     const k = keyOf(providerId, account);
     savingSchedule = { ...savingSchedule, [k]: true };
     error = null;
     try {
-      await setAccountSchedule(providerId, account, { priority });
+      await setAccountSchedule(providerId, account, patch);
       await invalidateAll();
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to update scheduling');
@@ -752,40 +730,28 @@
     }
   }
 
-  async function toggleSchedulable(
-    providerId: string,
-    account: string,
-    schedulable: boolean,
-  ): Promise<void> {
-    const k = keyOf(providerId, account);
-    savingSchedule = { ...savingSchedule, [k]: true };
-    error = null;
-    try {
-      await setAccountSchedule(providerId, account, { schedulable });
-      await invalidateAll();
-    } catch (e) {
-      error = e instanceof Error ? e.message : $t('Failed to update scheduling');
-    } finally {
-      savingSchedule = { ...savingSchedule, [k]: false };
+  // Priority is a non-negative integer on both account types (API keys cap at 1000).
+  // `Number`, not parseInt, so "1.9" is refused instead of silently truncated.
+  function parsePriority(raw: string, max: number): number | null {
+    const value = Number(raw);
+    if (raw.trim() === '' || !Number.isInteger(value) || value < 0 || value > max) {
+      error =
+        max === Number.MAX_SAFE_INTEGER
+          ? $t('Priority must be a non-negative integer')
+          : $t('Priority must be a whole number from 0 to {max}', { max });
+      return null;
     }
+    return value;
   }
 
-  async function toggleFastMode(
-    providerId: string,
-    account: string,
-    fastMode: boolean,
-  ): Promise<void> {
-    const k = keyOf(providerId, account);
-    savingSchedule = { ...savingSchedule, [k]: true };
-    error = null;
-    try {
-      await setAccountSchedule(providerId, account, { fastMode });
-      await invalidateAll();
-    } catch (e) {
-      error = e instanceof Error ? e.message : $t('Failed to update Fast mode');
-    } finally {
-      savingSchedule = { ...savingSchedule, [k]: false };
-    }
+  function saveOAuthPriority(providerId: string, account: string, raw: string): void {
+    const priority = parsePriority(raw, Number.MAX_SAFE_INTEGER);
+    if (priority !== null) void updateSchedule(providerId, account, { priority });
+  }
+
+  function saveKeyPriority(pool: string, account: ApiKeyAccountView, raw: string): void {
+    const priority = parsePriority(raw, 1000);
+    if (priority !== null) keyManager?.setPriority(pool, account, priority);
   }
 
   async function saveSelectionStrategy(selectionStrategy: OAuthSelectionStrategy): Promise<void> {
@@ -930,46 +896,415 @@
       disconnecting = false;
     }
   }
-  const visibleOAuthRows = $derived(
-    rows.filter(
-      (row) =>
-        (authentication === 'all' || authentication === 'oauth') &&
-        matchesSearch(
-          `${row.provider.name} ${row.account.account} ${row.account.models.join(' ')}`,
-        ),
-    ),
+  // ── One list for every account ───────────────────────────────────────────────
+  // Subscription logins, API key accounts and key-free connections become the same
+  // row shape (see ./account-list), so the list shows the same columns and actions
+  // for all of them. Search, filters and sort live in the URL.
+  let filters = $state<ProviderListFilters>(
+    untrack(() => parseProviderListFilters($page.url.searchParams)),
   );
-  const keyRows = $derived(
-    keyPools
-      .flatMap((pool) => {
-        const linked = connections.filter((p) => !p.keyless && p.poolId === pool.id);
-        const label = linked.find((p) => p.id === pool.id)?.label ?? linked[0]?.label ?? pool.id;
-        return (pool.accounts.length ? pool.accounts : [null]).map((account) => ({
-          pool,
-          account,
-          linked,
-          label,
-        }));
-      })
-      .filter(
-        (row) =>
-          (authentication === 'all' || authentication === 'key') &&
-          matchesSearch(
-            `${row.label} ${row.account?.name ?? ''} ${row.linked.map((p) => `${p.label} ${p.base_url}`).join(' ')} ${row.pool.models.join(' ')}`,
-          ),
-      ),
+
+  function setFilters(next: Partial<ProviderListFilters>): void {
+    filters = { ...filters, ...next };
+    const qs = providerListFiltersToSearch(filters);
+    replaceState(qs ? `?${qs}` : $page.url.pathname, {});
+  }
+
+  // Back/forward restore the filters the URL carries.
+  $effect(() => {
+    const fromUrl = parseProviderListFilters($page.url.searchParams);
+    untrack(() => {
+      if (providerListFiltersToSearch(fromUrl) !== providerListFiltersToSearch(filters)) {
+        filters = fromUrl;
+      }
+    });
+  });
+
+  function sortBy(key: SortKey): void {
+    if (filters.sort === key) setFilters({ dir: filters.dir === 'asc' ? 'desc' : 'asc' });
+    else setFilters({ sort: key, dir: key === 'name' || key === 'priority' ? 'asc' : 'desc' });
+  }
+
+  type Tone = 'ok' | 'warning' | 'error' | 'neutral';
+  type QuotaSummary = {
+    remaining: number;
+    used: number;
+    label: string;
+    resetText: string;
+  };
+  type ListRow = AccountListRow & {
+    accountLabel: string;
+    /** Secondary facts kept out of the list, shown on hover over the account. */
+    accountTitle: string;
+    providerLabel: string;
+    typeLabel: string;
+    status: { tone: Tone; label: string; detail: string; title: string } | null;
+    quota: QuotaSummary | null;
+    /** Every quota window, each with its own bar. */
+    windows: Array<{ key: string; label: string; used: number; resetText: string }>;
+    /** Every balance-like fact the provider reports (credits, resets, limits). */
+    balances: Array<{ label: string; value: string; testid?: string }>;
+    costUsd: number | null | undefined;
+    rpm: number | null;
+    usagePeriod: 'today' | 'day';
+    proxy: { label: string; title: string } | null;
+    href: string | null;
+    open: (() => void) | null;
+    oauth?: { provider: OAuthProviderStatus; account: OAuthAccount };
+    key?: (typeof keyEntries)[number];
+    connection?: ManagedProviderView;
+  };
+
+  const toneClass: Record<Tone, string> = {
+    ok: 'badge-ok',
+    warning: 'badge-warning',
+    error: 'badge-error',
+    neutral: 'badge-neutral',
+  };
+
+  const PLAN_LABELS: Record<string, string> = {
+    pro: 'Pro',
+    max: 'Max',
+    team: 'Team',
+    enterprise: 'Enterprise',
+  };
+
+  function subscriptionPlan(p: OAuthProviderStatus, account: OAuthAccount): string | null {
+    if (p.id === 'anthropic') {
+      return account.anthropicPlanType ? (PLAN_LABELS[account.anthropicPlanType] ?? null) : null;
+    }
+    if (p.id === 'openai-codex') {
+      const plan =
+        quotaByKey.get(keyOf(p.id, account.account))?.planType ?? account.chatgptPlanType;
+      return plan ? planLabel(plan) : null;
+    }
+    return null;
+  }
+
+  function quotaSummary(q: OAuthQuotaSnapshot | undefined): QuotaSummary | null {
+    const windows = q?.windows ?? [];
+    const worst = mostConstrainedWindow(windows);
+    if (worst) {
+      const used = Math.min(100, Math.max(0, worst.usedPercent));
+      return {
+        used,
+        remaining: Math.round(100 - used),
+        label: quotaWindowLabel(worst),
+        resetText: resetIn(worst.resetsAtMs),
+      };
+    }
+    const individual = individualLimitUsedPercent(q);
+    if (individual != null && q?.individualLimit) {
+      return {
+        used: individual,
+        remaining: Math.round(100 - individual),
+        label: $t('Monthly credit limit'),
+        resetText: resetIn(q.individualLimit.resetsAtMs),
+      };
+    }
+    return null;
+  }
+
+  function balancesFor(
+    provider: OAuthProviderStatus,
+    account: OAuthAccount,
+    q: OAuthQuotaSnapshot | undefined,
+  ): ListRow['balances'] {
+    const out: ListRow['balances'] = [];
+    if (q?.individualLimit) {
+      out.push({
+        label: $t('Monthly credit limit'),
+        value: $t('{used} of {limit} credits used', {
+          used: formatCreditAmount(q.individualLimit.used),
+          limit: formatCreditAmount(q.individualLimit.limit),
+        }),
+        testid: 'codex-individual-limit',
+      });
+    }
+    if (q?.credits?.unlimited) out.push({ label: $t('Credits'), value: $t('Unlimited') });
+    else if (q?.credits) {
+      const n = Number(q.credits.balance);
+      out.push({
+        label: $t('Credits'),
+        value:
+          q.credits.balance == null ? '—' : Number.isFinite(n) ? n.toFixed(2) : q.credits.balance,
+      });
+    }
+    if (q?.resetCredits != null) {
+      out.push({ label: $t('Reset credits'), value: String(q.resetCredits) });
+    }
+    if (provider.id === 'anthropic') {
+      const grant = anthropicResetGrant(account.account);
+      if (grant) {
+        out.push({
+          label: $t('Claude resets'),
+          value: `${grant.resets_left} · ${$t('Expires')} ${new Date(grant.ends_at).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}`,
+        });
+      }
+    }
+    const extra = additionalLimitNames(q);
+    if (extra.length > 0) out.push({ label: $t('Additional limits'), value: extra.join(', ') });
+    const reached = rateLimitReachedLabel(q?.rateLimitReachedType);
+    if (reached) out.push({ label: $t('Limit'), value: reached });
+    return out;
+  }
+
+  function oauthStatus(
+    account: OAuthAccount,
+    limit: UsageLimitStatus | null,
+  ): {
+    tone: Tone;
+    label: string;
+    detail: string;
+    title: string;
+    group: AccountListRow['statusGroup'];
+  } {
+    if (!account.healthy) {
+      return {
+        tone: 'error',
+        label: $t('Needs sign-in'),
+        detail: '',
+        title: '',
+        group: 'attention',
+      };
+    }
+    if (limit) {
+      const recovery = autoRecoverIn(limit.untilMs);
+      return {
+        tone: account.allowSpendRemainingCredits ? 'warning' : 'error',
+        label: account.allowSpendRemainingCredits
+          ? $t('Limited · using credits')
+          : $t('Rate limited'),
+        detail: limit.label && recovery ? `${limit.label} · ${recovery}` : recovery,
+        title: limit.label ?? '',
+        group: 'attention',
+      };
+    }
+    if (!account.schedulable) {
+      return { tone: 'neutral', label: $t('Paused'), detail: '', title: '', group: 'paused' };
+    }
+    return { tone: 'ok', label: $t('Normal'), detail: '', title: '', group: 'ok' };
+  }
+
+  function keyStatus(account: ApiKeyAccountView | null): {
+    tone: Tone;
+    label: string;
+    detail: string;
+    title: string;
+    group: AccountListRow['statusGroup'];
+  } {
+    if (!account) {
+      return {
+        tone: 'warning',
+        label: $t('No saved keys'),
+        detail: '',
+        title: '',
+        group: 'attention',
+      };
+    }
+    const title = [account.reason, account.reasonMessage].filter(Boolean).join('\n');
+    const detail = account.nextRetryAt
+      ? `${$t('Next recovery attempt')}: ${new Date(account.nextRetryAt).toLocaleString(undefined, {
+          month: 'numeric',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}`
+      : '';
+    if (!account.enabled)
+      return { tone: 'neutral', label: $t('Paused'), detail: '', title, group: 'paused' };
+    switch (account.state) {
+      case 'ready':
+        return { tone: 'ok', label: $t('Normal'), detail: '', title, group: 'ok' };
+      case 'cooldown':
+        return { tone: 'warning', label: $t('Rate limited'), detail, title, group: 'attention' };
+      case 'quota_exhausted':
+        return { tone: 'warning', label: $t('Quota exhausted'), detail, title, group: 'attention' };
+      case 'invalid':
+        return { tone: 'error', label: $t('Key not working'), detail, title, group: 'attention' };
+    }
+  }
+
+  const keyEntries = $derived(
+    keyPools.flatMap((pool) => {
+      const linked = connections.filter((p) => !p.keyless && p.poolId === pool.id);
+      const label = linked.find((p) => p.id === pool.id)?.label ?? linked[0]?.label ?? pool.id;
+      return (pool.accounts.length ? pool.accounts : [null]).map((account) => ({
+        pool,
+        account,
+        linked,
+        label,
+      }));
+    }),
   );
-  const unpooledConnections = $derived(
-    connections.filter(
-      (p) =>
-        !keyPools.some((pool) => pool.id === p.poolId) &&
-        (authentication === 'all' || authentication === (p.keyless ? 'none' : 'key')) &&
-        matchesSearch(`${p.label} ${p.base_url} ${p.models.map((m) => m.alias).join(' ')}`),
-    ),
-  );
-  const visibleCount = $derived(
-    visibleOAuthRows.length + keyRows.length + unpooledConnections.length,
-  );
+
+  function proxyOf(
+    proxy: OAuthAccount['proxy'] | ApiKeyAccountView['proxy'],
+  ): { label: string; title: string } | null {
+    return proxy ? { label: $t('Proxy'), title: proxyTitle(proxy) } : null;
+  }
+
+  const allRows = $derived.by((): ListRow[] => {
+    const out: ListRow[] = [];
+    for (const { provider, account } of rows) {
+      const k = keyOf(provider.id, account.account);
+      const isCodex = provider.id === 'openai-codex';
+      const quotaRaw = quotaByKey.get(k);
+      const quota = isCodex ? activeCodexQuota(quotaRaw) : quotaRaw;
+      const usage = usageByKey.get(k);
+      const status = oauthStatus(account, usageLimitStatus(quota, isCodex));
+      const summary = quotaSummary(quota);
+      const plan = subscriptionPlan(provider, account);
+      out.push({
+        id: `oauth:${k}`,
+        kind: 'subscription',
+        name: account.account,
+        accountLabel: account.account,
+        accountTitle: [
+          account.email && account.email !== account.account ? account.email : '',
+          plan ? $t('Plan: {plan}', { plan }) : '',
+          account.isFedramp ? $t('FedRAMP') : '',
+          account.chatgptAccountId ? $t('ChatGPT ID: {id}', { id: account.chatgptAccountId }) : '',
+          `${$t('Token expires')}: ${expiryLabel(account)}`,
+          account.models.length > 0 ? `${$t('Models')}: ${account.models.join(', ')}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        providerLabel: provider.name,
+        typeLabel: [$t('Subscription'), plan, provider.id === 'xai' ? $t('Experimental') : null]
+          .filter(Boolean)
+          .join(' · '),
+        priority: account.priority,
+        statusGroup: status.group,
+        status,
+        remainingPercent: summary?.remaining ?? null,
+        quota: summary,
+        windows: (quota?.windows ?? []).map((w) => ({
+          key: w.key,
+          label: quotaWindowLabel(w),
+          used: Math.min(100, Math.max(0, w.usedPercent)),
+          resetText: resetIn(w.resetsAtMs),
+        })),
+        balances: balancesFor(provider, account, quota),
+        tokens: usage?.tokens ?? 0,
+        requests: usage?.requests ?? 0,
+        costUsd: usage?.costUsd,
+        rpm: usage?.rpm ?? null,
+        usagePeriod: 'today',
+        proxy: proxyOf(account.proxy),
+        href: accountDetailHref(base, provider.id, account.account),
+        open: null,
+        searchText: `${provider.name} ${account.account} ${account.email ?? ''} ${account.models.join(' ')}`,
+        oauth: { provider, account },
+      });
+    }
+    for (const entry of keyEntries) {
+      const { pool, account, label } = entry;
+      const usage = account ? pool.usage.find((u) => u.account === account.id) : undefined;
+      const status = keyStatus(account);
+      out.push({
+        id: `key:${pool.id}/${account?.id ?? 'empty'}`,
+        kind: 'key',
+        name: account?.name ?? label,
+        accountLabel: account?.name ?? label,
+        accountTitle: [
+          (account?.models ?? pool.models).length > 0
+            ? `${$t('Models')}: ${(account?.models ?? pool.models).join(', ')}`
+            : '',
+          entry.linked.length > 1
+            ? $t('Shared by {count} connections', { count: entry.linked.length })
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        providerLabel: account ? `${label} · ${account.mask}` : label,
+        typeLabel: 'API Key',
+        priority: account?.priority ?? null,
+        statusGroup: status.group,
+        status,
+        remainingPercent: null,
+        quota: null,
+        windows: [],
+        balances: [],
+        tokens: usage?.tokens ?? 0,
+        requests: usage?.requests ?? 0,
+        costUsd: usage?.costUsd,
+        rpm: null,
+        usagePeriod: 'day',
+        proxy: proxyOf(account?.proxy),
+        href: null,
+        open: account
+          ? () => keyManager?.edit(pool.id, account)
+          : pool.configured
+            ? () => keyManager?.addKeys(pool.id)
+            : null,
+        searchText: `${label} ${account?.name ?? ''} ${entry.linked.map((p) => `${p.label} ${p.base_url}`).join(' ')} ${(account?.models ?? pool.models).join(' ')}`,
+        key: entry,
+      });
+    }
+    for (const connection of connections) {
+      if (keyPools.some((pool) => pool.id === connection.poolId)) continue;
+      const kind: AccountKind = connection.keyless ? 'keyless' : 'key';
+      out.push({
+        id: `conn:${connection.id}`,
+        kind,
+        name: connection.label,
+        accountLabel: connection.label,
+        accountTitle: connection.models.length
+          ? `${$t('Models')}: ${connection.models.map((m) => m.alias).join(', ')}`
+          : '',
+        providerLabel: connection.base_url,
+        typeLabel: connection.keyless ? $t('No key required') : 'API Key',
+        priority: null,
+        statusGroup: 'ok',
+        status: null,
+        remainingPercent: null,
+        quota: null,
+        windows: [],
+        balances: [],
+        tokens: 0,
+        requests: 0,
+        costUsd: undefined,
+        rpm: null,
+        usagePeriod: 'day',
+        proxy: null,
+        href: null,
+        open: connection.keyless ? null : () => providerEditor?.start(connection),
+        searchText: `${connection.label} ${connection.base_url} ${connection.models.map((m) => m.alias).join(' ')}`,
+        connection,
+      });
+    }
+    return out;
+  });
+
+  const visibleRows = $derived(filterAndSortRows(allRows, filters));
+
+  // A click anywhere on a row opens the account; clicks on its own controls don't.
+  function onRowClick(event: MouseEvent, row: ListRow): void {
+    const target = event.target as Element | null;
+    if (target?.closest('a, button, input, select, textarea, label, details, summary')) return;
+    openRow(row);
+  }
+
+  function openRow(row: ListRow): void {
+    if (row.href) void goto(row.href);
+    else row.open?.();
+  }
+
+  function onRowKey(event: KeyboardEvent, row: ListRow): void {
+    if (event.key !== 'Enter' || event.target !== event.currentTarget) return;
+    event.preventDefault();
+    openRow(row);
+  }
+
+  const sortColumns: Array<{ key: SortKey; label: string; align?: 'right' }> = [
+    { key: 'name', label: 'Account' },
+    { key: 'remaining', label: 'Quota and balance' },
+    { key: 'used', label: 'Usage', align: 'right' },
+    { key: 'calls', label: 'Calls', align: 'right' },
+    { key: 'priority', label: 'Priority' },
+  ];
+  const sortLabel = (key: SortKey) => sortColumns.find((c) => c.key === key)?.label ?? key;
 </script>
 
 <section class="page">
@@ -1000,25 +1335,105 @@
     onconfigure={(provider) => providerEditor?.start(provider)}
   />
 
+  {#snippet icon(name: 'fast' | 'auto-reset' | 'credits' | 'direct' | 'proxy')}
+    <svg
+      class="h-3.5 w-3.5 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      {#if name === 'fast'}
+        <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+      {:else if name === 'auto-reset'}
+        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" />
+      {:else if name === 'credits'}
+        <circle cx="8" cy="8" r="6" /><path d="M18.09 10.37A6 6 0 1 1 10.34 18" /><path
+          d="M7 6h1v4"
+        />
+      {:else if name === 'direct'}
+        <path d="M5 12h14" /><path d="m12 5 7 7-7 7" />
+      {:else}
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      {/if}
+    </svg>
+  {/snippet}
+
+  {#snippet sortHeader(key: SortKey, align: 'left' | 'right' = 'left')}
+    <button
+      type="button"
+      class="inline-flex cursor-pointer items-center gap-1 uppercase tracking-wide hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+      class:flex-row-reverse={align === 'right'}
+      aria-label={$t('Sort by {column}', { column: $t(sortLabel(key)) })}
+      onclick={() => sortBy(key)}
+    >
+      <span>{$t(sortLabel(key))}</span>
+      <span class="w-2 text-[10px]" aria-hidden="true"
+        >{filters.sort === key ? (filters.dir === 'asc' ? '↑' : '↓') : ''}</span
+      >
+    </button>
+  {/snippet}
+
   <section class="flex flex-col gap-3" aria-label={$t('Providers')}>
-    <header class="flex flex-wrap items-center gap-x-4 gap-y-2">
+    <header class="flex flex-wrap items-center gap-2">
       <input
         class="input min-w-0 flex-1 sm:max-w-xs"
         type="search"
         aria-label={$t('Search providers')}
-        placeholder={$t('Search providers')}
-        bind:value={providerSearch}
+        placeholder={$t('Search accounts or models')}
+        value={filters.q}
+        oninput={(e) => setFilters({ q: e.currentTarget.value })}
       />
       <select
-        class="select w-full sm:w-44"
-        aria-label={$t('Authentication')}
-        bind:value={authentication}
+        class="select w-full sm:w-36"
+        aria-label={$t('Account type')}
+        value={filters.type}
+        onchange={(e) => setFilters({ type: e.currentTarget.value as ProviderListFilters['type'] })}
       >
-        <option value="all">{$t('All authentication methods')}</option><option value="oauth"
-          >OAuth</option
-        ><option value="key">API Key</option><option value="none">{$t('No key required')}</option>
+        <option value="all">{$t('All types')}</option>
+        <option value="subscription">{$t('Subscription')}</option>
+        <option value="key">API Key</option>
+        <option value="keyless">{$t('No key required')}</option>
       </select>
-      <div class="ml-auto flex items-center gap-2">
+      <select
+        class="select w-full sm:w-36"
+        aria-label={$t('Status')}
+        value={filters.status}
+        onchange={(e) =>
+          setFilters({ status: e.currentTarget.value as ProviderListFilters['status'] })}
+      >
+        <option value="all">{$t('All statuses')}</option>
+        <option value="ok">{$t('Normal')}</option>
+        <option value="attention">{$t('Needs attention')}</option>
+        <option value="paused">{$t('Paused')}</option>
+      </select>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        {#if rows.length > 0}
+          {@const selectedStrategy =
+            strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
+            strategyOptions[0]}
+          <label
+            class="flex items-center gap-2 text-sm text-ink-muted"
+            title={$t(selectedStrategy.description)}
+          >
+            <span class="shrink-0">{$t('Subscription account usage')}</span>
+            <select
+              class="select w-40 disabled:opacity-50"
+              aria-label={$t('Account usage strategy')}
+              value={overview.selectionStrategy}
+              disabled={savingStrategy}
+              onchange={(e) =>
+                saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+            >
+              {#each strategyOptions as option (option.value)}
+                <option value={option.value}>{$t(option.label)}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         <RefreshControl
           onRefresh={async () => {
             await Promise.all([refresh(), keyManager?.refreshView(), providerEditor?.load()]);
@@ -1032,46 +1447,6 @@
         >
       </div>
     </header>
-    <details class="text-sm">
-      <summary class="w-fit cursor-pointer text-ink-muted">{$t('OAuth account strategy')}</summary>
-      <div class="mt-2 flex flex-wrap items-center gap-3">
-        {#if rows.length > 0}
-          {@const selectedStrategy =
-            strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
-            strategyOptions[0]}
-          <div
-            class="order-3 flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 lg:order-2 lg:flex-1 lg:basis-0 lg:flex-nowrap"
-          >
-            <label
-              class="flex min-w-0 flex-1 items-center gap-2 sm:flex-none"
-              title={$t(
-                'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
-              )}
-            >
-              <span class="shrink-0 text-sm text-ink-muted">{$t('Account usage strategy')}</span>
-              <select
-                class="select h-11 min-w-0 flex-1 disabled:opacity-50 sm:h-9 sm:w-44 sm:flex-none"
-                aria-label={$t('Account usage strategy')}
-                value={overview.selectionStrategy}
-                disabled={savingStrategy}
-                onchange={(e) =>
-                  saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
-              >
-                {#each strategyOptions as option (option.value)}
-                  <option value={option.value}>{$t(option.label)}</option>
-                {/each}
-              </select>
-            </label>
-            <p
-              class="field-help min-w-0 basis-full sm:flex-1 sm:basis-0 sm:truncate"
-              title={$t(selectedStrategy.description)}
-            >
-              {$t(selectedStrategy.description)}
-            </p>
-          </div>
-        {/if}
-      </div>
-    </details>
 
     {#if refreshStatusLabel(overview.refresh)}
       <p
@@ -1130,7 +1505,7 @@
       />
     {/if}
 
-    {#if visibleCount === 0}
+    {#if visibleRows.length === 0}
       <div class="empty-state">
         {$t('No matching providers. Add a provider or change the filters.')}
       </div>
@@ -1139,661 +1514,529 @@
         <table class="cards-table">
           <thead class="table-head">
             <tr>
-              <th class="px-3 py-2">{$t('Provider')}</th>
-              <th class="px-3 py-2">{$t('Authentication')}</th>
-              <th class="px-3 py-2">{$t('Models')}</th>
-              <th class="px-3 py-2">{$t('Usage')}</th>
-              <th class="px-3 py-2">{$t('Quota')}</th>
-              <th class="px-3 py-2">{$t('Scheduling')}</th>
-              <th class="px-3 py-2 table-mode:text-right">{$t('Actions')}</th>
+              <th class="px-3 py-2">{@render sortHeader('name')}</th>
+              <th class="px-3 py-2">{$t('Status')}</th>
+              <th class="px-3 py-2">{@render sortHeader('remaining')}</th>
+              <th class="px-3 py-2 text-right" title={$t('Tokens, cost and requests')}
+                >{@render sortHeader('used', 'right')}</th
+              >
+              <th class="px-3 py-2">{$t('Connection')}</th>
+              <th
+                class="px-3 py-2 text-center"
+                title={$t(
+                  'Lower numbers are used first. Subscription accounts and API keys are currently compared within their own pools.',
+                )}>{@render sortHeader('priority')}</th
+              >
+              <th class="whitespace-nowrap px-3 py-2">{$t('Enabled')}</th>
+              <th class="whitespace-nowrap px-3 py-2">{$t('Options')}</th>
+              <th class="px-3 py-2"><span class="sr-only">{$t('Actions')}</span></th>
             </tr>
           </thead>
           <tbody>
-            {#each visibleOAuthRows as row (keyOf(row.provider.id, row.account.account))}
-              {@const k = keyOf(row.provider.id, row.account.account)}
-              {@const usage = usageByKey.get(k)}
-              {@const isCodex = row.provider.id === 'openai-codex'}
-              {@const quota = isCodex ? activeCodexQuota(quotaByKey.get(k)) : quotaByKey.get(k)}
-              <!-- The live WHAM quota plan can change before the OAuth identity claim refreshes. -->
-              {@const codexPlanType = isCodex
-                ? (quota?.planType ?? row.account.chatgptPlanType)
-                : undefined}
-              {@const saving = savingSchedule[k] === true}
-              {@const supportsFast =
-                row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
-              {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
-              {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
-              {@const usageLimit = usageLimitStatus(quota, isCodex)}
-              {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
-              {@const needsReconnect = !row.account.healthy}
-              {@const credentialFailed = row.account.credentialFailed === true}
-              {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
-              {@const codexCreditBalance =
-                isCodex && quota?.credits && !quota.credits.unlimited
-                  ? formatCreditBalance(quota.credits.balance)
-                  : null}
-              {@const hasCodexQuotaMetadata =
-                isCodex &&
-                Boolean(
-                  quota?.planType ||
-                  quota?.credits ||
-                  rateLimitReachedLabel(quota?.rateLimitReachedType),
-                )}
-              {@const hasCodexIdentity =
-                isCodex &&
-                Boolean(
-                  row.account.email ||
-                  codexPlanType ||
-                  row.account.chatgptAccountId ||
-                  row.account.isFedramp,
-                )}
-              <tr class="align-top" data-testid="provider-account-row">
-                <!-- Provider / account + health + type badge. The name+account is a link
-                   into the account usage-detail page (per-reset-period token usage). -->
+            {#each visibleRows as row (row.id)}
+              {@const scheduleKey = row.oauth
+                ? keyOf(row.oauth.provider.id, row.oauth.account.account)
+                : ''}
+              {@const saving = savingSchedule[scheduleKey] === true}
+              <tr
+                class="cursor-pointer align-top focus-visible:bg-slate-50 focus-visible:outline-none"
+                data-testid={row.oauth
+                  ? 'provider-account-row'
+                  : row.key
+                    ? 'key-provider-row'
+                    : 'unpooled-provider-row'}
+                tabindex={row.href || row.open ? 0 : -1}
+                onclick={(e) => onRowClick(e, row)}
+                onkeydown={(e) => onRowKey(e, row)}
+              >
+                <!-- Account: name, what kind of account, and where it comes from. -->
                 <td
-                  data-label={$t('Provider')}
-                  class="table-mode:w-56 table-mode:min-w-44 table-mode:whitespace-normal"
+                  data-label={$t('Account')}
+                  data-testid="provider-account-cell"
+                  class="table-mode:max-w-60 table-mode:min-w-48 table-mode:whitespace-normal"
                 >
-                  <a
-                    class="group block"
-                    href={accountDetailHref(base, row.provider.id, row.account.account)}
-                    title={$t('View token usage per reset period')}
-                  >
-                    <div
-                      class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline"
+                  {#if row.href}
+                    <a
+                      class="block truncate font-medium text-ink-body hover:underline"
+                      href={row.href}
+                      title={row.accountTitle || row.accountLabel}>{row.accountLabel}</a
                     >
-                      {row.provider.name}
-                    </div>
-                    <code class="font-mono text-xs text-ink-strong group-hover:text-indigo-600">
-                      {row.account.account}
-                    </code>
-                  </a>
-                  {#if hasCodexIdentity}
-                    <div
-                      class="mt-1 flex max-w-52 flex-col items-start gap-1 text-xs"
-                      data-testid="codex-subscription-details"
-                    >
-                      {#if row.account.email && row.account.email !== row.account.account}
-                        <span class="break-all text-ink-body">{row.account.email}</span>
-                      {/if}
-                      {#if codexPlanType || row.account.isFedramp}
-                        <div class="flex flex-wrap gap-1">
-                          {#if codexPlanType}
-                            <span class="badge-neutral">{planLabel(codexPlanType)}</span>
-                          {/if}
-                          {#if row.account.isFedramp}
-                            <span class="badge-neutral">{$t('FedRAMP')}</span>
-                          {/if}
-                        </div>
-                      {/if}
-                      {#if row.account.chatgptAccountId}
-                        <span
-                          class="break-all font-mono text-[10px] text-ink-muted"
-                          title={$t('ChatGPT account ID')}
-                        >
-                          {$t('ChatGPT ID: {id}', { id: row.account.chatgptAccountId })}
-                        </span>
-                      {/if}
-                    </div>
-                  {/if}
-                  <div class="mt-1 flex flex-wrap items-center gap-1">
-                    <span
-                      class="badge-neutral"
-                      title={row.account.anthropicPlanCheckedAt
-                        ? `${$t('Plan checked')}: ${new Date(row.account.anthropicPlanCheckedAt).toLocaleString()}`
-                        : undefined}>{typeBadge(row.provider, row.account)}</span
-                    >
-                    <!-- Egress proxy (redacted; "Direct" when none) -->
-                    {#if proxyLabel(row.account.proxy)}
-                      <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
-                        >{proxyLabel(row.account.proxy)}</span
-                      >
-                    {:else}
-                      <span class="text-xs text-ink-muted">{$t('Direct')}</span>
-                    {/if}
-                    {#if isCodex && row.account.autoReset}
-                      <span
-                        class="badge-ok"
-                        data-testid="auto-reset-badge"
-                        title={$t(
-                          'Auto-resets the weekly limit once it saturates (at most once per hour)',
-                        )}>{$t('Auto-reset')}</span
-                      >
-                    {/if}
-                  </div>
-                  <!-- Health (+ parked / rate-limit pill and its recovery time) -->
-                  <div class="mt-1.5 flex flex-wrap items-center gap-1">
-                    {#if row.account.healthy}
-                      <span class="badge-ok">{$t('connected')}</span>
-                    {:else}
-                      <span class="badge-error">{$t('needs reconnect')}</span>
-                    {/if}
-                    {#if !row.account.schedulable}
-                      <span class="badge-neutral">{$t('parked')}</span>
-                    {/if}
-                    {#if usageLimit}
-                      {#if row.account.allowSpendRemainingCredits}
-                        <!-- Toggle on: the account still serves off its remaining credits
-                           despite the limit, so the pill reflects that instead of a plain
-                           "parked" rate-limited state. -->
-                        <span class="badge-warning"
-                          >{$t('Rate limited · still spending credits')}</span
-                        >
-                      {:else}
-                        <span class="badge-error">{$t('Rate limited')}</span>
-                      {/if}
-                      {#if usageLimitRecovery}
-                        <span class="basis-full text-[10px] text-ink-muted">
-                          {usageLimit.label
-                            ? `${usageLimit.label} · ${usageLimitRecovery}`
-                            : usageLimitRecovery}
-                        </span>
-                      {/if}
-                    {/if}
-                  </div>
-                </td>
-
-                <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
-                <td data-label={$t('Authentication')}><span class="badge-neutral">OAuth</span></td>
-                <td data-label={$t('Models')}>
-                  {#if row.account.models.length > 0}
-                    {@const shown = [...row.account.models]
-                      .sort(
-                        (left, right) =>
-                          Number(Boolean(mediaBadge(right))) - Number(Boolean(mediaBadge(left))),
-                      )
-                      .slice(0, MODELS_SHOWN)}
-                    {@const extra = row.account.models.length - shown.length}
-                    <div
-                      class="flex max-w-full flex-wrap gap-1 table-mode:w-48"
-                      title={row.account.models.join('\n')}
-                    >
-                      {#each shown as m (m)}
-                        <span class="badge-neutral font-mono text-[10px]">{m}</span>
-                        {#if mediaBadge(m)}
-                          <span class="badge-ok text-[10px]">{mediaBadge(m)}</span>
-                        {/if}
-                      {/each}
-                      {#if extra > 0}
-                        <span class="badge-neutral text-[10px]">+{extra}</span>
-                      {/if}
-                    </div>
                   {:else}
-                    <span class="text-xs text-ink-muted">—</span>
+                    <div
+                      class="truncate font-medium text-ink-body"
+                      title={row.accountTitle || row.accountLabel}
+                    >
+                      {row.accountLabel}
+                    </div>
                   {/if}
+                  <div class="mt-1 flex min-w-0 items-center gap-1.5">
+                    <span
+                      class={`shrink-0 whitespace-nowrap ${row.kind === 'subscription' ? 'badge-rules' : 'badge-neutral'}`}
+                      data-testid="provider-type-cell">{row.typeLabel}</span
+                    >
+                    <span class="truncate text-xs text-ink-muted" title={row.providerLabel}
+                      >{row.providerLabel}</span
+                    >
+                  </div>
                 </td>
 
-                <!-- Today's usage -->
-                <td data-label={$t('Usage')} class="text-xs">
-                  <p class="field-help">{$t('Today')}</p>
-                  {#if usage && usage.requests > 0}
-                    <div class="text-ink-body">
-                      <span>{$t('{n} req', { n: formatCount(usage.requests) })}</span>
-                      <span class="text-ink-muted"> · {usage.rpm} RPM</span>
-                    </div>
-                    <div class="text-ink-muted">
-                      <span>{formatTokens(usage.tokens)} tok</span> ·
-                      <span>{formatUsd(usage.costUsd)}</span>
-                    </div>
+                <td
+                  data-label={$t('Status')}
+                  data-testid="provider-status-cell"
+                  class="table-mode:max-w-36 table-mode:whitespace-normal"
+                  title={row.status?.title || undefined}
+                >
+                  {#if row.status}
+                    <span class={toneClass[row.status.tone]}>{row.status.label}</span>
+                    {#if row.status.detail}
+                      <div class="mt-0.5 text-xs text-ink-muted">{row.status.detail}</div>
+                    {/if}
+                    {#if row.key && row.status.tone !== 'ok' && row.status.title}
+                      <!-- Why an API key stopped: the provider's own message, full text on hover. -->
+                      <div class="mt-0.5 line-clamp-2 text-xs text-ink-muted">
+                        {row.status.title.split('\n').at(-1)}
+                      </div>
+                    {/if}
                   {:else}
                     <span class="text-ink-muted">—</span>
                   {/if}
                 </td>
 
-                <!-- Quota / session windows (+ Codex reset-credit count) -->
-                <td data-label={$t('Quota')} data-testid="provider-quota-cell">
-                  {#if quota && quota.windows.length > 0}
-                    <div class="flex w-full flex-col gap-1.5 table-mode:w-36">
-                      {#each quota.windows as w (w.key)}
+                <!-- Quota and balance: every window with its own bar, then every
+                     balance-like fact (credits, reset credits, monthly limit…). -->
+                <td
+                  data-label={$t('Quota and balance')}
+                  data-testid="provider-quota-cell"
+                  class="table-mode:whitespace-normal"
+                >
+                  {#if row.windows.length === 0 && row.balances.length === 0}
+                    <span class="text-ink-muted">—</span>
+                  {:else}
+                    <div class="flex w-full flex-col gap-1.5 table-mode:w-52">
+                      {#each row.windows as w (w.key)}
                         <div>
-                          <div
-                            class="flex items-center justify-between gap-1 text-xs text-ink-muted"
-                          >
-                            <span>{quotaWindowLabel(w)}</span>
-                            <span class="shrink-0">{Math.round(w.usedPercent)}%</span>
+                          <div class="flex items-baseline justify-between gap-2 text-xs">
+                            <span class="truncate text-ink-muted">{w.label}</span>
+                            <span class="shrink-0 font-medium tabular-nums text-ink-body"
+                              >{$t('{n}% left', { n: Math.round(100 - w.used) })}</span
+                            >
                           </div>
-                          <div class="progress-track">
+                          <div class="progress-track mt-0.5">
                             <div
-                              class={`progress-bar ${barColor(w.usedPercent)}`}
-                              style={`width:${Math.min(100, Math.max(2, w.usedPercent))}%`}
+                              class={`progress-bar ${barColor(w.used)}`}
+                              style={`width:${Math.min(100, Math.max(2, w.used))}%`}
                             ></div>
                           </div>
-                          {#if resetIn(w.resetsAtMs)}
-                            <div class="text-[10px] text-ink-muted">{resetIn(w.resetsAtMs)}</div>
+                          {#if w.resetText}
+                            <div class="text-[11px] text-ink-muted">{w.resetText}</div>
                           {/if}
                         </div>
                       {/each}
-                    </div>
-                  {/if}
-                  {#if additionalLimits.length > 0}
-                    <div class:mt-2={quota && quota.windows.length > 0}>
-                      <div class="text-[10px] font-medium text-ink-muted">
-                        {$t('Additional limits')}
-                      </div>
-                      <div class="mt-1 flex flex-wrap gap-1">
-                        {#each additionalLimits as limit (limit)}
-                          <span class="badge-neutral text-[10px]">{limit}</span>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                  {#if isCodex && quota?.individualLimit}
-                    {@const usedPercent = individualLimitUsedPercent(quota)}
-                    <div class="mt-2 min-w-0" data-testid="codex-individual-limit">
-                      <div class="flex items-center justify-between gap-2 text-xs text-ink-muted">
-                        <span>{$t('Monthly credit limit')}</span>
-                        {#if usedPercent != null}
-                          <span>{Math.round(usedPercent)}%</span>
-                        {/if}
-                      </div>
-                      {#if usedPercent != null}
-                        <div class="progress-track">
-                          <div
-                            class={`progress-bar ${barColor(usedPercent)}`}
-                            style={`width:${Math.min(100, Math.max(2, usedPercent))}%`}
-                          ></div>
-                        </div>
-                      {/if}
-                      <div class="text-[10px] text-ink-muted">
-                        {$t('{used} of {limit} credits used', {
-                          used: formatCreditAmount(quota.individualLimit.used),
-                          limit: formatCreditAmount(quota.individualLimit.limit),
-                        })}
-                      </div>
-                      {#if resetIn(quota.individualLimit.resetsAtMs)}
-                        <div class="text-[10px] text-ink-muted">
-                          {resetIn(quota.individualLimit.resetsAtMs)}
-                        </div>
+                      {#if row.balances.length > 0}
+                        <dl
+                          class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs"
+                          class:border-t={row.windows.length > 0}
+                          class:border-slate-100={row.windows.length > 0}
+                          class:pt-1.5={row.windows.length > 0}
+                        >
+                          {#each row.balances as b (b.label)}
+                            <dt class="text-ink-muted">{b.label}</dt>
+                            <dd
+                              class="min-w-0 break-words text-right tabular-nums text-ink-body"
+                              data-testid={b.testid}
+                            >
+                              {b.value}
+                            </dd>
+                          {/each}
+                        </dl>
                       {/if}
                     </div>
-                  {/if}
-                  {#if codexCredits != null}
-                    <div
-                      class="text-[10px] text-ink-muted"
-                      class:mt-1={quota && quota.windows.length > 0}
-                    >
-                      {$t('{n} reset credits', { n: codexCredits })}
-                    </div>
-                  {/if}
-                  {#if isCodex && quota?.planType}
-                    <div class="text-[10px] text-ink-muted">
-                      {$t('Plan: {plan}', { plan: planLabel(quota.planType) })}
-                    </div>
-                  {/if}
-                  {#if isCodex && quota?.credits?.unlimited}
-                    <div class="text-[10px] text-ink-muted">
-                      {$t('Credits: {balance}', {
-                        balance: $t('Unlimited'),
-                      })}
-                    </div>
-                  {:else if codexCreditBalance}
-                    <div class="text-[10px] text-ink-muted">
-                      {$t('Credits: {balance}', {
-                        balance: codexCreditBalance,
-                      })}
-                    </div>
-                  {/if}
-                  {#if isCodex && rateLimitReachedLabel(quota?.rateLimitReachedType)}
-                    <div class="text-[10px] text-ink-muted">
-                      {rateLimitReachedLabel(quota?.rateLimitReachedType)}
-                    </div>
-                  {/if}
-                  {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit && !hasCodexQuotaMetadata}
-                    <span class="text-xs text-ink-muted">—</span>
                   {/if}
                 </td>
 
-                <!-- Scheduling: priority (lower = preferred), schedulable, fast mode,
-                   token expiry — the per-account knobs, grouped in one cell. -->
                 <td
-                  data-label={$t('Scheduling')}
-                  class="text-xs"
-                  data-testid="provider-scheduling-cell"
+                  data-label={$t('Usage')}
+                  data-testid="provider-used-cell"
+                  class="table-mode:text-right"
                 >
-                  <div
-                    class="grid w-max max-w-full grid-cols-[auto_auto] items-center gap-x-3 gap-y-1"
-                  >
-                    <span class="text-ink-muted">{$t('Priority')}</span>
+                  {#if row.tokens > 0 || row.requests > 0 || (row.costUsd ?? 0) > 0}
+                    <div class="tabular-nums text-ink-body">
+                      {formatTokens(row.tokens)}
+                      <span class="text-ink-muted">· {formatUsd(row.costUsd)}</span>
+                    </div>
+                    <div
+                      class="text-xs tabular-nums text-ink-muted"
+                      data-testid="provider-calls-cell"
+                      title={row.rpm != null ? `${row.rpm} ${$t('per minute')}` : undefined}
+                    >
+                      {$t('{n} calls', {
+                        n: formatCount(row.requests),
+                      })}{#if row.rpm != null}{` · ${row.rpm}/${$t('min')}`}{/if}
+                    </div>
+                    <div class="text-[11px] text-ink-muted">
+                      {row.usagePeriod === 'day' ? $t('Last 24 hours') : $t('Today')}
+                    </div>
+                  {:else}
+                    <span class="text-ink-muted" data-testid="provider-calls-cell">—</span>
+                  {/if}
+                </td>
+
+                <td data-label={$t('Connection')} data-testid="provider-connection-cell">
+                  {#if row.kind === 'keyless' || row.connection}
+                    <span class="text-ink-muted">—</span>
+                  {:else if row.proxy}
+                    <span
+                      class="inline-flex items-center gap-1 text-xs text-ink-body"
+                      use:tooltip={`${$t('Via proxy')}: ${row.proxy.title}`}
+                      >{@render icon('proxy')}{row.proxy.label}</span
+                    >
+                  {:else}
+                    <span
+                      class="inline-flex items-center gap-1 text-xs text-ink-muted"
+                      use:tooltip={$t('Connects directly, no proxy')}
+                      >{@render icon('direct')}{$t('Direct')}</span
+                    >
+                  {/if}
+                </td>
+
+                <!-- Priority: lower numbers are used first. Edited in place. -->
+                <td
+                  data-label={$t('Priority')}
+                  data-testid="provider-priority-cell"
+                  class="table-mode:text-center"
+                >
+                  {#if row.oauth}
+                    {@const { provider, account } = row.oauth}
                     <input
+                      class="input-sm w-16 text-center tabular-nums"
                       type="number"
                       min="0"
                       step="1"
-                      class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 lg:min-h-0"
-                      value={row.account.priority}
-                      disabled={saving}
                       aria-label={$t('Priority')}
+                      value={account.priority}
+                      disabled={saving}
                       onchange={(e) =>
-                        savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
+                        saveOAuthPriority(provider.id, account.account, e.currentTarget.value)}
                     />
-                    <span class="text-ink-muted">{$t('Schedulable')}</span>
-                    <input
-                      type="checkbox"
-                      class="h-5 w-5 disabled:opacity-50 lg:h-4 lg:w-4"
-                      checked={row.account.schedulable}
-                      disabled={saving || credentialFailed}
-                      aria-label={$t('Schedulable')}
-                      title={credentialFailed ? $t('needs reconnect') : undefined}
-                      onchange={(e) =>
-                        toggleSchedulable(
-                          row.provider.id,
-                          row.account.account,
-                          e.currentTarget.checked,
-                        )}
-                    />
-                    {#if supportsFast}
-                      <span class="text-ink-muted">{$t('Fast')}</span>
+                  {:else if row.key?.account}
+                    {@const { pool, account } = row.key}
+                    {#if account}
                       <input
-                        type="checkbox"
-                        class="h-5 w-5 disabled:opacity-50 lg:h-4 lg:w-4"
-                        checked={row.account.fastMode ?? false}
-                        disabled={saving}
-                        aria-label={$t('Fast mode')}
-                        onchange={(e) =>
-                          toggleFastMode(
-                            row.provider.id,
-                            row.account.account,
-                            e.currentTarget.checked,
-                          )}
+                        class="input-sm w-16 text-center tabular-nums"
+                        type="number"
+                        min="0"
+                        max="1000"
+                        step="1"
+                        aria-label={$t('Priority')}
+                        value={account.priority}
+                        title={pool.strategy === 'round_robin'
+                          ? $t(
+                              'This key pool takes turns; priority applies once it uses manual priority.',
+                            )
+                          : undefined}
+                        onchange={(e) => saveKeyPriority(pool.id, account, e.currentTarget.value)}
                       />
                     {/if}
-                    <span class="text-ink-muted">{$t('Expires')}</span>
-                    <span class="text-ink-body">{expiryLabel(row.account)}</span>
-                  </div>
+                  {:else}
+                    <span class="text-ink-muted">—</span>
+                  {/if}
                 </td>
 
-                <!-- Actions -->
-                <td class="table-mode:text-right">
-                  <div class="flex items-center justify-end gap-2">
-                    {#if needsReconnect}
-                      <button
-                        type="button"
-                        class="btn-primary"
-                        disabled={!overview.configured}
-                        onclick={() => {
-                          reconnecting = {
-                            providerId: row.provider.id,
-                            account: row.account.account,
-                          };
-                          showConnect = true;
-                        }}>{$t('Reconnect')}</button
-                      >
-                    {/if}
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      onclick={() =>
-                        (testing = {
-                          providerId: row.provider.id,
-                          providerName: row.provider.name,
-                          account: row.account.account,
-                          models: row.account.models.filter((model) => mediaBadge(model) === null),
-                        })}>{$t('Test')}</button
-                    >
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      onclick={() =>
-                        (managing = {
-                          providerId: row.provider.id,
-                          providerName: row.provider.name,
-                          account: row.account.account,
-                        })}>{$t('Manage')}</button
-                    >
-                    <details data-testid="provider-actions" class="menu">
-                      <summary class="menu-trigger" title={$t('More actions')}>
-                        <span aria-hidden="true">⋯</span>
-                        <span class="sr-only">{$t('More actions')}</span>
-                      </summary>
-                      <div class="menu-panel w-56">
-                        {#if usageLimit?.retryable && isCodex}
-                          <button
-                            type="button"
-                            class="menu-item"
-                            disabled={resetting[k] === true}
-                            title={$t('Clear Helm local cooldown and try this account again')}
-                            onclick={() => retryAccount(row.provider.id, row.account.account)}
-                            >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
-                          >
-                        {/if}
-                        {#if isCodex}
-                          <button
-                            type="button"
-                            class="menu-item"
-                            disabled={!canResetCodexLimit}
-                            title={resetCreditTitle(quota, codexCredits)}
-                            onclick={() =>
-                              (confirmingReset = (() => {
-                                const credit = quota?.resetCreditDetails?.find(
-                                  (item) =>
-                                    item.status === 'available' &&
-                                    item.resetType === 'codexRateLimits',
-                                );
-                                return {
-                                  providerId: row.provider.id,
-                                  account: row.account.account,
-                                  credits: codexCredits ?? 0,
-                                  autoReset: row.account.autoReset ?? false,
-                                  ...(credit?.id ? { creditId: credit.id } : {}),
-                                  ...(credit?.title ? { creditTitle: credit.title } : {}),
-                                  idempotencyKey: resetRequestId(),
-                                };
-                              })())}
-                            >{codexCredits != null && codexCredits > 0
-                              ? $t('Reset limit ({n})', { n: codexCredits })
-                              : $t('Reset limit')}</button
-                          >
-                        {/if}
-                        {#if row.provider.id === 'anthropic'}
-                          <button
-                            type="button"
-                            class="menu-item"
-                            disabled={resettingLimit}
-                            onclick={() => prepareAnthropicReset(row.account.account)}
-                            >{$t(
-                              'Reset Claude usage',
-                            )}{#if anthropicResetButtonMeta(row.account.account)}
-                              <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
-                                >({anthropicResetButtonMeta(row.account.account)})</span
-                              >{/if}</button
-                          >
-                        {/if}
-                        <button
-                          type="button"
-                          class="menu-item-danger"
-                          disabled={disconnecting}
-                          onclick={() =>
-                            (confirming = {
-                              providerId: row.provider.id,
-                              account: row.account.account,
-                            })}>{$t('Disconnect')}</button
-                        >
-                      </div>
-                    </details>
-                  </div>
-                </td>
-              </tr>
-            {/each}
-            {#each keyRows as row (`${row.pool.id}/${row.account?.id ?? 'empty'}`)}
-              {@const account = row.account}
-              {@const accountUsage = row.pool.usage.find((u) => u.account === account?.id)}
-              <tr class="align-top" data-testid="key-provider-row">
-                <td
-                  data-label={$t('Provider')}
-                  class="table-mode:w-56 table-mode:min-w-44 table-mode:whitespace-normal"
-                >
-                  <div class="font-medium text-ink-body">{row.label}</div>
-                  {#if account}<div class="text-xs text-ink-strong">{account.name}</div>
-                    <code class="text-xs text-ink-muted">{account.mask}</code>
-                    <div class="mt-1">
-                      <span class={keyManager?.accountStatusClass(account) ?? 'badge-neutral'}
-                        >{keyManager?.accountStatus(account)}</span
-                      >
-                    </div>
-                  {:else}<span class="badge-warn">{$t('No saved keys')}</span>{/if}
-                  {#if row.linked.length > 1}<p class="field-help mt-1">
-                      {$t('Shared by {count} connections', { count: row.linked.length })}
-                    </p>{/if}
-                </td>
-                <td data-label={$t('Authentication')}><span class="badge-neutral">API Key</span></td
-                >
-                <td data-label={$t('Models')}
-                  ><div class="flex max-w-64 flex-wrap gap-1">
-                    {#each (account?.models ?? row.pool.models).slice(0, 3) as model}<code
-                        class="badge-neutral text-xs">{model}</code
-                      >{/each}
-                    {#if (account?.models ?? row.pool.models).length > 3}<span class="badge-neutral"
-                        >+{(account?.models ?? row.pool.models).length - 3}</span
-                      >{/if}
-                  </div></td
-                >
-                <td data-label={$t('Usage')} class="text-xs"
-                  ><p class="field-help">{$t('Last 24 hours')}</p>
-                  <p>
-                    {formatCount(accountUsage?.requests ?? 0)}
-                    {$t('requests')} · {formatTokens(accountUsage?.tokens ?? 0)} Token
-                  </p>
-                  <p class="text-ink-muted">{formatUsd(accountUsage?.costUsd)}</p>
-                </td>
-                <td
-                  data-label={$t('Quota')}
-                  class="table-mode:max-w-48 table-mode:whitespace-normal"
-                  ><span class="text-ink-muted">—</span>{#if account?.reason}<details
-                      class="mt-1 text-xs text-ink-muted"
-                    >
-                      <summary class="cursor-pointer">{$t('Details')}</summary>
-                      <p class="max-w-xs whitespace-normal break-words">
-                        {account.reason}{#if account.reasonMessage}<span class="mt-1 block"
-                            >{account.reasonMessage}</span
-                          >{/if}
-                      </p>
-                    </details>{/if}
-                  {#if account?.nextRetryAt}<p class="field-help">
-                      {$t('Next recovery attempt')}: {new Date(
-                        account.nextRetryAt,
-                      ).toLocaleString()}
-                    </p>{/if}
-                </td>
-                <td data-label={$t('Scheduling')} class="text-xs">
-                  <p>
-                    {row.pool.strategy === 'manual_priority'
-                      ? $t('Manual priority')
-                      : $t('Round robin')}
-                  </p>
-                  {#if account}<p class="mt-1">
-                      {$t('Priority')}: <span class="tabular-nums">{account.priority}</span>
-                    </p>{/if}
-                </td>
-                <td
-                  ><div class="flex items-center justify-end gap-2">
+                <!-- Enabled: whether the gateway may route to this account. -->
+                <td data-label={$t('Enabled')} data-testid="provider-enabled-cell">
+                  {#if row.oauth}
+                    {@const { provider, account } = row.oauth}
+                    <Switch
+                      label={$t('Schedulable')}
+                      checked={account.schedulable}
+                      disabled={saving || account.credentialFailed === true}
+                      title={account.credentialFailed ? $t('Needs sign-in') : undefined}
+                      onchange={(v) =>
+                        updateSchedule(provider.id, account.account, { schedulable: v })}
+                    />
+                  {:else if row.key?.account}
+                    {@const { pool, account } = row.key}
                     {#if account}
-                      <button
-                        type="button"
-                        class="btn-secondary"
-                        disabled={!keyManager?.canTest(row.pool, account)}
-                        onclick={() => keyManager?.openTest(row.pool, account)}>{$t('Test')}</button
-                      >
-                      <button
-                        type="button"
-                        class="btn-secondary"
-                        onclick={() => keyManager?.edit(row.pool.id, account)}
-                        >{$t('Manage')}</button
-                      >
-                    {:else}<button
-                        type="button"
-                        class="btn-primary"
-                        disabled={!row.pool.configured}
-                        onclick={() => keyManager?.addKeys(row.pool.id)}
-                        >{$t('Add API keys')}</button
-                      >{/if}
-                    <details class="menu">
-                      <summary class="menu-trigger" title={$t('More actions')}
-                        ><span aria-hidden="true">⋯</span><span class="sr-only"
-                          >{$t('More actions')}</span
-                        ></summary
-                      >
-                      <div class="menu-panel w-64">
-                        <button
-                          type="button"
-                          class="menu-item"
-                          disabled={!row.pool.configured}
-                          onclick={() => keyManager?.addKeys(row.pool.id)}
-                          >{$t('Add API keys')}</button
-                        >
-                        <button
-                          type="button"
-                          class="menu-item"
-                          disabled={!keyManager?.canRecover(row.pool)}
-                          onclick={() => keyManager?.batchTest(row.pool)}
-                          >{$t('Batch test and recover')}</button
-                        >
-                        {#if account}<button
-                            type="button"
-                            class="menu-item"
-                            onclick={() => keyManager?.toggleAccount(row.pool.id, account)}
-                            >{account.enabled ? $t('Pause') : $t('Resume')}</button
-                          >{/if}
-                        {#if account && keyManager?.canRecoverAccount(account) && keyManager?.canTest(row.pool, account)}
+                      <Switch
+                        label={$t('Schedulable')}
+                        checked={account.enabled}
+                        onchange={() => keyManager?.toggleAccount(pool.id, account)}
+                      />
+                    {/if}
+                  {:else}
+                    <span class="text-ink-muted">—</span>
+                  {/if}
+                </td>
+
+                <!-- Options: fixed slots (fast / auto-reset / use credits) so every row lines up. -->
+                <td data-label={$t('Options')} data-testid="provider-options-cell">
+                  {#if row.oauth}
+                    {@const { provider, account } = row.oauth}
+                    {@const options = [
+                      provider.id === 'anthropic' || provider.id === 'openai-codex'
+                        ? {
+                            icon: 'fast' as const,
+                            label: $t('Fast mode'),
+                            title: $t('Fast mode: always use the provider’s faster tier'),
+                            on: account.fastMode ?? false,
+                            patch: (v: boolean) => ({ fastMode: v }),
+                          }
+                        : null,
+                      provider.id === 'openai-codex'
+                        ? {
+                            icon: 'auto-reset' as const,
+                            label: $t('Auto-reset'),
+                            title: $t(
+                              'Auto-resets the weekly limit once it saturates (at most once per hour)',
+                            ),
+                            on: account.autoReset ?? false,
+                            patch: (v: boolean) => ({ autoReset: v }),
+                          }
+                        : null,
+                      {
+                        icon: 'credits' as const,
+                        label: $t('Use credits when limited'),
+                        title: $t('Keeps using remaining credits when limited'),
+                        on: account.allowSpendRemainingCredits ?? false,
+                        patch: (v: boolean) => ({ allowSpendRemainingCredits: v }),
+                      },
+                    ]}
+                    <div class="flex items-center gap-1.5">
+                      {#each options as option, i (i)}
+                        {#if option}
                           <button
                             type="button"
-                            class="menu-item"
-                            onclick={() => keyManager?.recoverAccount(row.pool, account)}
-                            >{$t('Try recovery')}</button
+                            class="btn-icon-toggle"
+                            aria-pressed={option.on}
+                            aria-label={option.label}
+                            use:tooltip={`${option.title} · ${option.on ? $t('On') : $t('Off')}`}
+                            disabled={saving}
+                            onclick={() =>
+                              updateSchedule(
+                                provider.id,
+                                account.account,
+                                option.patch(!option.on),
+                              )}>{@render icon(option.icon)}</button
                           >
+                        {:else}
+                          <span class="btn-icon-toggle invisible" aria-hidden="true"></span>
                         {/if}
-                        {#each row.linked as connection}
+                      {/each}
+                    </div>
+                  {:else}
+                    <span class="text-ink-muted">—</span>
+                  {/if}
+                </td>
+                <!-- Actions: Test stays visible, everything else in one menu. -->
+                <td class="table-mode:w-px table-mode:text-right">
+                  <div class="flex items-center justify-end gap-2">
+                    {#if row.oauth}
+                      {@const { provider, account } = row.oauth}
+                      {@const k = keyOf(provider.id, account.account)}
+                      {@const isCodex = provider.id === 'openai-codex'}
+                      {@const quota = isCodex
+                        ? activeCodexQuota(quotaByKey.get(k))
+                        : quotaByKey.get(k)}
+                      {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
+                      {@const usageLimit = usageLimitStatus(quota, isCodex)}
+                      {#if !account.healthy}
+                        <button
+                          type="button"
+                          class="btn-primary"
+                          disabled={!overview.configured}
+                          onclick={() => {
+                            reconnecting = { providerId: provider.id, account: account.account };
+                            showConnect = true;
+                          }}>{$t('Reconnect')}</button
+                        >
+                      {/if}
+                      <button
+                        type="button"
+                        class="btn-secondary"
+                        onclick={() =>
+                          (testing = {
+                            providerId: provider.id,
+                            providerName: provider.name,
+                            account: account.account,
+                            models: account.models.filter((model) => mediaBadge(model) === null),
+                          })}>{$t('Test')}</button
+                      >
+                      <details data-testid="provider-actions" class="menu">
+                        <summary class="menu-trigger" use:tooltip={$t('More actions')}>
+                          <span aria-hidden="true">⋯</span>
+                          <span class="sr-only">{$t('More actions')}</span>
+                        </summary>
+                        <div class="menu-panel w-56">
                           <button
                             type="button"
                             class="menu-item"
-                            onclick={() => providerEditor?.start(connection)}
-                            >{$t('Configure')} · {connection.label}</button
+                            onclick={() =>
+                              (managing = {
+                                providerId: provider.id,
+                                providerName: provider.name,
+                                account: account.account,
+                              })}>{$t('Manage')}</button
                           >
-                          {#if connection.managed}<button
+                          {#if usageLimit?.retryable && isCodex}
+                            <button
                               type="button"
-                              class="menu-item-danger"
-                              onclick={() => providerEditor?.askDelete(connection)}
-                              >{$t('Delete provider')} · {connection.label}</button
-                            >{/if}
-                        {/each}
-                        {#if account}<button
+                              class="menu-item"
+                              disabled={resetting[k] === true}
+                              title={$t('Clear Helm local cooldown and try this account again')}
+                              onclick={() => retryAccount(provider.id, account.account)}
+                              >{resetting[k] === true
+                                ? $t('Retrying…')
+                                : $t('Retry account')}</button
+                            >
+                          {/if}
+                          {#if isCodex}
+                            <button
+                              type="button"
+                              class="menu-item"
+                              disabled={!canUseCodexResetCredit(quota, codexCredits)}
+                              title={resetCreditTitle(quota, codexCredits)}
+                              onclick={() =>
+                                (confirmingReset = (() => {
+                                  const credit = quota?.resetCreditDetails?.find(
+                                    (item) =>
+                                      item.status === 'available' &&
+                                      item.resetType === 'codexRateLimits',
+                                  );
+                                  return {
+                                    providerId: provider.id,
+                                    account: account.account,
+                                    credits: codexCredits ?? 0,
+                                    autoReset: account.autoReset ?? false,
+                                    ...(credit?.id ? { creditId: credit.id } : {}),
+                                    ...(credit?.title ? { creditTitle: credit.title } : {}),
+                                    idempotencyKey: resetRequestId(),
+                                  };
+                                })())}
+                              >{codexCredits != null && codexCredits > 0
+                                ? $t('Reset limit ({n})', { n: codexCredits })
+                                : $t('Reset limit')}</button
+                            >
+                          {/if}
+                          {#if provider.id === 'anthropic'}
+                            <button
+                              type="button"
+                              class="menu-item"
+                              disabled={resettingLimit}
+                              onclick={() => prepareAnthropicReset(account.account)}
+                              >{$t(
+                                'Reset Claude usage',
+                              )}{#if anthropicResetButtonMeta(account.account)}
+                                <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
+                                  >({anthropicResetButtonMeta(account.account)})</span
+                                >{/if}</button
+                            >
+                          {/if}
+                          <button
                             type="button"
                             class="menu-item-danger"
-                            onclick={() => keyManager?.removeAccount(row.pool.id, account)}
-                            >{$t('Delete account')}</button
-                          >{/if}
-                      </div>
-                    </details>
-                  </div></td
-                >
-              </tr>
-            {/each}
-            {#each unpooledConnections as connection (connection.id)}
-              <tr class="align-top" data-testid="unpooled-provider-row">
-                <td data-label={$t('Provider')}
-                  ><div class="font-medium text-ink-body">{connection.label}</div>
-                  <p class="field-help break-all">{connection.base_url}</p></td
-                >
-                <td data-label={$t('Authentication')}
-                  ><span class="badge-neutral"
-                    >{connection.keyless ? $t('No key required') : 'API Key'}</span
-                  ></td
-                >
-                <td data-label={$t('Models')}
-                  ><div class="flex max-w-64 flex-wrap gap-1">
-                    {#each connection.models.slice(0, 3) as model}<code
-                        class="badge-neutral text-xs">{model.alias}</code
-                      >{/each}
-                  </div></td
-                >
-                <td data-label={$t('Usage')}>—</td><td data-label={$t('Quota')}>—</td><td
-                  data-label={$t('Scheduling')}>—</td
-                >
-                <td class="table-mode:text-right"
-                  >{#if connection.keyless}<span class="field-help">{$t('Configuration file')}</span
-                    >{:else}<button
-                      class="btn-secondary"
-                      onclick={() => providerEditor?.start(connection)}>{$t('Manage here')}</button
-                    >{/if}</td
-                >
+                            disabled={disconnecting}
+                            onclick={() =>
+                              (confirming = { providerId: provider.id, account: account.account })}
+                            >{$t('Disconnect')}</button
+                          >
+                        </div>
+                      </details>
+                    {:else if row.key}
+                      {@const { pool, account, linked } = row.key}
+                      {#if account}
+                        <button
+                          type="button"
+                          class="btn-secondary"
+                          disabled={!keyManager?.canTest(pool, account)}
+                          onclick={() => keyManager?.openTest(pool, account)}>{$t('Test')}</button
+                        >
+                      {:else}
+                        <button
+                          type="button"
+                          class="btn-primary"
+                          disabled={!pool.configured}
+                          onclick={() => keyManager?.addKeys(pool.id)}>{$t('Add API keys')}</button
+                        >
+                      {/if}
+                      <details class="menu">
+                        <summary class="menu-trigger" use:tooltip={$t('More actions')}
+                          ><span aria-hidden="true">⋯</span><span class="sr-only"
+                            >{$t('More actions')}</span
+                          ></summary
+                        >
+                        <div class="menu-panel w-64">
+                          {#if account}<button
+                              type="button"
+                              class="menu-item"
+                              onclick={() => keyManager?.edit(pool.id, account)}
+                              >{$t('Manage')}</button
+                            >{/if}
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={!pool.configured}
+                            onclick={() => keyManager?.addKeys(pool.id)}
+                            >{$t('Add API keys')}</button
+                          >
+                          <button
+                            type="button"
+                            class="menu-item"
+                            disabled={!keyManager?.canRecover(pool)}
+                            onclick={() => keyManager?.batchTest(pool)}
+                            >{$t('Batch test and recover')}</button
+                          >
+                          {#if account}<button
+                              type="button"
+                              class="menu-item"
+                              onclick={() => keyManager?.toggleAccount(pool.id, account)}
+                              >{account.enabled ? $t('Pause') : $t('Resume')}</button
+                            >{/if}
+                          {#if account && keyManager?.canRecoverAccount(account) && keyManager?.canTest(pool, account)}
+                            <button
+                              type="button"
+                              class="menu-item"
+                              onclick={() => keyManager?.recoverAccount(pool, account)}
+                              >{$t('Try recovery')}</button
+                            >
+                          {/if}
+                          {#each linked as connection (connection.id)}
+                            <button
+                              type="button"
+                              class="menu-item"
+                              onclick={() => providerEditor?.start(connection)}
+                              >{$t('Configure')} · {connection.label}</button
+                            >
+                          {/each}
+                          {#each linked as connection (connection.id)}
+                            {#if connection.managed}<button
+                                type="button"
+                                class="menu-item-danger"
+                                onclick={() => providerEditor?.askDelete(connection)}
+                                >{$t('Delete provider')} · {connection.label}</button
+                              >{/if}
+                          {/each}
+                          {#if account}<button
+                              type="button"
+                              class="menu-item-danger"
+                              onclick={() => keyManager?.removeAccount(pool.id, account)}
+                              >{$t('Delete account')}</button
+                            >{/if}
+                        </div>
+                      </details>
+                    {:else if row.connection}
+                      {#if row.connection.keyless}
+                        <span class="field-help">{$t('Configuration file')}</span>
+                      {:else}
+                        <button
+                          type="button"
+                          class="btn-secondary"
+                          onclick={() => row.connection && providerEditor?.start(row.connection)}
+                          >{$t('Manage here')}</button
+                        >
+                      {/if}
+                    {/if}
+                  </div>
+                </td>
               </tr>
             {/each}
           </tbody>

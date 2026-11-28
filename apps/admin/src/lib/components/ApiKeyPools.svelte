@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/tooltip';
   import { onMount, onDestroy } from 'svelte';
   import {
     ApiKeyPoolsViewSchema,
@@ -295,6 +296,13 @@
   export function removeAccount(pool: string, account: ApiKeyAccountView) {
     deleting = { pool, account };
   }
+  // List-level edits from the Providers page (same PATCH/PUT seams as the dialogs).
+  export function setPriority(pool: string, account: ApiKeyAccountView, value: number) {
+    void run(async () => {
+      await write(accountUrl(pool, account.id), 'PATCH', { priority: value });
+      await load();
+    });
+  }
   export function toggleAccount(pool: string, account: ApiKeyAccountView) {
     void run(async () => {
       await write(accountUrl(pool, account.id), 'PATCH', { enabled: !account.enabled });
@@ -520,7 +528,7 @@
                           <details class="menu">
                             <summary
                               class="menu-trigger"
-                              title={$t('More actions')}
+                              use:tooltip={$t('More actions')}
                               aria-disabled={busy}
                               onclick={(e) => {
                                 if (busy) e.preventDefault();
