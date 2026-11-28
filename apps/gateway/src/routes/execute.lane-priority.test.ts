@@ -323,6 +323,7 @@ async function scenario(
   if (options.openClaude || options.halfOpenClaude) breaker.recordFailure(CLAUDE);
   if (options.halfOpenClaude) clock = 1001;
   const execute = createExecute({
+    accountPriorityRandom: () => 0.5,
     log: (_level, event, fields) => {
       if (_level === "warn") warnings.push(event);
       if (event === "provider.account_priority") priorityEvents.push(fields);

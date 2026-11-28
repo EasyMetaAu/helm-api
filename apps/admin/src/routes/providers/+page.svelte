@@ -1524,7 +1524,7 @@
               <th
                 class="px-3 py-2 text-center"
                 title={$t(
-                  'Lower numbers are used first. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.',
+                  'Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.',
                 )}>{@render sortHeader('priority')}</th
               >
               <th class="whitespace-nowrap px-3 py-2">{$t('Enabled')}</th>
