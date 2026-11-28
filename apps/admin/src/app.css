@@ -138,6 +138,36 @@
     @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 lg:h-7 lg:w-7;
   }
 
+  /* Icon on/off button for compact per-row options (aria-pressed = on). Same hit
+     area as .btn-icon; a light border so an off option still reads as a control. */
+  .btn-icon-toggle {
+    @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded border border-slate-200 text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-40 aria-pressed:border-slate-700 aria-pressed:bg-slate-700 aria-pressed:text-white aria-pressed:hover:bg-slate-600 lg:h-7 lg:w-7;
+  }
+  /* Instant tooltip ($lib/tooltip.ts): top-layer, fixed, never clipped. */
+  .tooltip {
+    @apply pointer-events-none fixed z-[60] max-w-xs rounded bg-slate-800 px-2 py-1 text-xs leading-snug whitespace-pre-line text-white shadow-md;
+  }
+  /* On/off switch (role="switch", see $lib/components/Switch.svelte). The track sits
+     inside a full-height hit area so it stays easy to tap. */
+  .switch {
+    @apply inline-flex min-h-11 cursor-pointer items-center focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 lg:min-h-0;
+  }
+  .switch-track {
+    @apply relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-slate-300 transition-colors;
+  }
+  .switch-thumb {
+    @apply inline-block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform;
+  }
+  .switch[aria-checked='true'] .switch-track {
+    @apply bg-slate-700;
+  }
+  .switch[aria-checked='true'] .switch-thumb {
+    @apply translate-x-4.5;
+  }
+  .switch:focus-visible .switch-track {
+    @apply ring-2 ring-slate-400;
+  }
+
   /* — Row action menu ("⋯") — a native <details> that keeps its items in the DOM
      (tests, a11y); $lib/menu closes it on click-away / Escape / item choice.
      Primary actions stay as buttons in the row;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/tooltip';
   import { untrack } from 'svelte';
   import {
     COMPLEXITY_OPTIONS,
@@ -121,7 +122,7 @@
       type="button"
       class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
       aria-label={$t('drag to reorder policy')}
-      title={$t('drag to reorder policy')}
+      use:tooltip={$t('drag to reorder policy')}
       disabled={total < 2}
       data-testid="policy-drag-handle"
       ondragstart={(event) => ondragstart(index, event)}
@@ -153,6 +154,7 @@
       type="button"
       class="btn-icon hover:bg-red-50 hover:text-red-600"
       aria-label={$t('remove')}
+      use:tooltip={$t('remove')}
       onclick={() => onremove(index)}>✕</button
     >
   </header>

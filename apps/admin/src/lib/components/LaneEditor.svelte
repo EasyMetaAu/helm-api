@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/tooltip';
   import { untrack } from 'svelte';
   import { type Lane, REASONING_EFFORTS, type ReasoningEffort } from '$lib/api/lanes.js';
   import type { ModelOption } from '$lib/api/models.js';
@@ -289,7 +290,7 @@
               type="button"
               class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
               aria-label={$t('drag to reorder fallback')}
-              title={$t('drag to reorder fallback')}
+              use:tooltip={$t('drag to reorder fallback')}
               disabled={fallback.length < 2}
               draggable={fallback.length > 1}
               ondragstart={(event) => handleDragStart(i, event)}
@@ -309,6 +310,7 @@
               type="button"
               class="btn-icon"
               aria-label={`remove ${f}`}
+              use:tooltip={`remove ${f}`}
               onclick={() => removeFallback(i)}>✕</button
             >
           </li>

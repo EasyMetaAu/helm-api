@@ -66,7 +66,7 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await expect(page).toHaveTitle(/Helm/i);
     const section = page.getByRole("region", { name: "Providers", exact: true });
     await expect(page.getByRole("table")).toHaveCount(1);
-    await expect(section.getByRole("columnheader", { name: "Authentication" })).toBeVisible();
+    await expect(section.getByRole("columnheader", { name: /Quota and balance/ })).toBeVisible();
     await section
       .getByRole("row")
       .filter({ hasText: "openai" })
@@ -118,11 +118,9 @@ test("API key provider import, pause, edit and delete through the real admin UI"
       }
       await page.reload();
       const paused = section.getByRole("row").filter({ hasText: "API 1" });
-      await paused.getByText("Details", { exact: true }).click();
       await expect(
         paused.getByText("Provider reports insufficient credit for this request.", { exact: true }),
       ).toBeVisible();
-      await paused.getByText("Details", { exact: true }).click();
       await paused.locator("summary.menu-trigger").click();
       await paused.getByRole("button", { name: "Batch test and recover", exact: true }).click();
       const batch = page.getByRole("dialog", { name: "Batch test and recover", exact: true });
@@ -141,8 +139,9 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     ).not.toBeVisible();
     await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Pause", exact: true }).click();
-    await expect(row.getByText("Paused manually")).toBeVisible();
+    await expect(row.getByText("Paused", { exact: true })).toBeVisible();
     await expect(row.getByRole("button", { name: "Try recovery" })).toHaveCount(0);
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Manage", exact: true }).click();
     await page.getByRole("dialog").getByLabel("Name", { exact: true }).fill("Primary account");
     await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
@@ -150,7 +149,8 @@ test("API key provider import, pause, edit and delete through the real admin UI"
     await expect(row).toBeVisible();
     await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Resume", exact: true }).click();
-    await expect(row.getByText("Available", { exact: true })).toBeVisible();
+    await expect(row.getByText("Normal", { exact: true })).toBeVisible();
+    await row.locator("summary.menu-trigger").click();
     await row.getByRole("button", { name: "Manage", exact: true }).click();
     await page
       .getByRole("dialog")

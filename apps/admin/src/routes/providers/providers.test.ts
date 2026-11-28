@@ -211,7 +211,7 @@ describe('providers page', () => {
   it('uses one provider list with an authentication field instead of separate provider sections', async () => {
     renderPage();
     await screen.findByTestId('provider-account-row');
-    expect(screen.getByRole('columnheader', { name: 'Authentication' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: /Quota and balance/ })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Subscription Providers' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Provider connections' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Key providers' })).toBeNull();
@@ -271,9 +271,14 @@ describe('providers page', () => {
     renderPage();
     await screen.findByText('Home GPU');
     expect(screen.getAllByTestId('key-provider-row')).toHaveLength(1);
-    expect(screen.getByText('Shared by 2 connections')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('key-provider-row')).getByTestId('provider-account-cell')
+        .firstElementChild,
+    ).toHaveAttribute('title', expect.stringContaining('Shared by 2 connections'));
     expect(screen.getAllByRole('table')).toHaveLength(1);
-    await fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'none' } });
+    await fireEvent.change(screen.getByLabelText('Account type'), {
+      target: { value: 'keyless' },
+    });
     expect(screen.queryByTestId('provider-account-row')).toBeNull();
     expect(screen.queryByTestId('key-provider-row')).toBeNull();
     expect(screen.getByTestId('unpooled-provider-row')).toHaveTextContent('No key required');
@@ -342,7 +347,7 @@ describe('providers page', () => {
       },
     });
 
-    expect(screen.getByText('43 req')).toBeInTheDocument();
+    expect(screen.getByTestId('provider-calls-cell')).toHaveTextContent('43');
   });
 
   it('labels the Grok subscription provider as experimental', () => {
@@ -369,76 +374,57 @@ describe('providers page', () => {
       usage: [],
       quota: [],
     });
-    expect(screen.getByText('Grok · OAuth · Experimental')).toBeInTheDocument();
+    expect(screen.getByText('Subscription · Experimental')).toBeInTheDocument();
     expect(screen.queryByText('GitHub Enterprise domain (optional)')).not.toBeInTheDocument();
-  });
-
-  it('labels Grok Imagine models by output media capability', () => {
-    renderPage({
-      providers: [
-        provider({
-          id: 'xai',
-          accounts: [
-            {
-              account: 'media',
-              expiresAt: null,
-              updatedAt: Date.now(),
-              healthy: true,
-              priority: 50,
-              schedulable: true,
-              proxy: null,
-              models: [
-                'grok-composer-2.5-fast',
-                'grok-4.5',
-                'grok-4.5-fast',
-                'grok-imagine-image-quality',
-                'grok-imagine-video-1.5-preview',
-                'grok-imagine-video',
-              ],
-            },
-          ],
-        }),
-      ],
-      usage: [],
-      quota: [],
-    });
-
-    const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('Image')).toBeInTheDocument();
-    expect(within(row).getAllByText('Video')).toHaveLength(2);
   });
 
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 
-    expect(screen.getByRole('columnheader', { name: 'Authentication' })).toBeInTheDocument();
     expect(screen.getByLabelText('Account usage strategy')).toHaveValue('balanced');
     expect(
-      screen.getByTitle(
-        'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('Spread new sessions across accounts while keeping sessions sticky.'),
+      screen.getByTitle('Spread new sessions across accounts while keeping sessions sticky.'),
     ).toBeInTheDocument();
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('Anthropic (Claude Pro/Max)')).toBeInTheDocument();
-    expect(within(row).getByText('Claude · Plan unknown · OAuth')).toBeInTheDocument();
-    expect(within(row).queryByText('Claude Max · OAuth')).not.toBeInTheDocument();
+    expect(within(row).getByTestId('provider-type-cell')).toHaveTextContent(/^\s*Subscription\s*$/);
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
-    expect(within(row).getByText('connected')).toBeInTheDocument();
-    expect(within(row).getByText('42 req')).toBeInTheDocument();
-    expect(within(row).getByText('1.5K tok')).toBeInTheDocument();
-    expect(within(row).getByText('$0.034')).toBeInTheDocument();
-    expect(within(row).getByText('74%')).toBeInTheDocument();
-    expect(within(row).getByDisplayValue('10')).toBeInTheDocument();
-    expect(within(row).getByRole('checkbox', { name: /schedulable/i })).toBeChecked();
-    expect(within(row).getByRole('checkbox', { name: /fast mode/i })).not.toBeChecked();
-    // Proxy column: the redacted egress hop, compact "type · host:port".
-    expect(within(row).getByText('socks5 · 10.0.0.1:1080')).toBeInTheDocument();
-    // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
-    expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
-    expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+    expect(within(row).getByTestId('provider-status-cell')).toHaveTextContent('Normal');
+    expect(within(row).getByTestId('provider-calls-cell')).toHaveTextContent('42');
+    expect(within(row).getByTestId('provider-calls-cell')).toHaveAttribute(
+      'title',
+      '0.7 per minute',
+    );
+    expect(within(row).getByTestId('provider-used-cell')).toHaveTextContent('1.5K');
+    expect(within(row).getByTestId('provider-used-cell')).toHaveTextContent('$0.034');
+    expect(within(row).getByText('26% left')).toBeInTheDocument();
+    // Every adjustable setting is edited right in the list.
+    expect(within(row).getByRole('spinbutton', { name: 'Priority' })).toHaveValue(10);
+    expect(within(row).getByRole('switch', { name: 'Schedulable' })).toBeChecked();
+    expect(within(row).getByRole('button', { name: 'Fast mode' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(within(row).getByRole('button', { name: 'Use credits when limited' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    // Connection: proxy shown as a short label; the redacted address is in the tooltip.
+    const connection = within(row).getByTestId('provider-connection-cell');
+    // Hovering the small icon shows its tooltip at once (no native title delay).
+    fireEvent.mouseEnter(within(connection).getByText('Proxy'));
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
+      'Via proxy: socks5://10.0.0.1:1080 · ••••',
+    );
+    fireEvent.mouseLeave(within(connection).getByText('Proxy'));
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    fireEvent.mouseEnter(within(row).getByRole('button', { name: 'Fast mode' }));
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Off');
+    // Models live in the account tooltip instead of taking a column.
+    expect(within(row).getByText('acct-claude')).toHaveAttribute(
+      'title',
+      expect.stringContaining('claude-haiku-4-5'),
+    );
   });
 
   it('shows each Claude account authoritative plan independently', () => {
@@ -455,9 +441,13 @@ describe('providers page', () => {
       ],
     });
     const rows = screen.getAllByTestId('provider-account-row');
-    expect(within(rows[0]).getByText('Claude Pro · OAuth')).toBeInTheDocument();
-    expect(within(rows[1]).getByText('Claude Max · OAuth')).toBeInTheDocument();
-    expect(within(rows[2]).getByText('Claude · Plan unknown · OAuth')).toBeInTheDocument();
+    const typeOf = (accountName: string) =>
+      within(rows.find((r) => within(r).queryByText(accountName)) as HTMLElement).getByTestId(
+        'provider-type-cell',
+      );
+    expect(typeOf('pro-account')).toHaveTextContent('Subscription · Pro');
+    expect(typeOf('max-account')).toHaveTextContent('Subscription · Max');
+    expect(typeOf('unknown-account')).toHaveTextContent(/^\s*Subscription\s*$/);
   });
 
   it('renders Codex subscription identity details only when present', () => {
@@ -489,11 +479,12 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    const details = within(row).getByTestId('codex-subscription-details');
-    expect(within(details).getByText('lukin@example.com')).toBeInTheDocument();
-    expect(within(details).getByText('Plus')).toBeInTheDocument();
-    expect(within(details).getByText('ChatGPT ID: chatgpt-account-123')).toBeInTheDocument();
-    expect(within(details).getByText('FedRAMP')).toBeInTheDocument();
+    const title = within(row).getByText('acct-codex').getAttribute('title') ?? '';
+    expect(title).toContain('lukin@example.com');
+    expect(title).toContain('Plan: Plus');
+    expect(title).toContain('ChatGPT ID: chatgpt-account-123');
+    expect(title).toContain('FedRAMP');
+    expect(within(row).getByTestId('provider-type-cell')).toHaveTextContent('Subscription · Plus');
   });
 
   it('prefers the live Codex quota plan over a stale identity plan', () => {
@@ -533,11 +524,11 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    const details = within(row).getByTestId('codex-subscription-details');
-    const quotaCell = within(row).getByTestId('provider-quota-cell');
-    expect(within(details).getByText('Plus')).toBeInTheDocument();
-    expect(within(details).queryByText('Pro')).not.toBeInTheDocument();
-    expect(within(quotaCell).getByText('Plan: Plus')).toBeInTheDocument();
+    expect(within(row).getByTestId('provider-type-cell')).toHaveTextContent('Subscription · Plus');
+    expect(within(row).getByText('acct-codex')).toHaveAttribute(
+      'title',
+      expect.stringContaining('Plan: Plus'),
+    );
   });
 
   it('labels Codex quota windows by their real duration across plan shapes', () => {
@@ -624,11 +615,12 @@ describe('providers page', () => {
       quota: [],
     });
 
-    expect(
-      within(screen.getByTestId('provider-account-row')).queryByTestId(
-        'codex-subscription-details',
-      ),
-    ).not.toBeInTheDocument();
+    const title =
+      within(screen.getByTestId('provider-account-row'))
+        .getByText('acct-codex')
+        .getAttribute('title') ?? '';
+    expect(title).not.toContain('ChatGPT ID');
+    expect(title).not.toContain('FedRAMP');
   });
 
   it('adds and saves a custom model id in manual mode', async () => {
@@ -833,7 +825,7 @@ describe('providers page', () => {
 
     await fireEvent.click(screen.getByTestId('refresh-now'));
 
-    await waitFor(() => expect(screen.getByText('99 req')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('provider-calls-cell')).toHaveTextContent('99'));
     expect(screen.getByTestId('provider-refresh-status')).toHaveTextContent(
       'refresh available again in 1.5min',
     );
@@ -906,8 +898,9 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('7d · Fable')).toBeInTheDocument();
-    expect(within(row).getByText('5%')).toBeInTheDocument();
+    const quotaCell = within(row).getByTestId('provider-quota-cell');
+    expect(within(quotaCell).getByText('7d · Fable')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('95% left')).toBeInTheDocument();
   });
 
   it('uses the saturated quota window as the rate-limit recovery source', () => {
@@ -1015,7 +1008,7 @@ describe('providers page', () => {
 
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('7d · Fable')).toBeInTheDocument();
-    expect(within(row).getAllByText('100%')).toHaveLength(2);
+    expect(within(row).getAllByText('0% left')).toHaveLength(2);
     expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
   });
 
@@ -1042,7 +1035,7 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('98%')).toBeInTheDocument();
+    expect(within(row).getByText('2% left')).toBeInTheDocument();
     expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
   });
 
@@ -1074,7 +1067,7 @@ describe('providers page', () => {
     expect(resetUsageLimit).not.toHaveBeenCalled();
   });
 
-  it('keeps the account table to seven columns and tucks rare actions into a row menu', () => {
+  it('shows the same columns for every account and tucks rare actions into a row menu', () => {
     renderPage({
       providers: [
         provider({
@@ -1093,23 +1086,28 @@ describe('providers page', () => {
         }),
       ],
     });
-    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
+    expect(
+      screen.getAllByRole('columnheader').map((h) => h.textContent?.replace(/[↑↓]/g, '').trim()),
+    ).toEqual([
+      'Account',
+      'Status',
+      'Quota and balance',
+      'Usage',
+      'Connection',
+      'Priority',
+      'Enabled',
+      'Options',
+      'Actions',
+    ]);
     const row = screen.getByTestId('provider-account-row');
-    // Health sits beside the account it describes, so a laptop-width table has
-    // no narrow status column to squeeze.
-    expect(within(row).getAllByRole('cell')[0]).toHaveTextContent('connected');
     expect(within(row).getByRole('button', { name: 'Test' })).toBeVisible();
-    expect(within(row).getByRole('button', { name: 'Manage' })).toBeVisible();
     const menu = within(row).getByTestId('provider-actions');
     expect(menu.tagName).toBe('DETAILS');
+    expect(within(menu).getByRole('button', { name: 'Manage' })).toBeInTheDocument();
     expect(within(menu).getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
-    // Scheduling controls stay inline, grouped in one cell.
-    const scheduling = within(row).getByTestId('provider-scheduling-cell');
-    expect(within(scheduling).getByLabelText('Priority')).toBeInTheDocument();
-    expect(within(scheduling).getByLabelText('Schedulable')).toBeInTheDocument();
   });
 
-  it('renders "Direct" and caps the models list with a +N pill', () => {
+  it('renders "Direct" and keeps the model list in the account tooltip', () => {
     renderPage({
       providers: [
         provider({
@@ -1130,9 +1128,11 @@ describe('providers page', () => {
     });
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('Direct')).toBeInTheDocument();
-    expect(within(row).getByText('m3')).toBeInTheDocument();
-    expect(within(row).queryByText('m4')).not.toBeInTheDocument(); // collapsed
-    expect(within(row).getByText('+2')).toBeInTheDocument();
+    expect(within(row).queryByText('m4')).not.toBeInTheDocument();
+    expect(within(row).getByText('acct-copilot')).toHaveAttribute(
+      'title',
+      expect.stringContaining('m1, m2, m3, m4, m5'),
+    );
   });
 
   it('shows the OAuth warning without hiding the unified add-provider entry', () => {
@@ -1170,8 +1170,8 @@ describe('providers page', () => {
 
   it('toggles schedulability through the scheduling endpoint', async () => {
     renderPage();
-    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('checkbox', {
-      name: /schedulable/i,
+    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('switch', {
+      name: 'Schedulable',
     });
 
     await fireEvent.click(checkbox);
@@ -1184,7 +1184,23 @@ describe('providers page', () => {
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
-  it('disables schedulability for credential-failed accounts', async () => {
+  it('toggles per-account Fast mode through the scheduling endpoint', async () => {
+    renderPage();
+    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('button', {
+      name: 'Fast mode',
+    });
+
+    await fireEvent.click(checkbox);
+
+    await waitFor(() =>
+      expect(setAccountSchedule).toHaveBeenCalledWith('anthropic', 'acct-claude', {
+        fastMode: true,
+      }),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks credential-failed accounts as needing sign-in', async () => {
     renderPage({
       providers: [
         provider({
@@ -1206,11 +1222,9 @@ describe('providers page', () => {
       ],
     });
     const row = screen.getByTestId('provider-account-row');
-    const checkbox = within(row).getByRole('checkbox', { name: /schedulable/i });
-
-    expect(within(row).getByText('needs reconnect')).toBeInTheDocument();
-    expect(checkbox).toBeDisabled();
-
+    expect(within(row).getByTestId('provider-status-cell')).toHaveTextContent('Needs sign-in');
+    expect(within(row).getByRole('switch', { name: 'Schedulable' })).toBeDisabled();
+    expect(within(row).getByRole('button', { name: /^reconnect$/i })).toBeInTheDocument();
     expect(setAccountSchedule).not.toHaveBeenCalled();
   });
 
@@ -1242,22 +1256,6 @@ describe('providers page', () => {
       expect(startManualPaste).toHaveBeenCalledWith('anthropic', undefined, 'acct-claude'),
     );
     expect(screen.getByRole('heading', { name: 'Reconnect subscription' })).toBeInTheDocument();
-  });
-
-  it('toggles per-account Fast mode through the scheduling endpoint', async () => {
-    renderPage();
-    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('checkbox', {
-      name: /fast mode/i,
-    });
-
-    await fireEvent.click(checkbox);
-
-    await waitFor(() =>
-      expect(setAccountSchedule).toHaveBeenCalledWith('anthropic', 'acct-claude', {
-        fastMode: true,
-      }),
-    );
-    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
   it('opens the Test dialog seeded with the account’s routable models', async () => {
@@ -1498,10 +1496,13 @@ describe('providers page', () => {
     });
   }
 
-  it('shows the Auto-reset badge on the list only when the account opted in', async () => {
+  it('shows the Auto-reset switch on when the account opted in', async () => {
     renderCodex(2, true);
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByTestId('auto-reset-badge')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Auto-reset' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
   it('recognizes a duration-backed primary window as the Codex weekly allowance', async () => {
@@ -1521,10 +1522,13 @@ describe('providers page', () => {
     expect(within(row).getByRole('button', { name: /reset limit \(2\)/i })).toBeEnabled();
   });
 
-  it('hides the Auto-reset badge when the account has not opted in', async () => {
+  it('shows the Auto-reset switch off when the account has not opted in', async () => {
     renderCodex(2, false);
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).queryByTestId('auto-reset-badge')).not.toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Auto-reset' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
   });
 
   it('does not show a local retry action for a Codex account still blocked by a quota window', () => {
@@ -1594,11 +1598,12 @@ describe('providers page', () => {
     });
     renderCodex(2);
     const row = screen.getByTestId('provider-account-row');
-    // The available reset-credit count renders in the Quota cell AND on the button.
-    expect(within(row).getByText('2 reset credits')).toBeInTheDocument();
-    expect(within(row).getByText('Plan: Pro')).toBeInTheDocument();
-    expect(within(row).getByText('Credits: 9.99')).toBeInTheDocument();
-    expect(within(row).getByText('Rate limit reached')).toBeInTheDocument();
+    // Every balance fact is shown in the list: credits, reset credits, reached limit.
+    const quotaCell = within(row).getByTestId('provider-quota-cell');
+    expect(quotaCell).toHaveTextContent(/Reset credits\s*2/);
+    expect(quotaCell).toHaveTextContent(/Credits\s*9\.99/);
+    expect(quotaCell).toHaveTextContent('Rate limit reached');
+    expect(within(row).getByTestId('provider-type-cell')).toHaveTextContent('Subscription · Pro');
 
     // Clicking the row button only OPENS the confirm dialog — no consume yet (the
     // credit is a scarce, irreversible spend; a single click must never trigger it).
@@ -1764,12 +1769,12 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('GPT-5.6-Codex-Luna · 30m')).not.toHaveClass('text-[9px]');
-    expect(within(row).queryByText('GPT-5.6-Codex-Spark · 30m')).not.toBeInTheDocument();
-    const individualLimit = within(row).getByTestId('codex-individual-limit');
-    expect(within(individualLimit).getByText('Monthly credit limit')).toBeInTheDocument();
-    expect(within(individualLimit).getByText('8,000 of 25,000 credits used')).toBeInTheDocument();
-    expect(within(individualLimit).getByText('32%')).toBeInTheDocument();
+    const quotaCell = within(row).getByTestId('provider-quota-cell');
+    expect(within(quotaCell).getByText('GPT-5.6-Codex-Luna · 30m')).toBeInTheDocument();
+    expect(quotaCell).not.toHaveTextContent('GPT-5.6-Codex-Spark');
+    expect(within(row).getByTestId('codex-individual-limit')).toHaveTextContent(
+      '8,000 of 25,000 credits used',
+    );
   });
 
   it('renders additional-limit names without fake usage bars when quota windows are absent', () => {
@@ -1815,10 +1820,8 @@ describe('providers page', () => {
     const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
       'provider-quota-cell',
     );
-    expect(within(quotaCell).getByText('Additional limits')).toBeInTheDocument();
-    expect(within(quotaCell).queryByText('GPT-5.6-Codex-Spark')).not.toBeInTheDocument();
-    expect(within(quotaCell).getByText('GPT-5.6-Codex-Terra')).toBeInTheDocument();
-    expect(within(quotaCell).queryByText('0%')).not.toBeInTheDocument();
+    expect(quotaCell).toHaveTextContent(/Additional limits\s*GPT-5.6-Codex-Terra/);
+    expect(quotaCell).not.toHaveTextContent('GPT-5.6-Codex-Spark');
     expect(quotaCell.querySelector('.progress-track')).toBeNull();
     expect(within(quotaCell).queryByText('—')).not.toBeInTheDocument();
   });
@@ -1865,13 +1868,12 @@ describe('providers page', () => {
     const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
       'provider-quota-cell',
     );
-    expect(within(quotaCell).getByText('Plan: Pro')).toBeInTheDocument();
-    expect(within(quotaCell).getByText('Credits: 24524.04')).toBeInTheDocument();
-    expect(within(quotaCell).getByText('Rate limit reached')).toBeInTheDocument();
+    expect(quotaCell).toHaveTextContent(/Credits\s*24524\.04/);
+    expect(quotaCell).toHaveTextContent('Rate limit reached');
     expect(within(quotaCell).queryByText('—')).not.toBeInTheDocument();
   });
 
-  it('hides a zero Codex credit balance', () => {
+  it('shows a zero Codex credit balance', () => {
     renderPage({
       providers: [
         provider({
@@ -1912,8 +1914,8 @@ describe('providers page', () => {
     const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
       'provider-quota-cell',
     );
-    expect(within(quotaCell).getByText('Plan: Pro')).toBeInTheDocument();
-    expect(within(quotaCell).queryByText(/^Credits:/)).not.toBeInTheDocument();
+    // A zero balance is still a balance: show it rather than hide it.
+    expect(quotaCell).toHaveTextContent(/Credits\s*0\.00/);
   });
 
   it('does NOT consume when the reset confirmation is cancelled', async () => {
@@ -1977,5 +1979,124 @@ describe('providers page', () => {
     renderPage(); // default anthropic account
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).queryByRole('button', { name: /reset limit/i })).not.toBeInTheDocument();
+  });
+
+  it('opens the account detail when any part of a subscription row is clicked', async () => {
+    const { goto } = await import('$app/navigation');
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByTestId('provider-calls-cell'));
+    expect(vi.mocked(goto)).toHaveBeenCalledWith(expect.stringContaining('/providers/'));
+    vi.mocked(goto).mockClear();
+    // Its own controls keep their own behaviour.
+    await fireEvent.click(within(row).getByRole('button', { name: 'Test' }));
+    expect(vi.mocked(goto)).not.toHaveBeenCalled();
+  });
+
+  it('keeps search, type filter and sort in the URL without reloading the page', async () => {
+    const { replaceState } = await import('$app/navigation');
+    renderPage();
+    await fireEvent.input(screen.getByLabelText('Search providers'), {
+      target: { value: 'claude' },
+    });
+    expect(vi.mocked(replaceState)).toHaveBeenLastCalledWith('?q=claude', {});
+    await fireEvent.change(screen.getByLabelText('Account type'), {
+      target: { value: 'subscription' },
+    });
+    expect(vi.mocked(replaceState)).toHaveBeenLastCalledWith('?q=claude&type=subscription', {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by Usage' }));
+    expect(vi.mocked(replaceState)).toHaveBeenLastCalledWith(
+      '?q=claude&type=subscription&sort=used&dir=desc',
+      {},
+    );
+    expect(invalidateAllMock).not.toHaveBeenCalled();
+  });
+
+  it('lists subscription accounts in priority order with the lowest number first', () => {
+    const base = provider();
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            { ...base.accounts[0], account: 'later', priority: 30 },
+            { ...base.accounts[0], account: 'first', priority: 5 },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+    const names = screen
+      .getAllByTestId('provider-account-row')
+      .map(
+        (row) => within(row).getByTestId('provider-account-cell').querySelector('a')?.textContent,
+      );
+    expect(names).toEqual(['first', 'later']);
+  });
+
+  it('edits API key priority and pause straight from the list', async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method && init.method !== 'GET') {
+          calls.push({ url, method: init.method, body: JSON.parse(String(init.body)) });
+          return Response.json({});
+        }
+        if (url === '/admin/api/api-key-pools')
+          return Response.json({
+            pools: [
+              {
+                id: 'openai',
+                type: 'openai',
+                configured: true,
+                timezone: 'UTC',
+                strategy: 'round_robin',
+                models: ['m'],
+                accounts: [
+                  {
+                    id: 'k1',
+                    name: 'Key one',
+                    mask: '••••1234',
+                    enabled: true,
+                    priority: 50,
+                    models: null,
+                    state: 'ready',
+                    reason: null,
+                    nextRetryAt: null,
+                    probeUntil: null,
+                    deniedModels: [],
+                  },
+                ],
+                usage: [],
+              },
+            ],
+          });
+        return original(url, init);
+      }),
+    );
+    renderPage();
+    const row = await screen.findByTestId('key-provider-row');
+    const priority = within(row).getByRole('spinbutton', { name: 'Priority' });
+    await fireEvent.change(priority, { target: { value: '1001' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('from 0 to 1000');
+    expect(calls).toHaveLength(0);
+    await fireEvent.change(priority, { target: { value: '7' } });
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        url: '/admin/api/api-key-pools/openai/accounts/k1',
+        method: 'PATCH',
+        body: { priority: 7 },
+      }),
+    );
+    await fireEvent.click(within(row).getByRole('switch', { name: 'Schedulable' }));
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        url: '/admin/api/api-key-pools/openai/accounts/k1',
+        method: 'PATCH',
+        body: { enabled: false },
+      }),
+    );
   });
 });

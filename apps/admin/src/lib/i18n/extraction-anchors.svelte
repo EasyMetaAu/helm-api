@@ -56,4 +56,6 @@
   )}
   {$t('The client named this exact model, so routing passed it through without fallback.')}
   {$t('Image generation is pinned to the requested model, so there is no fallback.')}
+  <!-- Providers list: sortable column labels (sortLabel()) -->
+  {$t('Account')}{$t('Remaining')}{$t('Used')}{$t('Calls')}{$t('Priority')}
 {/if}
