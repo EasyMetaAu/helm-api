@@ -313,23 +313,23 @@ describe('providers page', () => {
     });
     renderPage();
     const row = screen.getByTestId('provider-account-row');
-    await fireEvent.click(within(row).getByRole('button', { name: 'Reset Claude usage' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
+    await fireEvent.click(await within(row).findByRole('button', { name: /Reset weekly limit/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm Reset weekly limit' });
     expect(consumeAnthropicReset).not.toHaveBeenCalled();
     expect(within(dialog).getByText(/1 resets remaining/)).toBeInTheDocument();
     expect(screen.queryByTestId('modal-scrim')).not.toBeInTheDocument();
     await fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.getByRole('dialog', { name: 'Confirm Claude usage reset' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Confirm Reset weekly limit' })).toBeInTheDocument();
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(consumeAnthropicReset).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    const resetButton = await within(row).findByRole('button', { name: /Reset Claude usage/ });
+    const resetButton = await within(row).findByRole('button', { name: /Reset weekly limit/ });
     expect(within(resetButton).getByTestId('anthropic-reset-meta')).toHaveTextContent(
       '1 resets remaining',
     );
     await fireEvent.click(resetButton);
-    const confirmation = await screen.findByRole('dialog', { name: 'Confirm Claude usage reset' });
-    await fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset Claude usage' }));
+    const confirmation = await screen.findByRole('dialog', { name: 'Confirm Reset weekly limit' });
+    await fireEvent.click(within(confirmation).getByRole('button', { name: 'Reset weekly limit' }));
     await waitFor(() => expect(consumeAnthropicReset).toHaveBeenCalledTimes(1));
   });
 
@@ -2123,5 +2123,41 @@ describe('providers page', () => {
       .getAllByTestId('provider-account-row')
       .map((r) => within(r).getByTestId('provider-account-cell').querySelector('a')?.textContent);
     expect(names).toEqual(['acct-claude', 'codex-1']);
+  });
+
+  it('labels a Fable-only Claude reset as such and counts every available grant', async () => {
+    const fable = (id: string) => ({
+      id,
+      label: 'Fable reset',
+      resets_total: 1,
+      resets_left: 1,
+      ends_at: new Date(Date.now() + 86_400_000).toISOString(),
+      clears: ['seven_day_overage_included'],
+      paused: false,
+      usable_now: true,
+      use_requires_limit: false,
+      blocking: [],
+    });
+    getAnthropicResetStatus.mockResolvedValue({
+      eligible: true,
+      at_limit: false,
+      pending: false,
+      next_grant_id: 'fable-a',
+      grants: [fable('fable-a'), fable('fable-b')],
+    });
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    const action = await within(row).findByRole('button', { name: /Reset Fable allowance/ });
+    expect(within(action).getByTestId('anthropic-reset-meta')).toHaveTextContent(
+      '2 resets remaining',
+    );
+    await waitFor(() =>
+      expect(within(row).getByTestId('provider-quota-cell')).toHaveTextContent(/Fable resets\s*2/),
+    );
+    await fireEvent.click(action);
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm Reset Fable allowance' });
+    expect(within(dialog).getByTestId('anthropic-reset-effect')).toHaveTextContent(
+      'It does not reset the whole week.',
+    );
   });
 });

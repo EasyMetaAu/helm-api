@@ -67,6 +67,7 @@
   } from '$lib/format';
   import { t } from '$lib/i18n';
   import { tooltip } from '$lib/tooltip';
+  import { type ResetKind, resetKind, summarizeResetGrants } from '$lib/anthropic-reset-kinds';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
   // owns the flow + encrypted token storage; this page lists connected accounts and
@@ -217,20 +218,38 @@
     return overview.providers.find((p) => p.id === id)?.name ?? id;
   }
 
-  function anthropicResetGrant(account: string): AnthropicResetGrant | null {
+  // What each kind of Claude reset restores, in the user's words.
+  const RESET_KIND_LABEL: Record<ResetKind, string> = {
+    week: 'Weekly limit resets',
+    fable: 'Fable resets',
+    other: 'Other Claude resets',
+  };
+  const RESET_KIND_ACTION: Record<ResetKind, string> = {
+    week: 'Reset weekly limit',
+    fable: 'Reset Fable allowance',
+    other: 'Reset Claude usage',
+  };
+  const RESET_KIND_EFFECT: Record<ResetKind, string> = {
+    week: 'Resets the whole 7-day limit for this Claude account.',
+    fable:
+      'Refills the Fable allowance and gives back what Fable used of the weekly limit. It does not reset the whole week.',
+    other: 'Restores the Claude limits listed below.',
+  };
+
+  function anthropicResetSummary(account: string) {
     const status = anthropicResetStatusByAccount[keyOf('anthropic', account)];
-    if (!status) return null;
-    return (
-      status.grants.find((grant) => grant.id === status.next_grant_id && grant.resets_left > 0) ??
-      status.grants.find((grant) => grant.resets_left > 0) ??
-      null
-    );
+    return status ? summarizeResetGrants(status, Date.now()) : null;
   }
 
   function anthropicResetButtonMeta(account: string): string {
-    const grant = anthropicResetGrant(account);
-    if (!grant) return '';
-    return `${$t('{n} resets remaining', { n: grant.resets_left })} · ${$t('Expires')}: ${new Date(grant.ends_at).toLocaleDateString()}`;
+    const next = anthropicResetSummary(account)?.next;
+    if (!next) return '';
+    return `${$t('{n} resets remaining', { n: next.left })} · ${$t('Expires')}: ${new Date(next.endsAt).toLocaleDateString()}`;
+  }
+
+  function anthropicResetAction(account: string): string {
+    const next = anthropicResetSummary(account)?.next;
+    return $t(RESET_KIND_ACTION[next?.kind ?? 'other']);
   }
 
   function mediaBadge(model: string): 'Image' | 'Video' | null {
@@ -1040,11 +1059,10 @@
       out.push({ label: $t('Reset credits'), value: String(q.resetCredits) });
     }
     if (provider.id === 'anthropic') {
-      const grant = anthropicResetGrant(account.account);
-      if (grant) {
+      for (const r of anthropicResetSummary(account.account)?.byKind ?? []) {
         out.push({
-          label: $t('Claude resets'),
-          value: `${grant.resets_left} · ${$t('Expires')} ${new Date(grant.ends_at).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}`,
+          label: $t(RESET_KIND_LABEL[r.kind]),
+          value: `${r.left} · ${$t('Expires')} ${new Date(r.endsAt).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}`,
         });
       }
     }
@@ -1944,8 +1962,8 @@
                               class="menu-item"
                               disabled={resettingLimit}
                               onclick={() => prepareAnthropicReset(account.account)}
-                              >{$t(
-                                'Reset Claude usage',
+                              >{anthropicResetAction(
+                                account.account,
                               )}{#if anthropicResetButtonMeta(account.account)}
                                 <span class="text-xs opacity-80" data-testid="anthropic-reset-meta"
                                   >({anthropicResetButtonMeta(account.account)})</span
@@ -2149,16 +2167,25 @@
 
   {#if confirmingAnthropicReset}
     <Modal
-      label={$t('Confirm Claude usage reset')}
+      label={$t('Confirm {action}', {
+        action: $t(RESET_KIND_ACTION[resetKind(confirmingAnthropicReset.grant)]),
+      })}
       dismissible={false}
       onclose={() => {
         if (!resettingLimit) confirmingAnthropicReset = null;
       }}
     >
-      <h2 class="section-header">{$t('Confirm Claude usage reset')}</h2>
+      <h2 class="section-header">
+        {$t('Confirm {action}', {
+          action: $t(RESET_KIND_ACTION[resetKind(confirmingAnthropicReset.grant)]),
+        })}
+      </h2>
       <p class="mt-3 text-sm text-ink-body">
         {$t('Use one Claude reset for')}
         <code class="font-mono text-ink-strong">{confirmingAnthropicReset.account}</code>?
+      </p>
+      <p class="mt-2 text-sm text-ink-body" data-testid="anthropic-reset-effect">
+        {$t(RESET_KIND_EFFECT[resetKind(confirmingAnthropicReset.grant)])}
       </p>
       <p class="mt-2 text-sm text-ink-muted">
         {confirmingAnthropicReset.grant.label ?? confirmingAnthropicReset.grant.id}; {$t(
@@ -2188,7 +2215,9 @@
           class="btn-primary"
           disabled={resettingLimit}
           onclick={confirmAnthropicReset}
-          >{resettingLimit ? $t('Resetting…') : $t('Reset Claude usage')}</button
+          >{resettingLimit
+            ? $t('Resetting…')
+            : $t(RESET_KIND_ACTION[resetKind(confirmingAnthropicReset.grant)])}</button
         >
       </div>
     </Modal>

@@ -1383,5 +1383,14 @@
   "Lane · fallback": "通道 · 兜底",
   "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "数字越小越先使用；数字相同的账号一起分摊流量。在开启了「按优先级混用账号」的通道里，通道中所有提供商的账号按这个数字一起排序；其他情况下只在各自的池内比较。",
   "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "开启后，本通道直接列出的模型背后的所有账号（订阅、API Key、其他提供商）按优先级排成一个顺序使用：数字越小越先用，数字相同的账号一起分摊流量。通道名引用仍排在它们后面兜底。优先级在「提供商」页面设置。",
-  "{n} accounts": "{n} 个账号"
+  "{n} accounts": "{n} 个账号",
+  "Weekly limit resets": "整周额度重置",
+  "Fable resets": "Fable 重置",
+  "Other Claude resets": "其他 Claude 重置",
+  "Reset weekly limit": "重置整周额度",
+  "Reset Fable allowance": "重置 Fable 额度",
+  "Confirm {action}": "确认{action}",
+  "Resets the whole 7-day limit for this Claude account.": "重置这个 Claude 账号整周（7 天）的额度。",
+  "Refills the Fable allowance and gives back what Fable used of the weekly limit. It does not reset the whole week.": "补满 Fable 额度，并退回 Fable 已占用的周额度；不会重置整周的通用额度。",
+  "Restores the Claude limits listed below.": "恢复下面列出的 Claude 额度。"
 }

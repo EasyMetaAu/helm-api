@@ -56,6 +56,16 @@
   )}
   {$t('The client named this exact model, so routing passed it through without fallback.')}
   {$t('Image generation is pinned to the requested model, so there is no fallback.')}
+  <!-- Providers: Claude reset kinds (RESET_KIND_LABEL/ACTION/EFFECT) -->
+  {$t('Weekly limit resets')}
+  {$t('Fable resets')}
+  {$t('Other Claude resets')}
+  {$t('Reset weekly limit')}
+  {$t('Reset Fable allowance')}
+  {$t('Reset Claude usage')}
+  {$t('Resets the whole 7-day limit for this Claude account.')}
+  {$t('Refills the Fable allowance and gives back what Fable used of the weekly limit. It does not reset the whole week.')}
+  {$t('Restores the Claude limits listed below.')}
   <!-- Providers list: sortable column labels (sortLabel()) -->
   {$t('Account')}{$t('Remaining')}{$t('Used')}{$t('Calls')}{$t('Priority')}
 {/if}
