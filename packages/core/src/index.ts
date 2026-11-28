@@ -501,6 +501,7 @@ export type {
   NativeResponse,
   Transformer,
 } from "./protocol/transformer.js";
+export * from "./provider/account-priority.js";
 // Native Anthropic Messages executor (issue #38): Claude Pro/Max subscription
 // routing — OpenAI-Chat IR <-> Anthropic Messages translation + Claude-Code
 // identity headers + system spoof + 401 refresh-retry.

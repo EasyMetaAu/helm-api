@@ -143,6 +143,8 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  /** Trusted cooperative account scheduler; never forwarded on the wire. */
+  accountPriorityCursor?: import("./account-priority.js").AccountPriorityCursor;
   /** Pre-dispatch durable request ID for providers that query client-assigned tasks. */
   providerRequestId?: string;
   /** Authenticated owner scope and original conversation, never sent verbatim. */
@@ -198,6 +200,7 @@ export interface ProviderCallOptions {
 }
 
 export interface ProviderClient {
+  accountPriority?: import("./account-priority.js").AccountPriorityPool;
   /** Internal Ark asset authorization binding; never expose in API responses or logs. */
   arkAssetScope?: string;
   transcribe?: import("./audio-transcription.js").AudioTranscriptionClient["transcribe"];

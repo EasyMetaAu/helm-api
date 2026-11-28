@@ -12,6 +12,7 @@ import type {
   XaiOAuthModel,
 } from "@helm/core";
 import {
+  type AccountPriorityCursor,
   AnthropicIdentityError,
   anthropicRequestAccountUuid,
   applyForcedAnthropicThinking,
@@ -19,6 +20,7 @@ import {
   CodexCapacityRetryExhaustedError,
   canUseNativePassthrough,
   checkCapability,
+  coordinateAccountPriority,
   correlationTraceId,
   guardPreOutputFailure,
   isCodexResponsesBeforeSendError,
@@ -27,7 +29,10 @@ import {
   offeredAnthropicClientVersion,
   openaiTransformer,
   optimizeVisualContext,
+  type PriorityAccount,
+  PriorityCursorCancelled,
   preOutputClassifierFor,
+  priorityGroups,
   resolveCostUsd,
   responsesInputItemsAreCrossProtocolLossy,
   sanitizeCodexResponsesNativeBody,
@@ -61,6 +66,7 @@ import {
   REQUEST_TIMEOUT_REASON,
   requestCancellationReason,
 } from "../request-cancellation.js";
+import { type ServingAccountHolder, servingAccountStore } from "../runtime/serving-account.js";
 import { clientErrorMessage } from "./client-error.js";
 import {
   usageFromAnthropicResponse,
@@ -311,14 +317,20 @@ export function isAbort(err: unknown, signal: AbortSignal): boolean {
 // `recordAbort` (no breaker fault, terminal). Mirrors the provider clients' own
 // `withTimeout` discriminator (openai.ts). Absent `attemptMs` => the client signal is
 // passed straight through (zero behavior change for normal traffic).
-async function withAttemptDeadline<T>(
+async function withAccountAttemptDeadline<T>(
   attemptMs: number | undefined,
   clientSignal: AbortSignal,
   op: (attemptSignal: AbortSignal) => Promise<T>,
+  cursor?: AccountPriorityCursor,
 ): Promise<T> {
   if (!attemptMs) return op(clientSignal);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), attemptMs);
+  const cancelTimer = cursor
+    ? cursor.scheduleTimeout(attemptMs, () => ctrl.abort())
+    : (() => {
+        const timer = setTimeout(() => ctrl.abort(), attemptMs);
+        return () => clearTimeout(timer);
+      })();
   const merged = AbortSignal.any([clientSignal, ctrl.signal]);
   try {
     return await op(merged);
@@ -328,7 +340,7 @@ async function withAttemptDeadline<T>(
     }
     throw err;
   } finally {
-    clearTimeout(timer);
+    cancelTimer();
   }
 }
 
@@ -1712,9 +1724,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const needsCachedContent =
       typeof req.cached_content === "string" && req.cached_content.length > 0;
 
-    for (const alias of plan.candidate_chain) {
+    const runAlias = async (
+      alias: string,
+      accountPriorityCursor?: AccountPriorityCursor,
+    ): Promise<ExecuteOutcome | undefined> => {
+      const withAttemptDeadline = <T>(
+        ms: number | undefined,
+        clientSignal: AbortSignal,
+        op: (signal: AbortSignal) => Promise<T>,
+      ) => withAccountAttemptDeadline(ms, clientSignal, op, accountPriorityCursor);
       const startedAt = now();
-      const elapsed = () => Math.max(0, now() - startedAt);
+      const elapsed = () => Math.max(0, now() - startedAt - (accountPriorityCursor?.pausedMs ?? 0));
 
       // Resolve alias -> { provider name, upstream model }. Two DISTINCT ids come
       // out and must not be conflated (fix-upstream-model-id 2026-05-31):
@@ -1748,7 +1768,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       if (!provider) {
         onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
-        continue;
+        return undefined;
       }
 
       // 1) Circuit breaker gate (keyed by alias — the routing unit). OAuth subscription
@@ -1770,7 +1790,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         circuitSkipped = true;
         onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
-        continue;
+        return undefined;
       }
       let breakerSettled = false;
       const settleBreaker = (kind: "success" | "failure" | "abort"): void => {
@@ -1796,12 +1816,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
           capabilityPruned = true;
           attempts.push(skipRow(alias, "capability_metadata_missing", elapsed()));
-          continue;
+          return undefined;
         }
         if (!caps && needsCachedContent) {
           capabilityPruned = true;
           attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
-          continue;
+          return undefined;
         }
         // xAI Imagine images and every video model require Helm's dedicated media
         // routes. Other providers may intentionally return images through their
@@ -1814,7 +1834,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         ) {
           capabilityPruned = true;
           attempts.push(skipRow(alias, "media_endpoint_required", elapsed()));
-          continue;
+          return undefined;
         }
         if (caps) {
           const estimatedPromptTokens = approxPromptTokens(req);
@@ -1850,7 +1870,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               );
             }
             attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
-            continue;
+            return undefined;
           }
         }
 
@@ -1858,14 +1878,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         if (protocolSkip !== null) {
           capabilityPruned = true;
           attempts.push(skipRow(alias, protocolSkip, elapsed()));
-          continue;
+          return undefined;
         }
 
         const candidateSkip = candidateGuardSkipReason(req, target, alias);
         if (candidateSkip !== null) {
           capabilityPruned = true;
           attempts.push(skipRow(alias, candidateSkip, elapsed()));
-          continue;
+          return undefined;
         }
 
         // Native protocol passthrough decision for THIS attempt (issue #217), computed
@@ -1881,7 +1901,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           attempts.push(
             skipRow(alias, "responses_generate_false_requires_native_passthrough", elapsed()),
           );
-          continue;
+          return undefined;
         }
         let visualCompressionMutation: VisualContextCompressionMutation | undefined;
         let optimizedNativeBody: Record<string, unknown> | null = null;
@@ -1946,6 +1966,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             delete countBody.stream;
             const tokenCount = await provider.countTokens(countBody, {
               signal,
+              accountPriorityCursor,
               anthropicIdentityContext,
               requestCompatibility: caps?.requestCompatibility,
             });
@@ -1963,7 +1984,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 contextConfirmationKey,
               );
               attempts.push(skipRow(alias, "context_too_small", elapsed()));
-              continue;
+              return undefined;
             }
           } catch (err) {
             log?.("warn", "anthropic.count_tokens_preflight_failed", {
@@ -2122,6 +2143,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 return peekStream(
                   () => {
                     const raw = passthroughStream(passthroughBody, {
+                      accountPriorityCursor,
                       onDiagnosticScrubber,
                       anthropicIdentityContext,
                       signal: preOutputAbort
@@ -2179,6 +2201,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                             ...(firstOutputTimeoutMs
                               ? {
                                   firstOutputTimeoutMs,
+                                  scheduleTimeout:
+                                    accountPriorityCursor?.scheduleTimeout.bind(
+                                      accountPriorityCursor,
+                                    ),
                                   onTimeout: () => preOutputAbort?.abort(),
                                 }
                               : {}),
@@ -2236,6 +2262,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 peekStream(
                   () => {
                     const raw = provider.chatCompletionStream(rendered.body, {
+                      accountPriorityCursor,
                       onDiagnosticScrubber,
                       anthropicIdentityContext,
                       signal: attemptSignal,
@@ -2327,6 +2354,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               signal,
               (attemptSignal) =>
                 passthroughInvoke(passthroughBody, {
+                  accountPriorityCursor,
                   anthropicIdentityContext,
                   signal: attemptSignal,
                   overloadRetry,
@@ -2374,6 +2402,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           );
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             provider.chatCompletion(bodyReq.body, {
+              accountPriorityCursor,
               anthropicIdentityContext,
               signal: attemptSignal,
               overloadRetry,
@@ -2407,6 +2436,25 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             responseMetadata: capturedResponseMetadata,
           };
         } catch (err) {
+          if (err instanceof PriorityCursorCancelled) {
+            // This alias really tried an account, but a peer served before its next sibling.
+            // Preserve that attempt/fallback count without faulting the unfinished pool.
+            const previous = accountPriorityCursor?.lastError;
+            const free429 = isFreeAlias(alias) && upstreamStatusOf(previous) === 429;
+            if (previous !== undefined)
+              attempts.splice(Math.max(0, attempts.length - 1), 0, {
+                alias,
+                skipped: free429,
+                skip_reason: free429 ? "free_429" : null,
+                status: "error",
+                error_class: free429 ? "rate_limited" : errorClassOf(previous),
+                latency_ms: elapsed(),
+                cost_usd: null,
+                error_detail: errorDetailOf(scrubFailure(previous)),
+                ...attemptTelemetry,
+              });
+            return undefined;
+          }
           const cancellation = requestCancellationReason(signal);
           if (
             cancellation === CONCURRENCY_LEASE_LOST_REASON ||
@@ -2568,7 +2616,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error_detail: errorDetailOf(err),
               ...defaultPassthroughTelemetry(),
             });
-            continue;
+            return undefined;
           }
 
           // A REAL upstream confirmed the request is over a hard context ceiling
@@ -2629,7 +2677,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error_detail: errorDetailOf(err),
               ...attemptTelemetry,
             });
-            continue;
+            return undefined;
           }
 
           if (isCandidateSpecificProtocolRejection(err)) {
@@ -2645,7 +2693,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error_detail: errorDetailOf(err),
               ...attemptTelemetry,
             });
-            continue;
+            return undefined;
           }
 
           // Deterministic request-shape rejection (oversized image, bad param): the
@@ -2730,6 +2778,137 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // was already cleared, or this attempt does not own the in-flight probe.
         if (!breakerSettled) settleBreaker("abort");
       }
+    };
+
+    // Resolve metadata first: unrelated/default single-type chains do no scheduling I/O.
+    const discovered: {
+      alias: string;
+      model: string;
+      provider: ProviderClient;
+      pool: NonNullable<ProviderClient["accountPriority"]>;
+    }[] = [];
+    if (plan.candidate_chain.length > 1) {
+      for (const alias of plan.candidate_chain) {
+        const target = resolveAttemptTarget({
+          alias,
+          defaultProvider,
+          providers,
+          registry,
+          knownOAuthPrefixes,
+          isManagedProvider,
+          isManagedAlias,
+          oauthAliases,
+          oauthWireModels,
+          oauthProviderProtocols,
+        });
+        const capability = xaiCatalogEntry(alias, target.providerModel)?.capabilities;
+        if (
+          !target.provider ||
+          target.provider.mediaOnly ||
+          capability?.outputImage ||
+          capability?.outputAudio
+        )
+          continue;
+        const pool = target.provider.accountPriority;
+        if (!pool || target.providerModel === "auto" || target.providerModel.endsWith("/auto"))
+          continue;
+        discovered.push({ alias, model: target.providerModel, provider: target.provider, pool });
+      }
+    }
+    const pools: {
+      alias: string;
+      model: string;
+      kind: "oauth" | "api_key";
+      candidates: PriorityAccount[];
+    }[] = [];
+    const snapshots = new Map<ProviderClient, Map<string, Promise<PriorityAccount[]>>>();
+    let pinned = false;
+    for (const entry of discovered) {
+      if (
+        !discovered.some((peer) => peer.model === entry.model && peer.pool.kind !== entry.pool.kind)
+      )
+        continue;
+      let byModel = snapshots.get(entry.provider);
+      if (!byModel) {
+        byModel = new Map();
+        snapshots.set(entry.provider, byModel);
+      }
+      try {
+        let snapshot = byModel.get(entry.model);
+        if (!snapshot) {
+          snapshot = entry.pool.snapshot(entry.model, req);
+          byModel.set(entry.model, snapshot);
+        }
+        const candidates = await snapshot;
+        pinned ||= entry.pool.isPinned(req);
+        pools.push({ alias: entry.alias, model: entry.model, kind: entry.pool.kind, candidates });
+      } catch {
+        // Discovery failure preserves legacy order; real dispatch still validates credentials.
+        pinned = true;
+        log?.("warn", "provider.account_priority_unavailable", {
+          trace_id: correlationTraceId(req),
+          alias: entry.alias,
+        });
+      }
+    }
+    // A round-robin alias is a chain boundary, not just an excluded group member:
+    // a later manual-priority pool must not leap over it through an earlier OAuth alias.
+    const barriers = new Set(
+      discovered.filter((entry) => entry.pool.enabled === false).map((entry) => entry.alias),
+    );
+    const groups: string[][] = [];
+    if (!pinned) {
+      let segment: typeof pools = [];
+      for (const alias of plan.candidate_chain) {
+        if (barriers.has(alias)) {
+          groups.push(...priorityGroups(segment));
+          segment = [];
+        } else {
+          const pool = pools.find((entry) => entry.alias === alias);
+          if (pool) segment.push(pool);
+        }
+      }
+      groups.push(...priorityGroups(segment));
+    }
+    const consumed = new Set<string>();
+    for (const alias of plan.candidate_chain) {
+      if (consumed.has(alias)) continue;
+      const group = groups.find((members) => members[0] === alias);
+      if (!group) {
+        const outcome = await runAlias(alias);
+        if (outcome) return outcome;
+        continue;
+      }
+      for (const member of group) consumed.add(member);
+      let sequence = 0;
+      const holders = new Map<string, ServingAccountHolder>();
+      const parentHolder = servingAccountStore.getStore();
+      const outcome = await coordinateAccountPriority(
+        group.map((member) => ({
+          alias: member,
+          candidates: pools.find((pool) => pool.alias === member)?.candidates ?? [],
+        })),
+        async (member, cursor) => {
+          cursor.onSelect = (account, priority) => {
+            log?.("info", "provider.account_priority", {
+              trace_id: correlationTraceId(req),
+              alias: member,
+              account,
+              priority,
+              sequence: ++sequence,
+            });
+          };
+          const holder: ServingAccountHolder = { selected: null };
+          holders.set(member, holder);
+          return servingAccountStore.run(holder, () => runAlias(member, cursor));
+        },
+      );
+      // The last completed alias is the winner/terminal attempt; cancelled cursors retain only actual pre-output failures.
+      const finalAlias =
+        outcome?.final.status === "ok" ? outcome.final.alias : attempts.at(-1)?.alias;
+      if (parentHolder && finalAlias && holders.has(finalAlias))
+        parentHolder.selected = holders.get(finalAlias)?.selected ?? null;
+      if (outcome) return outcome;
     }
 
     // Chain exhausted (or empty). Pick the structured terminal error (docs/07):

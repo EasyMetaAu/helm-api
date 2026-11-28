@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { Protocol } from "@helm/shared";
 import { nextSSEFrameBoundary } from "../protocol/streaming.js";
+import { PriorityCursorCancelled } from "./account-priority.js";
 import { UpstreamError } from "./openai.js";
 
 // The guard must retain preamble bytes verbatim until the first real output, so
@@ -343,6 +344,8 @@ export interface PreOutputGuardOptions {
    * streams untouched. Omitted or <= 0 disables it (unchanged behavior).
    */
   firstOutputTimeoutMs?: number;
+  /** Cooperative scheduling excludes time awaiting another pool. */
+  scheduleTimeout?: (ms: number, fire: () => void) => () => void;
   /** Abort the upstream pull when the deadline expires. */
   onTimeout?: () => void;
 }
@@ -371,15 +374,24 @@ export async function* guardPreOutputFailure(
   // the moment real output commits.
   const firstOutputTimeoutMs = options.firstOutputTimeoutMs ?? 0;
   const deadlineArmed = firstOutputTimeoutMs > 0;
+  let cancelScheduledDeadline: (() => void) | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const deadlineReached = deadlineArmed
     ? new Promise<"deadline">((resolve) => {
+        if (options.scheduleTimeout) {
+          cancelScheduledDeadline = options.scheduleTimeout(firstOutputTimeoutMs, () =>
+            resolve("deadline"),
+          );
+          return;
+        }
         deadlineTimer = setTimeout(() => resolve("deadline"), firstOutputTimeoutMs);
         // Never hold the process open for this timer alone.
         deadlineTimer.unref?.();
       })
     : null;
   const clearDeadline = (): void => {
+    cancelScheduledDeadline?.();
+    cancelScheduledDeadline = undefined;
     if (deadlineTimer !== undefined) {
       clearTimeout(deadlineTimer);
       deadlineTimer = undefined;
@@ -458,6 +470,7 @@ export async function* guardPreOutputFailure(
     // response body is released instead of leaking until GC.
     if (!committed) void iterator.return?.().catch(() => {});
     const tailError = unterminatedError();
+    if (error instanceof PriorityCursorCancelled) throw error;
     if (tailError) throw tailError;
     if (error instanceof UpstreamError) throw error;
     if (classifier === responsesClassifier && !committed && !explicitPreOutputError) {

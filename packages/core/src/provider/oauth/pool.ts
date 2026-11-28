@@ -1,4 +1,10 @@
 import type { AccountSelectionTrace } from "@helm/shared";
+import {
+  type AccountPriorityCursor,
+  nextPriority,
+  type PriorityAccount,
+  PriorityCursorCancelled,
+} from "../account-priority.js";
 import { createSpeedHistory } from "./speed.js";
 // OAuth account POOL client (issue #38, Stage 3). A single ProviderClient that
 // fronts N per-account clients of ONE subscription provider (each already built
@@ -21,6 +27,7 @@ import { createHash } from "node:crypto";
 import {
   type AudioTranscriptionRequest,
   appendMutationList,
+  type InternalRequest,
   isNativePassthroughCarrier,
   type NativePassthroughInput,
   nativePassthroughBody,
@@ -159,6 +166,8 @@ export interface OAuthPoolMember {
   /** Verified token account UUID snapshot; final dispatch rechecks the live credential. */
   anthropicAccountUuid?: string;
   priority: number;
+  /** Configured shared priority, independent of the legacy pool strategy. */
+  routingPriority?: number;
   schedulable: boolean;
   // Optional per-account model entitlement. Undefined preserves the legacy
   // "supports every routed model" behavior; an explicit empty list supports none.
@@ -614,6 +623,57 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         !modelLimited(e.member.account, model, nowMs) &&
         !exclude?.has(e.member.account),
     );
+  }
+
+  function prioritySnapshot(
+    model: string | null,
+    exclude?: ReadonlySet<string>,
+    avoidBusy = false,
+  ): PriorityAccount[] {
+    const nowMs = now();
+    const preferred = preferHealthyTier(eligibleEntries(nowMs, exclude, model), nowMs);
+    const eligible = new Set(preferredCapacityTier(preferred, avoidBusy).candidates);
+    return entries.map((entry) => ({
+      account: entry.member.account,
+      priority: entry.member.routingPriority ?? entry.member.priority,
+      eligible: eligible.has(entry),
+    }));
+  }
+  function priorityPinned(req: InternalRequest): boolean {
+    if (req.metadata.stateful_provider_account || req.metadata.stateful_provider_alias) return true;
+    try {
+      const raw = req.provider_raw ?? {};
+      if (isStrictAccountSticky(stickyKeyFromChat(raw as ChatCompletionRequest))) return true;
+      // Check all assertions, including identities discarded by cross-protocol rendering.
+      if (anthropicRequestAccountUuid(raw)) return true;
+      if (req.native_request) {
+        if (isStrictAccountSticky(stickyKeyFromNative(req.native_request))) return true;
+        if (anthropicRequestAccountUuid(nativePassthroughBody(req.native_request))) return true;
+      }
+      return false;
+    } catch (error) {
+      // Preserve the existing identity validation/error boundary at real dispatch.
+      if (error instanceof AnthropicIdentityError) return true;
+      throw error;
+    }
+  }
+
+  async function selectAtPriority(
+    cursor: AccountPriorityCursor,
+    stickyKey: string | null,
+    exclude: ReadonlySet<string> | undefined,
+    model: string | null,
+    avoidBusy: boolean,
+    signal?: AbortSignal,
+  ): Promise<PoolEntry> {
+    const snapshot = () => prioritySnapshot(model, exclude, avoidBusy);
+    for (;;) {
+      await cursor.wait(snapshot, signal);
+      signal?.throwIfAborted();
+      // Eligibility can change between preview and permit (quota polls/admin writes).
+      if (nextPriority(snapshot()) !== cursor.priority) continue;
+      return select(stickyKey, exclude, { model, avoidBusy, cursor });
+    }
   }
 
   function preferredCapacityTier(
@@ -1102,6 +1162,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     opts: {
       avoidBusy?: boolean;
       model?: string | null;
+      cursor?: AccountPriorityCursor;
     } = {},
   ): PoolEntry {
     const nowMs = now();
@@ -1120,6 +1181,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // still uses the full `eligible` set so a pinned conversation is never diverted.
     const preferred = preferHealthyTier(eligible, nowMs);
     const capacityTier = preferredCapacityTier(preferred, opts.avoidBusy === true);
+    const capacityCandidates = capacityTier.candidates;
+    if (opts.cursor)
+      capacityTier.candidates = capacityTier.candidates.filter(
+        (entry) =>
+          (entry.member.routingPriority ?? entry.member.priority) === opts.cursor?.priority,
+      );
     const snapshot = (
       selected: PoolEntry,
       reason: OAuthPoolSelection["reason"],
@@ -1151,13 +1218,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
                         ? "identity_pin"
                         : !preferred.includes(entry)
                           ? "credit_tier"
-                          : !capacityTier.candidates.includes(entry)
+                          : !capacityCandidates.includes(entry)
                             ? "capacity"
-                            : (!weightedSelection || deps.rotateIndependentRequests) &&
-                                member.priority !== priority &&
-                                entry !== selected
+                            : opts.cursor && !capacityTier.candidates.includes(entry)
                               ? "priority"
-                              : null;
+                              : (!weightedSelection || deps.rotateIndependentRequests) &&
+                                  member.priority !== priority &&
+                                  entry !== selected
+                                ? "priority"
+                                : null;
           const resets = applicableQuotaWindows(entry, model, nowMs).flatMap((w) =>
             w.resetsAtMs !== null && w.resetsAtMs > nowMs ? [w.resetsAtMs] : [],
           );
@@ -1245,6 +1314,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       }
       throw new Error("oauth pool has no schedulable account");
     }
+    opts.cursor?.onSelect?.(
+      best.member.account,
+      best.member.routingPriority ?? best.member.priority,
+    );
     return commitSelection(best, stickyOnly ? null : (stickyKey ?? null), nowMs, {
       ...selectionBase,
       reason,
@@ -1360,6 +1433,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     overloadRetry?: ProviderCallOptions["overloadRetry"],
     signal?: AbortSignal,
     excluded?: ReadonlySet<string>,
+    cursor?: AccountPriorityCursor,
   ): Promise<R> {
     const tried = new Set<string>(excluded);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
@@ -1368,8 +1442,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     for (;;) {
       let entry: PoolEntry;
       try {
-        entry = select(stickyKey, tried, { avoidBusy, model });
+        entry = cursor
+          ? await selectAtPriority(cursor, stickyKey, tried, model, avoidBusy, signal)
+          : select(stickyKey, tried, { avoidBusy, model });
       } catch (selErr) {
+        if (selErr instanceof PriorityCursorCancelled || (cursor && signal?.aborted)) throw selErr;
         const waitMs = !waitedForStickyAccount ? stickyAccountWaitMs(selErr) : null;
         if (waitMs !== null) {
           waitedForStickyAccount = true;
@@ -1401,6 +1478,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
+        if (cursor) cursor.lastError = err;
         if (err instanceof CodexCapacityRetryExhaustedError) throw err;
         if (overloadRetry?.exhausted) throw err;
         if (deps.shouldRetryAccountError?.(err)) {
@@ -1483,6 +1561,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         ]();
         first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
+        if (opts.accountPriorityCursor) opts.accountPriorityCursor.lastError = err;
         if (iterator) await iterator.return?.().catch(() => {});
         const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
         signal?.throwIfAborted();
@@ -1503,9 +1582,23 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           // The operator/usage poll may have parked the account while we waited.
           if (!eligibleEntries(now(), undefined, model).includes(entry)) {
             try {
-              entry = select(stickyKey, tried, { avoidBusy, model });
+              entry = opts.accountPriorityCursor
+                ? await selectAtPriority(
+                    opts.accountPriorityCursor,
+                    stickyKey,
+                    tried,
+                    model,
+                    avoidBusy,
+                    signal,
+                  )
+                : select(stickyKey, tried, { avoidBusy, model });
               tried.add(entry.member.account);
-            } catch {
+            } catch (selectionError) {
+              if (
+                selectionError instanceof PriorityCursorCancelled ||
+                (opts.accountPriorityCursor && signal?.aborted)
+              )
+                throw selectionError;
               throw err;
             }
           }
@@ -1531,8 +1624,22 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         if (statefulContinuation && !invalidPreviousResponseId) throw lastErr;
         let next: PoolEntry;
         try {
-          next = select(stickyKey, tried, { avoidBusy, model });
-        } catch {
+          next = opts.accountPriorityCursor
+            ? await selectAtPriority(
+                opts.accountPriorityCursor,
+                stickyKey,
+                tried,
+                model,
+                avoidBusy,
+                signal,
+              )
+            : select(stickyKey, tried, { avoidBusy, model });
+        } catch (selectionError) {
+          if (
+            selectionError instanceof PriorityCursorCancelled ||
+            (opts.accountPriorityCursor && signal?.aborted)
+          )
+            throw selectionError;
           throw lastErr; // no sibling left → surface the real upstream cause
         }
         tried.add(next.member.account);
@@ -1621,6 +1728,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   return {
+    accountPriority: {
+      kind: "oauth",
+      snapshot: async (model, request) =>
+        prioritySnapshot(model, undefined, request ? isUserMessageRequest(request) : false),
+      isPinned: priorityPinned,
+    },
     ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
     supportsResponsesNativeItems: entries.every(
       (entry) => entry.member.client.supportsResponsesNativeItems !== false,
@@ -1680,6 +1793,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         false,
         opts?.overloadRetry,
         opts?.signal,
+        undefined,
+        opts?.accountPriorityCursor,
       );
     },
     chatCompletionStream(
@@ -1695,6 +1810,29 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       opts = { ...opts, overloadRetry: opts?.overloadRetry ?? { attempt: 0 } };
       const open = (client: ProviderClient, entry: PoolEntry) =>
         client.chatCompletionStream(req, callOptionsForEntry(opts, entry));
+      if (opts.accountPriorityCursor) {
+        const cursor = opts.accountPriorityCursor;
+        const callOpts = opts;
+        return (async function* () {
+          const first = await selectAtPriority(
+            cursor,
+            stickyKey,
+            undefined,
+            model,
+            avoidBusy,
+            callOpts.signal,
+          );
+          yield* streamWithRetry(
+            first,
+            stickyKey,
+            model,
+            avoidBusy,
+            callOpts,
+            open,
+            deps.chatStreamPreambleClassifier,
+          );
+        })();
+      }
       try {
         const first = select(stickyKey, undefined, { avoidBusy, model });
         return streamWithRetry(
@@ -1763,6 +1901,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         opts?.overloadRetry,
         opts?.signal,
         recovery.excluded,
+        opts?.accountPriorityCursor,
       );
     },
     // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
@@ -1788,6 +1927,30 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         }
         return client.nativePassthroughStream(body, callOptionsForEntry(opts, entry));
       };
+      if (opts.accountPriorityCursor) {
+        const cursor = opts.accountPriorityCursor;
+        const callOpts = opts;
+        return (async function* () {
+          const first = await selectAtPriority(
+            cursor,
+            stickyKey,
+            recovery.excluded,
+            model,
+            avoidBusy,
+            callOpts.signal,
+          );
+          yield* streamWithRetry(
+            first,
+            stickyKey,
+            model,
+            avoidBusy,
+            callOpts,
+            open,
+            deps.nativeStreamPreambleClassifier,
+            recovery.excluded,
+          );
+        })();
+      }
       try {
         const first = select(stickyKey, recovery.excluded, { avoidBusy, model });
         if (!first.member.client.nativePassthroughStream) {

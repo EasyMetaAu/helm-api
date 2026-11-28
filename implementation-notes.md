@@ -8,6 +8,26 @@
 ---
 
 
+## 2026-11-28 · 跨订阅与 API Key 的账号优先级：首个切片已实现（docs/02、03、04、07、11）
+
+**状态：已实现本地切片，未提交、未运行远程 CI、未部署。** 基线 `49263aa28e8e952347fac5106c77974d86a037e9`。用户解除前次设计门槛后，按原方案补齐可恢复的池执行状态和请求级协调器。原默认顺序表征测试保持原文；新增真实 `routeRequest → createExecute → OAuth/API key pool` 边界测试先证明 A10→B30→K20 的旧行为，再验证 A10→K20→B30。独立只读审查发现的冷却更新、容量/付费额度、legacy key 与错误脱敏问题均补了回归用例。
+
+**等价范围与默认兼容。** 只处理已经经过授权、lane 展开和 `blocked_models` 过滤的文本候选；按解析后的实际 `providerModel` 严格相等分组，不根据 UI 名称、alias 后缀或相似能力推断等价。只在同模型组内同时存在可用订阅账号和策略为 `manual_priority` 的可用 API key 账号、且至少一个可用账号的优先级不是 50 时启动协调。全部为默认 50、单一认证类型、显式单 alias 请求仍走顺序执行和原池策略，不使用游标。不合并 `auto`、不同 wire ID 或媒体输出；例如 ZenMux 的 `anthropic/claude-X` 与官方 `claude-X` 不等价。没有管理账号的 legacy key alias 不进入共享组，仍由原候选循环处理，不能以“空优先级”抢到队首。
+
+非默认组按首次出现的 alias 位置进入执行；组内按可用账号的优先级从小到大选择，同级先按原 alias 顺序，同池同级仍用既有策略。组耗尽后再处理后续候选，因此启用共享优先级会有意把同组 alias 之间原先穿插的其他候选排到该组之后。先保留原有模型许可、启停、usage park、冷却、健康额度及用户消息容量规则，再比较优先级；不会为了低数字而绕过健康账号去花超额 credits，或选择已有空闲 sibling 时仍排队的账号。按用户确认的兼容规则，API key 只有 `manual_priority` 池参与共享排序；`round_robin` 继续忽略历史非默认优先级，并作为候选链分界，后续 manual 池不能借更早的 OAuth alias 越过它。普通黏性只能在选中优先级内生效；池识别的 Responses ID、Codex turn state、WebSocket session、Anthropic UUID 和持久化账号绑定使请求整体退出共享排序，保留原身份/恢复边界。
+
+**最小机制与资源所有权。** core 的 `AccountPriorityCursor` 只在选账号前暂停原调用；`completeWithRetry` / `streamWithRetry` 仍持有 tried 集、最后错误、重试预算、usage park 和有效输出提交点。只读快照不调用 select、不改 LRU、不预占额度。每次请求只对存在相同 wire model、相反认证类型的候选读取调度快照，按 provider 客户端和 model 缓存一次，重复 alias 及协调器直接复用。没有匹配对的链不产生调度存储读取；默认优先级的混合匹配对仍各读取一次以确认实际设置。授予执行机会时保留尚未启动游标的初始候选集，已启动池通过内存回调重新检查 tried、冷却和容量，恢复时再次验证最低可用优先级；例如 K20 执行期间 B30 被 quota poll 停放，后续仍能选 C40，而不会把 A10 的旧错误冒充整个池耗尽。API key 出站仍执行原 refresh/acquire/settle、凭据代次及 CAS 校验，这些安全读取不被调度缓存替代。实测 A10→K20→B30 的 API key 调度快照调用从 6 次降到 1 次，两类池均只做一次发现快照；本次 fixture 比同样的 key provider 直接调用仅多 1 次 store.get。未暴露成员客户端或凭据。
+
+网关把原单 alias 执行体提取为 `runAlias`，协调器一次只允许一个 alias 执行，其余保留异步调用帧。能力/上下文检查、协议翻译、计价和 breaker 键仍是原 alias。HALF_OPEN 的 probeToken 在暂停期间保持归属，成功或真正耗尽才结算健康；同组另一 alias 成功或终结时用内部取消信号唤醒并清理暂停调用，不伪造 client_abort，也不把未耗尽的池记为故障。与原设计相比，deadline 明确按**剩余上游执行时间**续用：调度等待暂停 attempt 和原生 first-output 计时，避免另一池的延迟误伤本池；不会重新发放整段预算，整个请求的断连/超时仍始终生效。alias latency 同样扣除调度暂停，避免总延迟重复累计 peer 的执行时间。已经提交有效输出后不再调度或重放。
+
+确定性 400、队列背压、`:free` 429 skip、usage park、abort 不计故障以及现有错误终结逻辑保持。暂停调用被取消时，已发生的 pre-output 失败仍保留为一次 alias 尝试并经该 alias 的凭据 scrubber 脱敏；`:free` 429 仍记 skipped。每个 alias 的池内 sibling 重试不额外增加 `fallback_count`，不会因为成功的 peer 提前结束而漏掉前面实际尝试过的 alias。分类的 `classifier.decided_by` / `fallback_reason` 与执行的 `provider_attempts` / `fallback_count` 继续分开。新增结构化日志 `provider.account_priority` 记录 alias、逻辑 account、priority、组内 sequence 和 trace_id，以解释真实 A→K→B 顺序；不记录正文、密钥或原始亲和标识，也没有新增 DecisionRecord 字段。每个协调 alias 使用独立 serving-account holder，清理后仅当最终 alias 存在于本组 holders 时才写回请求 holder；本组没有最终尝试时保留此前非组 alias 的身份，避免 usage park 和计费串号。
+
+**配置、持久化与 UI。** 没有数据库迁移、新的 YAML 字段或 admin 改动。仍使用加密 `oauth.account_settings` 与 `provider.api_keys.<poolId>` 中既有 `priority`，默认 50；SQLite 和 Postgres 的 ConfigStore 适配器都不需改动。调度快照读取失败时记录 `provider.account_priority_unavailable` 并保留原顺序执行，不让原本无需访问的 fallback 存储故障破坏可成功的请求；真正选到该 provider 时仍重新读取并执行原 fail-closed 凭据/配置检查。协调器不再重新读取并把错误替换成空数组，瞬时读失败不会将尚未启动的账号排到最高优先级。快照不是发送授权，也不提供跨进程全局调度事务。
+
+UI 继续使用既有接口：OAuth 从 `GET /admin/api/oauth/:provider/account?account=<label>` 读顶层 `priority`，以 `PUT /admin/api/oauth/:provider/account` 提交 `{ "account": "<label>", "priority": 10 }`；API key 从 `GET /admin/api/api-key-pools` 读 `pools[].accounts[].priority`，以 `PATCH /admin/api/api-key-pools/:pool/accounts/:id` 提交 `{ "priority": 20 }`。API key 范围是 0–1000，OAuth 为非负整数；统一输入框可用 0–1000 的交集，但不能截断已有更大 OAuth 值。只应对以上等价范围宣传跨类型优先级，不能将不同模型、legacy 环境 key 或媒体任务描述为共享账号调度。
+
+**验证与剩余范围。** 新测试覆盖非流式及翻译/原生流、初始默认顺序、同级优先级、无资格账号、原生 preamble 后失败、严格 continuation、权限过滤、HALF_OPEN 暂停/独占/清理、真实 400、限额停放、断连与读取竞争、已输出后的禁止重放、计时预算、最终账号归属、失败脱敏和 free429 计数。运行范围限相关 pool/execute/config 样例文件，并执行完整 typecheck 与 lint；独立复审的四项修正另覆盖快照/store 读取次数、round_robin 旧优先级与链位置、瞬时重读优先级倒置和空组归属交接，均先验证回归再修复；具体命令和结果见本次交付报告。尚未扩展模糊/显式跨 wire-ID 等价关系、媒体调度或远程生产验收；现有跨进程管理变更及账号池重建仍遵循原凭据/生命周期约束。
+
 ## 2026-11-28 · 提供商列表统一列与列表内编辑（docs/11）
 
 按用户要求重做 Providers 列表：订阅账号、API Key 和免密钥连接用同一套列，依次是账号（含类型标签）、状态、额度与余额、用量、连接、优先级、已启用、选项、操作；不按提供商分组。行模型、筛选、排序和 URL 编码放在 `routes/providers/account-list.ts`，用纯函数实现。搜索、类型、状态和排序写入 URL，通过 `replaceState` 更新，不重新加载数据。
@@ -83,11 +103,9 @@ WhisperX 支持按 PCM16 WAV 的真实采样帧在派发前限制时长，同一
 
 发布 0.30.95 按发布流程同步 Grok 1.0.92、Claude Code 2.1.330，Codex 0.171.0 不变；Claude 新增的 MCP 保存字段已静态审查并加入剥离回归，Messages 信任白名单不变。
 
-## 2026-11-21 · Qwen Filetrans 原生秒数（docs/06、native-media）
-
-真实文件任务返回 `usage.seconds`，此前仅 Fun-ASR 的 `duration` 被标准化，导致异步预算回执漏记 Qwen 用量。Qwen Filetrans 现在验证有限、非负秒数并添加 `type: duration`，保留供应商原数值，不用上传时长或字幕末尾推算。金额仍为 unknown，原预留不变；现有任务经只读查询即可补齐回执，无需再次付费提交。
-
 ## 更早历史总览
+
+2026-11-21：Qwen Filetrans 原生秒数——标准化 `usage.seconds` 为 duration 用量，金额仍为 unknown，只读查询即可补齐回执。
 
 2026-11-20：单音轨转写费用上界——价卡 `maxChannels` 校验实际轨数，超限在预留前拒绝；未配置仍按完整作业上界。
 

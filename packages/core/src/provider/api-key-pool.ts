@@ -543,6 +543,9 @@ export function createApiKeyPoolClient(deps: {
     if (!pool || signature !== nextSignature) {
       const members: OAuthPoolMember[] = accounts.map((a) => ({
         account: `${a.id}@${a.generation}`,
+        get routingPriority() {
+          return deps.accounts.entries().find((row) => row.id === a.id)?.priority ?? 50;
+        },
         get priority() {
           return deps.accounts.strategy(deps.strategy) === "manual_priority"
             ? (deps.accounts.entries().find((row) => row.id === a.id)?.priority ?? 50)
@@ -575,6 +578,21 @@ export function createApiKeyPoolClient(deps: {
   }
   return new Proxy(template, {
     get(target, property, receiver) {
+      if (property === "accountPriority")
+        return {
+          kind: "api_key",
+          get enabled() {
+            return deps.accounts.strategy(deps.strategy) === "manual_priority";
+          },
+          snapshot: async (model: string, request?: import("@helm/shared").InternalRequest) => {
+            const active = await current();
+            // Stored priorities are intentionally ignored by the legacy round-robin policy.
+            if (deps.accounts.strategy(deps.strategy) !== "manual_priority") return [];
+            return active.accountPriority?.snapshot(model, request) ?? [];
+          },
+          isPinned: (request: import("@helm/shared").InternalRequest) =>
+            pool?.accountPriority?.isPinned(request) ?? false,
+        } satisfies NonNullable<ProviderClient["accountPriority"]>;
       const method: unknown = Reflect.get(target, property, receiver);
       if (typeof method !== "function") return method;
       const invoke = async (args: unknown[]) => {
