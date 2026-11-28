@@ -1443,6 +1443,47 @@ CREATE TABLE request_payload_response_chunks (
       );
     },
   },
+  {
+    version: 58,
+    sql: `CREATE TABLE request_payload_blob_refs (
+  request_id TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  PRIMARY KEY (request_id, sha256)
+);`,
+  },
+  {
+    version: 59,
+    async run(db) {
+      // An expression index avoids rewriting historical JSON payload rows into
+      // a new STORED column; the indexed expression is identical to queryPage.
+      if (await pgTableHasColumns(db, "telemetry", ["api_key_id", "decision_json", "created_at"]))
+        await db.execute(
+          sql.raw(
+            "CREATE INDEX idx_telemetry_key_trace ON telemetry (api_key_id, (decision_json ->> 'trace_id'), created_at)",
+          ),
+        );
+      if (await pgTableHasColumns(db, "sessions", ["api_key_id", "external_session_id"]))
+        await db.execute(
+          sql.raw(
+            "CREATE INDEX idx_sessions_key_label ON sessions (api_key_id, external_session_id)",
+          ),
+        );
+    },
+  },
+  {
+    version: 60,
+    async run(db) {
+      if (!(await pgTableHasColumns(db, "config_kv", ["key", "value"]))) return;
+      await db.execute(sql.raw("ALTER TABLE config_kv ADD COLUMN expires_at BIGINT"));
+      await db.execute(
+        sql.raw(
+          "CREATE INDEX idx_config_expiry ON config_kv (expires_at) WHERE expires_at IS NOT NULL",
+        ),
+      );
+      await db.execute(sql`UPDATE config_kv SET expires_at = ${Date.now() + 7 * 86400_000}
+        WHERE key LIKE 'portal.replay.receipt.%' OR key LIKE 'portal.replay.rate.%'`);
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -1463,6 +1504,8 @@ async function pgTableHasColumns(
     | "memory_jobs"
     | "oauth_quota"
     | "oauth_reset_period"
+    | "config_kv"
+    | "sessions"
     | "session_revisions"
     | "telemetry"
     | "request_payloads",

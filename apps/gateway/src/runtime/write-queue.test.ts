@@ -679,3 +679,33 @@ describe("createWriteQueue", () => {
     expect(logs.some((l) => l.includes("on_task_drain"))).toBe(true);
   });
 });
+
+it("reports only the caller's buffered and committing telemetry as pending", async () => {
+  const sink = fakeSink();
+  let finish!: () => void;
+  let start!: () => void;
+  const started = new Promise<void>((resolve) => {
+    start = resolve;
+  });
+  sink.insertMany = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+        start();
+      }),
+  );
+  const q = createWriteQueue({ telemetry: sink, log: () => {}, flushIntervalMs: 60000 });
+  const row = tele("pending");
+  row.decision.trace_id = "client";
+  await q.enqueueTelemetry(row);
+  expect(q.pendingRequests?.("k1", { requestId: "pending" })).toEqual(["pending"]);
+  expect(q.pendingRequests?.("k2", { requestId: "pending" })).toEqual([]);
+  expect(q.pendingRequests?.("k1", { traceId: "client" })).toEqual(["pending"]);
+  const flush = q.flush();
+  await started;
+  expect(q.pendingRequests?.("k1", { requestId: "pending" })).toEqual(["pending"]);
+  finish();
+  await flush;
+  expect(q.pendingRequests?.("k1", { requestId: "pending" })).toEqual([]);
+  await q.stop();
+});

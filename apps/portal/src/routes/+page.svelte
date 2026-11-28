@@ -3,8 +3,14 @@
   import { base } from "$app/paths";
   import { goto } from "$app/navigation";
   import { page as pageStore } from "$app/stores";
-  import { t } from "$lib/i18n";
-  import { formatUsd, formatTokens, formatTimestamp } from "$lib/format";
+  import { locale, t } from "$lib/i18n";
+  import {
+    formatUsd,
+    formatTokens,
+    formatTimestamp,
+    formatDurationMs,
+    formatTps,
+  } from "$lib/format";
   import {
     formatTrendTick,
     pctDelta,
@@ -135,6 +141,8 @@
   type ModelRow = {
     model: string;
     requests: number;
+    input: number;
+    output: number;
     tokens: number;
     cost: number | null;
     sharePct: number;
@@ -148,6 +156,8 @@
       .map((m) => ({
         model: m.model ?? $t("unknown"),
         requests: m.requests,
+        input: m.prompt_tokens,
+        output: m.completion_tokens,
         tokens: m.total_tokens,
         cost: m.cost_usd,
         sharePct: tokenSharePct(m.total_tokens, modelTotalTokens),
@@ -316,6 +326,60 @@
     </div>
   </div>
 
+  <div class="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div class="card">
+      <div class="section-desc">
+        {$t("Errors")}
+      </div>
+      <div class="mt-1 text-2xl font-semibold">
+        {formatTokens(stats.totals.error_count)}
+      </div>
+      <div class="mt-0.5 text-xs text-ink-muted">
+        {$t("Successful: {count}", {
+          count: formatTokens(stats.totals.ok_count),
+        })}
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-desc">
+        {$t("Avg latency")}
+      </div>
+      <div class="mt-1 text-2xl font-semibold">
+        {stats.totals.avg_latency_ms == null
+          ? "—"
+          : formatDurationMs(stats.totals.avg_latency_ms)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-desc">
+        {$t("Avg speed")}
+      </div>
+      <div class="mt-1 text-2xl font-semibold">
+        {formatTps(stats.totals.avg_tps, (value) =>
+          $t("{value} tokens/s", { value }),
+        )}
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-desc">
+        {$t("Cache hit rate")}
+      </div>
+      <div class="mt-1 text-2xl font-semibold">
+        {stats.totals.cache_hit_rate == null
+          ? "—"
+          : new Intl.NumberFormat($locale, {
+              style: "percent",
+              maximumFractionDigits: 1,
+            }).format(stats.totals.cache_hit_rate)}
+      </div>
+      <div class="mt-0.5 text-xs text-ink-muted">
+        {$t("Cached tokens: {count}", {
+          count: formatTokens(stats.totals.cached_tokens),
+        })}
+      </div>
+    </div>
+  </div>
+
   <!-- Budget -->
   <section class="card mt-4">
     <h2 class="section-header mb-2">{$t("Your budget")}</h2>
@@ -465,6 +529,8 @@
             <tr>
               <th class="px-3 py-2 text-left">{$t("Model")}</th>
               <th class="px-3 py-2 text-right">{$t("Requests")}</th>
+              <th class="px-3 py-2 text-right">{$t("Input tokens")}</th>
+              <th class="px-3 py-2 text-right">{$t("Output tokens")}</th>
               <th class="px-3 py-2 text-right">{$t("Tokens")}</th>
               <th class="px-3 py-2 text-right">{$t("Cost")}</th>
               <th class="px-3 py-2 text-right">{$t("Share")}</th>
@@ -484,6 +550,18 @@
                 </td>
                 <td data-label={$t("Requests")} class="table-mode:text-right">
                   {formatTokens(row.requests)}
+                </td>
+                <td
+                  data-label={$t("Input tokens")}
+                  class="table-mode:text-right tabular-nums"
+                >
+                  {formatTokens(row.input)}
+                </td>
+                <td
+                  data-label={$t("Output tokens")}
+                  class="table-mode:text-right tabular-nums"
+                >
+                  {formatTokens(row.output)}
                 </td>
                 <td data-label={$t("Tokens")} class="table-mode:text-right">
                   {formatTokens(row.tokens)}

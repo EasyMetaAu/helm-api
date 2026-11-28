@@ -486,6 +486,7 @@ export {
   createStreamState,
   nextSSEFrameBoundary,
   parseSSEData,
+  parseSSEFrame,
   readSSE,
   type SSEFrame,
   type SSEFrameBoundary,
@@ -970,6 +971,7 @@ export {
   type StoreSet,
   splitSessionRequestJson,
 } from "./store/index.js";
+export { rehydrateImages } from "./store/payload-blobs.js";
 export type {
   BudgetDim,
   BudgetPeekResult,

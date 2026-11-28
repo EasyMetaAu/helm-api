@@ -1,13 +1,12 @@
-import type { BudgetStore, KeyStore, TelemetryStore } from "@helm/core";
-import { readWeeklyBudget, redact } from "@helm/core";
+import type { BudgetStore, KeyStore, MemoryStore, TelemetryStore } from "@helm/core";
+import { readWeeklyBudget, runtimeResponseWorkAdmission } from "@helm/core";
 import {
-  DecisionRecordSchema,
   PortalMemorySettingsRequestSchema,
   RequestsQuerySchema,
   StatsQuerySchema,
   toPortalDecisionView,
 } from "@helm/shared";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import {
   type BodyMemoryAdmission,
@@ -16,12 +15,11 @@ import {
   readAdmittedRequestBody,
 } from "../../runtime/memory-admission.js";
 import type { AdminApiDeps } from "../admin/deps.js";
-import {
-  enrichAccountLabels,
-  type RequestPayloadDeps,
-  registerRequestPayloadRoutes,
-} from "../admin/requests.js";
+import { type RequestPayloadDeps, registerRequestPayloadRoutes } from "../admin/requests.js";
 import { assertOwnsTrace } from "./ownership.js";
+import { projectPortalPayload } from "./payload-privacy.js";
+import { createPortalDecisionProjection } from "./privacy.js";
+import { type PortalReplayWiring, registerPortalReplayRoute } from "./replay.js";
 
 // The self-service portal REST surface (docs/12 §4.2). EVERY handler write-forces
 // the scope from `c.get("identity")` (set by authMiddleware) and IGNORES any caller
@@ -30,13 +28,20 @@ import { assertOwnsTrace } from "./ownership.js";
 // a scopeless read. Memory CRUD is deliberately absent: the SPA calls the existing
 // POST /mcp JSON-RPC directly (§4.2 endpoint 6 — zero new backend).
 export interface PortalApiDeps {
+  replay?: PortalReplayWiring;
   budgetStore?: Pick<BudgetStore, "peek">;
   memoryAdmission?: BodyMemoryAdmission;
   responseWorkAdmission?: RequestPayloadDeps["responseWorkAdmission"];
+  memoryStore?: Pick<MemoryStore, "getMemoryAdminStats">;
+  pendingRequests?: (keyId: string, query: { requestId?: string; traceId?: string }) => string[];
   keyStore: Pick<KeyStore, "updateKey"> & Partial<Pick<KeyStore, "getById">>;
   apiKeyPools?: AdminApiDeps["apiKeyPools"];
   telemetry: Pick<
     TelemetryStore,
+    | "findSessionRefsForKey"
+    | "listSessionsByRefs"
+    | "hasPayloadBlobReference"
+    | "getPayloadBlob"
     | "aggregate"
     | "queryPage"
     | "getByRequestId"
@@ -53,6 +58,8 @@ export interface PortalApiDeps {
     | "streamSessionRevisionsPage"
   >;
   now?: () => number;
+  pseudonymSecret?: string | null;
+  contentSettings?: () => { mode: "none" | "session" | "payload"; retentionDays: number };
   // Map a stored served-model value (which is the internal wire `provider_model`,
   // NOT the public alias — see SqliteTelemetryStore) to the PUBLIC lane alias the
   // user is entitled to see (§4.3: the served model already appears in their API
@@ -63,6 +70,50 @@ export interface PortalApiDeps {
 }
 
 export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void {
+  const projectDecision =
+    deps.pseudonymSecret === null ? null : createPortalDecisionProjection(deps.pseudonymSecret);
+  const memoryStatsNext = new Map<string, number>();
+  const blobResponses = new Map<string, number>();
+  const notFound = { error: "request not found", code: "request_not_found" } as const;
+  app.use("/portal/api/requests/*", async (c, next) => {
+    c.header("cache-control", "no-store");
+    await next();
+    if (c.res.status === 404) c.res = c.json(notFound, 404);
+  });
+
+  app.get("/portal/api/memory/stats", async (c) => {
+    const identity = c.get("identity");
+    if (!identity.keyId || !identity.accountId) throw new Error("missing memory scope");
+    if (!deps.memoryStore?.getMemoryAdminStats)
+      return c.json({ error: "memory stats unavailable", code: "memory_unavailable" }, 503);
+    const now = (deps.now ?? Date.now)();
+    if (memoryStatsNext.size >= 5000)
+      for (const [key, expires] of memoryStatsNext) if (expires <= now) memoryStatsNext.delete(key);
+    if ((memoryStatsNext.get(identity.keyId) ?? 0) > now || memoryStatsNext.size >= 5000) {
+      c.header("retry-after", "10");
+      return c.json(
+        { error: "memory stats rate limit exceeded", code: "memory_stats_rate_limited" },
+        429,
+      );
+    }
+    memoryStatsNext.set(identity.keyId, now + 10_000);
+    const stats = await deps.memoryStore.getMemoryAdminStats({
+      accountId: identity.accountId,
+      projectId: identity.caps.memory.projectId ?? identity.keyId,
+      now: new Date((deps.now ?? Date.now)()),
+    });
+    c.header("cache-control", "no-store");
+    return c.json({
+      generated_at: stats.generatedAt,
+      project_id: identity.caps.memory.projectId ?? identity.keyId,
+      shared: identity.caps.memory.projectName != null,
+      storage: stats.storage,
+      queue: stats.queue,
+      leases: { running: stats.queue.running, stale: stats.queue.staleRunning },
+      activity: stats.activity,
+    });
+  });
+
   // GET /portal/api/me — a SAFE projection of the caller's identity/caps for the
   // account menu + budget bar. NEVER the hash/plaintext/secret_enc (principle 7):
   // authMiddleware already dropped them — identity carries only prefix + caps.
@@ -74,6 +125,13 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
       role: identity.role,
       allowed_lanes: identity.caps.allowedLanes,
       client_policy: identity.caps.clientPolicy ?? null,
+      concurrency_limit: identity.caps.concurrencyLimit,
+      allow_custom_model: identity.caps.allowCustomModel,
+      allow_fast_mode: identity.caps.allowFastMode,
+      request_content: {
+        mode: identity.caps.requestContentMode ?? deps.contentSettings?.().mode ?? "none",
+        retention_days: deps.contentSettings?.().retentionDays ?? null,
+      },
       rate_limit: { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm },
       budget: {
         requests: b.requests,
@@ -180,12 +238,15 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         cost_usd: t.totalCostUsd ?? 0,
         avg_latency_ms: t.avgLatencyMs,
         avg_tps: t.avgTps,
+        cache_hit_rate: t.promptTokens > 0 ? t.cachedTokens / t.promptTokens : null,
       },
       series: agg.series.map((s) => ({
         bucket_start_ms: s.bucketStartMs,
         requests: s.requests,
         prompt_tokens: s.promptTokens,
         completion_tokens: s.completionTokens,
+        cached_tokens: s.cachedTokens,
+        cache_creation_tokens: s.cacheCreationTokens,
         cost_usd: s.costUsd,
       })),
       // Resolve each row's wire provider_model to its PUBLIC alias (NEVER emit the
@@ -213,8 +274,24 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
   // GET /portal/api/requests — the caller's OWN request list, whitelist-projected.
   // apiKeyId write-forced to identity.keyId (a caller ?key_id= is ignored, R5).
   app.get("/portal/api/requests", async (c) => {
+    if (!projectDecision)
+      return c.json(
+        { error: "portal privacy unavailable", code: "portal_privacy_unavailable" },
+        503,
+      );
     const q = RequestsQuerySchema.parse(c.req.query());
     const identity = c.get("identity");
+    const session = c.req.query("session")?.trim();
+    if (session && session.length > 256)
+      return c.json({ error: "invalid session filter", code: "invalid_session" }, 400);
+    const sessionRefs = session
+      ? ((await deps.telemetry.findSessionRefsForKey?.(identity.keyId, session)) ?? [])
+      : undefined;
+    if (sessionRefs && sessionRefs.length > 256)
+      return c.json(
+        { error: "session filter is too broad", code: "session_filter_too_broad" },
+        422,
+      );
     const { rows, total } = await deps.telemetry.queryPage({
       limit: q.pageSize,
       offset: (q.page - 1) * q.pageSize,
@@ -222,48 +299,84 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
       endMs: q.end,
       status: q.status,
       lane: q.lane,
+      decidedBy: q.decided_by,
       model: q.model,
+      sessionRef: q.session_ref,
+      sessionRefs,
       apiKeyId: identity.keyId, // WRITE-FORCED — never q.key_id
     });
+    const refs = [
+      ...new Set(rows.flatMap((r) => (r.record.session ? [r.record.session.ref] : []))),
+    ];
+    const sessions = refs.length ? ((await deps.telemetry.listSessionsByRefs?.(refs)) ?? []) : [];
+    const labels = new Map(
+      sessions
+        .filter((session) => session.apiKeyId === identity.keyId)
+        .map((session) => [session.sessionRef, session.externalSessionId]),
+    );
     return c.json({
-      items: rows.map((r) => ({
-        ...toPortalDecisionView(r.record),
-        created_at: r.createdAt.getTime(),
-      })),
+      items: rows.map((r) => {
+        const safe = projectDecision(r.record);
+        return {
+          ...toPortalDecisionView(safe),
+          decided_by: safe.classifier.decided_by,
+          fallback_count: safe.fallback_count,
+          stream_outcome: safe.stream_outcome,
+          partial: safe.stream_outcome != null && safe.stream_outcome !== "completed",
+          serving_provider:
+            [...safe.provider_attempts].reverse().find((a) => !a.skipped)?.provider_name ?? null,
+          session_ref: safe.session?.ref ?? null,
+          session_label: safe.session ? (labels.get(safe.session.ref) ?? null) : null,
+          created_at: r.createdAt.getTime(),
+        };
+      }),
       total,
       page: q.page,
       page_size: q.pageSize,
     });
   });
 
-  // GET /portal/api/requests/:traceId — ownership-gated, whitelist-projected detail.
-  app.get("/portal/api/requests/:traceId", async (c) => {
+  const inProgress = (c: Context<AppEnv>, requestId: string) =>
+    c.json({ status: "in_progress", request_id: requestId, phase: "telemetry_pending" }, 202);
+  const detail = async (c: Context<AppEnv>, requestId: string) => {
     const identity = c.get("identity");
-    const traceId = c.req.param("traceId");
-    c.header("cache-control", "no-store");
-    // OWNERSHIP FIRST (R1) — before any getByRequestId read.
-    if ((await assertOwnsTrace(deps.telemetry, identity.keyId, traceId)) !== "ok") {
-      return c.json({ error: "request not found" }, 404);
+    if ((await assertOwnsTrace(deps.telemetry, identity.keyId, requestId)) !== "ok") {
+      if (deps.pendingRequests?.(identity.keyId, { requestId }).length)
+        return inProgress(c, requestId);
+      return c.json(notFound, 404);
     }
-    const rec = await deps.telemetry.getByRequestId(traceId);
-    if (!rec) return c.json({ error: "request not found" }, 404);
-    const createdAt = await deps.telemetry.getCreatedAt(traceId);
-    const [labeled] = await enrichAccountLabels(
-      [redact(DecisionRecordSchema.parse(rec), { payloadKeys: [] })],
-      deps,
-      () => {},
-    );
+    const rec = await deps.telemetry.getByRequestId(requestId);
+    if (!rec) return c.json(notFound, 404);
+    if (!projectDecision)
+      return c.json(
+        { error: "portal privacy unavailable", code: "portal_privacy_unavailable" },
+        503,
+      );
+    const createdAt = await deps.telemetry.getCreatedAt(requestId);
+    const safe = projectDecision(rec);
     const ownKey = await deps.keyStore.getById?.(identity.keyId);
     return c.json({
-      ...toPortalDecisionView(rec),
+      ...toPortalDecisionView(safe),
       decision: {
-        ...labeled,
+        ...safe,
         key_name: ownKey?.name ?? null,
         ...(createdAt ? { created_at: createdAt.getTime() } : {}),
       },
       ...(createdAt ? { created_at: createdAt.getTime() } : {}),
     });
+  };
+  app.get("/portal/api/requests/by-trace/:clientTraceId", async (c) => {
+    const keyId = c.get("identity").keyId;
+    const traceId = c.req.param("clientTraceId");
+    const page = await deps.telemetry.queryPage({ apiKeyId: keyId, traceId, limit: 2, offset: 0 });
+    const pending = deps.pendingRequests?.(keyId, { traceId }) ?? [];
+    const ids = new Set([...page.rows.map((r) => r.record.request_id), ...pending]);
+    if (page.total > 1 || ids.size > 1)
+      return c.json({ error: "client trace id is not unique", code: "ambiguous_trace_id" }, 409);
+    const id = [...ids][0];
+    return id ? detail(c, id) : c.json(notFound, 404);
   });
+  app.get("/portal/api/requests/:traceId", (c) => detail(c, c.req.param("traceId")));
 
   app.use("/portal/api/requests/:traceId/*", async (c, next) => {
     const requestId = c.req.param("traceId");
@@ -273,10 +386,77 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
     c.header("cache-control", "no-store");
     return next();
   });
+  app.get("/portal/api/requests/:traceId/payload-blobs/:sha256", async (c) => {
+    const requestId = c.req.param("traceId");
+    const sha256 = c.req.param("sha256");
+    if (
+      !/^[a-f0-9]{64}$/.test(sha256) ||
+      !(await deps.telemetry.hasPayloadBlobReference?.(requestId, sha256))
+    )
+      return c.json(notFound, 404);
+    const decision = await deps.telemetry.getByRequestId(requestId);
+    if (!decision || decision.request_content_mode === "none") return c.json(notFound, 404);
+    const keyId = c.get("identity").keyId;
+    const active = blobResponses.get(keyId) ?? 0;
+    if (active >= 2) {
+      c.header("retry-after", "1");
+      return c.json({ error: "too many blob responses", code: "blob_concurrency_limited" }, 429);
+    }
+    const admission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
+    const maxBytes = Math.min(16 * 1024 * 1024, Math.floor(admission.capacityBytes / 8));
+    const acquired = admission.acquire(maxBytes);
+    if (!acquired.ok)
+      return c.json({ error: "response capacity unavailable", code: "response_capacity" }, 503);
+    blobResponses.set(keyId, active + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      acquired.lease.release();
+      const remaining = (blobResponses.get(keyId) ?? 1) - 1;
+      if (remaining) blobResponses.set(keyId, remaining);
+      else blobResponses.delete(keyId);
+    };
+    let transferred = false;
+    try {
+      const blob = await deps.telemetry.getPayloadBlob?.(sha256, maxBytes);
+      if (!blob) return c.json(notFound, 404);
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(blob.bytes));
+        },
+        pull(controller) {
+          controller.close();
+          release();
+        },
+        cancel() {
+          release();
+        },
+      });
+      const mime =
+        blob.mime && /^image\/[a-z0-9.+-]+$/i.test(blob.mime)
+          ? blob.mime
+          : "application/octet-stream";
+      const response = new Response(body, {
+        headers: {
+          "content-type": mime,
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+          "content-security-policy": "default-src 'none'; sandbox",
+        },
+      });
+      transferred = true;
+      return response;
+    } finally {
+      if (!transferred) release();
+    }
+  });
+  registerPortalReplayRoute(app, deps);
   registerRequestPayloadRoutes(
     app,
     {
       ...deps,
+      projectPayload: projectPortalPayload,
       authorizeSession: async (requestId, sessionRef) => {
         const keyId = await deps.telemetry.getApiKeyId(requestId);
         const session = await deps.telemetry.getSessionByRef?.(sessionRef);
@@ -297,10 +477,24 @@ type ModelUsageRow = Awaited<ReturnType<TelemetryStore["aggregate"]>>["byModel"]
 function aggregateByLabel(
   rows: ModelUsageRow[],
   labelOf: (m: ModelUsageRow) => string,
-): Array<{ model: string; requests: number; total_tokens: number; cost_usd: number | null }> {
+): Array<{
+  model: string;
+  requests: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number | null;
+}> {
   const byLabel = new Map<
     string,
-    { model: string; requests: number; total_tokens: number; cost_usd: number | null }
+    {
+      model: string;
+      requests: number;
+      total_tokens: number;
+      prompt_tokens: number;
+      completion_tokens: number;
+      cost_usd: number | null;
+    }
   >();
   for (const m of rows) {
     const label = labelOf(m);
@@ -308,12 +502,16 @@ function aggregateByLabel(
     if (acc) {
       acc.requests += m.requests;
       acc.total_tokens += m.totalTokens;
+      acc.prompt_tokens += m.promptTokens;
+      acc.completion_tokens += m.completionTokens;
       if (m.costUsd !== null) acc.cost_usd = (acc.cost_usd ?? 0) + m.costUsd;
     } else {
       byLabel.set(label, {
         model: label,
         requests: m.requests,
         total_tokens: m.totalTokens,
+        prompt_tokens: m.promptTokens,
+        completion_tokens: m.completionTokens,
         cost_usd: m.costUsd,
       });
     }

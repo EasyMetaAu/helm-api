@@ -37,6 +37,8 @@
   });
 
   const rpm = $derived(me?.rate_limit.rpm);
+  const contentMode = $derived(me?.request_content?.mode);
+  const retentionDays = $derived(me?.request_content?.retention_days);
 
   // Progress-bar percent against a cap; null cap → no bar (unlimited).
   function usedPct(used: number, cap: number | null): number | null {
@@ -91,6 +93,46 @@
           <dt class="text-ink-muted">{$t("Rate limit")}</dt>
           <dd class="text-right">
             {rpm === null || rpm === undefined ? $t("unlimited") : `${rpm} rpm`}
+          </dd>
+          <dt class="text-ink-muted">{$t("Concurrency limit")}</dt>
+          <dd class="text-right">
+            {me.concurrency_limit === null
+              ? $t("No limit")
+              : (me.concurrency_limit?.toLocaleString() ?? $t("Not set"))}
+          </dd>
+          <dt class="text-ink-muted">{$t("Choose any model")}</dt>
+          <dd class="text-right">
+            {me.allow_custom_model === undefined
+              ? $t("Not set")
+              : me.allow_custom_model
+                ? $t("Yes")
+                : $t("No")}
+          </dd>
+          <dt class="text-ink-muted">{$t("Fast mode allowed")}</dt>
+          <dd class="text-right">
+            {me.allow_fast_mode === undefined
+              ? $t("Not set")
+              : me.allow_fast_mode
+                ? $t("Yes")
+                : $t("No")}
+          </dd>
+          <dt class="text-ink-muted">{$t("Request content recording")}</dt>
+          <dd class="text-right">
+            {#if contentMode === "none"}
+              {$t("Off")}
+            {:else if contentMode === "session"}
+              {$t("Session transcripts")}
+            {:else if contentMode === "payload"}
+              {$t("Full requests and responses")}
+            {:else}
+              {$t("Not set")}
+            {/if}
+          </dd>
+          <dt class="text-ink-muted">{$t("Recording retention")}</dt>
+          <dd class="text-right">
+            {retentionDays == null
+              ? $t("Not set")
+              : $t("Kept {days} days", { days: retentionDays })}
           </dd>
         </dl>
       </div>

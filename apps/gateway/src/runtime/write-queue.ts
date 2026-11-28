@@ -48,6 +48,8 @@ export interface WriteQueueDeps {
 }
 
 export interface WriteQueue {
+  /** Same-process evidence only; no inference from arbitrary client ids. */
+  pendingRequests?(keyId: string, query: { requestId?: string; traceId?: string }): string[];
   // Defer a telemetry decision insert (batched, fail-open, runs after the response).
   enqueueTelemetry(input: InsertTelemetryInput): Promise<void>;
   // Defer a payload upsert (batched, fail-open).
@@ -97,6 +99,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   const maxPendingAdmissionBytes = deps.maxPendingAdmissionBytes ?? maxBytes;
   const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
 
+  const pendingTelemetry = new Map<string, { keyId: string; traceId: string }>();
   let telemetryBuf: InsertTelemetryInput[] = [];
   let payloadBuf: Array<{ input: InsertPayloadInput; isCurrent?: () => boolean }> = [];
   // Costs are computed once at admission and accumulated until the whole buffer moves
@@ -251,6 +254,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
         await writePayloads(pBatch);
       })
       .finally(() => {
+        for (const row of tBatch) pendingTelemetry.delete(row.decision.request_id);
         inFlightBytes -= flushedBytes;
         inFlightDepth -= flushedDepth;
       });
@@ -315,6 +319,19 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   };
 
   return {
+    pendingRequests(keyId, query) {
+      if (!keyId) throw new Error("pending telemetry requires key scope");
+      return [...pendingTelemetry]
+        .filter(
+          ([id, row]) =>
+            row.keyId === keyId &&
+            (query.requestId !== undefined
+              ? id === query.requestId
+              : row.traceId === query.traceId),
+        )
+        .slice(0, 2)
+        .map(([id]) => id);
+    },
     async enqueueTelemetry(input: InsertTelemetryInput): Promise<void> {
       if (stopped) return;
       if (paused) {
@@ -323,6 +340,10 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       }
       const cost = telemetryCost(input);
       await admit(cost, () => {
+        pendingTelemetry.set(input.decision.request_id, {
+          keyId: input.apiKeyId,
+          traceId: input.decision.trace_id,
+        });
         telemetryBuf.push(input);
         bufferedBytes += cost;
         // Eager flush on EITHER the row threshold or the byte threshold, so neither a

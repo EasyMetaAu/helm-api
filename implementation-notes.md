@@ -8,6 +8,24 @@
 ---
 
 
+## 2026-11-28 · Portal 持有者调试 API 与重放边界（docs/12）
+
+**已定范围。** 只改 Gateway、Store 与文档，不改 Portal/Admin UI，不升版本、不提交、不发布。列表增加分类来源、执行 fallback、流式结果、服务商与保留中的 session 标签；client trace 查找只在本 key 唯一时成立。`in_progress` 仅代表本进程写队列里已有该 key 的待持久化记录；不能据此判断仍在上游运行、其他实例运行或已丢失的记录。
+
+**账号与诊断隐私。** ConfigStore 用 CAS 原子初始化随机 HMAC secret，账号代码按 provider/account 稳定，重启及多实例共用；不从 API key 或邮箱派生 secret。只给生产者写入的账号字段生成代码，任意 trace/error 文本中的邮箱固定脱敏，避免持有者用猜测邮箱查询 HMAC。保留选择策略、优先级、配额与 TTFT；移除 stack/cause、安装身份和非白名单 headers。Portal 转发正文中的生成身份元数据、JSON/SSE 错误及 session response 同样做有界投影，并标记 `X-Helm-Payload-Projection: portal`；原始用户正文不做邮箱过滤，Admin 仍读原始捕获。
+
+**Blob 来源。** SQLite 59 / Postgres 58 仅新增 `request_payload_blob_refs`，与正文、真实图片字节同事务写入，替换正文同步替换引用，不建跨表 FK；保留清理用 DELETE RETURNING 取得实际删除的 request ID，同事务分批删除对应引用，两条语句各自只访问单表。chunk 元数据改为快照内的两次单表读取，SQLite 读事务与 Postgres repeatable-read 保持代次、字节数一致，避免跨表查询；不是按请求列表逐条查询。用户填入的 sentinel 不获得访问权限，历史无证明的引用不推测回填。Portal 逐请求校验拥有者后才读取有证明的图片，读前申请响应内存；MIME 校验失败回退二进制类型。重放图片按每次出现计入恢复上限，不能只按去重 hash 计费内存。
+
+**重放取舍。** 调用实际 Chat/Messages/Responses/Gemini 客户端入口，compact 保持原操作；AsyncLocalStorage 仅在服务端传递调用 key，强制读取当前认证状态并把超预算降级改成拒绝，其余权限、速率、并发、预算结算和记录走正常请求链路，不使用 Admin/root fallback。要求 UUID Idempotency-Key；CAS 回执保留七天，窗口内避免重启和多实例重复执行；额外限每 key 十秒一次。十分钟未完成回执返回 outcome_unknown，不自动再发；SQLite 61 / Postgres 60 增加 nullable expires_at 和到期索引，按请求与分钟定时器分批清理；容量准入失败未出站时 CAS 删除自己的回执/限速行，503 可原 token 重试。正常请求遥测失败时返回 recording_pending，不声称已记录。原始 HTTP headers 不恢复；按当前调用者客户端身份及当前 key 设置执行。
+
+**独立安全审查修正。** SQLite 60 增加 VIRTUAL trace_id 及按 key/trace/时间的复合索引，Postgres 59 用表达式索引避免重写历史 JSON 行；两个 Store 增加 key/会话标签索引，把 ref/标签 OR 拆成两次单表索引查询。memory stats 每实例每 key 十秒一次，blob 每 key 最多同时两个响应租约，消费/取消/失败均释放；不改待 owner 决策的 memory project 选择，也不动其他 worker 的 Portal/Admin UI。上游正文顶层采用内容/参数 allow-list，移除 prompt_cache_key、user、safety_identifier 及未知字段；所有 header 后缀容器（含大小写与数组形式）过滤，Unicode 邮箱与 org-ID 文本脱敏。有 HELM_OAUTH_ENC_KEY 时用既有 AES-GCM token-cipher 存储随机 HMAC secret，CAS 升级明文不改变代号；自定义 Store 缺原子能力或解密失败只令 Portal decision/list 503，不阻止 headless 网关启动。索引构建仍需扫描既有行并持正常迁移锁，不声称零耗时/在线无锁。
+
+**本轮安全验证。** 定向 RED 复现索引缺失、顶层稳定身份、header/Unicode/org 脱敏、secret 明文/缺 CAS、资源限流、回执过期及容量重试；最终 15 个文件级命令串行完成，128 个测试通过。EXPLAIN 验证两种 Store 的 trace rows/count、会话及到期索引；真实 server 验证无 CAS 仍可启动和处理普通流量。`CI=true pnpm typecheck`、`pnpm lint`、`git diff --check` 均通过，lint 234 warnings / 6 infos、无 error。未改既有 migration 测试，Postgres 用 PGlite 验证，未做远程 CI 或生产访问。
+
+**升级兼容修正。** Postgres 的 `request_payloads` 在 v6 创建，但历史升级测试用已应用 ledger 搭配最小表集合，v58 的新 FK 会因目标表不存在导致启动迁移失败。SQLite 59 / Postgres 58 改为独立复合主键表，既有迁移测试保持原文；新增无 payload 表的升级、幂等与主键验证，以及两种 Store 的跨批次保留清理验证。没有按 sha256 单独查询引用的路径，因此不加无用途的索引。修正后按文件串行跑完指定迁移、Portal 与真实 Server 回归，13 个文件共 109 个测试通过；既有 Postgres、media-spend 和 SQLite migration 测试未改。最终 `CI=true pnpm typecheck`、`pnpm lint`、`git diff --check` 均通过（lint 228 warnings / 6 infos，无 error）。
+
+**检查与限制。** 用定向 RED/GREEN 覆盖越权、邮箱猜测 oracle、诊断白名单、真实图片来源、重放去重/预算/限流/并发及主库归属；SQLite 与 PGlite/Postgres 共用 Store 合同测试。初次实现按文件串行运行 11 个定向命令，160 个测试通过，含 Admin 请求读取回归与 SSE 解析；`CI=true pnpm typecheck`、`pnpm lint`、`git diff --check` 均通过，lint 有 228 warnings / 6 infos、无 error。本机 SQLite 二进制 ABI 147，使用已安装 Node 26.5.0 跑 Store/真实 Server 测试，不重建共享依赖。未运行远程 CI、独立 Postgres 服务或真实上游验收。完整接口形状、返回码及历史图片/队列可见性限制见 docs/12。
+
 ## 2026-11-28 · 同优先级跨池共享流量（docs/04）
 
 **决定与范围。** 在 #1070 相同 wire model 与 #1071 lane 共享组内，同级不再按 chain index 耗尽前池，而按当前最低可用级中各池的合格账号数分配首选机会。两个订阅、一个官方 key、一个 ZenMux key 均为 10 时，独立请求按 2:1:1 概率使用；Kimi20 只在 10 级对本请求已不可用或耗尽后进入。组成员、默认 50 绕过、严格账号亲和、媒体排除和 manual_priority 门槛均沿用既有规则；不增加配置、管理接口或 SQLite/Postgres schema，不修改版本。
@@ -113,52 +131,8 @@ UI 继续使用既有接口：OAuth 从 `GET /admin/api/oauth/:provider/account?
 
 范围限当前单进程设置管理；跨进程修改不具备即时通知保证。整条配置被外部删除与首次未配置仍无法区分。浏览器授权页使用浏览器网络；账号池切换仍遵循被选账号各自的代理。旧 WS 的新发送会关闭旧连接并拒绝，已发请求可完成；未再使用的连接沿用原会话关闭生命周期。Claude 原生 TLS 的 DNS 未做真实代理抓包验证；不能用 WebSocket 的测试代替该证明。本次无数据库迁移。
 
-## 2026-11-21 · 自有内网模型免上游凭据（docs/02、04）
-
-Lukin 明确要求家庭 GPU 无认证，并增加 `.5` 的本地 Qwen 接入。仅明确私有 IPv4 的 OpenAI 兼容与 WhisperX provider 可省略上游凭据；已配置的凭据缺失不静默降级。公网 Helm API 的访问控制保持。自有模型按零供应商现金价格记账，仍保留实际 token/音频秒数及容量限制。
-
 ## 更早历史总览
 
-2026-11-21：GPU 转写容量与恢复——按真实音频帧限制时长，共用容量；加密结果保留六小时，原操作号禁止重复派发，仅工作器明确 gpu-busy 时允许退避重试。完整记录见 Git 历史。
+2026-11-21 · 自有内网模型免上游凭据（docs/02、04）：仅允许显式配置的自有内网 provider 免凭据，公共上游与接管后 Store 权威规则不变；完整记录见 Git history。
 
-2026-11-21：豆包录音空白时间戳——只过滤非空纯空白且双端为 -1 的 words 占位，保留全文及真实时间；其他非法时间仍拒绝，既有任务只读查询即可。
-
-2026-11-21：Qwen Filetrans 原生秒数——标准化 `usage.seconds` 为 duration 用量，金额仍为 unknown，只读查询即可补齐回执。
-
-2026-11-20：单音轨转写费用上界——价卡 `maxChannels` 校验实际轨数，超限在预留前拒绝；未配置仍按完整作业上界。
-
-2026-11-20：媒体用量按官方秒数与部署汇率计价，未知费用不编造；完整记录见 Git 历史。
-
-2026-11-19：订阅账号按权重随机分配，保留原优先级和可调度约束；完整实现记录见 Git 历史。
-
-2026-11-19：同步短录音复用 transcription-short，multipart 选择可接文件客户端；官方 API 账号按模型许可选取，未知价格下的硬预算拒绝发送。
-
-2026-11-18：新增 GPT-6.2 Astra／Sol 的发现、lane 和阶梯定价，官方 API 与 Codex 窗口分别处理；完整权衡见 Git 历史。
-
-2026-11-14：GPT／Claude 官方价卡与能力元数据同步，费用适用边界见 Git 历史。
-
-2026-11-14/13：豆包语音目录、请求内存与 Docker 堆、百炼短 WAV 原子预留已交；完整记录见对应 Git 历史。
-
-2026-11-12 的 Seedance 素材授权将素材类型、key 和上游身份绑定，每次创建任务时校验。
-
-2026-11-12 · Ark 媒体错误保留上游诊断，真人素材仍受授权和素材入库条件限制。
-
-受限 key 显式选择 lane 时按其已授予的 lane 权限校验。
-
-2026-11-12 · G4 语音、时间戳与费用：增加独立媒体预算与原生时戳；分供应商的实测结果、汇率与音色限制见历史记录。
-
-2026-11-11：上游 Providers 只读用量查询与模型／账号路由归属，详见 Git 历史。
-
-2026-11-11（docs/06、11、Portal）：API Key 固定七天循环配额；按入站周期原子计请求，Token／USD 事后结算，未知计量拒绝受限请求，双数据库与真实网关验证通过。
-
-2026-11-11（docs/07、11）：请求页展示实际上游 API Key 名称与末四位，解释 Codex BYOK 组织限制；身份代次校验与原错误详情保留，174 项测试及桌面／窄屏预览通过。
-
-2026-11-10 · OpenAI Luna 温度参数兼容（docs/04、05、07）；完整记录见 Git history。
-
-更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。
-
-历史摘要补记：2026-11-16 · Fun-ASR／Paraformer 录音文件识别（docs/05、06、native-media）；原文见 Git history。
-
-历史摘要补记：2026-11-18 · 零用量空截断恢复（docs/04）；原文见 Git history。
-
-历史摘要补记：2026-11-20 · 文件转写下载凭据与预算回执（docs/06、native-media）；原文见 Git history。
+更早工作涵盖 API Key 暂停与吊销、固定配额和预算，客户端身份与版本快照，Codex／Claude／Grok／DeepSeek 协议兼容、模型目录与订阅额度，HTTP/WebSocket/SSE 生命周期、发送后结果不明禁止重放、fallback 与熔断，Memory 观察／注入／压缩／保留，payload/session 持久化、SQLite/Postgres 一致性与资源保护，图片／视频／语音权限及计费，Admin/Portal/i18n，以及构建、CI、Docker、发布与验收。历史默认值和实测以对应提交为准；完整条目可从基线 632e2971db3363b1a2575cba1ed31cbac213634c 的本文件及 Git history 回溯。 Fun-ASR／Paraformer 录音识别、零用量空截断恢复、文件转写下载凭据与预算回执等更早补记一并归入上述历史范围。

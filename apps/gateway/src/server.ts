@@ -287,6 +287,8 @@ import { registerModelsRoute } from "./routes/models.js";
 import { nativeMediaProfile } from "./routes/native-media-profile.js";
 import { clearSessionCaptureCache } from "./routes/payload-capture.js";
 import { registerPortalApi } from "./routes/portal/index.js";
+import { loadPortalPseudonymSecret } from "./routes/portal/privacy.js";
+import { portalReplayKey } from "./routes/portal/replay-context.js";
 import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
 import {
   providerUsageConfig,
@@ -2482,11 +2484,20 @@ export async function buildServer(
   // busts the cache automatically. TTL bounds cross-instance staleness (shared
   // Postgres) — a revoked key keeps serving on another instance for at most TTL.
   const authCacheTtlMs = Number(process.env.HELM_AUTH_CACHE_TTL_MS ?? 30_000);
-  const keyStore = createCachedKeyStore(store.keys, {
+  const cachedKeyStore = createCachedKeyStore(store.keys, {
     ttlMs: Number.isFinite(authCacheTtlMs) && authCacheTtlMs >= 0 ? authCacheTtlMs : 30_000,
     maxEntries: 5_000,
     now: () => Date.now(),
   });
+  const keyStore: typeof cachedKeyStore = {
+    ...cachedKeyStore,
+    async getByHash(hash) {
+      const replayKeyId = portalReplayKey.getStore();
+      if (replayKeyId === undefined) return cachedKeyStore.getByHash(hash);
+      const key = await store.keys.getByHash(hash);
+      return key?.key_id === replayKeyId ? key : null;
+    },
+  };
   const telemetry = store.telemetry;
   // Deferred + batched write queue (perf): the four AI faces enqueue their fail-open
   // telemetry/payload/observe writes here so a synchronous better-sqlite3 commit never
@@ -2642,6 +2653,7 @@ export async function buildServer(
       tpm: settings.rate_limit_default_tpm,
     },
   };
+  let replayCleanupScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let cleanupScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let vacuumScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let signalScheduler: ReturnType<typeof startSignalScheduler> | null = null;
@@ -3995,7 +4007,15 @@ export async function buildServer(
   // swallows store failures). Shared by all four faces: chat reads the gate/settle
   // directly; the three pipeline faces get them via `pipelineBudget`.
   const budgetConfig = { defaultWindowSeconds: 2_592_000, defaultDegradeLane: "economy" };
-  const budgetGate = createBudgetGate({ store: store.budget, config: budgetConfig });
+  const normalBudgetGate = createBudgetGate({ store: store.budget, config: budgetConfig });
+  const budgetGate: typeof normalBudgetGate = {
+    async check(probe) {
+      const result = await normalBudgetGate.check(probe);
+      return result.overBudget && portalReplayKey.getStore() === probe.keyId
+        ? { ...result, behavior: "reject" }
+        : result;
+    },
+  };
   const transcriptionAccounting = createTranscriptionAccounting(store.budget, budgetConfig);
   const settleKeyBudget = (
     keyId: string,
@@ -4559,7 +4579,20 @@ export async function buildServer(
     for (const m of p.models)
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
+  const portalPseudonymSecret = await loadPortalPseudonymSecret(store.config, oauthEncKey);
+  if (portalPseudonymSecret === null)
+    logger.log("warn", "portal.privacy_unavailable", {
+      message: "Portal decision projections unavailable; gateway traffic remains enabled",
+    });
   registerPortalApi(app, {
+    replay: { configStore: store.config, afterResponse: () => writeQueue.flush() },
+    pseudonymSecret: portalPseudonymSecret,
+    memoryStore: store.memory,
+    pendingRequests: (keyId, query) => writeQueue.pendingRequests?.(keyId, query) ?? [],
+    contentSettings: () => ({
+      mode: settings.capture_payloads ? "payload" : settings.capture_sessions ? "session" : "none",
+      retentionDays: settings.payload_retention_days,
+    }),
     apiKeyPools,
     budgetStore: store.budget,
     memoryAdmission: requestBodyMemoryAdmission,
@@ -6527,6 +6560,15 @@ export async function buildServer(
     wakeMemoryWorker = () => memoryWorker?.wake();
   }
 
+  // Expiring replay state is independent of optional traffic/payload retention.
+  if (store.config.pruneExpired && process.env.HELM_CLEANUP_DISABLED !== "1") {
+    replayCleanupScheduler = startCleanupScheduler({
+      intervalMs: 60_000,
+      runTick: () => store.config.pruneExpired!(Date.now()),
+      log: (level, msg, fields) => logger.log(level, msg, fields),
+    });
+  }
+
   // Data-cleanup scheduler — the OFF-the-request-path retention/archival sweep
   // (telemetry/payload/memory pruning + archive). DELIBERATELY separate from the 60s
   // memory worker: cleanup is a heavier hour/day-cadence pass. The interval is seeded
@@ -6648,6 +6690,7 @@ export async function buildServer(
       const memoryStopped = memoryWorker?.stop();
       const backgroundStopped = backgroundTasks.closeAndWait();
       cleanupScheduler?.stop();
+      replayCleanupScheduler?.stop();
       vacuumScheduler?.stop();
       await maintenanceQueue.closeAndWait();
       await Promise.all([signalStopped, memoryStopped, backgroundStopped]);

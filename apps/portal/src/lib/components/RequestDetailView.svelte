@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { servingAccountLabel } from '$lib/format/serving-account.js';
+  import { accountPseudonym, servingAccountLabel } from '$lib/format/serving-account.js';
   import { base } from '$app/paths';
-  import { invalidateAll } from '$app/navigation';
   import {
     getRequestPayloadPart,
     rebuildSessionTranscript,
@@ -17,6 +16,7 @@
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import RoutingSummary from '$lib/components/RoutingSummary.svelte';
+  import ReplayDialog from '$lib/components/ReplayDialog.svelte';
   import TokenUsage from '$lib/components/TokenUsage.svelte';
   import ImagePreview from '$lib/components/ImagePreview.svelte';
   import { type CollectedImage, collectImages } from '$lib/components/imageData';
@@ -24,21 +24,20 @@
   import StreamViewer from '$lib/components/StreamViewer.svelte';
   import { isSseStream } from '$lib/sse';
 
-  // Request detail (docs/07 detail). READ-ONLY consumer — renders the recorded trail
-  // and recomputes nothing (Principle 1). When capture_payloads is on, the full request +
-  // response bodies are shown; when off, a clear "not recorded" notice. The key
-  // never appears in plaintext (it lives in the Authorization header, not the body).
-  // Principle 5: classification vs execution fallback stay separate (DecisionChain).
   let {
     data,
+    onRefresh,
   }: {
     data: {
       detail: RequestDetail | null;
-      payload: RequestPayloadView;
+      payload: RequestPayloadView | null;
       requestId: string;
       backTo?: string;
-      loadError?: string;
+      session: { ref: string; label?: string } | null;
+      replayable: boolean;
+      state: 'loading' | 'pending' | 'refresh' | 'ready' | 'notFound' | 'error';
     };
+    onRefresh: () => void;
   } = $props();
 
   // Return to the originating list (carries its filters/page via the loader's
@@ -47,6 +46,9 @@
 
   let copied = $state(false);
   let detachedMedia = $state(false);
+  let showReplay = $state(false);
+  const canReplay = $derived(data.replayable && hasPayloadPart('request'));
+  const displayAccount = $derived((id: string) => $t('Account {id}', { id }));
 
   // The Request panel has two lenses over the SAME captured body: a chat transcript
   // (default — read it as a user⇄agent dialog) and the raw JSON tree (source of
@@ -152,8 +154,6 @@
     ]);
   }
 
-
-
   async function copyTrace(): Promise<void> {
     try {
       // The route parameter is the unique internal request_id used for lookup.
@@ -224,15 +224,30 @@
     >&larr; {$t('Back to requests')}</a
   >
 
-  {#if !data.detail}
+  {#if data.state === 'loading'}
+    <p class="empty-state">{$t('Loading')}</p>
+  {:else if data.state === 'pending' || data.state === 'refresh'}
+    <div class="alert-warn" role="status">
+      <p>{$t('This request is still being recorded')}</p>
+      {#if data.state === 'refresh'}
+        <button type="button" class="btn-secondary mt-3" onclick={onRefresh}>{$t('Refresh')}</button
+        >
+      {/if}
+    </div>
+  {:else if data.state === 'notFound'}
+    <p class="empty-state" data-testid="detail-not-found">
+      {$t(
+        'Request not found — it may have been cleaned up by the retention policy or belong to another key.',
+      )}
+    </p>
+  {:else if !data.detail}
     <div data-testid="detail-error" role="alert" class="alert-error text-center">
       <p class="font-medium">{$t('Could not load this request.')}</p>
-      <p class="mt-1">{data.loadError ?? $t('The trace may not exist or has expired.')}</p>
       <button
         type="button"
         data-testid="detail-retry"
         class="btn-secondary mt-3"
-        onclick={() => invalidateAll()}>{$t('Retry')}</button
+        onclick={onRefresh}>{$t('Retry')}</button
       >
     </div>
   {:else}
@@ -255,15 +270,30 @@
         <button type="button" data-testid="copy-trace" class="btn-secondary" onclick={copyTrace}
           >{copied ? $t('Copied') : $t('Copy trace ID')}</button
         >
-
+        <button
+          type="button"
+          data-testid="replay-request"
+          class="btn-secondary"
+          disabled={!canReplay}
+          title={canReplay || data.payload === null
+            ? undefined
+            : $t('Replay unavailable — no replayable request was recorded.')}
+          onclick={() => (showReplay = true)}>{$t('Replay')}</button
+        >
       </div>
     </header>
 
-
+    {#if showReplay}
+      <ReplayDialog requestId={data.requestId} {backTo} onclose={() => (showReplay = false)} />
+    {/if}
 
     <RoutingSummary detail={d} />
     {#if detachedMedia}
-      <p class="card text-sm text-ink-muted" data-testid="detached-media-notice">{$t('Some archived images cannot be restored because their request ownership was not recorded. Their stored references remain visible in the raw body.')}</p>
+      <p class="card text-sm text-ink-muted" data-testid="detached-media-notice">
+        {$t(
+          'Some archived images could not be loaded. Their references are still visible in the request or response.',
+        )}
+      </p>
     {/if}
 
     <!-- Request summary: identity + routing at a glance (the same fields as the list
@@ -288,6 +318,17 @@
             {/if}
           </dd>
         </div>
+        {#if data.session}
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Session')}</dt>
+            <dd class="mt-0.5 text-ink-body">
+              {#if data.session.label}
+                <span class="text-ink-strong">{data.session.label}</span>
+              {/if}
+              <code class="break-all font-mono text-xs text-ink-muted">{data.session.ref}</code>
+            </dd>
+          </div>
+        {/if}
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Status')}</dt>
           <dd class="mt-0.5">
@@ -315,46 +356,44 @@
           <dt class="text-xs uppercase tracking-wide text-slate-400">
             {$t(d.serving_account?.kind === 'api_key' ? 'Upstream API key' : 'Upstream account')}
           </dt>
-          <dd
-            class="mt-0.5 break-all font-mono text-ink-body"
-            title={d.serving_account
-              ? `${d.serving_account.provider_id}/${d.serving_account.account}`
-              : undefined}
-          >
-            {d.serving_account ? servingAccountLabel(d.serving_account) : '—'}
+          <dd class="mt-0.5 break-all font-mono text-ink-body" title={d.serving_account?.account}>
+            {d.serving_account ? servingAccountLabel(d.serving_account, displayAccount) : '—'}
           </dd>
           {#if d.serving_account?.selection}
             {@const selection = d.serving_account.selection}
             <details class="mt-2 text-sm">
               <summary class="cursor-pointer">{$t('Why this account?')}</summary>
               <p>
-                {selection.strategy} · {selection.reason} · {new Date(
-                  selection.captured_at_ms,
-                ).toISOString()}
+                {selection.strategy} · {selection.reason} · {formatTimestamp(
+                  new Date(selection.captured_at_ms).toISOString(),
+                )}
               </p>
-              <div class="overflow-x-auto">
-                <table class="table-base text-xs">
-                  <thead
-                    ><tr
-                      ><th class="pr-4">{$t('Account')}</th><th class="pr-4">{$t('Reason')}</th><th
-                        class="pr-4">{$t('Quota used')}</th
-                      ><th class="pr-4">{$t('First output')}</th></tr
-                    ></thead
-                  >
+              <div class="cards-table-frame compact">
+                <table class="cards-table">
+                  <thead class="table-head">
+                    <tr>
+                      <th class="px-3 py-2">{$t('Account')}</th>
+                      <th class="px-3 py-2">{$t('Reason')}</th>
+                      <th class="px-3 py-2">{$t('Quota used')}</th>
+                      <th class="px-3 py-2">{$t('First output')}</th>
+                    </tr>
+                  </thead>
                   <tbody
                     >{#each selection.candidates as candidate}<tr>
-                        <td class="pr-4">{candidate.account}</td>
-                        <td class="pr-4"
+                        <td data-label={$t('Account')} class="px-3 py-2" title={candidate.account}
+                          >{accountPseudonym(candidate.account, displayAccount)}</td
+                        >
+                        <td data-label={$t('Reason')} class="px-3 py-2"
                           >{candidate.selected
                             ? $t('Selected')
                             : (candidate.exclusion ?? $t('Eligible'))}</td
                         >
-                        <td class="pr-4"
+                        <td data-label={$t('Quota used')} class="px-3 py-2"
                           >{candidate.quota_fresh && candidate.quota_pressure !== null
                             ? `${candidate.quota_pressure}%`
                             : $t('Unknown')}</td
                         >
-                        <td class="pr-4"
+                        <td data-label={$t('First output')} class="px-3 py-2"
                           >{candidate.ttft_ms === null
                             ? $t('Unknown')
                             : `${Math.round(candidate.ttft_ms)} ms`}</td
@@ -494,7 +533,9 @@
       <h2 class="section-header">
         {upstreamDiffers ? $t('Request (from client)') : $t('Request')}
       </h2>
-      {#if data.payload?.captured || transcriptLoaded}
+      {#if data.payload === null}
+        <p class="field-help">{$t('Loading')}</p>
+      {:else if data.payload.captured || transcriptLoaded}
         {#if data.payload?.source === 'session' || transcriptLoaded}
           <p
             data-testid="session-recovery-warning"
@@ -633,16 +674,14 @@
       {/if}
     </section>
 
-    <!-- Forwarded upstream request: the EXACT body sent to the provider, AFTER
-         memory injection + protocol translation. Shown as a SEPARATE panel only when
-         it differs from the inbound body; when identical, the single "Request" panel
-         above already covers it (no duplicate). -->
+    <!-- Show the portal projection of the forwarded body. The duplicate panel
+         collapses when the projected body matches the inbound body. -->
     {#if hasUpstream}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Forwarded to upstream LLM')}</h2>
         <p class="field-help mb-2">
           {$t(
-            'The exact request sent to the provider — after memory injection and protocol translation. This is what the model actually received.',
+            'The request sent to the provider after routing and any memory updates. Private account and installation details are removed.',
           )}
         </p>
         {#if !upstreamLoaded || !requestLoaded}

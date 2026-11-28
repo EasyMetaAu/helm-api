@@ -1,8 +1,18 @@
 <script lang="ts">
   import { t } from "$lib/i18n";
-  import { formatTimestamp } from "$lib/format";
+  import {
+    formatCount,
+    formatLatestTimestamp,
+    formatTimestamp,
+  } from "$lib/format";
   import { paginationItems } from "$lib/pagination";
-  import { getMe, type Me } from "$lib/api/portal";
+  import { ApiError } from "$lib/api/client";
+  import {
+    getMe,
+    getMemoryStats,
+    type Me,
+    type MemoryStats,
+  } from "$lib/api/portal";
   import {
     deleteFact,
     deleteReflection,
@@ -24,6 +34,9 @@
   const PAGE_SIZE = 25;
 
   let me = $state<Me | null>(null);
+  let stats = $state<MemoryStats | null>(null);
+  let statsError = $state(false);
+  let latestStatsLoad = 0;
   let facts = $state<Fact[]>([]);
   let reflections = $state<Reflection[]>([]);
   let loading = $state(true);
@@ -66,7 +79,27 @@
     if (factPage > factTotalPages) factPage = factTotalPages;
   });
 
+  async function loadStats(): Promise<void> {
+    const loadId = ++latestStatsLoad;
+    stats = null;
+    statsError = false;
+    try {
+      const nextStats = await getMemoryStats();
+      if (loadId === latestStatsLoad) stats = nextStats;
+    } catch (failure) {
+      if (loadId !== latestStatsLoad) return;
+      if (
+        failure instanceof ApiError &&
+        failure.status === 503 &&
+        failure.code === "memory_unavailable"
+      )
+        return;
+      statsError = true;
+    }
+  }
+
   async function load(): Promise<void> {
+    void loadStats();
     loading = true;
     error = null;
     disabled = false;
@@ -131,6 +164,7 @@
     facts = facts.map((fact) => (fact.id === updated.id ? updated : fact));
     editingFact = null;
     notice = $t("Fact updated.");
+    void loadStats();
   }
 
   function onReflectionSaved(updated: Reflection): void {
@@ -139,6 +173,7 @@
     );
     editingReflection = null;
     notice = $t("Reflection updated.");
+    void loadStats();
   }
 
   function onSettingsSaved(memory: Me["memory"]): void {
@@ -214,6 +249,76 @@
     <RefreshControl onRefresh={load} />
   </div>
 </header>
+
+{#if stats}
+  <div
+    data-testid="memory-stats"
+    class="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-5"
+  >
+    <div class="card flex flex-col gap-2">
+      <p class="text-xs uppercase tracking-wide text-ink-muted">
+        {$t("Facts")}
+      </p>
+      <p class="text-2xl font-semibold text-ink-strong">
+        {formatCount(stats.storage.activeFacts)} / {formatCount(
+          stats.storage.facts,
+        )}
+      </p>
+      <p class="text-xs text-ink-muted">{$t("Active / total")}</p>
+    </div>
+    <div class="card flex flex-col gap-2">
+      <p class="text-xs uppercase tracking-wide text-ink-muted">
+        {$t("Reflections")}
+      </p>
+      <p class="text-2xl font-semibold text-ink-strong">
+        {formatCount(stats.storage.activeReflections)} / {formatCount(
+          stats.storage.reflections,
+        )}
+      </p>
+      <p class="text-xs text-ink-muted">{$t("Active / total")}</p>
+    </div>
+    <div class="card flex flex-col gap-2">
+      <p class="text-xs uppercase tracking-wide text-ink-muted">
+        {$t("Messages")}
+      </p>
+      <p class="text-2xl font-semibold text-ink-strong">
+        {formatCount(stats.storage.messages)}
+      </p>
+    </div>
+    <div class="card flex flex-col gap-2">
+      <p class="text-xs uppercase tracking-wide text-ink-muted">
+        {$t("Queue")}
+      </p>
+      <p class="text-2xl font-semibold text-ink-strong">
+        {formatCount(stats.queue.open)}
+      </p>
+      <div class="flex flex-wrap gap-2 text-xs text-ink-muted">
+        <span>{$t("{count} pending", { count: stats.queue.pending })}</span>
+        <span>{$t("{count} running", { count: stats.queue.running })}</span>
+        <span>{$t("{count} failed", { count: stats.queue.failed })}</span>
+        {#if stats.queue.staleRunning > 0}
+          <span class="badge-warning"
+            >{$t("{count} taking too long", {
+              count: stats.queue.staleRunning,
+            })}</span
+          >
+        {/if}
+      </div>
+    </div>
+    <div class="card flex flex-col gap-2">
+      <p class="text-xs uppercase tracking-wide text-ink-muted">
+        {$t("Last activity")}
+      </p>
+      <p class="text-2xl font-semibold text-ink-strong">
+        {formatLatestTimestamp(Object.values(stats.activity))}
+      </p>
+    </div>
+  </div>
+{:else if statsError}
+  <p class="alert-error mb-4" role="alert">
+    {$t("Could not load memory statistics.")}
+  </p>
+{/if}
 
 {#if showInfo}
   <div class="alert-warn mb-4">

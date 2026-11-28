@@ -597,6 +597,10 @@ export interface TelemetryPageQuery {
   // Exact session reference lives in the redacted DecisionRecord rather than a
   // telemetry column; it is only an operator filter, never a session body lookup.
   sessionRef?: string;
+  /** Exact client correlation id, always paired with caller apiKeyId by Portal. */
+  traceId?: string;
+  /** Resolved, bounded session refs; an empty array matches nothing. */
+  sessionRefs?: readonly string[];
 }
 
 // One queryPage row: a recent decision record + the recorded api_key_id (key_id).
@@ -695,6 +699,10 @@ export interface TelemetryStore {
   upsertSessionRevision?(input: UpsertSessionRevisionInput): Promise<void>;
   getSessionByRef?(sessionRef: string): Promise<SessionRecord | null>;
   listSessionsByRefs?(sessionRefs: readonly string[]): Promise<SessionRecord[]>;
+  /** Exact label or ref within a key, at most 257 rows (caller rejects >256). */
+  findSessionRefsForKey?(keyId: string, session: string): Promise<string[]>;
+  /** Only references created from actual image bytes, never caller-supplied sentinels. */
+  hasPayloadBlobReference?(requestId: string, sha256: string): Promise<boolean>;
   listSessionRevisions?(sessionRef: string): Promise<SessionRevisionRecord[]>;
   listSessionRevisionsPage?(
     sessionRef: string,
@@ -796,7 +804,7 @@ export interface TelemetryStore {
     part: RequestPayloadPart,
     maxBytes?: number, // Enforced in the single-row query, before materializing bytes.
   ): Promise<EncodedRequestPayloadPartRecord | null>;
-  getPayloadBlob?(sha256: string): Promise<RequestPayloadBlobRecord | null>;
+  getPayloadBlob?(sha256: string, maxBytes?: number): Promise<RequestPayloadBlobRecord | null>;
   // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
   // Drives payload_retention_days auto-prune; safe to call opportunistically.
   prunePayloads(olderThanMs: number): Promise<void>;
@@ -1570,11 +1578,25 @@ export interface ConfigStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
   /** Atomic replacement; null expects an absent row. Used for credential pool state. */
-  compareAndSet?(key: string, expected: string | null, value: string): Promise<boolean>;
+  compareAndSet?(
+    key: string,
+    expected: string | null,
+    value: string,
+    expiresAtMs?: number,
+  ): Promise<boolean>;
+  /** Delete only this value (release an undispatched replay reservation safely). */
+  deleteIfValue?(key: string, expected: string): Promise<boolean>;
+  /** Delete at most 1000 explicitly expired entries; permanent config is untouched. */
+  pruneExpired?(nowMs: number): Promise<void>;
   // Atomic scarce-resource reservation helper. Sets `key=value` only when the row
   // is missing or the current value is a valid non-negative integer <= `lte`.
   // Returns true only for the caller that won the reservation.
-  setIfMissingOrNumericLte?(key: string, value: string, lte: number): Promise<boolean>;
+  setIfMissingOrNumericLte?(
+    key: string,
+    value: string,
+    lte: number,
+    expiresAtMs?: number,
+  ): Promise<boolean>;
 }
 
 // Persisted OAuth subscription credentials (issue #38 follow-up — makes the

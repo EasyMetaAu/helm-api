@@ -6,32 +6,39 @@ import { getKey, clearKey } from "$lib/auth";
 // bounces to /login (the key was revoked/disabled). Read-only GETs only in the
 // Memory content writes go through MCP; the narrow per-key settings mutation uses
 // the portal API because it updates key metadata, not memory content.
-const API_BASE = `${base}/api`;
+export const API_BASE = `${base}/api`;
 
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
+    public retryAfter?: string,
   ) {
     super(message);
   }
 }
 
+export function apiError(response: Response, body: unknown): ApiError {
+  const envelope = body as {
+    code?: unknown;
+    error?: { code?: unknown };
+  } | null;
+  const code = envelope?.code ?? envelope?.error?.code;
+  return new ApiError(
+    response.status,
+    `portal api ${response.status}`,
+    typeof code === "string" ? code : undefined,
+    response.headers.get("Retry-After") ?? undefined,
+  );
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const key = getKey();
-  if (!key) {
-    clearKey();
-    throw new ApiError(401, "no api key");
-  }
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { accept: "application/json", Authorization: `Bearer ${key}` },
+  const res = await apiFetch(`${API_BASE}${path}`, {
+    headers: { accept: "application/json" },
   });
-  if (res.status === 401) {
-    clearKey();
-    throw new ApiError(401, "unauthorized");
-  }
   if (!res.ok) {
-    throw new ApiError(res.status, `portal api ${res.status}`);
+    throw apiError(res, await res.json().catch(() => null));
   }
   return (await res.json()) as T;
 }
@@ -108,15 +115,19 @@ export async function mcpTool<T>(
 export async function apiFetch(
   url: string,
   init: RequestInit = {},
+  { keepSessionOnUnauthorized = false } = {},
 ): Promise<Response> {
   const key = getKey();
-  if (!key) throw new ApiError(401, "no api key");
+  if (!key) {
+    if (!keepSessionOnUnauthorized) clearKey();
+    throw new ApiError(401, "no api key", "auth_error");
+  }
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${key}`);
   const response = await fetch(url, { ...init, headers });
-  if (response.status === 401) {
+  if (response.status === 401 && !keepSessionOnUnauthorized) {
     clearKey();
-    throw new ApiError(401, "unauthorized");
+    throw apiError(response, await response.json().catch(() => null));
   }
   return response;
 }

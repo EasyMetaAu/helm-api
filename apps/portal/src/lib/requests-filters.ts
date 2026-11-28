@@ -1,3 +1,5 @@
+import type { DecidedBy } from "./api/portal";
+
 export const RANGE_KEYS = ["all", "today", "yesterday", "7d", "30d"] as const;
 export type RangeKey = (typeof RANGE_KEYS)[number];
 
@@ -11,6 +13,9 @@ export interface RequestsFilters {
   endDate?: string;
   status?: "ok" | "error";
   model?: string;
+  lane?: string;
+  decidedBy?: DecidedBy;
+  session?: string;
   page: number;
   pageSize: number;
 }
@@ -24,6 +29,7 @@ export const DEFAULT_FILTERS: RequestsFilters = {
 const DAY_MS = 86_400_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = new Set<RequestsFilters["status"]>(["ok", "error"]);
+const DECISION_SOURCES: DecidedBy[] = ["rules", "eval", "default", "fallback"];
 
 function isRange(value: string | null): value is RangeKey {
   return value !== null && (RANGE_KEYS as readonly string[]).includes(value);
@@ -47,6 +53,11 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
         ? (status as RequestsFilters["status"])
         : undefined,
     model: model || undefined,
+    lane: sp.get("lane")?.trim() || undefined,
+    decidedBy: DECISION_SOURCES.find(
+      (source) => source === sp.get("decided_by"),
+    ),
+    session: sp.get("session") || undefined,
     page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
     pageSize: (PAGE_SIZE_OPTIONS as readonly number[]).includes(pageSizeRaw)
       ? pageSizeRaw
@@ -69,10 +80,27 @@ export function filtersToSearch(filters: RequestsFilters): string {
   }
   if (filters.status) qs.set("status", filters.status);
   if (filters.model?.trim()) qs.set("model", filters.model.trim());
+  if (filters.lane?.trim()) qs.set("lane", filters.lane.trim());
+  if (filters.decidedBy) qs.set("decided_by", filters.decidedBy);
+  if (filters.session) qs.set("session", filters.session);
   if (filters.page > 1) qs.set("page", String(filters.page));
   if (filters.pageSize !== DEFAULT_PAGE_SIZE)
     qs.set("pageSize", String(filters.pageSize));
   return qs.toString();
+}
+
+export function requestDetailHref(
+  listPath: string,
+  requestId: string,
+  from: string,
+): string {
+  return `${listPath}/${encodeURIComponent(requestId)}?from=${encodeURIComponent(from)}`;
+}
+
+export function requestsBackTo(from: string | null, listPath: string): string {
+  return from === listPath || from?.startsWith(`${listPath}?`)
+    ? from
+    : listPath;
 }
 
 export function resolveWindow(

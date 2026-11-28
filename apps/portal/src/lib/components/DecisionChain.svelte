@@ -107,7 +107,7 @@
   function accountTitle(
     account: RequestDetail['provider_attempts'][number]['serving_account'],
   ): string {
-    return account ? `${account.provider_id}/${account.account}` : '';
+    return account?.account ?? '';
   }
 </script>
 
@@ -310,7 +310,7 @@
             <span class="font-mono text-ink-strong">{a.provider ?? '—'}</span>
             {#if a.serving_account}
               <span class="badge-neutral" title={accountTitle(a.serving_account)}
-                >{servingAccountLabel(a.serving_account)}</span
+                >{servingAccountLabel(a.serving_account, (id) => $t('Account {id}', { id }))}</span
               >
             {/if}
             <span class="text-ink-muted">{a.model}</span>

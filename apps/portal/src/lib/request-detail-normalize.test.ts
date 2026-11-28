@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { PortalRequestDetail } from "./api/portal";
+import type { CompactRequest } from "./api/portal";
 import { normalizePortalDetail } from "./request-detail-normalize";
 
-const base: PortalRequestDetail = {
+const base: CompactRequest = {
   request_id: "r1",
   trace_id: "r1",
   requested_model: "auto",
@@ -23,7 +23,7 @@ const base: PortalRequestDetail = {
 
 describe("normalizePortalDetail", () => {
   it("passes a fully-populated detail through unchanged", () => {
-    const full: PortalRequestDetail = {
+    const full: CompactRequest = {
       ...base,
       attempts: [{ outcome: "success", latency_ms: 5 }],
       tps: 12,
@@ -40,8 +40,8 @@ describe("normalizePortalDetail", () => {
     delete legacy.ttfb_ms;
     delete legacy.generation_ms;
 
-    expect(
-      normalizePortalDetail(legacy as unknown as PortalRequestDetail),
-    ).toEqual(base);
+    expect(normalizePortalDetail(legacy as unknown as CompactRequest)).toEqual(
+      base,
+    );
   });
 });
