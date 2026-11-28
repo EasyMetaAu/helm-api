@@ -200,7 +200,9 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
       return {
         requestId: "trace_1",
         part,
-        bytes: Buffer.from(`{"body":"of ${part}"}`),
+        bytes: Buffer.from(
+          JSON.stringify({ [part === "upstream_request" ? "input" : "body"]: `of ${part}` }),
+        ),
         codec: "raw",
         createdAt: new Date(1000),
       };
@@ -223,6 +225,7 @@ function buildApp(
   updateKey: (keyId: string, patch: MemoryPatch) => Promise<void> = vi.fn(async () => {}),
   memoryAdmission?: BodyMemoryAdmission,
   responseWorkAdmission?: ResponseWorkAdmission,
+  extra: Partial<PortalApiDeps> = {},
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
@@ -233,6 +236,7 @@ function buildApp(
     now: () => 10_000,
     memoryAdmission,
     responseWorkAdmission,
+    ...extra,
   });
   return app;
 }
@@ -614,7 +618,7 @@ describe("portal API", () => {
       expect(body).toContain("SECRET_WIRE");
       expect(body).toContain("SECRET_PROVIDER");
       expect(body).toContain("SECRET_PID");
-      expect(body).toContain("SECRET_ACCT");
+      expect(body).not.toContain("SECRET_ACCT");
     });
 
     it("retains legacy outcomes and includes full provider attempts in the owned decision", async () => {
@@ -963,6 +967,12 @@ describe("Portal full-detail boundaries", () => {
       targetRequestId: "trace_1",
       revisions: [{ requestId: "trace_1" }],
     });
+    revision.responseJson =
+      '{"error":{"message":"owner@gmail.com rejected","codex_installation_id":"PRIVATE"}}';
+    for (const path of ["session-revisions", "payload?part=response"]) {
+      const response = await app.request(`/portal/api/requests/trace_1/${path}`, { headers: AUTH });
+      expect(await response.text()).not.toMatch(/gmail.com|PRIVATE/);
+    }
   });
 });
 
@@ -1047,4 +1057,784 @@ it("releases the encoded response budget after the body is consumed", async () =
   expect(admission.reservedBytes).toBeGreaterThan(0);
   await result.arrayBuffer();
   expect(admission.reservedBytes).toBe(0);
+});
+
+describe("portal debug API security", () => {
+  it("pseudonymizes accounts consistently and allow-lists error diagnostics", async () => {
+    const rec = decision({ codex_installation_id: "installation-private" });
+    rec.serving_account = {
+      provider_id: "claude",
+      account: "owner@gmail.com",
+      selection: {
+        strategy: "balanced",
+        reason: "strategy",
+        captured_at_ms: 10,
+        omitted_candidates: 0,
+        candidates: ["owner@gmail.com", "other@gmail.com"].map((account) => ({
+          account,
+          selected: account.startsWith("owner"),
+          priority: 2,
+          exclusion: null,
+          quota_fresh: true,
+          quota_pressure: 0.5,
+          expiring_value: null,
+          next_reset_ms: null,
+          ttft_ms: 100,
+          tokens_per_second: 30,
+        })),
+      },
+    };
+    rec.provider_attempts[0]!.error_detail = {
+      upstream_status: 429,
+      message: "owner@gmail.com exhausted",
+      provider_raw: { error: "quota" },
+      stack: "private stack",
+      cause: { internal: true },
+      provider_headers: {
+        "X-Request-Id": "req-upstream",
+        "cf-ray": "ray",
+        "retry-after": "10",
+        "anthropic-ratelimit-tokens-remaining": "0",
+        "x-ratelimit-limit-requests": "60",
+        "openai-organization": "private-org",
+        "set-cookie": "private-cookie",
+      },
+    };
+    rec.final.error_detail = rec.provider_attempts[0]!.error_detail;
+    const app = buildApp(record(), telemetry({ getByRequestId: async () => rec }));
+    const read = async () =>
+      (await app.request("/portal/api/requests/trace_1", { headers: AUTH })).json() as Promise<{
+        decision: DecisionRecord;
+      }>;
+    const a = await read();
+    const b = await read();
+    const account = a.decision.serving_account!;
+    expect(account.account).toMatch(/^acct_[a-f0-9]{24}$/);
+    expect(account.account).toBe(b.decision.serving_account!.account);
+    expect(account.selection!.candidates[0]!.account).toBe(account.account);
+    expect(account.selection!.candidates[1]!.account).not.toBe(account.account);
+    expect(account.selection!.candidates[0]).toMatchObject({
+      quota_pressure: 0.5,
+      ttft_ms: 100,
+      priority: 2,
+    });
+    for (const error of [
+      a.decision.provider_attempts[0]!.error_detail,
+      a.decision.final.error_detail,
+    ]) {
+      expect(error).not.toHaveProperty("stack");
+      expect(error).not.toHaveProperty("cause");
+      expect(error?.provider_headers).toEqual({
+        "x-request-id": "req-upstream",
+        "cf-ray": "ray",
+        "retry-after": "10",
+        "anthropic-ratelimit-tokens-remaining": "0",
+        "x-ratelimit-limit-requests": "60",
+      });
+    }
+    expect(JSON.stringify(a)).not.toMatch(
+      /gmail|private-org|private-cookie|installation-private|codex_installation_id/,
+    );
+    expect(rec.serving_account.account).toBe("owner@gmail.com"); // admin/source unchanged
+  });
+
+  it("forwards classification filters with forced key scope and widens list diagnostics", async () => {
+    const queryPage = vi.fn(telemetry().queryPage);
+    const res = await buildApp(record(), telemetry({ queryPage })).request(
+      "/portal/api/requests?lane=coding&decided_by=rules&key_id=k2",
+      { headers: AUTH },
+    );
+    expect(queryPage).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKeyId: "k1", lane: "coding", decidedBy: "rules" }),
+    );
+    expect(((await res.json()) as { items: unknown[] }).items[0]).toMatchObject({
+      decided_by: "rules",
+      fallback_count: 0,
+      stream_outcome: "completed",
+      partial: false,
+      serving_provider: "SECRET_PROVIDER",
+      session_label: null,
+    });
+  });
+
+  it("exposes cache series and prompt/completion model totals only for the caller", async () => {
+    const aggregate = vi.fn(telemetry().aggregate);
+    const res = await buildApp(record(), telemetry({ aggregate })).request(
+      "/portal/api/usage/stats?key_id=k2",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as { totals: unknown; series: unknown[]; by_model: unknown[] };
+    expect(aggregate).toHaveBeenCalledWith(0, 10000, "day", 0, "k1");
+    expect(body.totals).toMatchObject({
+      error_count: 0,
+      avg_latency_ms: 500,
+      avg_tps: null,
+      cache_hit_rate: 0,
+    });
+    expect(body.series[0]).toMatchObject({ cached_tokens: 0, cache_creation_tokens: 0 });
+    expect(body.by_model[0]).toMatchObject({ prompt_tokens: 10, completion_tokens: 5 });
+  });
+
+  it("exposes the caller's read-only caps", async () => {
+    const res = await buildApp(
+      record({
+        concurrency_limit: 3,
+        allow_custom_model: true,
+        allow_fast_mode: true,
+        request_content_mode: "none",
+      }),
+    ).request("/portal/api/me?key_id=k2", { headers: AUTH });
+    expect(await res.json()).toMatchObject({
+      concurrency_limit: 3,
+      allow_custom_model: true,
+      allow_fast_mode: true,
+      request_content: { mode: "none" },
+    });
+  });
+});
+
+describe("portal scoped debugging endpoints", () => {
+  const ownedSession = {
+    sessionRef: "sa",
+    accountId: "acct",
+    apiKeyId: "k1",
+    source: "x-thread-id",
+    externalSessionId: "my session",
+    createdAt: new Date(0),
+    lastSeenAt: new Date(0),
+    headRequestId: "trace_1",
+    revisionCount: 1,
+    storedBytes: 10,
+    eventHead: null,
+  };
+  it("resolves a session label within the caller key and decorates only owned sessions", async () => {
+    const findSessionRefsForKey = vi.fn(async () => ["sa"]);
+    const queryPage = vi.fn(async () => ({
+      rows: [
+        {
+          record: decision({ session: { ref: "sa", source: "x-thread-id" } }),
+          apiKeyId: "k1",
+          createdAt: new Date(0),
+        },
+      ],
+      total: 1,
+    }));
+    const tel = telemetry({
+      findSessionRefsForKey,
+      queryPage,
+      listSessionsByRefs: async () => [ownedSession],
+    });
+    const app = buildApp(record(), tel);
+    const body = (await (
+      await app.request("/portal/api/requests?session=my%20session&key_id=k2", { headers: AUTH })
+    ).json()) as { items: Array<{ session_label: string | null }> };
+    expect(findSessionRefsForKey).toHaveBeenCalledWith("k1", "my session");
+    expect(queryPage).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKeyId: "k1", sessionRefs: ["sa"] }),
+    );
+    expect(body.items[0]?.session_label).toBe("my session");
+    tel.listSessionsByRefs = async () => [
+      { ...ownedSession, apiKeyId: "k2", externalSessionId: "foreign" },
+    ];
+    expect(
+      (
+        (await (await app.request("/portal/api/requests", { headers: AUTH })).json()) as {
+          items: Array<{ session_label: string | null }>;
+        }
+      ).items[0]?.session_label,
+    ).toBeNull();
+  });
+
+  it("looks up unique client traces within the key, with typed missing, ambiguous and pending outcomes", async () => {
+    const queryPage = vi.fn(async (q) => ({
+      rows:
+        q.traceId === "owned"
+          ? [{ record: decision(), createdAt: new Date(0), apiKeyId: q.apiKeyId }]
+          : [],
+      total: q.traceId === "ambiguous" ? 2 : q.traceId === "owned" ? 1 : 0,
+    }));
+    const app = buildApp(
+      record(),
+      telemetry({ queryPage, getApiKeyId: async (id) => (id === "trace_1" ? "k1" : null) }),
+      undefined,
+      undefined,
+      undefined,
+      {
+        pendingRequests: (key, q) =>
+          key === "k1" && (q.traceId === "pending" || q.requestId === "pending") ? ["pending"] : [],
+      },
+    );
+    const get = (id: string) =>
+      app.request(`/portal/api/requests/by-trace/${id}`, { headers: AUTH });
+    expect(((await (await get("owned")).json()) as { request_id: string }).request_id).toBe(
+      "trace_1",
+    );
+    expect(queryPage).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKeyId: "k1", traceId: "owned", limit: 2 }),
+    );
+    const missing = await get("missing");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "request not found", code: "request_not_found" });
+    expect(await (await get("foreign")).json()).toEqual({
+      error: "request not found",
+      code: "request_not_found",
+    });
+    expect((await get("ambiguous")).status).toBe(409);
+    const pending = await get("pending");
+    expect(pending.status).toBe(202);
+    expect(await pending.json()).toEqual({
+      status: "in_progress",
+      request_id: "pending",
+      phase: "telemetry_pending",
+    });
+    expect((await app.request("/portal/api/requests/pending", { headers: AUTH })).status).toBe(202);
+  });
+
+  it("forces memory account/project scope, including intentional shared projects", async () => {
+    const getMemoryAdminStats = vi.fn(async (scope) => ({
+      generatedAt: scope.now,
+      scope,
+      storage: {
+        threads: 1,
+        messages: 2,
+        observations: 0,
+        facts: 3,
+        activeFacts: 2,
+        reflections: 0,
+        activeReflections: 0,
+      },
+      queue: {
+        pending: 2,
+        running: 3,
+        done: 4,
+        failed: 0,
+        open: 5,
+        staleRunning: 1,
+        oldestPendingAt: null,
+        oldestRunningAt: null,
+        newestDoneAt: null,
+        newestFailedAt: null,
+        byType: [],
+      },
+      activity: {
+        lastMessageAt: null,
+        lastObservationAt: null,
+        lastFactUpdatedAt: null,
+        lastReflectionUpdatedAt: null,
+      },
+    }));
+    for (const key of [record(), record({ key_id: "k2", memory_project_id: "shared" })]) {
+      const app = buildApp(key, undefined, undefined, undefined, undefined, {
+        memoryStore: { getMemoryAdminStats },
+      });
+      const res = await app.request(
+        "/portal/api/memory/stats?account_id=foreign&project_id=foreign",
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { leases: unknown };
+      expect(body.leases).toEqual({ running: 3, stale: 1 });
+      expect(getMemoryAdminStats).toHaveBeenLastCalledWith({
+        accountId: "acct",
+        projectId: key.memory_project_id ?? key.key_id,
+        now: new Date(10000),
+      });
+    }
+  });
+
+  it("normalizes malformed blob MIME and releases its response lease", async () => {
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 8192,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const app = buildApp(
+      record(),
+      telemetry({
+        hasPayloadBlobReference: async () => true,
+        getPayloadBlob: async () => ({
+          sha256: "a".repeat(64),
+          bytes: Buffer.from("image"),
+          mime: "image/png\r\nx-injected: bad",
+        }),
+      }),
+      undefined,
+      undefined,
+      admission,
+    );
+    const res = await app.request(`/portal/api/requests/trace_1/payload-blobs/${"a".repeat(64)}`, {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+    await res.text();
+    expect(admission.reservedBytes).toBe(0);
+  });
+  it("serves proven owned blobs and returns identical 404s for missing, foreign and forged references", async () => {
+    const sha = "a".repeat(64);
+    const getPayloadBlob = vi.fn(async () => ({
+      sha256: sha,
+      bytes: Buffer.from("image"),
+      mime: "image/png",
+      size: 5,
+      createdAt: new Date(0),
+    }));
+    const app = buildApp(
+      record(),
+      telemetry({
+        getApiKeyId: async (id) => (id === "foreign" ? "k2" : id === "missing" ? null : "k1"),
+        hasPayloadBlobReference: async (id) => id === "owned",
+        getPayloadBlob,
+      }),
+    );
+    const fetch = (id: string) =>
+      app.request(`/portal/api/requests/${id}/payload-blobs/${sha}`, { headers: AUTH });
+    const own = await fetch("owned");
+    expect(own.status).toBe(200);
+    expect(await own.text()).toBe("image");
+    expect(own.headers.get("cache-control")).toBe("no-store");
+    for (const id of ["foreign", "missing", "forged"]) {
+      const res = await fetch(id);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "request not found", code: "request_not_found" });
+    }
+    expect(getPayloadBlob).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("portal replay", () => {
+  const token = "00000000-0000-4000-8000-000000000001";
+  function fixture(key = record(), admission?: ResponseWorkAdmission) {
+    let now = 10000;
+    const expiry = new Map<string, number>();
+    const state = new Map<string, string>();
+    const configStore = {
+      get: async (k: string) => state.get(k) ?? null,
+      set: async (k: string, value: string) => {
+        state.set(k, value);
+      },
+      compareAndSet: async (
+        k: string,
+        expected: string | null,
+        value: string,
+        expiresAt?: number,
+      ) => {
+        if ((state.get(k) ?? null) !== expected) return false;
+        state.set(k, value);
+        if (expiresAt !== undefined) expiry.set(k, expiresAt);
+        return true;
+      },
+      deleteIfValue: async (k: string, expected: string) => {
+        if (state.get(k) !== expected) return false;
+        expiry.delete(k);
+        return state.delete(k);
+      },
+      pruneExpired: async (time: number) => {
+        for (const [k, until] of expiry)
+          if (until <= time) {
+            state.delete(k);
+            expiry.delete(k);
+          }
+      },
+      setIfMissingOrNumericLte: async (
+        k: string,
+        value: string,
+        lte: number,
+        expiresAt?: number,
+      ) => {
+        if (state.has(k) && Number(state.get(k)) > lte) return false;
+        state.set(k, value);
+        if (expiresAt !== undefined) expiry.set(k, expiresAt);
+        return true;
+      },
+    };
+    const sent: Request[] = [];
+    const records = new Map([["trace_1", decision()]]);
+    const tel = telemetry({
+      getByRequestId: async (id) => records.get(id) ?? null,
+      getApiKeyId: async (id) => (records.has(id) ? "k1" : null),
+      getPayloadPartEncoded: async () => ({
+        requestId: "trace_1",
+        part: "request",
+        codec: "raw",
+        createdAt: new Date(0),
+        bytes: Buffer.from(
+          JSON.stringify({
+            model: "auto",
+            messages: [{ role: "user", content: "replay me" }],
+            stream: true,
+          }),
+        ),
+      }),
+    });
+    const app = buildApp(key, tel, undefined, undefined, admission, {
+      now: () => now,
+      keyStore: { updateKey: async () => {}, getById: async () => key },
+      replay: { configStore, afterResponse: async () => {} },
+    });
+    app.post("/v1/chat/completions", async (c) => {
+      sent.push(c.req.raw);
+      expect(c.req.header("authorization")).toBe(AUTH.Authorization);
+      expect((await c.req.json()).messages[0].content).toBe("replay me");
+      const id = c.get("request_id");
+      records.set(id, decision({ request_id: id }));
+      return c.text("data: [DONE]\n\n", 200, { "content-type": "text/event-stream" });
+    });
+    const post = (id = "trace_1", idempotencyKey = token) =>
+      app.request(`/portal/api/requests/${id}/replay`, {
+        method: "POST",
+        headers: { ...AUTH, "idempotency-key": idempotencyKey },
+      });
+    return {
+      app,
+      post,
+      sent,
+      configStore,
+      records,
+      tel,
+      key,
+      state,
+      advance: (ms: number) => {
+        now += ms;
+      },
+    };
+  }
+  it("dispatches the captured body with only caller credentials, records a new request and deduplicates", async () => {
+    const f = fixture();
+    const first = await f.post();
+    expect(first.status).toBe(200);
+    const body = (await first.json()) as { request_id: string };
+    expect(body).toMatchObject({
+      status: "recorded",
+      source_request_id: "trace_1",
+      upstream_status: 200,
+    });
+    expect(body.request_id).not.toBe("trace_1");
+    expect(f.records.has(body.request_id)).toBe(true);
+    const second = await f.post();
+    expect(await second.json()).toEqual(body);
+    expect(f.sent).toHaveLength(1);
+    expect((await f.post("trace_1", "00000000-0000-4000-8000-000000000002")).status).toBe(429);
+  });
+  it("allows safe same-token retry after capacity rejection without a terminal receipt", async () => {
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 8192,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const held = admission.acquire(8192);
+    expect(held.ok).toBe(true);
+    const f = fixture(record(), admission);
+    const rejected = await f.post();
+    expect(rejected.status).toBe(503);
+    expect(await rejected.json()).toMatchObject({ code: "response_capacity" });
+    expect(f.sent).toHaveLength(0);
+    expect([...f.state.keys()].filter((k) => k.startsWith("portal.replay."))).toHaveLength(0);
+    if (held.ok) held.lease.release();
+    expect((await f.post()).status).toBe(200);
+    expect(f.sent).toHaveLength(1);
+  });
+  it("keeps duplicate prevention for seven days then expires receipt and throttle rows", async () => {
+    const f = fixture();
+    const first = await (await f.post()).json();
+    f.advance(7 * 86400_000 - 1);
+    expect(await (await f.post()).json()).toEqual(first);
+    expect(f.sent).toHaveLength(1);
+    f.advance(1);
+    expect((await f.post()).status).toBe(200);
+    expect(f.sent).toHaveLength(2);
+  });
+  it("budgets every occurrence before restoring a repeated detached image", async () => {
+    const f = fixture();
+    const sha = "a".repeat(64);
+    const json = JSON.stringify({
+      model: "auto",
+      messages: [
+        {
+          role: "user",
+          content: Array.from({ length: 4 }, () => ({
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: `helm-blob:sha256:${sha}` },
+          })),
+        },
+      ],
+    });
+    f.tel.getPayloadPartEncoded = async () => ({
+      requestId: "trace_1",
+      part: "request",
+      codec: "raw",
+      bytes: Buffer.from(json),
+      createdAt: new Date(0),
+    });
+    f.tel.hasPayloadBlobReference = async () => true;
+    const getPayloadBlob = vi.fn(async (_sha: string, maxBytes?: number) =>
+      (maxBytes ?? Infinity) < 1024
+        ? null
+        : { sha256: sha, bytes: Buffer.alloc(1024), mime: "image/png" },
+    );
+    f.tel.getPayloadBlob = getPayloadBlob;
+    const app = buildApp(
+      record(),
+      f.tel,
+      undefined,
+      undefined,
+      createResponseWorkAdmission({
+        capacityBytes: 65536,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+      {
+        keyStore: { updateKey: async () => {}, getById: async () => record() },
+        replay: { configStore: f.configStore, afterResponse: async () => {} },
+      },
+    );
+    const res = await app.request("/portal/api/requests/trace_1/replay", {
+      method: "POST",
+      headers: { ...AUTH, "idempotency-key": token },
+    });
+    expect(res.status).toBe(409);
+    expect(getPayloadBlob.mock.calls[0]?.[1]).toBeLessThan(1024);
+  });
+  it("keeps idempotency receipts across route instances", async () => {
+    const f = fixture();
+    const first = await (await f.post()).json();
+    const app = buildApp(record(), f.tel, undefined, undefined, undefined, {
+      keyStore: { updateKey: async () => {}, getById: async () => record() },
+      replay: { configStore: f.configStore, afterResponse: async () => {} },
+    });
+    const repeated = await app.request("/portal/api/requests/trace_1/replay", {
+      method: "POST",
+      headers: { ...AUTH, "idempotency-key": token },
+    });
+    expect(await repeated.json()).toEqual(first);
+    expect(f.sent).toHaveLength(1);
+  });
+  it("reports expired unfinished receipts as unknown without sending again", async () => {
+    const f = fixture();
+    await f.post();
+    for (const [key, value] of f.state)
+      if (key.startsWith("portal.replay.receipt.")) {
+        const receipt = JSON.parse(value);
+        receipt.body.status = "in_progress";
+        receipt.body.request_id = null;
+        receipt.http_status = 202;
+        receipt.started_at_ms = 10000;
+        f.state.set(key, JSON.stringify(receipt));
+      }
+    const app = buildApp(record(), f.tel, undefined, undefined, undefined, {
+      now: () => 1_000_000,
+      keyStore: { updateKey: async () => {}, getById: async () => record() },
+      replay: { configStore: f.configStore, afterResponse: async () => {} },
+    });
+    const response = await app.request("/portal/api/requests/trace_1/replay", {
+      method: "POST",
+      headers: { ...AUTH, "idempotency-key": token },
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      status: "outcome_unknown",
+      code: "replay_outcome_unknown",
+    });
+    expect(f.sent).toHaveLength(1);
+  });
+  it("replays Responses compact on its original operation", async () => {
+    const f = fixture();
+    f.records.set(
+      "trace_1",
+      decision({
+        protocol: "openai_responses",
+        policy: { matched_policy_id: null, reason: "responses_compact" },
+        lane: { selected_lane: "responses_compact", candidate_chain: [] },
+      }),
+    );
+    let compactCalls = 0;
+    f.app.post("/v1/responses/compact", (c) => {
+      compactCalls++;
+      f.records.set(c.get("request_id"), decision({ request_id: c.get("request_id") }));
+      return c.json({ output: [] });
+    });
+    const res = await f.post();
+    expect(res.status).toBe(200);
+    expect(compactCalls).toBe(1);
+    expect(f.sent).toHaveLength(0);
+  });
+  it("rejects missing confirmation and isolates missing vs foreign requests", async () => {
+    const f = fixture(record({ key_id: "k2" }));
+    const foreign = await f.post();
+    const missing = await f.post("missing");
+    expect(foreign.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await foreign.json()).toEqual(await missing.json());
+    expect(f.sent).toHaveLength(0);
+    const own = fixture();
+    expect((await own.post("trace_1", "")).status).toBe(400);
+    expect(own.sent).toHaveLength(0);
+  });
+  it("rechecks fresh key state and never substitutes a root identity", async () => {
+    const f = fixture();
+    f.key.disabled = true;
+    expect((await f.post()).status).toBe(401);
+    expect(f.sent).toHaveLength(0);
+    const rotated = fixture();
+    rotated.key.hash = hashKey("rotated-secret");
+    expect((await rotated.post()).status).toBe(401);
+    expect(rotated.sent).toHaveLength(0);
+  });
+  it("rejects replay when the recorded request is metadata-only", async () => {
+    const f = fixture();
+    f.records.set("trace_1", decision({ request_content_mode: "none" }));
+    expect((await f.post()).status).toBe(409);
+    expect(f.sent).toHaveLength(0);
+  });
+});
+
+it("removes generated identities from forwarded payload metadata and captured errors", async () => {
+  const upstream = {
+    messages: [{ role: "user", content: "my email user@example.com" }],
+    client_metadata: { "x-codex-installation-id": "rebound-installation", other: "kept" },
+    metadata: { user_id: '{"account_uuid":"upstream-account","session_id":"session"}' },
+  };
+  const tel = telemetry({
+    getPayloadPartEncoded: async (_id, part) => ({
+      requestId: "trace_1",
+      part,
+      codec: "raw",
+      createdAt: new Date(0),
+      bytes: Buffer.from(
+        JSON.stringify(
+          part === "upstream_request"
+            ? upstream
+            : {
+                error: {
+                  message: "owner@gmail.com exhausted",
+                  stack: "PRIVATE",
+                  provider_headers: { "openai-organization": "PRIVATE" },
+                },
+              },
+        ),
+      ),
+    }),
+  });
+  const app = buildApp(record(), tel);
+  for (const part of ["upstream_request", "response"]) {
+    const res = await app.request(`/portal/api/requests/trace_1/payload?part=${part}`, {
+      headers: { ...AUTH, Accept: "application/vnd.helm.payload" },
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toMatch(/rebound-installation|upstream-account|owner@gmail.com|PRIVATE/);
+    expect(res.headers.get("x-helm-payload-projection")).toBe("portal");
+    if (part === "upstream_request") expect(text).toContain("my email user@example.com");
+  }
+});
+
+it("projects small chunked captures and rejects oversized ones before consuming chunks", async () => {
+  let reads = 0;
+  const json = 'event: error\ndata: {"error":{"message":"owner@gmail.com","stack":"PRIVATE"}}\n\n';
+  let byteLength = Buffer.byteLength(json);
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 65536,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const app = buildApp(
+    record(),
+    telemetry({
+      getPayloadPartEncoded: async () => null,
+      getPayloadPartStream: async (requestId, part) => ({
+        requestId,
+        part,
+        createdAt: new Date(0),
+        byteLength,
+        stream: (async function* () {
+          reads++;
+          yield Buffer.from(json);
+        })(),
+      }),
+    }),
+    undefined,
+    undefined,
+    admission,
+  );
+  const read = () =>
+    app.request("/portal/api/requests/trace_1/payload?part=response", {
+      headers: { ...AUTH, Accept: "application/vnd.helm.payload" },
+    });
+  const response = await read();
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("application/vnd.helm.payload");
+  expect(await response.text()).not.toMatch(/gmail.com|PRIVATE/);
+  expect(reads).toBe(1);
+  expect(admission.reservedBytes).toBe(0);
+  byteLength = 1_000_000;
+  const tooLarge = await read();
+  expect(await tooLarge.json()).toMatchObject({
+    captured: false,
+    reason: "payload_recovery_limited",
+  });
+  expect(reads).toBe(1);
+  expect(admission.reservedBytes).toBe(0);
+});
+
+it("fails closed for owned decisions when durable pseudonyms are unavailable", async () => {
+  const app = buildApp(
+    record(),
+    telemetry({ getApiKeyId: async (id) => (id === "trace_1" ? "k1" : null) }),
+    undefined,
+    undefined,
+    undefined,
+    { pseudonymSecret: null },
+  );
+  expect((await app.request("/portal/api/me", { headers: AUTH })).status).toBe(200);
+  expect((await app.request("/portal/api/requests/trace_1", { headers: AUTH })).status).toBe(503);
+  expect((await app.request("/portal/api/requests", { headers: AUTH })).status).toBe(503);
+  expect((await app.request("/portal/api/requests/foreign", { headers: AUTH })).status).toBe(404);
+});
+
+it("limits memory stats to one scan per key per ten seconds", async () => {
+  let now = 10000;
+  const scan = vi.fn(async () => {
+    throw new Error("store unavailable");
+  });
+  const key = record();
+  const app = buildApp(key, undefined, undefined, undefined, undefined, {
+    now: () => now,
+    memoryStore: { getMemoryAdminStats: scan },
+  });
+  expect((await app.request("/portal/api/memory/stats", { headers: AUTH })).status).toBe(502);
+  const second = await app.request("/portal/api/memory/stats?project_id=other", { headers: AUTH });
+  expect(second.status).toBe(429);
+  expect(second.headers.get("retry-after")).toBe("10");
+  expect(scan).toHaveBeenCalledTimes(1);
+  key.key_id = "k2";
+  await app.request("/portal/api/memory/stats", { headers: AUTH });
+  expect(scan).toHaveBeenCalledTimes(2);
+  key.key_id = "k1";
+  now += 10000;
+  await app.request("/portal/api/memory/stats", { headers: AUTH });
+  expect(scan).toHaveBeenCalledTimes(3);
+});
+
+it("holds no more than two blob response leases per key and releases on cancel", async () => {
+  const admission = createResponseWorkAdmission({
+    capacityBytes: 8192,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+  const tel = telemetry({
+    hasPayloadBlobReference: async () => true,
+    getPayloadBlob: async (sha256) => ({ sha256, bytes: Buffer.from("image"), mime: "image/png" }),
+  });
+  const app = buildApp(record(), tel, undefined, undefined, admission);
+  const url = `/portal/api/requests/trace_1/payload-blobs/${"a".repeat(64)}`;
+  const first = await app.request(url, { headers: AUTH });
+  const second = await app.request(url, { headers: AUTH });
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect((await app.request(url, { headers: AUTH })).status).toBe(429);
+  await first.body?.cancel();
+  const next = await app.request(url, { headers: AUTH });
+  expect(next.status).toBe(200);
+  await second.body?.cancel();
+  await next.body?.cancel();
 });

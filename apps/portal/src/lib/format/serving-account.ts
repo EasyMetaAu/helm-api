@@ -3,7 +3,19 @@ import type {
   ServingAccountView,
 } from "$lib/api/request-trail.js";
 
-export function servingAccountLabel(account: ServingAccountView): string {
+export function accountPseudonym(
+  value: string,
+  label: (id: string) => string,
+): string {
+  return /^acct_[a-f0-9]{24}$/.test(value) ? label(value.slice(5, 13)) : value;
+}
+
+export function servingAccountLabel(
+  account: ServingAccountView,
+  label: (id: string) => string,
+): string {
+  const pseudonym = accountPseudonym(account.account, label);
+  if (pseudonym !== account.account) return pseudonym;
   return account.kind === "api_key" ? (account.label ?? "—") : account.account;
 }
 

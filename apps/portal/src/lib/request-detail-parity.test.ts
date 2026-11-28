@@ -16,7 +16,7 @@ const admin = readFileSync(
   "utf8",
 );
 describe("Portal full request-detail parity", () => {
-  it("retains the admin detail sections while omitting management replay", () => {
+  it("retains the admin detail sections and uses a Portal replay confirmation", () => {
     const ids = [...admin.matchAll(/data-testid="([^"]+)"/g)].map(
       (match) => match[1],
     );
@@ -24,9 +24,12 @@ describe("Portal full request-detail parity", () => {
       expect(view).toContain(`data-testid="${id}"`);
     expect(view).not.toContain("RetryDialog");
     expect(view).not.toContain('data-testid="retry-request"');
+    expect(view).toContain('data-testid="replay-request"');
+    expect(view).toContain("<ReplayDialog");
   });
   it("uses the same normalizer and lazy body/session recovery views", () => {
-    expect(api).toContain("toDetail(body.decision)");
+    expect(api).toContain("...body.decision");
+    expect(api).toContain("return toDetail(");
     expect(view).toContain("DecisionChain");
     expect(view).toContain("RoutingSummary");
     expect(view).toContain("CostBreakdown");

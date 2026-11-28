@@ -1481,6 +1481,42 @@ CREATE TABLE request_payload_response_chunks (
       );
     },
   },
+  {
+    version: 59,
+    run(db) {
+      db.exec(`CREATE TABLE request_payload_blob_refs (
+  request_id TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  PRIMARY KEY (request_id, sha256)
+);`);
+    },
+  },
+  {
+    version: 60,
+    run(db) {
+      if (sqliteTableHasColumns(db, "telemetry", ["api_key_id", "decision_json", "created_at"])) {
+        db.exec(`ALTER TABLE telemetry ADD COLUMN trace_id TEXT
+          GENERATED ALWAYS AS (json_extract(decision_json, '$.trace_id')) VIRTUAL;
+          CREATE INDEX idx_telemetry_key_trace ON telemetry (api_key_id, trace_id, created_at);`);
+      }
+      if (sqliteTableHasColumns(db, "sessions", ["api_key_id", "external_session_id"]))
+        db.exec(
+          "CREATE INDEX idx_sessions_key_label ON sessions (api_key_id, external_session_id)",
+        );
+    },
+  },
+  {
+    version: 61,
+    run(db) {
+      if (!sqliteTableHasColumns(db, "config_kv", ["key", "value"])) return;
+      db.exec(`ALTER TABLE config_kv ADD COLUMN expires_at INTEGER;
+        CREATE INDEX idx_config_expiry ON config_kv (expires_at) WHERE expires_at IS NOT NULL;`);
+      // Legacy rows receive a full seven-day grace period on upgrade.
+      db.prepare(
+        "UPDATE config_kv SET expires_at = ? WHERE key GLOB 'portal.replay.receipt.*' OR key GLOB 'portal.replay.rate.*'",
+      ).run(Date.now() + 7 * 86400_000);
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

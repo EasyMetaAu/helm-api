@@ -1,6 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, inArray, lt, lte, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  lt,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
@@ -45,6 +59,7 @@ import {
 import type { PgDb } from "./migrate.js";
 import {
   payloadBlobs,
+  requestPayloadBlobRefs,
   requestPayloadResponseChunks,
   requestPayloads,
   sessionHeadEventHashes,
@@ -470,6 +485,36 @@ export class PgTelemetryStore implements TelemetryStore {
     }
   }
 
+  async findSessionRefsForKey(keyId: string, session: string): Promise<string[]> {
+    if (!keyId) throw new Error("session lookup requires key scope");
+    // Separate indexed equality probes avoid a tenant-wide OR scan.
+    const direct = await this.db
+      .select({ ref: sessions.sessionRef })
+      .from(sessions)
+      .where(and(eq(sessions.apiKeyId, keyId), eq(sessions.sessionRef, session)))
+      .limit(1);
+    const labels = await this.db
+      .select({ ref: sessions.sessionRef })
+      .from(sessions)
+      .where(and(eq(sessions.apiKeyId, keyId), eq(sessions.externalSessionId, session)))
+      .limit(257);
+    return [...new Set([...direct, ...labels].map((r) => r.ref))].slice(0, 257);
+  }
+
+  async hasPayloadBlobReference(requestId: string, sha256: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ sha256: requestPayloadBlobRefs.sha256 })
+      .from(requestPayloadBlobRefs)
+      .where(
+        and(
+          eq(requestPayloadBlobRefs.requestId, requestId),
+          eq(requestPayloadBlobRefs.sha256, sha256),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
   async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
     const rows = await this.db
       .select()
@@ -864,6 +909,12 @@ export class PgTelemetryStore implements TelemetryStore {
     if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
     if (query.sessionRef !== undefined)
       conds.push(sql`${telemetry.decisionJson} -> 'session' ->> 'ref' = ${query.sessionRef}`);
+    if (query.traceId !== undefined)
+      conds.push(sql`${telemetry.decisionJson} ->> 'trace_id' = ${query.traceId}`);
+    if (query.sessionRefs !== undefined)
+      conds.push(
+        inArray(sql`${telemetry.decisionJson} -> 'session' ->> 'ref'`, [...query.sessionRefs]),
+      );
     // lane + decided_by hit the migration-v29 STORED generated columns (indexed)
     // instead of a jsonb extract — an index seek, no per-row jsonb scan.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
@@ -1084,6 +1135,13 @@ export class PgTelemetryStore implements TelemetryStore {
           createdAt: ts,
         },
       });
+    await tx
+      .delete(requestPayloadBlobRefs)
+      .where(eq(requestPayloadBlobRefs.requestId, input.requestId));
+    if (blobs.size)
+      await tx
+        .insert(requestPayloadBlobRefs)
+        .values([...blobs.keys()].map((sha256) => ({ requestId: input.requestId, sha256 })));
     for (const b of blobs.values()) {
       await tx
         .insert(payloadBlobs)
@@ -1190,16 +1248,7 @@ export class PgTelemetryStore implements TelemetryStore {
     part: RequestPayloadPart,
   ): Promise<RequestPayloadPartStream | null> {
     if (part !== "response") return null;
-    const [row] = await this.db
-      .select({
-        generation: requestPayloads.responseBodyGeneration,
-        createdAt: requestPayloads.createdAt,
-        chunkCount: sql<number>`(SELECT count(*) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
-        byteLength: sql<number>`(SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
-      })
-      .from(requestPayloads)
-      .where(eq(requestPayloads.requestId, requestId))
-      .limit(1);
+    const row = await this.readPayloadMetadata(requestId);
     if (!row?.generation) return null;
     const db = this.db;
     const generation = row.generation;
@@ -1207,7 +1256,7 @@ export class PgTelemetryStore implements TelemetryStore {
       requestId,
       part,
       createdAt: new Date(row.createdAt),
-      byteLength: Number(row.byteLength),
+      byteLength: Number(row.responseBytes),
       stream: (async function* () {
         let deliveredBytes = 0;
         for (let index = 0; index < Number(row.chunkCount); index++) {
@@ -1229,7 +1278,7 @@ export class PgTelemetryStore implements TelemetryStore {
           deliveredBytes += bytes.byteLength;
           yield bytes;
         }
-        if (deliveredBytes !== Number(row.byteLength))
+        if (deliveredBytes !== Number(row.responseBytes))
           throw new Error("invalid payload response length");
       })(),
     };
@@ -1273,22 +1322,50 @@ export class PgTelemetryStore implements TelemetryStore {
     };
   }
 
+  private async readPayloadMetadata(requestId: string) {
+    return this.db.transaction(
+      async (tx) => {
+        const [row] = await tx
+          .select({
+            requestId: requestPayloads.requestId,
+            generation: requestPayloads.responseBodyGeneration,
+            hasRequest: sql<boolean>`${requestPayloads.requestJson} IS NOT NULL`,
+            hasResponse: sql<boolean>`(${requestPayloads.responseJson} IS NOT NULL OR ${requestPayloads.responseBodyGeneration} IS NOT NULL)`,
+            hasUpstream: sql<boolean>`${requestPayloads.upstreamRequestJson} IS NOT NULL`,
+            createdAt: requestPayloads.createdAt,
+          })
+          .from(requestPayloads)
+          .where(eq(requestPayloads.requestId, requestId))
+          .limit(1);
+        if (!row) return null;
+        const chunks = row.generation
+          ? (
+              await tx
+                .select({
+                  chunkCount: count(),
+                  responseBytes: sql<number>`coalesce(sum(${requestPayloadResponseChunks.rawBytes}), 0)`,
+                })
+                .from(requestPayloadResponseChunks)
+                .where(
+                  and(
+                    eq(requestPayloadResponseChunks.requestId, requestId),
+                    eq(requestPayloadResponseChunks.generation, row.generation),
+                  ),
+                )
+            )[0]
+          : undefined;
+        return {
+          ...row,
+          chunkCount: Number(chunks?.chunkCount ?? 0),
+          responseBytes: row.generation ? Number(chunks?.responseBytes ?? 0) : null,
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
   async getPayloadMeta(requestId: string): Promise<RequestPayloadMeta | null> {
-    const rows = await this.db
-      .select({
-        requestId: requestPayloads.requestId,
-        responseBytes: sql<
-          number | null
-        >`CASE WHEN ${requestPayloads.responseBodyGeneration} IS NOT NULL THEN (SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration}) END`,
-        hasRequest: sql<boolean>`${requestPayloads.requestJson} IS NOT NULL`,
-        hasResponse: sql<boolean>`(${requestPayloads.responseJson} IS NOT NULL OR ${requestPayloads.responseBodyGeneration} IS NOT NULL)`,
-        hasUpstream: sql<boolean>`${requestPayloads.upstreamRequestJson} IS NOT NULL`,
-        createdAt: requestPayloads.createdAt,
-      })
-      .from(requestPayloads)
-      .where(eq(requestPayloads.requestId, requestId))
-      .limit(1);
-    const row = rows[0];
+    const row = await this.readPayloadMetadata(requestId);
     if (!row) return null;
     return {
       requestId: row.requestId,
@@ -1380,11 +1457,21 @@ export class PgTelemetryStore implements TelemetryStore {
     };
   }
 
-  async getPayloadBlob(sha256: string): Promise<RequestPayloadBlobRecord | null> {
+  async getPayloadBlob(
+    sha256: string,
+    maxBytes?: number,
+  ): Promise<RequestPayloadBlobRecord | null> {
     const rows = await this.db
       .select({ bytes: payloadBlobs.bytes, mime: payloadBlobs.mime })
       .from(payloadBlobs)
-      .where(eq(payloadBlobs.sha256, sha256))
+      .where(
+        and(
+          eq(payloadBlobs.sha256, sha256),
+          maxBytes === undefined
+            ? undefined
+            : sql`octet_length(${payloadBlobs.bytes}) <= ${Math.max(0, Math.floor(maxBytes))}`,
+        ),
+      )
       .limit(1);
     const row = rows[0];
     return row ? { sha256, bytes: row.bytes, mime: row.mime } : null;
@@ -1395,7 +1482,32 @@ export class PgTelemetryStore implements TelemetryStore {
   // on every referencing write, so blob.created_at >= every surviving payload's
   // created_at → a kept payload never references a pruned blob.
   async prunePayloads(olderThanMs: number): Promise<void> {
-    await this.db.delete(requestPayloads).where(lt(requestPayloads.createdAt, olderThanMs));
+    for (;;) {
+      const deleted = await this.db.transaction(async (tx) => {
+        // Return only rows actually deleted, including after a concurrent writer
+        // changes created_at. References are removed under the same row locks.
+        const rows = resultRows<{ request_id: string }>(
+          await tx.execute(sql`
+          DELETE FROM request_payloads
+          WHERE created_at < ${olderThanMs} AND request_id IN (
+            SELECT request_id FROM request_payloads
+            WHERE created_at < ${olderThanMs}
+            ORDER BY created_at, request_id LIMIT ${PG_RETENTION_PRUNE_BATCH_ROWS}
+          )
+          RETURNING request_id
+        `),
+        );
+        if (rows.length)
+          await tx.delete(requestPayloadBlobRefs).where(
+            inArray(
+              requestPayloadBlobRefs.requestId,
+              rows.map((row) => row.request_id),
+            ),
+          );
+        return rows.length;
+      });
+      if (deleted < PG_RETENTION_PRUNE_BATCH_ROWS) break;
+    }
     await this.db.delete(payloadBlobs).where(lt(payloadBlobs.createdAt, olderThanMs));
   }
 

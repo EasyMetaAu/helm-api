@@ -7,6 +7,21 @@ const page = readFileSync(
 );
 
 describe("Portal account page", () => {
+  it("shows the key's effective limits and content retention in the details list", () => {
+    for (const field of [
+      "concurrency_limit",
+      "allow_custom_model",
+      "allow_fast_mode",
+      "request_content",
+      "retention_days",
+    ]) {
+      expect(page).toContain(field);
+    }
+    expect(page).toContain('$t("No limit")');
+    expect(page).toContain('$t("Kept {days} days"');
+    expect(page).toContain('$t("Not set")');
+  });
+
   it("fills the window and lays out key details as a 2-column description list", () => {
     expect(page).not.toContain("max-w-3xl");
     expect(page).toContain("<dl");

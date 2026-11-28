@@ -18,34 +18,60 @@ export class SqliteConfigStore implements ConfigStore {
   async set(key: string, value: string): Promise<void> {
     this.db
       .insert(configKv)
-      .values({ key, value })
-      .onConflictDoUpdate({ target: configKv.key, set: { value } })
+      .values({ key, value, expiresAt: null })
+      .onConflictDoUpdate({ target: configKv.key, set: { value, expiresAt: null } })
       .run();
   }
 
-  async compareAndSet(key: string, expected: string | null, value: string): Promise<boolean> {
+  async compareAndSet(
+    key: string,
+    expected: string | null,
+    value: string,
+    expiresAtMs?: number,
+  ): Promise<boolean> {
     const result =
       expected === null
         ? this.db.$sqlite
-            .prepare("INSERT INTO config_kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING")
-            .run(key, value)
+            .prepare(
+              "INSERT INTO config_kv (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            )
+            .run(key, value, expiresAtMs ?? null)
         : this.db.$sqlite
-            .prepare("UPDATE config_kv SET value = ? WHERE key = ? AND value = ?")
-            .run(value, key, expected);
+            .prepare("UPDATE config_kv SET value = ?, expires_at = ? WHERE key = ? AND value = ?")
+            .run(value, expiresAtMs ?? null, key, expected);
     return result.changes === 1;
   }
 
-  async setIfMissingOrNumericLte(key: string, value: string, lte: number): Promise<boolean> {
+  async setIfMissingOrNumericLte(
+    key: string,
+    value: string,
+    lte: number,
+    expiresAtMs?: number,
+  ): Promise<boolean> {
     const res = this.db.$sqlite
       .prepare(`
-        INSERT INTO config_kv (key, value)
-        VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        INSERT INTO config_kv (key, value, expires_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at
         WHERE config_kv.value GLOB '[0-9]*'
           AND config_kv.value NOT GLOB '*[^0-9]*'
           AND CAST(config_kv.value AS INTEGER) <= ?
       `)
-      .run(key, value, Math.trunc(lte));
+      .run(key, value, expiresAtMs ?? null, Math.trunc(lte));
     return res.changes > 0;
+  }
+  async deleteIfValue(key: string, expected: string): Promise<boolean> {
+    return (
+      this.db.$sqlite
+        .prepare("DELETE FROM config_kv WHERE key = ? AND value = ?")
+        .run(key, expected).changes === 1
+    );
+  }
+  async pruneExpired(nowMs: number): Promise<void> {
+    this.db.$sqlite
+      .prepare(`DELETE FROM config_kv WHERE key IN (
+      SELECT key FROM config_kv WHERE expires_at <= ? ORDER BY expires_at LIMIT 1000
+    ) AND expires_at <= ?`)
+      .run(nowMs, nowMs);
   }
 }

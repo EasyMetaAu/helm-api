@@ -86,11 +86,14 @@ export const formatCount = formatTokens;
 // never < 0). Precision: one decimal below 100, whole numbers at/above — LLM
 // generation rates run from ~1 to a few hundred tok/s, so this keeps ~3 sig figs
 // without noise.
-export function formatTps(n: number | null | undefined): string {
+export function formatTps(
+  n: number | null | undefined,
+  render: (value: string) => string = (value) => `${value} tok/s`,
+): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   const v = Math.max(0, n);
   const s = v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, "");
-  return `${s} tok/s`;
+  return render(s);
 }
 
 // Coarse, magnitude-aware breakdown of a duration (in ms) — the SINGLE source of
@@ -152,6 +155,20 @@ export function formatTimestamp(ts: string): string {
   if (!ts) return "";
   const d = new Date(ts);
   return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+}
+
+export function formatLatestTimestamp(
+  timestamps: Array<string | null>,
+): string {
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const timestamp of timestamps) {
+    if (timestamp === null) continue;
+    const ms = Date.parse(timestamp);
+    if (ms > latest) latest = ms;
+  }
+  return Number.isFinite(latest)
+    ? formatTimestamp(new Date(latest).toISOString())
+    : "—";
 }
 
 export function formatBytes(n: number | null | undefined): string {

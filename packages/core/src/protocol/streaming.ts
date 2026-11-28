@@ -131,7 +131,7 @@ export function createSSEIncompleteFrameGuard(
 // Per the SSE spec a frame ends at a BLANK line. `data:`/`event:` fields may
 // repeat; multiple `data:` lines join with "\n". A leading single space after the
 // colon is stripped. `[DONE]` is just another data payload (the caller decides).
-function parseFrame(block: string): SSEFrame | null {
+export function parseSSEFrame(block: string): SSEFrame | null {
   let event: string | undefined;
   const dataLines: string[] = [];
   // Normalize CRLF → LF so a mixed stream splits cleanly.
@@ -184,7 +184,7 @@ export async function* readSSE(
         const block = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary.length);
         assertSSEFrameFits(block, maxFrameBytes);
-        const frame = parseFrame(block);
+        const frame = parseSSEFrame(block);
         if (frame !== null) yield frame;
         resize(Buffer.byteLength(buffer));
         boundary = nextSSEFrameBoundary(buffer);
@@ -196,7 +196,7 @@ export async function* readSSE(
     resize(Buffer.byteLength(buffer) + Buffer.byteLength(decodedTail));
     buffer += decodedTail;
     assertSSEFrameFits(buffer, maxFrameBytes);
-    const tail = parseFrame(buffer);
+    const tail = parseSSEFrame(buffer);
     if (tail !== null) yield tail;
   } catch (error) {
     await reader.cancel().catch(() => {});

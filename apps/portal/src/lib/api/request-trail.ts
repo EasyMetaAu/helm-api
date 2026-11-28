@@ -2,55 +2,39 @@ import {
   restoreSessionRevisionJson,
   type SessionRevisionForRestore,
 } from "@helm/shared";
+import { toDetail } from "../../../../admin/src/lib/api/requests";
+import { restoreDetachedImages } from "../request-detail-media";
+import { API_BASE, apiFetch } from "./client";
 import {
-  toDetail,
-  type RawDecisionRecord,
-  type RequestDetail,
-} from "../../../../admin/src/lib/api/requests";
-import { apiFetch } from "./client";
+  getPayloadMeta,
+  payloadBlobUrl,
+  type PayloadMeta,
+  type PortalRequestDetail,
+} from "./portal";
 export type {
   RequestDetail,
   AttemptErrorDetail,
   ServingAccountView,
   TokenUsageView,
 } from "../../../../admin/src/lib/api/requests";
-const BASE = "/portal/api/requests";
+const BASE = `${API_BASE}/requests`;
 const ENCODED_PAYLOAD_MEDIA_TYPE = "application/vnd.helm.payload";
-async function asJson<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`requests api ${res.status}`);
-  return res.json() as Promise<T>;
+
+export function toRequestDetail(
+  body: Pick<PortalRequestDetail, "decision" | "created_at">,
+) {
+  return toDetail({
+    ...body.decision,
+    created_at: body.decision.created_at ?? body.created_at,
+  });
 }
-export async function getRequest(id: string): Promise<RequestDetail> {
-  const body = await asJson<{ decision: RawDecisionRecord }>(
-    await apiFetch(`${BASE}/${encodeURIComponent(id)}`),
-  );
-  return toDetail(body.decision);
-}
-export interface RequestPayloadView {
-  captured: boolean;
-  source?: "payload" | "session" | "unavailable";
-  reason?:
-    | "no_session"
-    | "metadata_only"
-    | "session_unavailable"
-    | "session_incomplete"
-    | "session_recovery_limited"
-    | "response_unavailable";
-  exact?: boolean;
+export interface RequestPayloadView extends PayloadMeta {
   browser_recoverable?: boolean;
-  fidelity?: "exact" | "semantic" | "partial" | string;
   request?: unknown;
   response?: unknown;
-  // The EXACT body forwarded upstream — AFTER memory injection + protocol
-  // translation. This is what the model actually received (the inbound `request`
-  // is what the client sent). Null/absent when no provider served or pre-feature.
+  // Forwarded body after memory injection and protocol translation, with the
+  // portal projection applied. The inbound body is what the client sent.
   upstream_request?: unknown;
-  created_at?: number;
-  parts?: {
-    request: boolean;
-    response: boolean;
-    upstream_request: boolean;
-  };
 }
 
 export type RequestPayloadPartName =
@@ -83,14 +67,10 @@ export async function getRequestPayloadMeta(
   requestId: string,
 ): Promise<RequestPayloadView> {
   try {
-    const res = await apiFetch(
-      `${BASE}/${encodeURIComponent(requestId)}/payload?part=meta`,
-      {
-        headers: { accept: "application/json" },
-      },
-    );
-    if (!res.ok) return { captured: false };
-    return (await res.json()) as RequestPayloadView;
+    const metadata = await getPayloadMeta(requestId);
+    return typeof metadata?.captured === "boolean"
+      ? metadata
+      : { captured: false };
   } catch {
     return { captured: false };
   }
@@ -110,24 +90,51 @@ export async function getRequestPayloadPart(
     if (!res.ok) return { captured: false };
     if (res.headers.get("content-type")?.includes(ENCODED_PAYLOAD_MEDIA_TYPE)) {
       const text = await res.text();
-      const value = parseMaybeJson(text);
+      const parsed = parseMaybeJson(text);
+      const { value, missing } = text.includes("helm-blob:sha256:")
+        ? await restoreDetachedImages(parsed, (sha) =>
+            readPayloadBlob(requestId, sha),
+          )
+        : { value: parsed, missing: false };
+      const projected =
+        res.headers.get("x-helm-payload-projection") === "portal";
       const createdAtHeader = res.headers.get("x-helm-payload-created-at");
       const createdAt =
         createdAtHeader === null ? Number.NaN : Number(createdAtHeader);
       return {
         captured: true,
         source: "payload",
-        exact: true,
-        fidelity: "exact",
+        exact: !projected && !missing,
+        fidelity: projected ? "projected" : missing ? "partial" : "exact",
         part,
         value,
-        detached_media: /helm-blob:sha256:[0-9a-f]{64}/.test(text),
+        detached_media: missing,
         ...(Number.isFinite(createdAt) ? { created_at: createdAt } : {}),
       };
     }
     return (await res.json()) as RequestPayloadPartView;
   } catch {
     return { captured: false };
+  }
+}
+
+async function readPayloadBlob(
+  requestId: string,
+  sha: string,
+): Promise<string | null> {
+  try {
+    const response = await apiFetch(payloadBlobUrl(requestId, sha), {
+      headers: { accept: "image/*, application/octet-stream" },
+    });
+    if (!response.ok) return null;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 32_768) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+    }
+    return btoa(binary);
+  } catch {
+    return null;
   }
 }
 

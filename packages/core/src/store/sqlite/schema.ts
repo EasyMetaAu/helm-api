@@ -234,6 +234,7 @@ export const routingSignals = sqliteTable(
 export const configKv = sqliteTable("config_kv", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
+  expiresAt: integer("expires_at"),
 });
 
 export const responsesRegistry = sqliteTable(
@@ -425,3 +426,14 @@ export const mediaSpendRecords = sqliteTable("media_spend_records", {
   keyId: text("key_id").notNull(),
   recordJson: text("record_json").notNull(),
 });
+
+// Authenticated payload-image provenance. No historical backfill: sentinels alone
+// are untrusted and cannot prove that a key supplied the referenced image bytes.
+export const requestPayloadBlobRefs = sqliteTable(
+  "request_payload_blob_refs",
+  {
+    requestId: text("request_id").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.requestId, t.sha256] })],
+);

@@ -359,6 +359,7 @@ export const memoryJobs = pgTable("memory_jobs", {
 export const configKv = pgTable("config_kv", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }),
 });
 
 export const responsesRegistry = pgTable(
@@ -553,3 +554,14 @@ export const mediaSpendRecords = pgTable("media_spend_records", {
   keyId: text("key_id").notNull(),
   recordJson: text("record_json").notNull(),
 });
+
+// Authenticated payload-image provenance. No historical backfill: sentinels alone
+// are untrusted and cannot prove that a key supplied the referenced image bytes.
+export const requestPayloadBlobRefs = pgTable(
+  "request_payload_blob_refs",
+  {
+    requestId: text("request_id").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.requestId, t.sha256] })],
+);

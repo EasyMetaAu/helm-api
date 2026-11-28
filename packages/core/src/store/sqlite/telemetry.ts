@@ -1,6 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, inArray, lt, lte, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  lt,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import {
@@ -50,6 +64,7 @@ import {
 import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
 import {
+  requestPayloadBlobRefs,
   requestPayloadResponseChunks,
   requestPayloads,
   sessionHeadEventHashes,
@@ -550,6 +565,39 @@ export class SqliteTelemetryStore implements TelemetryStore {
     }
   }
 
+  async findSessionRefsForKey(keyId: string, session: string): Promise<string[]> {
+    if (!keyId) throw new Error("session lookup requires key scope");
+    // Separate indexed equality probes avoid a tenant-wide OR scan.
+    const direct = this.db
+      .select({ ref: sessions.sessionRef })
+      .from(sessions)
+      .where(and(eq(sessions.apiKeyId, keyId), eq(sessions.sessionRef, session)))
+      .limit(1)
+      .all();
+    const labels = this.db
+      .select({ ref: sessions.sessionRef })
+      .from(sessions)
+      .where(and(eq(sessions.apiKeyId, keyId), eq(sessions.externalSessionId, session)))
+      .limit(257)
+      .all();
+    return [...new Set([...direct, ...labels].map((r) => r.ref))].slice(0, 257);
+  }
+
+  async hasPayloadBlobReference(requestId: string, sha256: string): Promise<boolean> {
+    const rows = this.db
+      .select({ sha256: requestPayloadBlobRefs.sha256 })
+      .from(requestPayloadBlobRefs)
+      .where(
+        and(
+          eq(requestPayloadBlobRefs.requestId, requestId),
+          eq(requestPayloadBlobRefs.sha256, sha256),
+        ),
+      )
+      .limit(1)
+      .all();
+    return rows.length > 0;
+  }
+
   async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
     const row = this.db.select().from(sessions).where(eq(sessions.sessionRef, sessionRef)).get();
     const head = row
@@ -875,6 +923,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
       conds.push(
         sql`json_extract(${telemetry.decisionJson}, '$.session.ref') = ${query.sessionRef}`,
       );
+    if (query.traceId !== undefined) conds.push(sql`${telemetry}.trace_id = ${query.traceId}`);
+    if (query.sessionRefs !== undefined)
+      conds.push(
+        inArray(sql`json_extract(${telemetry.decisionJson}, '$.session.ref')`, [
+          ...query.sessionRefs,
+        ]),
+      );
     // lane + decided_by hit the migration-v30 generated columns (indexed) instead
     // of json_extract — an index seek, no per-row JSON parse.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
@@ -1093,10 +1148,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       getMeta: db.prepare(
         `SELECT
            request_id AS id,
-           CASE WHEN response_body_generation IS NOT NULL THEN (
-             SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks
-             WHERE request_id = request_payloads.request_id AND generation = request_payloads.response_body_generation
-           ) END AS responseBytes,
+           response_body_generation AS generation,
            request_json IS NOT NULL AS hasReq,
            (response_json IS NOT NULL OR response_body_generation IS NOT NULL) AS hasResp,
            upstream_request_json IS NOT NULL AS hasUp,
@@ -1155,6 +1207,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .where(eq(requestPayloadResponseChunks.requestId, input.requestId))
       .run();
     this.stmts().put.run({ id: input.requestId, req, resp, up, ts });
+    this.db
+      .delete(requestPayloadBlobRefs)
+      .where(eq(requestPayloadBlobRefs.requestId, input.requestId))
+      .run();
+    for (const sha256 of blobs.keys())
+      this.db.insert(requestPayloadBlobRefs).values({ requestId: input.requestId, sha256 }).run();
     for (const b of blobs.values()) {
       this.stmts().putBlob.run({
         sha: b.sha256,
@@ -1237,24 +1295,15 @@ export class SqliteTelemetryStore implements TelemetryStore {
     part: RequestPayloadPart,
   ): Promise<RequestPayloadPartStream | null> {
     if (part !== "response") return null;
-    const row = this.db
-      .select({
-        generation: requestPayloads.responseBodyGeneration,
-        createdAt: requestPayloads.createdAt,
-        chunkCount: sql<number>`(SELECT count(*) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
-        byteLength: sql<number>`(SELECT coalesce(sum(raw_bytes), 0) FROM request_payload_response_chunks WHERE request_id = ${requestPayloads.requestId} AND generation = ${requestPayloads.responseBodyGeneration})`,
-      })
-      .from(requestPayloads)
-      .where(eq(requestPayloads.requestId, requestId))
-      .get();
+    const row = this.readPayloadMetadata(requestId);
     if (!row?.generation) return null;
     const db = this.db;
     const generation = row.generation;
     return {
       requestId,
       part,
-      createdAt: row.createdAt,
-      byteLength: Number(row.byteLength),
+      createdAt: new Date(row.ts),
+      byteLength: Number(row.responseBytes),
       stream: (async function* () {
         let deliveredBytes = 0;
         for (let index = 0; index < Number(row.chunkCount); index++) {
@@ -1276,7 +1325,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
           deliveredBytes += bytes.byteLength;
           yield bytes;
         }
-        if (deliveredBytes !== Number(row.byteLength))
+        if (deliveredBytes !== Number(row.responseBytes))
           throw new Error("invalid payload response length");
       })(),
     };
@@ -1313,17 +1362,44 @@ export class SqliteTelemetryStore implements TelemetryStore {
     };
   }
 
+  private readPayloadMetadata(requestId: string) {
+    return this.db.$sqlite.transaction(() => {
+      const row = this.stmts().getMeta.get(requestId) as
+        | {
+            id: string;
+            hasReq: number;
+            hasResp: number;
+            hasUp: number;
+            generation: string | null;
+            ts: number;
+          }
+        | undefined;
+      if (!row) return null;
+      const chunks = row.generation
+        ? this.db
+            .select({
+              chunkCount: count(),
+              responseBytes: sql<number>`coalesce(sum(${requestPayloadResponseChunks.rawBytes}), 0)`,
+            })
+            .from(requestPayloadResponseChunks)
+            .where(
+              and(
+                eq(requestPayloadResponseChunks.requestId, requestId),
+                eq(requestPayloadResponseChunks.generation, row.generation),
+              ),
+            )
+            .get()
+        : undefined;
+      return {
+        ...row,
+        chunkCount: chunks?.chunkCount ?? 0,
+        responseBytes: row.generation ? (chunks?.responseBytes ?? 0) : null,
+      };
+    })();
+  }
+
   async getPayloadMeta(requestId: string): Promise<RequestPayloadMeta | null> {
-    const row = this.stmts().getMeta.get(requestId) as
-      | {
-          id: string;
-          hasReq: number;
-          hasResp: number;
-          hasUp: number;
-          responseBytes: number | null;
-          ts: number;
-        }
-      | undefined;
+    const row = this.readPayloadMetadata(requestId);
     if (!row) return null;
     return {
       requestId: row.id,
@@ -1404,10 +1480,19 @@ export class SqliteTelemetryStore implements TelemetryStore {
     };
   }
 
-  async getPayloadBlob(sha256: string): Promise<RequestPayloadBlobRecord | null> {
-    const row = this.stmts().getBlob.get(sha256) as
-      | { bytes: Buffer; mime: string | null }
-      | undefined;
+  async getPayloadBlob(
+    sha256: string,
+    maxBytes?: number,
+  ): Promise<RequestPayloadBlobRecord | null> {
+    const row = (
+      maxBytes === undefined
+        ? this.stmts().getBlob.get(sha256)
+        : this.db.$sqlite
+            .prepare(
+              "SELECT bytes, mime FROM payload_blobs WHERE sha256 = ? AND length(bytes) <= ?",
+            )
+            .get(sha256, Math.max(0, Math.floor(maxBytes)))
+    ) as { bytes: Buffer; mime: string | null } | undefined;
     return row ? { sha256, bytes: row.bytes, mime: row.mime } : null;
   }
 
@@ -1418,8 +1503,22 @@ export class SqliteTelemetryStore implements TelemetryStore {
     const payloadBatch = db.prepare(`DELETE FROM request_payloads WHERE request_id IN (
       SELECT request_id FROM request_payloads WHERE created_at < ?
       ORDER BY created_at, request_id LIMIT ?
-    )`);
-    await runBatchedPrune((limit) => payloadBatch.run(olderThanMs, limit).changes);
+    ) RETURNING request_id`);
+    const prunePayloadBatch = db.transaction((limit: number) => {
+      const rows = payloadBatch.all(olderThanMs, limit) as Array<{ request_id: string }>;
+      if (rows.length)
+        this.db
+          .delete(requestPayloadBlobRefs)
+          .where(
+            inArray(
+              requestPayloadBlobRefs.requestId,
+              rows.map((row) => row.request_id),
+            ),
+          )
+          .run();
+      return rows.length;
+    });
+    await runBatchedPrune(prunePayloadBatch);
     // Same-cutoff blob prune. Safe because an in-use image's created_at is touched
     // on every referencing write, so blob.created_at >= every surviving payload's
     // created_at → a kept payload never references a pruned blob.

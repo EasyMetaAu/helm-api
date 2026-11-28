@@ -1,8 +1,11 @@
+import { gunzipSync } from "node:zlib";
 import type {
+  EncodedRequestPayloadPartRecord,
   RequestPayload,
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  RequestPayloadPartStream,
   ResponseWorkAdmission,
   SessionRevisionRecord,
   TelemetryStore,
@@ -199,6 +202,8 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
 
 export type RequestPayloadDeps = Pick<AdminApiDeps, "responseWorkAdmission"> & {
   encodedPayloadOnly?: boolean;
+  /** Optional surface-specific projection; admin leaves captured bytes unchanged. */
+  projectPayload?: (json: string, part: RequestPayloadPart) => string;
   authorizeSession?: (requestId: string, sessionRef: string) => Promise<boolean>;
   telemetry: Pick<
     TelemetryStore,
@@ -234,6 +239,8 @@ export function registerRequestPayloadRoutes(
     const part = parsePayloadPart(c.req.query("part"));
     if (part === "invalid" || (encodedOnly && part === "full"))
       return c.json({ error: "invalid payload part" }, 400);
+    const projected = deps.projectPayload !== undefined && part !== "request" && part !== "meta";
+    if (projected) c.header("x-helm-payload-projection", "portal");
     const recordedDecision = await deps.telemetry.getByRequestId(traceId);
     if (recordedDecision?.request_content_mode === "none") {
       return c.json({ captured: false, source: "unavailable", reason: "metadata_only" });
@@ -320,9 +327,11 @@ export function registerRequestPayloadRoutes(
       });
     }
     if (part !== "full") {
+      let projectedStream: RequestPayloadPartStream | null = null;
       if (c.req.header("accept")?.includes("application/vnd.helm.payload")) {
         const chunked = await deps.telemetry.getPayloadPartStream?.(traceId, part);
-        if (chunked) {
+        if (chunked && projected) projectedStream = chunked;
+        if (chunked && !projected) {
           const iterator = chunked.stream[Symbol.asyncIterator]();
           return c.body(
             new ReadableStream<Uint8Array>({
@@ -348,16 +357,20 @@ export function registerRequestPayloadRoutes(
       }
       if (
         c.req.header("accept")?.includes("application/vnd.helm.payload") &&
-        deps.telemetry.getPayloadPartEncoded
+        (deps.telemetry.getPayloadPartEncoded || projectedStream)
       ) {
         const admission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
         const maxBytes = sessionRecoveryMaxWireBytes(admission);
         const admitted = encodedOnly
           ? await readPayloadWithinResponseWork(
               deps,
-              () => deps.telemetry.getPayloadPartEncoded!(traceId, part, maxBytes),
+              () =>
+                projectedStream
+                  ? collectPayloadStream(projectedStream, maxBytes)
+                  : deps.telemetry.getPayloadPartEncoded!(traceId, part, maxBytes),
               (value) => value.bytes.byteLength,
-            )
+              projectedStream?.byteLength,
+            ).catch(() => ({ status: "limited" as const }))
           : null;
         if (admitted?.status === "limited")
           return c.json({
@@ -369,15 +382,34 @@ export function registerRequestPayloadRoutes(
           ? admitted?.status === "loaded"
             ? admitted.value
             : null
-          : await deps.telemetry.getPayloadPartEncoded(traceId, part);
+          : await deps.telemetry.getPayloadPartEncoded?.(traceId, part);
         if (encoded) {
           const release = admitted?.status === "loaded" ? admitted.release : () => {};
+          let bytes = encoded.bytes;
+          let codec = encoded.codec;
+          if (projected && deps.projectPayload) {
+            try {
+              const decoded =
+                codec === "gzip" ? gunzipSync(bytes, { maxOutputLength: maxBytes }) : bytes;
+              if (decoded.byteLength > maxBytes) throw new Error("payload projection too large");
+              bytes = Buffer.from(deps.projectPayload(Buffer.from(decoded).toString("utf8"), part));
+              if (bytes.byteLength > maxBytes) throw new Error("payload projection too large");
+              codec = "raw";
+            } catch {
+              release();
+              return c.json({
+                captured: false,
+                source: "unavailable",
+                reason: "payload_recovery_limited",
+              });
+            }
+          }
           let sent = false;
           const body = new ReadableStream<Uint8Array>({
             pull(controller) {
               if (!sent) {
                 sent = true;
-                controller.enqueue(encoded.bytes);
+                controller.enqueue(bytes);
               } else {
                 controller.close();
                 release();
@@ -390,7 +422,7 @@ export function registerRequestPayloadRoutes(
           return c.body(body, 200, {
             "cache-control": "no-store",
             "content-type": "application/vnd.helm.payload",
-            ...(encoded.codec === "gzip" ? { "content-encoding": "gzip" } : {}),
+            ...(codec === "gzip" ? { "content-encoding": "gzip" } : {}),
             "x-content-type-options": "nosniff",
             "x-helm-payload-created-at": String(encoded.createdAt.getTime()),
           });
@@ -451,7 +483,7 @@ export function registerRequestPayloadRoutes(
             exact: false,
             fidelity: recovered.fidelity,
             part,
-            value: parseMaybeJson(json),
+            value: parseMaybeJson(deps.projectPayload?.(json, part) ?? json),
             created_at: recovered.createdAt.getTime(),
           });
         } finally {
@@ -539,6 +571,7 @@ export function registerRequestPayloadRoutes(
   // JSON serialization so one malformed historical revision cannot bypass the bound.
   app.get(`${prefix}/:traceId/session-revisions`, async (c) => {
     const traceId = c.req.param("traceId");
+    if (deps.projectPayload) c.header("x-helm-payload-projection", "portal");
     // no_session (not a session request at all) is more fundamental than the store's
     // paging capability, so resolve the session ref FIRST.
     const decision = await deps.telemetry.getByRequestId(traceId);
@@ -589,10 +622,36 @@ export function registerRequestPayloadRoutes(
         requestDeltaJson: r.requestDeltaJson,
         requestEnvelopeJson: r.requestEnvelopeJson,
         responseId: r.responseId,
-        responseJson: r.responseJson,
+        responseJson:
+          r.responseJson === null
+            ? null
+            : (deps.projectPayload?.(r.responseJson, "response") ?? r.responseJson),
       })),
     });
   });
+}
+
+// The store yields decoded chunks lazily. Hold admission before the first chunk,
+// enforce both the metadata bound and actual byte count, and never expand blobs.
+async function collectPayloadStream(
+  stored: RequestPayloadPartStream,
+  maxBytes: number,
+): Promise<EncodedRequestPayloadPartRecord> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of stored.stream) {
+    size += chunk.byteLength;
+    if (size > maxBytes) throw new Error("payload stream exceeds projection budget");
+    chunks.push(chunk);
+  }
+  if (size !== stored.byteLength) throw new Error("payload stream changed during read");
+  return {
+    requestId: stored.requestId,
+    part: stored.part,
+    createdAt: stored.createdAt,
+    codec: "raw",
+    bytes: Buffer.concat(chunks, size),
+  };
 }
 
 // One raw-revision page: `limit` caps rows/page and `maxBytes` caps both the page and
@@ -601,7 +660,7 @@ export function registerRequestPayloadRoutes(
 const SESSION_REVISION_PAGE_LIMIT = 100;
 const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
-async function getSessionRequest(
+export async function getSessionRequest(
   deps: RequestPayloadDeps,
   requestId: string,
 ): Promise<

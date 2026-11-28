@@ -40,12 +40,18 @@
   data-testid="routing-explanation"
 >
   <h2 id="routing-summary-title" class="section-header">{$t('What happened')}</h2>
-  <p class="font-medium text-ink-strong" role="status">
+  <p
+    class="font-medium text-ink-strong"
+    role="status"
+    title={restrictedAttempt ? d.serving_account?.account : undefined}
+  >
     {#if d.stream_outcome === 'client_aborted'}
       {$t('The client disconnected before the response completed.')}
     {:else if d.status === 'error' && restrictedAttempt}
       {$t('OpenAI blocked Codex usage for {account}.', {
-        account: d.serving_account ? servingAccountLabel(d.serving_account) : '—',
+        account: d.serving_account
+          ? servingAccountLabel(d.serving_account, (id) => $t('Account {id}', { id }))
+          : '—',
       })}
     {:else if d.status === 'error' || (d.stream_outcome && d.stream_outcome !== 'completed')}
       {$t('The response did not complete. Check the execution details below.')}
@@ -106,22 +112,22 @@
     {/if}
   </p>
   {#if selection && d.serving_account}
-    <p class="text-ink-body">
+    <p class="text-ink-body" title={d.serving_account.account}>
       {#if selection.reason === 'sticky_hit'}
         {$t('Account {account} was kept for this conversation.', {
-          account: servingAccountLabel(d.serving_account),
+          account: servingAccountLabel(d.serving_account, (id) => id),
         })}
       {:else if selection.reason === 'hash_assign'}
         {$t('Account {account} was assigned by session distribution.', {
-          account: servingAccountLabel(d.serving_account),
+          account: servingAccountLabel(d.serving_account, (id) => id),
         })}
       {:else if selection.reason === 'lru'}
         {$t('Account {account} was selected by least recent use.', {
-          account: servingAccountLabel(d.serving_account),
+          account: servingAccountLabel(d.serving_account, (id) => id),
         })}
       {:else}
         {$t('Account {account} was selected by {strategy}.', {
-          account: servingAccountLabel(d.serving_account),
+          account: servingAccountLabel(d.serving_account, (id) => id),
           strategy: $t(strategies[selection.strategy]),
         })}
       {/if}
