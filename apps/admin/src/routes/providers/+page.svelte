@@ -16,6 +16,7 @@
     type AccountListRow,
     type ProviderListFilters,
     type SortKey,
+    familyOf,
     filterAndSortRows,
     mostConstrainedWindow,
     parseProviderListFilters,
@@ -921,6 +922,11 @@
   });
 
   function sortBy(key: SortKey): void {
+    // The account header cycles name ↑ → name ↓ → back to the default vendor grouping.
+    if (key === 'name' && filters.sort === 'name' && filters.dir === 'desc') {
+      setFilters({ sort: 'group', dir: 'asc' });
+      return;
+    }
     if (filters.sort === key) setFilters({ dir: filters.dir === 'asc' ? 'desc' : 'asc' });
     else setFilters({ sort: key, dir: key === 'name' || key === 'priority' ? 'asc' : 'desc' });
   }
@@ -1157,6 +1163,7 @@
       const plan = subscriptionPlan(provider, account);
       out.push({
         id: `oauth:${k}`,
+        family: familyOf(provider.id, provider.name),
         kind: 'subscription',
         name: account.account,
         accountLabel: account.account,
@@ -1204,6 +1211,7 @@
       const status = keyStatus(account);
       out.push({
         id: `key:${pool.id}/${account?.id ?? 'empty'}`,
+        family: familyOf(`${pool.id} ${pool.type}`, label),
         kind: 'key',
         name: account?.name ?? label,
         accountLabel: account?.name ?? label,
@@ -1247,6 +1255,7 @@
       const kind: AccountKind = connection.keyless ? 'keyless' : 'key';
       out.push({
         id: `conn:${connection.id}`,
+        family: familyOf(`${connection.id} ${connection.type}`, connection.label),
         kind,
         name: connection.label,
         accountLabel: connection.label,
@@ -1510,17 +1519,15 @@
         {$t('No matching providers. Add a provider or change the filters.')}
       </div>
     {:else}
-      <div class="cards-table-frame overflow-visible">
+      <div class="cards-table-frame mid overflow-visible">
         <table class="cards-table">
           <thead class="table-head">
             <tr>
               <th class="px-3 py-2">{@render sortHeader('name')}</th>
-              <th class="px-3 py-2">{$t('Status')}</th>
               <th class="px-3 py-2">{@render sortHeader('remaining')}</th>
               <th class="px-3 py-2 text-right" title={$t('Tokens, cost and requests')}
                 >{@render sortHeader('used', 'right')}</th
               >
-              <th class="px-3 py-2">{$t('Connection')}</th>
               <th
                 class="px-3 py-2 text-center"
                 title={$t(
@@ -1533,7 +1540,22 @@
             </tr>
           </thead>
           <tbody>
-            {#each visibleRows as row (row.id)}
+            {#each visibleRows as row, i (row.id)}
+              {#if filters.sort === 'group' && (i === 0 || visibleRows[i - 1].family.label !== row.family.label)}
+                <tr class="group-row" data-testid="provider-family-row">
+                  <td
+                    colspan="7"
+                    class="bg-slate-50/70 px-3 pt-3 pb-1 text-xs font-semibold tracking-wide text-ink-muted uppercase"
+                  >
+                    {row.family.label}
+                    <span class="ml-1 font-normal normal-case"
+                      >· {$t('{n} accounts', {
+                        n: visibleRows.filter((r) => r.family.label === row.family.label).length,
+                      })}</span
+                    >
+                  </td>
+                </tr>
+              {/if}
               {@const scheduleKey = row.oauth
                 ? keyOf(row.oauth.provider.id, row.oauth.account.account)
                 : ''}
@@ -1553,7 +1575,7 @@
                 <td
                   data-label={$t('Account')}
                   data-testid="provider-account-cell"
-                  class="table-mode:max-w-60 table-mode:min-w-48 table-mode:whitespace-normal"
+                  class="table-mode:w-56 table-mode:max-w-56 table-mode:whitespace-normal 2xl:table-mode:w-72 2xl:table-mode:max-w-72"
                 >
                   {#if row.href}
                     <a
@@ -1578,27 +1600,44 @@
                       >{row.providerLabel}</span
                     >
                   </div>
-                </td>
-
-                <td
-                  data-label={$t('Status')}
-                  data-testid="provider-status-cell"
-                  class="table-mode:max-w-36 table-mode:whitespace-normal"
-                  title={row.status?.title || undefined}
-                >
-                  {#if row.status}
-                    <span class={toneClass[row.status.tone]}>{row.status.label}</span>
-                    {#if row.status.detail}
-                      <div class="mt-0.5 text-xs text-ink-muted">{row.status.detail}</div>
+                  <!-- Status and connection ride under the account instead of narrow columns. -->
+                  <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                    {#if row.status}
+                      <span
+                        class={`whitespace-nowrap ${toneClass[row.status.tone]}`}
+                        data-testid="provider-status-cell"
+                        use:tooltip={row.status.title || row.status.label}>{row.status.label}</span
+                      >
+                      {#if row.status.detail}
+                        <span class="text-ink-muted">{row.status.detail}</span>
+                      {/if}
                     {/if}
-                    {#if row.key && row.status.tone !== 'ok' && row.status.title}
-                      <!-- Why an API key stopped: the provider's own message, full text on hover. -->
-                      <div class="mt-0.5 line-clamp-2 text-xs text-ink-muted">
-                        {row.status.title.split('\n').at(-1)}
-                      </div>
+                    {#if !(row.kind === 'keyless' || row.connection)}
+                      <span data-testid="provider-connection-cell" class="inline-flex">
+                        {#if row.proxy}
+                          <span
+                            class="inline-flex items-center gap-1 text-ink-body"
+                            use:tooltip={`${$t('Via proxy')}: ${row.proxy.title}`}
+                            >{@render icon('proxy')}{row.proxy.label}</span
+                          >
+                        {:else}
+                          <span
+                            class="inline-flex items-center gap-1 text-ink-muted"
+                            use:tooltip={$t('Connects directly, no proxy')}
+                            >{@render icon('direct')}{$t('Direct')}</span
+                          >
+                        {/if}
+                      </span>
                     {/if}
-                  {:else}
-                    <span class="text-ink-muted">—</span>
+                  </div>
+                  {#if row.key && row.status && row.status.tone !== 'ok' && row.status.title}
+                    <!-- Why an API key stopped: the provider's own message, full text on hover. -->
+                    <div
+                      class="mt-0.5 line-clamp-2 text-xs text-ink-muted"
+                      use:tooltip={row.status.title}
+                    >
+                      {row.status.title.split('\n').at(-1)}
+                    </div>
                   {/if}
                 </td>
 
@@ -1612,7 +1651,7 @@
                   {#if row.windows.length === 0 && row.balances.length === 0}
                     <span class="text-ink-muted">—</span>
                   {:else}
-                    <div class="flex w-full flex-col gap-1.5 table-mode:w-52">
+                    <div class="flex w-full flex-col gap-1.5 table-mode:w-48">
                       {#each row.windows as w (w.key)}
                         <div>
                           <div class="flex items-baseline justify-between gap-2 text-xs">
@@ -1681,24 +1720,6 @@
                   {/if}
                 </td>
 
-                <td data-label={$t('Connection')} data-testid="provider-connection-cell">
-                  {#if row.kind === 'keyless' || row.connection}
-                    <span class="text-ink-muted">—</span>
-                  {:else if row.proxy}
-                    <span
-                      class="inline-flex items-center gap-1 text-xs text-ink-body"
-                      use:tooltip={`${$t('Via proxy')}: ${row.proxy.title}`}
-                      >{@render icon('proxy')}{row.proxy.label}</span
-                    >
-                  {:else}
-                    <span
-                      class="inline-flex items-center gap-1 text-xs text-ink-muted"
-                      use:tooltip={$t('Connects directly, no proxy')}
-                      >{@render icon('direct')}{$t('Direct')}</span
-                    >
-                  {/if}
-                </td>
-
                 <!-- Priority: lower numbers are used first. Edited in place. -->
                 <td
                   data-label={$t('Priority')}
@@ -1708,7 +1729,7 @@
                   {#if row.oauth}
                     {@const { provider, account } = row.oauth}
                     <input
-                      class="input-sm w-16 text-center tabular-nums"
+                      class="input-sm w-14 text-center tabular-nums"
                       type="number"
                       min="0"
                       step="1"
@@ -1722,7 +1743,7 @@
                     {@const { pool, account } = row.key}
                     {#if account}
                       <input
-                        class="input-sm w-16 text-center tabular-nums"
+                        class="input-sm w-14 text-center tabular-nums"
                         type="number"
                         min="0"
                         max="1000"

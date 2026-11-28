@@ -1382,5 +1382,6 @@
   "In pool": "进池",
   "Lane · fallback": "通道 · 兜底",
   "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "数字越小越先使用；数字相同的账号一起分摊流量。在开启了「按优先级混用账号」的通道里，通道中所有提供商的账号按这个数字一起排序；其他情况下只在各自的池内比较。",
-  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "开启后，本通道直接列出的模型背后的所有账号（订阅、API Key、其他提供商）按优先级排成一个顺序使用：数字越小越先用，数字相同的账号一起分摊流量。通道名引用仍排在它们后面兜底。优先级在「提供商」页面设置。"
+  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "开启后，本通道直接列出的模型背后的所有账号（订阅、API Key、其他提供商）按优先级排成一个顺序使用：数字越小越先用，数字相同的账号一起分摊流量。通道名引用仍排在它们后面兜底。优先级在「提供商」页面设置。",
+  "{n} accounts": "{n} 个账号"
 }
