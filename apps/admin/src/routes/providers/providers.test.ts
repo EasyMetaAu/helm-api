@@ -1090,16 +1090,18 @@ describe('providers page', () => {
       screen.getAllByRole('columnheader').map((h) => h.textContent?.replace(/[↑↓]/g, '').trim()),
     ).toEqual([
       'Account',
-      'Status',
       'Quota and balance',
       'Usage',
-      'Connection',
       'Priority',
       'Enabled',
       'Options',
       'Actions',
     ]);
     const row = screen.getByTestId('provider-account-row');
+    // Status and connection sit under the account, not in their own columns.
+    const accountCell = within(row).getByTestId('provider-account-cell');
+    expect(within(accountCell).getByTestId('provider-status-cell')).toHaveTextContent('Normal');
+    expect(within(accountCell).getByTestId('provider-connection-cell')).toHaveTextContent('Direct');
     expect(within(row).getByRole('button', { name: 'Test' })).toBeVisible();
     const menu = within(row).getByTestId('provider-actions');
     expect(menu.tagName).toBe('DETAILS');
@@ -2098,5 +2100,28 @@ describe('providers page', () => {
         body: { enabled: false },
       }),
     );
+  });
+
+  it('lists accounts grouped by vendor with a label row per group', () => {
+    const claude = provider();
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'ChatGPT Plus/Pro (Codex)',
+          accounts: [{ ...claude.accounts[0], account: 'codex-1' }],
+        }),
+        claude,
+      ],
+      usage: [],
+      quota: [],
+    });
+    const groups = screen.getAllByTestId('provider-family-row').map((r) => r.textContent ?? '');
+    expect(groups[0]).toContain('Claude');
+    expect(groups[1]).toContain('OpenAI');
+    const names = screen
+      .getAllByTestId('provider-account-row')
+      .map((r) => within(r).getByTestId('provider-account-cell').querySelector('a')?.textContent);
+    expect(names).toEqual(['acct-claude', 'codex-1']);
   });
 });

@@ -4,11 +4,37 @@
 
 export type AccountKind = 'subscription' | 'key' | 'keyless';
 export type StatusGroup = 'ok' | 'attention' | 'paused';
-export type SortKey = 'priority' | 'name' | 'remaining' | 'used' | 'calls';
+export type SortKey = 'group' | 'priority' | 'name' | 'remaining' | 'used' | 'calls';
 export type SortDir = 'asc' | 'desc';
+
+/** Which model vendor an account belongs to, so related accounts list together. */
+export interface ProviderFamily {
+  label: string;
+  order: number;
+}
+
+// Known vendors in the order people look for them; anything else sorts by name after.
+const FAMILIES: Array<[RegExp, string]> = [
+  [/anthropic|claude/i, 'Claude'],
+  [/openai|codex|gpt/i, 'OpenAI'],
+  [/gemini|google|vertex/i, 'Gemini'],
+  [/xai|grok/i, 'Grok'],
+  [/kimi|moonshot/i, 'Kimi'],
+  [/deepseek/i, 'DeepSeek'],
+];
+
+export function familyOf(providerId: string, label: string): ProviderFamily {
+  for (const [i, [pattern, name]] of FAMILIES.entries()) {
+    if (pattern.test(providerId)) return { label: name, order: i };
+  }
+  return { label, order: FAMILIES.length };
+}
+
+const KIND_ORDER: Record<AccountKind, number> = { subscription: 0, key: 1, keyless: 2 };
 
 export interface AccountListRow {
   id: string;
+  family: ProviderFamily;
   kind: AccountKind;
   name: string;
   /** Lower is preferred. `null` for rows that take no part in scheduling. */
@@ -33,13 +59,13 @@ export const DEFAULT_PROVIDER_LIST_FILTERS: ProviderListFilters = {
   q: '',
   type: 'all',
   status: 'all',
-  sort: 'priority',
+  sort: 'group',
   dir: 'asc',
 };
 
 const KINDS: readonly AccountKind[] = ['subscription', 'key', 'keyless'];
 const GROUPS: readonly StatusGroup[] = ['ok', 'attention', 'paused'];
-const SORTS: readonly SortKey[] = ['priority', 'name', 'remaining', 'used', 'calls'];
+const SORTS: readonly SortKey[] = ['group', 'priority', 'name', 'remaining', 'used', 'calls'];
 
 const oneOf = <T extends string>(values: readonly T[], raw: string | null): T | undefined =>
   values.find((value) => value === raw);
@@ -66,8 +92,19 @@ export function providerListFiltersToSearch(f: ProviderListFilters): string {
   return qs.toString();
 }
 
+function compareGroup(a: AccountListRow, b: AccountListRow): number {
+  return (
+    a.family.order - b.family.order ||
+    a.family.label.localeCompare(b.family.label) ||
+    KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
+    (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
 function sortValue(row: AccountListRow, key: SortKey): number | string | null {
   switch (key) {
+    case 'group':
+      return 0;
     case 'priority':
       return row.priority;
     case 'name':
@@ -95,6 +132,11 @@ export function filterAndSortRows<T extends AccountListRow>(
         (!needle || row.searchText.toLocaleLowerCase().includes(needle)),
     )
     .sort((a, b) => {
+      if (f.sort === 'group') {
+        return (
+          compareGroup(a, b) * sign || a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
+        );
+      }
       const av = sortValue(a, f.sort);
       const bv = sortValue(b, f.sort);
       // Unknown values (no quota, no scheduling) always sink to the bottom.

@@ -1382,5 +1382,6 @@
   "In pool": "進池",
   "Lane · fallback": "通道 · 備援",
   "Lower numbers are used first; accounts with the same number share traffic. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.": "數字越小越先使用；數字相同的帳號一起分攤流量。在開啟了「依優先順序混用帳號」的通道中，通道內所有供應商的帳號依這個數字一起排序；其他情況下只在各自的池內比較。",
-  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "開啟後，本通道直接列出的模型背後的所有帳號（訂閱、API Key、其他供應商）依優先順序排成一個順序使用：數字越小越先用，數字相同的帳號一起分攤流量。通道名稱引用仍排在它們後面作為備援。優先順序在「提供商」頁面設定。"
+  "When on, every account behind the models listed directly in this lane (subscriptions, API keys, other providers) is used in one order by its priority — lower numbers first, and accounts with the same number share traffic. Lane names stay as fallbacks after them. Set priorities on the Providers page.": "開啟後，本通道直接列出的模型背後的所有帳號（訂閱、API Key、其他供應商）依優先順序排成一個順序使用：數字越小越先用，數字相同的帳號一起分攤流量。通道名稱引用仍排在它們後面作為備援。優先順序在「提供商」頁面設定。",
+  "{n} accounts": "{n} 個帳號"
 }

@@ -18,6 +18,9 @@
   @container cards-table-compact (width >= 40rem) {
     @slot;
   }
+  @container cards-table-mid (width >= 60rem) {
+    @slot;
+  }
 }
 
 /* ============================================================================
@@ -372,6 +375,10 @@
   }
   .cards-table-frame.compact {
     container-name: cards-table-compact;
+  }
+  /* Tables that fit a 1280px laptop with the sidebar open (≈990px frame). */
+  .cards-table-frame.mid {
+    container-name: cards-table-mid;
   }
   /* Rows of short values (request lists) pack two cells per line on a phone. */
   .cards-table-frame.dense .cards-table tr {

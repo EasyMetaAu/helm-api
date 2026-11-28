@@ -391,7 +391,7 @@
                      timestamps and amounts live in Details. -->
                   <td data-label={$t('Quota')}>
                     {#if quota && (quota.windows.length > 0 || spendUsed != null)}
-                      <div class="flex w-full flex-col gap-1.5 table-mode:w-52">
+                      <div class="flex w-full flex-col gap-1.5 table-mode:w-48">
                         {#each quota.windows as window (`${window.limitId ?? ''}/${window.key}`)}
                           {@render quotaTrack(
                             window.usedPercent,
