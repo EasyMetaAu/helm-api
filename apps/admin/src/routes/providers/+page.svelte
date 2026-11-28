@@ -1524,7 +1524,7 @@
               <th
                 class="px-3 py-2 text-center"
                 title={$t(
-                  'Lower numbers are used first. Subscription accounts and API keys are currently compared within their own pools.',
+                  'Lower numbers are used first. In lanes with “Mix accounts by priority” on, accounts from every provider in the lane share this order; elsewhere it applies within each pool.',
                 )}>{@render sortHeader('priority')}</th
               >
               <th class="whitespace-nowrap px-3 py-2">{$t('Enabled')}</th>
@@ -1731,7 +1731,7 @@
                         value={account.priority}
                         title={pool.strategy === 'round_robin'
                           ? $t(
-                              'This key pool takes turns; priority applies once it uses manual priority.',
+                              'This key pool takes turns. Its priority still applies in lanes that mix accounts by priority, or after switching it to manual priority.',
                             )
                           : undefined}
                         onchange={(e) => saveKeyPriority(pool.id, account, e.currentTarget.value)}

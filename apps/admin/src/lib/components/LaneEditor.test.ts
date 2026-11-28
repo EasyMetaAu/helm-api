@@ -238,4 +238,31 @@ describe('LaneEditor', () => {
     });
     expect(screen.getByRole('button', { name: /^delete$/i })).toBeDisabled();
   });
+
+  it('toggles shared account priority and marks which entries join the pool', async () => {
+    const onchange = vi.fn();
+    render(LaneEditor, {
+      lane: makeLane({
+        name: 'claude-sonnet',
+        primary: 'anthropic/claude-sonnet-5-5',
+        fallback: ['kimi/k3.1-pro', 'balanced'],
+      }),
+      laneNames: ['claude-sonnet', 'balanced'],
+      onchange,
+    });
+    const toggle = screen.getByRole('switch', { name: /mix accounts by priority/i });
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByText('In pool')).not.toBeInTheDocument();
+
+    await fireEvent.click(toggle);
+
+    expect(onchange.mock.lastCall?.[0].shared_account_priority).toBe(true);
+    const items = screen.getAllByTestId('fallback-item');
+    expect(within(items[0]).getByText('In pool')).toBeInTheDocument();
+    expect(within(items[1]).getByText('Lane · fallback')).toBeInTheDocument();
+    expect(screen.getByTestId('primary-pool-badge')).toHaveTextContent('In pool');
+
+    await fireEvent.click(toggle);
+    expect('shared_account_priority' in onchange.mock.lastCall?.[0]).toBe(false);
+  });
 });

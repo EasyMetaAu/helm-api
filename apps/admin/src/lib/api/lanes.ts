@@ -44,6 +44,9 @@ export interface Lane {
   // Lane-forced reasoning effort; omitted = unforced. Round-trips to the gateway's
   // optional LaneSchema.reasoning_effort (strict enum, fail-closed) untouched.
   reasoning_effort?: ReasoningEffort;
+  // Opt-in: the lane's directly listed provider/model entries share one account
+  // priority order (lane references stay fallbacks). Omitted = off.
+  shared_account_priority?: boolean;
 }
 
 const BASE = '/admin/api/lanes';
@@ -82,6 +85,8 @@ function normalizeLane(raw: Record<string, unknown>): Lane {
     // Carry a valid forced effort; an absent/unknown value stays unforced. The
     // PUT body (toServerBody) spreads it through, so no extra wiring there.
     ...(isReasoningEffort(raw.reasoning_effort) ? { reasoning_effort: raw.reasoning_effort } : {}),
+    // Carried through so saving any lane from the UI never drops the flag.
+    ...(raw.shared_account_priority === true ? { shared_account_priority: true } : {}),
   };
 }
 

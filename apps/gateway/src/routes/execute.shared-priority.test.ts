@@ -34,6 +34,7 @@ afterEach(() => vi.useRealTimers());
 type ProviderCallOptions = NonNullable<Parameters<ProviderClient["chatCompletion"]>[1]>;
 interface Scenario {
   wallClock?: boolean;
+  nestedLanePriority?: "no-direct" | "with-direct";
   keyStrategy?: "round_robin" | "manual_priority";
   keyModel?: string;
   chain?: [string, ...string[]];
@@ -241,6 +242,17 @@ async function fixture(stream: boolean, scenario: Scenario = {}) {
     },
     defaultProvider: keys,
     providers: new Map([
+      [
+        "direct",
+        {
+          ...client("direct-failure"),
+          accountPriority: {
+            kind: "oauth",
+            snapshot: async () => [{ account: "direct", priority: 5, eligible: true }],
+            isPinned: () => false,
+          },
+        },
+      ],
       ["rr", roundRobin],
       ["openai", keys],
       ["openai-codex", oauth],
@@ -313,7 +325,18 @@ async function fixture(stream: boolean, scenario: Scenario = {}) {
           }),
           policies: { policies: [] },
           lanes: LanesConfigSchema.parse({
-            balanced: { primary: chain[0], fallback: chain.slice(1) },
+            balanced: scenario.nestedLanePriority
+              ? {
+                  shared_account_priority: true,
+                  primary:
+                    scenario.nestedLanePriority === "no-direct" ? "nested" : "direct/fixture",
+                  fallback:
+                    scenario.nestedLanePriority === "no-direct" ? [] : ["direct/other", "nested"],
+                }
+              : { primary: chain[0], fallback: chain.slice(1) },
+            ...(scenario.nestedLanePriority
+              ? { nested: { primary: chain[0], fallback: chain.slice(1) } }
+              : {}),
           }),
           execute,
           now: () => new Date(0),
@@ -851,4 +874,18 @@ it("aliases of the same provider and wire model share the request's snapshot", a
   expect(f.oauthSnapshot).toHaveBeenCalledTimes(1);
   expect(f.keySnapshot).toHaveBeenCalledTimes(1);
   expect(get).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  "no-direct",
+  "with-direct",
+] as const)("retains legacy same-wire priority in nested remainder (%s)", async (nestedLanePriority) => {
+  const f = await fixture(false, { nestedLanePriority });
+  const result = await f.run();
+  expect(result.decision.final.status).toBe("ok");
+  expect(f.calls.filter((name) => name !== "direct-failure")).toEqual([
+    "subscription-A",
+    "key-A",
+    "subscription-B",
+  ]);
 });

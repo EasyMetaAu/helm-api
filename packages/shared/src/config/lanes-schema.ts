@@ -69,6 +69,8 @@ export const LaneSchema = z.strictObject({
   // out-mapping + native-passthrough body rewrite). Omitted => unforced (today's
   // request-driven behavior). Strict enum, fail-closed.
   reasoning_effort: ReasoningEffortSchema.optional(),
+  // Opt-in: the selected lane is one account-priority pool. Absent preserves legacy routing.
+  shared_account_priority: z.boolean().optional(),
 });
 export type Lane = z.infer<typeof LaneSchema>;
 
